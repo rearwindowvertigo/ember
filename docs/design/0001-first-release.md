@@ -5,8 +5,10 @@
 - Created: 2026-11-01
 - Decision record: ADR 0001 (Accepted)
 
-Sections F (flows), G (panels) and H2 (gap check) target 0.2.0. Every other
-section targets 0.1.0.
+Sections F (flows), G (panels) and H2 (gap check) target 0.2.0, except
+the review bar (F4), which single runs use in 0.1.0. Every other section
+targets 0.1.0. Items inside other sections that are marked 0.2.0 target
+0.2.0.
 
 ## What Ember does
 
@@ -90,7 +92,8 @@ and every sandboxed worker is denied them.
 ## C. Settings and choices
 
 C1. Standing settings: the worker menu (which engine, model and effort writes
-single tasks, which reviews, how multi-task work runs, panel members),
+single tasks, which reviews; in 0.2.0 also how multi-task work runs and
+panel members),
 per-engine on or off, model shortlists with efforts, worker network access,
 sandbox method per engine, the terminal that shows worker sessions, start at
 login and notification switches.
@@ -189,11 +192,15 @@ I1. Settings `sandbox.codex` (`bubblewrap`, `codex-bundled`, `none`) and
 `sandbox.opencode` (`bubblewrap`, `none`). Unset means `bubblewrap` when
 `bwrap` is on PATH and `none` when it is not.
 
-I2. With a sandbox, each worker gets a deny list built from the home folder
-at launch: everything except the worktree, the repository's git folder,
+I2. With a sandbox, each worker gets a deny list built at launch: every
+entry in the home folder except the worktree, the repository's git folder,
 `~/.local/bin`, `~/.local/lib`, git's config and the paths in the
-`sandbox.read` setting. Git writes are blocked. Codex gets network only when
-`worker.network` is on; OpenCode keeps network for OpenRouter.
+`sandbox.read` setting; and all of `$XDG_RUNTIME_DIR`, which holds Ember's
+tmux socket. Git writes are blocked. Codex receives the list as a
+permission profile in `-c` options and applies it with its own `bwrap`
+(I4). Ember runs OpenCode inside `bwrap` with the same list. Codex gets
+network only when `worker.network` is on; OpenCode keeps network for
+OpenRouter.
 
 I3. With `none`, each run prints a `WARNING:` line, its record notes the
 method, and the app shows a notice on Overview and Engines.
@@ -218,8 +225,11 @@ The sandbox check (I5) records which `bwrap` Codex ran.
 I5. The Engines screen shows per engine: the method in use, whether `bwrap`
 was found and its version, the last sandbox check and its result, and known
 blocking causes when detected (Ubuntu's `bwrap-userns-restrict` AppArmor
-profile; a Codex install under a path the sandbox does not mount). The check
-runs on Check now and when the method changes.
+profile; a Codex install under a path the sandbox does not mount; a
+`sandbox_mode` key in a Codex `config.toml`, which makes Codex ignore the
+permission profile). Ember refuses to start a sandboxed Codex run while
+that key is present. The check runs on Check now and when the method
+changes.
 
 ## J. Desktop app
 
@@ -230,7 +240,7 @@ J2. Screens:
 
 | Screen | Holds |
 |---|---|
-| Overview | Live runs and flows with their tasks and steps; the last twenty finished runs and flows |
+| Overview | Live runs; the last twenty finished runs. In 0.2.0 also flows with their tasks and steps |
 | Menu | The worker menu (C1) |
 | Engines | One card per engine: logo, status, Use switch, sandbox method and checks; open for models, efforts and shortlists; OpenCode's OpenRouter model browser and filters; setup steps with copyable commands when not connected |
 | Dependencies | One tile per component, grouped (engines and apps, system tools, Ember's libraries): installed and newest version, status, and the update or install command |
@@ -241,8 +251,8 @@ quits. The tray uses Qt's `QSystemTrayIcon`. GNOME shows tray icons
 through an extension; the owner's Ubuntu 26.04 has
 `ubuntu-appindicators@ubuntu.com` installed.
 
-J4. Notifications: a run or flow finishes, a flow reaches a lead stop, a run
-fails. Each has a Settings switch.
+J4. Notifications: a run finishes, a run fails. In 0.2.0 also: a flow
+finishes, a flow reaches a lead stop. Each has a Settings switch.
 
 J5. Commands: an update, install or sign-in command shows a Run button. Run
 opens a dialog naming the exact command; on confirm, the app runs it in a
@@ -261,6 +271,7 @@ Settings.
 K1. A component list in `src/ember/data/components.toml`: id, label, group,
 how the installed version is read (apt, npm, a command, Python package),
 where the newest version is read, and its update and install commands.
+The list includes tmux, bubblewrap and git.
 
 K2. Status per component: current, update available, missing, check failed.
 Installed versions are read at start and on Check now; newest versions at
@@ -269,8 +280,8 @@ most every six hours, cached.
 ## L. Skill
 
 L1. An `ember` skill for Claude Code in `skill/`: `SKILL.md` and references
-for claims, wrappers, flows, panels, gap checks and Claude agents. It covers
-grounding, claiming, choosing a worker, the editing boundary, briefs,
+for claims, wrappers and Claude agents; references for flows, panels and
+gap checks are added in 0.2.0. It covers grounding, claiming, choosing a worker, the editing boundary, briefs,
 following a run, verification against the review bar, reporting, merging
 and cleanup.
 
@@ -284,7 +295,13 @@ L3. `emb skill install` links the skill into `~/.claude/skills/ember`.
 M1. A `.deb` built by `packaging/deb/`, installing the package, the `emb`
 command, the desktop entry, icons and the autostart entry template.
 
-M2. `ember-app` is checked as free on PyPI before the first release.
+M2. The `.deb` carries its own Python environment under `/usr/lib/ember/`,
+built from uv's lock file, with PySide6 and Ember's other libraries from
+PyPI. It runs on the system's Python 3.14. It depends on `python3` (3.14 or
+later), `tmux` and `git`, and recommends `bubblewrap`.
+
+M3. `ember-app` was free on PyPI on 2026-11-01. It is checked again before
+the first release.
 
 ## N. Tests
 
