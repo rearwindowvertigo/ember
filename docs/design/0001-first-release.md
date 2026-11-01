@@ -1,12 +1,12 @@
 # Design 0001: Ember's first release
 
-- Status: Draft
+- Status: Accepted, 2026-11-01
 - Target release: 0.1.0
 - Created: 2026-11-01
-- Decision record: ADR 0001 (Proposed)
+- Decision record: ADR 0001 (Accepted)
 
-Section P lists the questions that need the owner's answers before this
-design is Accepted.
+Sections F (flows), G (panels) and H2 (gap check) target 0.2.0. Every other
+section targets 0.1.0.
 
 ## What Ember does
 
@@ -19,8 +19,8 @@ what passes. Workers are:
 - Claude, through the Claude Code CLI;
 - Claude subagents and Claude workflows, inside Claude Code itself.
 
-Each editing worker works in its own git worktree and branch, in a kitty
-window the owner can watch. Read-only workers review or research without
+Each editing worker works in its own git worktree and branch, in a tmux
+session the owner can watch in a terminal window. Read-only workers review or research without
 editing. A flow runs a plan of several tasks with a writer and a read-only
 reviewer per task and fix rounds between them. A panel asks several models
 the same question and collects their answers.
@@ -34,7 +34,7 @@ The owner sees and configures all of this in the desktop app.
 | E1 | Machines | One machine. No remote or phone view. |
 | E2 | App toolkit and language | A native app in Python with PySide6 (Qt). |
 | E3 | What the app does | Shows work, engines, dependencies and settings; runs commands after a confirm step; sends desktop notifications; has a tray icon. It does not start runs. |
-| E4 | Other installed AI tools | Ember reads the state and settings of Claude Code, Claude Desktop, Codex and OpenCode. It does not drive them or write their configuration. |
+| E4 | Other installed AI tools | Ember reads the state and settings of Claude Code, Codex and OpenCode, and whether Claude Desktop is installed and its version. It does not read Claude Desktop's configuration. It does not drive these tools or write their configuration. |
 | E5 | Name and command | Ember; terminal command `emb`; Python package `ember-app`. |
 | E6 | Repository | `~/Repos/ember`, remote `github.com/rearwindowvertigo/ember`, private. |
 | E7 | Start at login | A Settings switch, on by default, starting into the tray. |
@@ -43,12 +43,18 @@ The owner sees and configures all of this in the desktop app.
 | E10 | Packaging | `.deb` first. |
 | E11 | MCP server | None. Claude uses `emb choices`. |
 | E12 | Seat usage | Not read or shown. |
+| E13 | Scope of 0.1.0 | Settings, engines, single runs, the sandbox, supporting commands, dependencies, the app, the skill and the `.deb`. Flows, panels and the gap check are in 0.2.0. |
+| E14 | Licence | MIT. |
+| E15 | Worker windows | Each worker runs in a tmux session. The owner picks the terminal that shows it. kitty is not required. |
+| E16 | Continuous integration | GitHub Actions on pull requests only. Docs-only pull requests skip the check. A newer push cancels the older run. Release Please runs on `main`. |
+| E17 | Python | 3.14 or later. |
+| E18 | Unit tests | Stub tools only (N1). |
 
 ## A. Repository and tooling
 
 A1. `src/` layout with one package, `ember`. `pyproject.toml` with the
-hatchling build backend. Python 3.12 or later (P7); the owner's machine has
-3.14.
+hatchling build backend. Python 3.14 or later. The MIT licence is in
+`LICENSE`.
 
 A2. uv manages the environment and lock file. ruff lints and formats.
 Pyrefly checks types on `src/` and `tests/`. pytest runs the tests on all
@@ -58,8 +64,10 @@ A3. The `Makefile` target `make check` runs lint, format check, type check
 and every test. It needs no network after the environment is built.
 pre-commit runs ruff lint and format on the changed files at each commit.
 
-A4. GitHub Actions runs `make check` on every push and pull request
-(question P5).
+A4. GitHub Actions runs `make check` on each pull request to `main`. A pull
+request that changes only Markdown files under `docs/` and top-level
+Markdown files skips it. A newer push to the same pull request cancels the
+older run. No check runs on pushes to `main`.
 
 A5. Releases follow `docs/releasing.md`: Release Please builds the version,
 `CHANGELOG.md` and the `v<version>` tag from Conventional Commits, as a
@@ -84,7 +92,8 @@ and every sandboxed worker is denied them.
 C1. Standing settings: the worker menu (which engine, model and effort writes
 single tasks, which reviews, how multi-task work runs, panel members),
 per-engine on or off, model shortlists with efforts, worker network access,
-sandbox method per engine, start at login and notification switches.
+sandbox method per engine, the terminal that shows worker sessions, start at
+login and notification switches.
 
 C2. One-time choices: the owner sets an answer for the next run only, at the
 terminal (`emb choices --once`). A run claims it with a unique id
@@ -120,13 +129,20 @@ E2. An editing run gets its own worktree and branch, `ember/<engine>/<id>`,
 cut from the current branch, and commits with the given trailer. A
 `--read-only` run edits nothing.
 
-E3. The run opens in a kitty window. Commands: `--send` (a correction into
-the same session), `--screen`, `--interrupt`, `--close`, `--recover`,
+E3. The run runs in its own tmux session, on a tmux server private to Ember
+(socket in `$XDG_RUNTIME_DIR/ember/`). Ember opens a window of the owner's
+terminal attached to that session. The setting `terminal` holds the command
+that opens it; unset means `xdg-terminal-exec`. Closing the window leaves
+the run going. Commands: `--send` (a correction into the same session,
+through tmux `send-keys`), `--screen` (tmux `capture-pane`), `--interrupt`,
+`--attach` (open a new window on the session), `--close`, `--recover`,
 `--status <id> --json`. Each non-zero exit prints a `next:` or `owner:` line.
 
 E4. Workers never push, merge, rebase, delete branches or touch `main`.
 
 ## F. Flows
+
+Target release: 0.2.0.
 
 F1. `emb flow --plan <file>` runs a JSON plan of tasks in waves by their
 `after` dependencies. Each task has a writer in an editing worktree and a
@@ -148,6 +164,8 @@ F5. `--dry-run`, `--start` in the background, `--watch --json` and
 
 ## G. Panels
 
+Target release: 0.2.0.
+
 G1. `emb panel` sends one prompt to the configured members (OpenRouter,
 Codex and Claude models) and collects each answer and a summary file.
 
@@ -157,13 +175,13 @@ H1. `emb ground --json`: the machine, the Claude surface, the repository,
 branch, dirty state and remote, read before a worker is chosen.
 
 H2. `emb gapcheck`: a read-only worker reads a flow plan against its failure
-model before the flow starts and reports gaps.
+model before the flow starts and reports gaps. Target release: 0.2.0.
 
 H3. `emb merge <branch> --into <branch> --verdict keep`: merges a reviewed
 worker branch, then removes its worktree and branch.
 
 H4. `emb cleanup --merged-into <branch>`: removes merged worker branches,
-their worktrees and parked windows, and keeps unmerged work.
+their worktrees and tmux sessions, and keeps unmerged work.
 
 ## I. Sandbox
 
@@ -180,10 +198,22 @@ at launch: everything except the worktree, the repository's git folder,
 I3. With `none`, each run prints a `WARNING:` line, its record notes the
 method, and the app shows a notice on Overview and Engines.
 
-I4. The installed Codex (0.164.0, read on 2026-11-01) has the feature flags
-`use_linux_sandbox_bwrap` and `use_legacy_landlock` and ships its own
-`bwrap`. How Ember makes Codex use the bundled `bwrap` over the system one is
-tested before build (question P6).
+I4. Codex 0.164.0 (traced on 2026-11-01) ships its own `bwrap` at
+`codex-resources/bwrap` inside its platform package. It looks for `bwrap` in
+its own folders, then in each `PATH` folder in order, and runs the first one
+found with `--help`. When that succeeds it uses that `bwrap`. When no `bwrap`
+is found, or `--help` fails, it uses the bundled one. No setting or feature
+flag selects the bundled one; `codex features list` shows
+`use_linux_sandbox_bwrap` as removed and `use_legacy_landlock` as
+deprecated.
+
+- `codex-bundled`: Ember puts a folder first on the worker's `PATH` holding
+  a `bwrap` symlink to Codex's `codex-resources/bwrap`. With it, every
+  `bwrap` that Codex ran was the bundled one.
+- `bubblewrap`: Ember leaves `PATH` as it is, and Codex uses the first
+  `bwrap` on it.
+
+The sandbox check (I5) records which `bwrap` Codex ran.
 
 I5. The Engines screen shows per engine: the method in use, whether `bwrap`
 was found and its version, the last sandbox check and its result, and known
@@ -204,7 +234,7 @@ J2. Screens:
 | Menu | The worker menu (C1) |
 | Engines | One card per engine: logo, status, Use switch, sandbox method and checks; open for models, efforts and shortlists; OpenCode's OpenRouter model browser and filters; setup steps with copyable commands when not connected |
 | Dependencies | One tile per component, grouped (engines and apps, system tools, Ember's libraries): installed and newest version, status, and the update or install command |
-| Settings | Start at login, notifications, worker network, sandbox read paths, theme |
+| Settings | Start at login, notifications, worker network, sandbox read paths, terminal, theme |
 
 J3. Tray icon: shows whether any run is live; its menu opens the window and
 quits. The tray uses Qt's `QSystemTrayIcon`. GNOME shows tray icons
@@ -216,7 +246,8 @@ fails. Each has a Settings switch.
 
 J5. Commands: an update, install or sign-in command shows a Run button. Run
 opens a dialog naming the exact command; on confirm, the app runs it in a
-kitty window so its output and any password prompt stay with the owner.
+window of the owner's terminal so its output and any password prompt stay
+with the owner.
 
 J6. Run records are watched with Qt's `QFileSystemWatcher` (inotify), with a
 check every sixty seconds as a backstop. While the window is hidden, the app
@@ -257,8 +288,8 @@ M2. `ember-app` is checked as free on PyPI before the first release.
 
 ## N. Tests
 
-N1. Unit tests per module with stub `codex`, `opencode`, `claude`, `kitty`,
-`bwrap` and `git` tools on PATH.
+N1. Unit tests per module with stub `codex`, `opencode`, `claude`, `tmux`,
+`bwrap` and `git` tools on PATH. Unit tests run no real engine.
 
 N2. App tests with pytest-qt on Qt's offscreen platform.
 
@@ -269,20 +300,9 @@ Claude session.
 
 1. Repository tooling (A), paths (B), settings and choices (C).
 2. Engines (D) and single runs (E), with the sandbox (I).
-3. Supporting commands (H), flows (F), panels (G).
+3. Supporting commands (H, without H2).
 4. Dependencies (K) and the desktop app (J).
-5. Skill (L), packaging (M).
+5. Skill (L), packaging (M). 0.1.0 is released.
+6. For 0.2.0: gap check (H2), flows (F), panels (G).
 
 Each step passes `make check` on its own and lands as its own pull request.
-
-## P. Open questions
-
-| | Question |
-|---|---|
-| P1 | Is all of sections C to M in 0.1.0, or does 0.1.0 ship single runs and the app, with flows and panels in 0.2.0? |
-| P2 | Licence: none (private), MIT, Apache 2.0 or GPL. PySide6 is LGPL, which allows any of these. |
-| P3 | Does kitty stay required for worker windows? |
-| P4 | Which Claude Desktop state the app reads: install and version only, or also its MCP configuration. |
-| P5 | GitHub Actions on a private repository uses the account's Actions minutes. |
-| P6 | How Codex is made to use its bundled `bwrap` (I4). |
-| P7 | Minimum Python version: 3.12 or 3.14. |

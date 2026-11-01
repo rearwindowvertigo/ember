@@ -1,7 +1,6 @@
 # ADR 0001: A local desktop app on one machine
 
-- Status: Proposed, 2026-11-01. Accepted when the owner accepts design
-  document 0001.
+- Status: Accepted, 2026-11-01.
 - Release: Ember 0.1.0.
 
 ## Context
@@ -23,9 +22,9 @@ current and change settings. The owner decided the shape of Ember on
 3. The app has a tray icon and desktop notifications. It starts at login
    into the tray by default; a Settings switch turns that off.
 4. The app may run update, install and sign-in commands after the owner
-   confirms each one. It reads the state and settings of Claude Code, Claude
-   Desktop, Codex and OpenCode and does not write their configuration. It
-   does not start worker runs.
+   confirms each one. It reads the state and settings of Claude Code, Codex
+   and OpenCode, and whether Claude Desktop is installed and its version. It
+   does not write their configuration. It does not start worker runs.
 5. The app learns of run changes by watching run files with inotify, with a
    slow periodic check as a backstop. It does no timed polling while nothing
    changes.
