@@ -8,6 +8,7 @@ which defaults to `os.environ`.
 """
 
 import os
+import pwd
 import stat
 from collections.abc import Mapping
 from pathlib import Path
@@ -40,10 +41,11 @@ def home_dir(env: Mapping[str, str] | None = None) -> Path:
         env: The environment; `None` reads `os.environ`.
 
     Returns:
-        `HOME` when it is set and not empty, otherwise `Path.home()`.
+        `HOME` from `env` when it is set and not empty, otherwise the home
+        folder in the password database for the current user.
     """
     home = _env(env).get("HOME", "")
-    return Path(home) if home else Path.home()
+    return Path(home) if home else Path(pwd.getpwuid(os.getuid()).pw_dir)
 
 
 def _xdg_base(name: str, env: Mapping[str, str] | None) -> Path | None:
@@ -160,10 +162,11 @@ def runs_dir(env: Mapping[str, str] | None = None) -> Path:
 def ensure_private_dir(path: Path, *, root: Path) -> Path:
     """Create an Ember folder and its Ember parents at mode 700.
 
-    Each folder from `root` down to `path` is created at mode 700 whatever
-    the umask, or, if it exists with permissions for group or others, changed
-    to mode 700. Folders
-    above `root` are created if missing and their modes are left alone.
+    Each folder from `root` down to `path` is created at mode 700 whatever the
+    umask, or, if it exists with permissions for group or others, changed to
+    mode 700. Each missing folder above `root` is created at mode 700, as the
+    XDG Base Directory Specification requires; existing folders above `root`
+    keep their modes.
 
     Args:
         path: The folder to create; `root` itself or a folder inside it.
@@ -173,31 +176,46 @@ def ensure_private_dir(path: Path, *, root: Path) -> Path:
         `path`.
 
     Raises:
-        ValueError: `path` is not `root` or inside it.
-        NotADirectoryError: An existing entry on the way is not a folder.
+        ValueError: `path` is not `root` or inside it, or its part below
+            `root` contains `..`.
+        NotADirectoryError: An existing entry from `root` down to `path` is a
+            symlink or not a folder.
     """
     if not path.is_relative_to(root):
         raise ValueError(f"{path} is not inside {root}")
-    root.parent.mkdir(parents=True, exist_ok=True)
-    folders = [root, *(root / part for part in _parts_below(path, root))]
+    relative = path.relative_to(root)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"{path} is not inside {root}")
+    missing = [folder for folder in root.parents if not folder.exists()]
+    for folder in reversed(missing):
+        _make_folder(folder)
+    folders = [root]
+    for part in relative.parts:
+        folders.append(folders[-1] / part)
     for folder in folders:
-        try:
-            folder.mkdir(mode=DIR_MODE)
-            created = True
-        except FileExistsError:
-            created = False
+        created = _make_folder(folder)
         info = folder.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            raise NotADirectoryError(f"{folder} is a symlink, not a folder")
         if not stat.S_ISDIR(info.st_mode):
             raise NotADirectoryError(f"{folder} is not a folder")
-        if (created or info.st_mode & 0o077) and stat.S_IMODE(info.st_mode) != DIR_MODE:
+        if not created and info.st_mode & 0o077:
             folder.chmod(DIR_MODE)
     return path
 
 
-def _parts_below(path: Path, root: Path) -> list[Path]:
-    """Return the cumulative relative paths from `root` down to `path`."""
-    relative = path.relative_to(root)
-    return [Path(*relative.parts[: i + 1]) for i in range(len(relative.parts))]
+def _make_folder(folder: Path) -> bool:
+    """Create `folder` at mode 700 whatever the umask.
+
+    Returns:
+        `True` if the folder was created, `False` if an entry already existed.
+    """
+    try:
+        folder.mkdir(mode=DIR_MODE)
+    except FileExistsError:
+        return False
+    folder.chmod(DIR_MODE)
+    return True
 
 
 def open_private_file(path: Path, flags: int = os.O_RDWR) -> int:

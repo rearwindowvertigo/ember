@@ -1,4 +1,5 @@
 import os
+import pwd
 import stat
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -64,9 +65,14 @@ def test_empty_or_relative_variable_is_ignored(
     assert function(env) == home.joinpath(*default, "ember")
 
 
-def test_empty_home_falls_back_to_path_home() -> None:
-    assert paths.home_dir({"HOME": ""}) == Path.home()
-    assert paths.home_dir({}) == Path.home()
+def test_empty_home_falls_back_to_password_database() -> None:
+    expected = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    assert paths.home_dir({"HOME": ""}) == expected
+
+
+def test_absent_home_falls_back_to_password_database() -> None:
+    expected = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    assert paths.home_dir({}) == expected
 
 
 def test_named_paths(home: Path, tmp_path: Path) -> None:
@@ -183,3 +189,49 @@ def test_umask_zero_still_gives_700_and_600(tmp_path: Path) -> None:
     assert _mode(root) == 0o700
     assert _mode(target) == 0o700
     assert _mode(target / "record") == 0o600
+
+
+@pytest.mark.parametrize("below", [Path(".."), Path("..") / "x", Path("a/../../x")])
+def test_ensure_private_dir_rejects_parent_reference(
+    below: Path, tmp_path: Path
+) -> None:
+    outside = tmp_path / "config"
+    root = outside / "ember"
+    root.mkdir(parents=True)
+    outside.chmod(0o755)
+    with pytest.raises(ValueError, match="not inside"):
+        paths.ensure_private_dir(root / below, root=root)
+    assert _mode(outside) == 0o755
+    assert not (outside / "x").exists()
+
+
+def test_ensure_private_dir_creates_missing_ancestors_at_700(tmp_path: Path) -> None:
+    root = tmp_path / "local" / "state" / "ember"
+    previous = os.umask(0)
+    try:
+        paths.ensure_private_dir(root, root=root)
+    finally:
+        os.umask(previous)
+    assert _mode(tmp_path / "local") == 0o700
+    assert _mode(tmp_path / "local" / "state") == 0o700
+    assert _mode(root) == 0o700
+
+
+def test_ensure_private_dir_keeps_existing_ancestor_modes(tmp_path: Path) -> None:
+    existing = tmp_path / "local"
+    existing.mkdir()
+    existing.chmod(0o755)
+    root = existing / "state" / "ember"
+    paths.ensure_private_dir(root, root=root)
+    assert _mode(existing) == 0o755
+    assert _mode(existing / "state") == 0o700
+
+
+def test_ensure_private_dir_rejects_symlink(tmp_path: Path) -> None:
+    root = tmp_path / "ember"
+    root.mkdir()
+    real = tmp_path / "real"
+    real.mkdir()
+    (root / "runs").symlink_to(real)
+    with pytest.raises(NotADirectoryError, match="symlink"):
+        paths.ensure_private_dir(root / "runs", root=root)
