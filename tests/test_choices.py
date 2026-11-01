@@ -1,4 +1,5 @@
 import json
+import multiprocessing
 import sqlite3
 import threading
 from collections.abc import Callable
@@ -737,3 +738,99 @@ def test_reply_is_json_serialisable(env: dict[str, str]) -> None:
     choices.set_once({"single.writer": "ask"}, env=env)
     json.dumps(choices.claim("run-000001", env=env))
     json.dumps(choices.snapshot(env=env))
+
+
+def _claim_in_process(
+    env: dict[str, str],
+    run_id: str,
+    barrier: Any,  # noqa: ANN401
+    results: Any,  # noqa: ANN401
+) -> None:
+    barrier.wait()
+    try:
+        results.put(choices.claim(run_id, env=env)["claim"]["status"])
+    except Exception as error:
+        results.put(repr(error))
+
+
+def _claim_in_processes(env: dict[str, str], count: int) -> list[str]:
+    context = multiprocessing.get_context("spawn")
+    barrier = context.Barrier(count)
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_claim_in_process, args=(env, f"run-{i:06d}", barrier, results)
+        )
+        for i in range(count)
+    ]
+    for process in processes:
+        process.start()
+    statuses = [results.get(timeout=60) for _ in processes]
+    for process in processes:
+        process.join(timeout=60)
+    return statuses
+
+
+def test_first_claims_from_processes_on_a_new_database(
+    env: dict[str, str],
+) -> None:
+    assert not _db_path(env).exists()
+    assert _claim_in_processes(env, 6) == ["none"] * 6
+    assert _generation(env) == 6
+
+
+def test_claims_from_processes_take_a_pending_once_once(
+    env: dict[str, str],
+) -> None:
+    choices.set_once({"single.writer_as": "subagent"}, env=env)
+    statuses = _claim_in_processes(env, 6)
+    assert sorted(statuses) == ["claimed"] + ["none"] * 5
+
+
+# An invalid pending once
+
+
+def _store_invalid_once(env: dict[str, str]) -> None:
+    choices.set_once({"single.writer": "ask"}, env=env)
+    _raw(env, "UPDATE once SET value = ?", '{"single.writer": "zz"}')
+
+
+def test_invalid_pending_once_does_not_affect_runs_with_a_record(
+    env: dict[str, str],
+) -> None:
+    choices.set_settings({"app.theme": "dark"}, env=env)
+    choices.set_once({"single.writer_as": "subagent"}, env=env)
+    choices.claim("run-000001", env=env)
+    choices.claim("run-000002", env=env)
+    _store_invalid_once(env)
+    for reply in (
+        choices.read("run-000001", env=env),
+        choices.claim("run-000001", env=env),
+    ):
+        assert reply["source_error"] is False
+        assert reply["claim"]["status"] == "claimed"
+        assert _answer(reply, "single.writer_as") == ("subagent", "one-time")
+        assert _answer(reply, "app.theme") == ("dark", "setting")
+    reply = choices.read("run-000002", env=env)
+    assert reply["source_error"] is False
+    assert reply["claim"]["status"] == "none"
+    assert _answer(reply, "app.theme") == ("dark", "setting")
+
+
+def test_invalid_pending_once_fails_closed_where_it_is_read(
+    env: dict[str, str],
+) -> None:
+    choices.set_settings({"app.theme": "dark"}, env=env)
+    _store_invalid_once(env)
+    assert choices.read(env=env)["source_error"] is True
+    assert choices.snapshot(env=env)["source_error"] is True
+    generation = _generation(env)
+    reply = choices.claim("run-000003", env=env)
+    assert reply["source_error"] is True
+    assert reply["claim"] == {"id": "run-000003", "status": "unknown"}
+    assert _answer(reply, "app.theme") == ("system", "default")
+    assert reply["generation"] == generation
+    conn = sqlite3.connect(_db_path(env))
+    assert conn.execute("SELECT count(*) FROM once").fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM claims").fetchone()[0] == 0
+    conn.close()

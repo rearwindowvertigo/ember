@@ -10,6 +10,7 @@ import os
 import sqlite3
 import stat
 import threading
+import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
@@ -43,7 +44,11 @@ CREATE TABLE claims (
 """
 
 _create_lock = threading.Lock()
-"""Held while this process creates the database file and closes its descriptor."""
+"""Held while this process creates the database file and closes its
+descriptor, and while a reader checks for the file and opens it."""
+
+_BUSY_RETRY_SECONDS = 0.01
+"""The pause between retries of a statement that SQLite reported busy."""
 
 
 class DatabaseError(Exception):
@@ -90,8 +95,7 @@ def translate_errors() -> Iterator[None]:
     try:
         yield
     except sqlite3.Error as error:
-        name = getattr(error, "sqlite_errorname", "")
-        if name.startswith(("SQLITE_BUSY", "SQLITE_LOCKED")):
+        if _is_busy(error):
             raise DatabaseBusyError(f"settings database is busy: {error}") from error
         raise DatabaseUnavailableError(f"settings database: {error}") from error
     except OSError as error:
@@ -121,6 +125,36 @@ def _prepare_file(path: Path) -> None:
         path.chmod(paths.FILE_MODE)
 
 
+def _is_busy(error: sqlite3.Error) -> bool:
+    name = getattr(error, "sqlite_errorname", "")
+    return name.startswith(("SQLITE_BUSY", "SQLITE_LOCKED"))
+
+
+def _retry_busy(conn: sqlite3.Connection, sql: str) -> None:
+    """Run `sql`, retrying while SQLite reports busy, up to the busy timeout.
+
+    Changing the journal mode of a new or empty database file reports busy at
+    once, without waiting for the busy timeout.
+
+    Raises:
+        DatabaseBusyError: The database stayed busy for the busy timeout.
+    """
+    deadline = time.monotonic() + BUSY_TIMEOUT_MS / 1000
+    while True:
+        try:
+            conn.execute(sql)
+        except sqlite3.OperationalError as error:
+            if not _is_busy(error):
+                raise
+            if time.monotonic() >= deadline:
+                raise DatabaseBusyError(
+                    f"settings database is busy: {error}"
+                ) from error
+            time.sleep(_BUSY_RETRY_SECONDS)
+        else:
+            return
+
+
 @contextmanager
 def open_write(env: Mapping[str, str] | None = None) -> Iterator[sqlite3.Connection]:
     """Open the settings database for writing, creating it if needed.
@@ -140,7 +174,7 @@ def open_write(env: Mapping[str, str] | None = None) -> Iterator[sqlite3.Connect
     conn = sqlite3.connect(path, isolation_level=None)
     try:
         conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
-        conn.execute("PRAGMA journal_mode = WAL")
+        _retry_busy(conn, "PRAGMA journal_mode = WAL")
         yield conn
     finally:
         conn.close()
@@ -160,12 +194,16 @@ def open_read(
         when the database file does not exist.
     """
     path = paths.settings_db_path(env)
-    if not path.exists():
+    with _create_lock:
+        if not path.exists():
+            conn = None
+        else:
+            conn = sqlite3.connect(
+                path.absolute().as_uri() + "?mode=ro", uri=True, isolation_level=None
+            )
+    if conn is None:
         yield None
         return
-    conn = sqlite3.connect(
-        path.absolute().as_uri() + "?mode=ro", uri=True, isolation_level=None
-    )
     try:
         conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
         yield conn

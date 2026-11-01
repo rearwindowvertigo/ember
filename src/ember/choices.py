@@ -407,8 +407,15 @@ def _load(
     generation: int | None,
     run_id: str | None,
     now: float,
+    *,
+    include_once: bool,
 ) -> _State:
-    """Read settings, the live pending once and one claim, projecting expiry."""
+    """Read settings, one claim and, if asked, the live pending once.
+
+    Expiry is projected without writing. The pending once is checked only
+    when `include_once` is true, so an invalid one makes only those replies
+    fail closed.
+    """
     state = _State(generation or 0, {}, None, None, None, None, [])
     if conn is None or generation is None:
         if run_id is not None:
@@ -423,7 +430,7 @@ def _load(
             continue
         state.settings[name] = value
     row = conn.execute("SELECT value, set_at FROM once WHERE id = 1").fetchone()
-    if row is not None and row[1] + ONCE_TTL > now:
+    if include_once and row is not None and row[1] + ONCE_TTL > now:
         state.once = _decode_object(row[0], "one-time choice", state.errors)
         state.once_set_at = row[1]
     if run_id is not None:
@@ -542,10 +549,10 @@ def _read_state(
 ) -> _State:
     with db.translate_errors(), db.open_read(env) as conn:
         if conn is None:
-            return _load(None, None, run_id, now)
+            return _load(None, None, run_id, now, include_once=run_id is None)
         with db.read_transaction(conn):
             generation = db.read_generation(conn)
-            return _load(conn, generation, run_id, now)
+            return _load(conn, generation, run_id, now, include_once=run_id is None)
 
 
 def read(
@@ -621,6 +628,8 @@ def claim(
     An unknown id takes a copy of the live pending one-time choice, which is
     then removed, and is recorded `claimed`; with none pending it is recorded
     `none`. A known id writes nothing and returns its stored status.
+    A pending one-time choice that is not valid is not consumed: nothing is
+    recorded, the reply has status `unknown` and fails closed.
 
     Args:
         id: The run's claim id.
@@ -641,11 +650,16 @@ def claim(
     request = _check_values(request or {}, REQUEST)
     at = _now(now)
 
+    refused: list[bool] = []
+
     def change(conn: sqlite3.Connection) -> None:
         known = conn.execute("SELECT 1 FROM claims WHERE id = ?", (run_id,)).fetchone()
         if known is not None:
             return
         row = conn.execute("SELECT value FROM once WHERE id = 1").fetchone()
+        if row is not None and _decode_object(row[0], "one-time choice", []) is None:
+            refused.append(True)
+            return
         if row is None:
             conn.execute(
                 "INSERT INTO claims (id, status, at, copy) VALUES (?, 'none', ?, NULL)",
@@ -659,7 +673,8 @@ def claim(
         conn.execute("DELETE FROM once WHERE id = 1")
 
     def reply(conn: sqlite3.Connection, generation: int) -> dict[str, Any]:
-        return _reply(_load(conn, generation, run_id, at), run_id, request, env)
+        state = _load(conn, generation, run_id, at, include_once=bool(refused))
+        return _reply(state, run_id, request, env)
 
     return _write(env, at, expect_generation, change, reply)
 
@@ -945,11 +960,11 @@ def snapshot(
     claims: list[dict[str, Any]] = []
     with db.translate_errors(), db.open_read(env) as conn:
         if conn is None:
-            state = _load(None, None, None, at)
+            state = _load(None, None, None, at, include_once=True)
         else:
             with db.read_transaction(conn):
                 generation = db.read_generation(conn)
-                state = _load(conn, generation, None, at)
+                state = _load(conn, generation, None, at, include_once=True)
                 if generation is not None:
                     claims = [
                         {"id": run_id, "at": claimed_at}

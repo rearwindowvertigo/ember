@@ -6,8 +6,9 @@ Reads standing settings and one-time choices, claims and releases one-time
 choices for runs, and sets settings and one-time choices at a terminal.
 
 Settings are kept in `$XDG_CONFIG_HOME/ember/settings.db` (default
-`~/.config/ember/settings.db`), mode 600 in a mode 700 folder. Reads never
-create or change it.
+`~/.config/ember/settings.db`), mode 600 in a mode 700 folder. A read never
+creates the database file and never changes its content. A read may leave
+empty `settings.db-wal` and `settings.db-shm` files beside it, at mode 600.
 
 Every reply is JSON on standard output, indented by two spaces. Messages go to
 standard error as `emb choices: <message>`.
@@ -73,8 +74,8 @@ Each key resolves to the first of:
 Each answer is `{"value": ..., "layer": "request" | "one-time" | "setting" |
 "default"}`.
 
-When a stored setting, the pending one-time choice or a claimed copy is not
-valid, every key resolves to its default, `source_error` is `true`, `errors`
+When a stored setting, a claimed copy, or the pending one-time choice where
+it is read is not valid, every key resolves to its default, `source_error` is `true`, `errors`
 names the invalid values, `menu` is `null` and the exit code is 0.
 
 ### One-time choices and claims
@@ -85,6 +86,10 @@ names the invalid values, `menu` is `null` and the exit code is 0.
 - `--claim --id ID` for a new id records `claimed` with a copy of the pending
   one-time choice and removes it, or records `none` when no one-time choice
   is pending. For a known id it changes nothing and returns the stored status.
+- The pending one-time choice is read by a read without `--id` and by a
+  claim of a new id. A read with `--id` and a claim of a known id do not read
+  it. A claim of a new id does not consume a pending one-time choice that is
+  not valid: it records nothing, and the reply has status `unknown`.
 - A claim reads as `gone` 7 days after it was made.
 - `--finish ID` records `ID` as `gone`, also when `ID` was not known.
 - Claim status is `claimed`, `none`, `gone`, or `unknown` for an id never
