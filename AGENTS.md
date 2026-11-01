@@ -21,6 +21,8 @@ follow `docs/releasing.md`.
   A breaking change adds `!` after the type or scope, or a
   `BREAKING CHANGE:` footer.
 - Never commit a credential, token or login file.
+- uv manages the environment and lock file; `uv sync` builds it. A
+  dependency is added with `uv add`, never by editing `uv.lock`.
 - `make check` is the full check: ruff lint and format check, Pyrefly type
   check, and every test with pytest on all cores (pytest-xdist `-n auto`).
   pre-commit runs ruff on the changed files at each commit.
