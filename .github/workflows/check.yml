@@ -1,0 +1,27 @@
+name: check
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "docs/**.md"
+      - "*.md"
+
+concurrency:
+  group: check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.14"
+          enable-cache: true
+      - run: uv sync --locked
+      - run: make check
