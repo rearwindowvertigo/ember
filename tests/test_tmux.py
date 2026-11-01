@@ -15,9 +15,11 @@ STUB = """#!{python}
 import json, os, sys
 args = sys.argv[1:]
 data = sys.stdin.read()
-with open(os.environ["STUB_LOG"], "a") as log:
-    log.write(json.dumps({{"args": args, "stdin": data}}) + "\\n")
-with open(os.environ["STUB_CONF"]) as conf:
+here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+with open(os.path.join(here, "log.jsonl"), "a") as log:
+    record = {{"args": args, "stdin": data, "env": dict(os.environ)}}
+    log.write(json.dumps(record) + "\\n")
+with open(os.path.join(here, "conf.json")) as conf:
     replies = json.load(conf)
 reply = replies.get(args[2], {{}})
 sys.stdout.write(reply.get("out", ""))
@@ -123,6 +125,22 @@ def test_new_session(env: dict[str, str], tmp_path: Path) -> None:
     assert not any(pair.startswith(("TMUX=", "TMUX_PANE=")) for pair in pairs)
 
 
+def test_commands_run_with_empty_environment(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    tmux.new_session(
+        "s",
+        cwd=tmp_path,
+        argv=["x"],
+        env_vars={},
+        env={**env, "SECRET_KEY": "leak"},
+    )
+    tmux.exists("s", env=env)
+    for call in _calls(env):
+        assert "SECRET_KEY" not in call["env"]
+        assert "STUB_LOG" not in call["env"]
+
+
 def test_new_session_size(env: dict[str, str], tmp_path: Path) -> None:
     tmux.new_session(
         "s", cwd=tmp_path, argv=["x"], env_vars={}, width=80, height=24, env=env
@@ -201,6 +219,14 @@ def test_capture_last_lines(env: dict[str, str]) -> None:
     _reply(env, "capture-pane", out="h1\nh2\nh3\nv1\nv2\n")
     assert tmux.capture("s", lines=3, env=env) == "h3\nv1\nv2\n"
     assert _commands(env) == [["capture-pane", "-p", "-J", "-t", "=s:", "-S", "-3"]]
+
+
+def test_capture_last_lines_drops_empty_rows_at_end(env: dict[str, str]) -> None:
+    _reply(env, "capture-pane", out="line1\nline2\nline3\n" + "\n" * 47)
+    assert tmux.capture("s", lines=5, env=env) == "line1\nline2\nline3\n"
+    assert tmux.capture("s", lines=2, env=env) == "line2\nline3\n"
+    _reply(env, "capture-pane", out="\n\n\n")
+    assert tmux.capture("s", lines=2, env=env) == ""
 
 
 @pytest.mark.parametrize("lines", [0, -1, True])

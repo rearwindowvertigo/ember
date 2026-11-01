@@ -6,8 +6,11 @@ folder, never the default server, and targets a session by its exact name
 a failure raises `TmuxError`.
 
 Every function takes an optional `env` mapping, which defaults to
-`os.environ`. It gives the `PATH` that finds `tmux`, the runtime folder, and
-the environment of a server the command starts.
+`os.environ`. It gives the `PATH` that finds `tmux` and the runtime folder.
+
+Each tmux command runs with an empty environment, so a server it starts has
+an empty global environment and passes no variable to later panes. A pane's
+variables are only those its session sets.
 """
 
 import os
@@ -98,7 +101,7 @@ def _run(
     input: str | None = None,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    """Run one tmux command against Ember's server.
+    """Run one tmux command against Ember's server, with an empty environment.
 
     Args:
         args: The tmux command and its arguments.
@@ -123,7 +126,7 @@ def _run(
             capture_output=True,
             text=True,
             timeout=TIMEOUT,
-            env=dict(env),
+            env={},
         )
     except subprocess.TimeoutExpired as error:
         raise TmuxError(f"tmux {args[0]} timed out after {TIMEOUT} seconds") from error
@@ -148,7 +151,9 @@ def new_session(
     """Start a detached session whose single pane runs a command.
 
     The pane's environment is `env` overlaid with `env_vars`, set on the
-    session; the server's global environment is not changed. The server's
+    session, plus the variables tmux sets in every pane, such as `TERM`,
+    `TMUX` and `TMUX_PANE`. The server's global environment is empty and is
+    not changed. The server's
     `remain-on-exit` option is on, so the pane's last screen stays readable
     after the command ends.
 
@@ -270,7 +275,8 @@ def capture(
     Args:
         name: The session name.
         lines: `None` for the visible pane; otherwise the last `lines` lines
-            available, counting the visible pane and its history.
+            available, counting the visible pane and its history, after
+            empty lines at the end are dropped.
         env: The environment; `None` reads `os.environ`.
 
     Returns:
@@ -289,7 +295,10 @@ def capture(
     text = _run(args, env).stdout
     if lines is None:
         return text
-    return "".join(text.splitlines(keepends=True)[-lines:])
+    rows = text.splitlines()
+    while rows and not rows[-1].strip():
+        rows.pop()
+    return "".join(f"{row}\n" for row in rows[-lines:])
 
 
 def _display(name: str, form: str, env: Mapping[str, str] | None) -> str:
