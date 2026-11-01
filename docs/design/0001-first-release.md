@@ -1,9 +1,12 @@
-# Ember 0.1.0: first release
+# Design 0001: Ember's first release
 
-Plan 0.1.0, draft 1, 2026-11-01. The decision record is ADR 0001, proposed
-with this draft. Section P lists the questions that need the owner's answers
-before draft 2. Merging, tagging, pushing a release and installing each need
-the owner's word.
+- Status: Draft
+- Target release: 0.1.0
+- Created: 2026-11-01
+- Decision record: ADR 0001 (Proposed)
+
+Section P lists the questions that need the owner's answers before this
+design is Accepted.
 
 ## What Ember does
 
@@ -57,7 +60,9 @@ needs no network after the environment is built.
 A4. GitHub Actions runs `make check` on every push and pull request
 (question P5).
 
-A5. `CHANGELOG.md` in Keep a Changelog form. Tags `v<version>`.
+A5. Releases follow `docs/releasing.md`: Release Please builds the version,
+`CHANGELOG.md` and the `v<version>` tag from Conventional Commits, as a
+GitHub Action.
 
 ## B. Paths
 
@@ -256,8 +261,8 @@ N1. Unit tests per module with stub `codex`, `opencode`, `claude`, `kitty`,
 
 N2. App tests with pytest-qt on Qt's offscreen platform.
 
-N3. Skill eval cases run outside `make check`, on the owner's word, because
-they use a real Claude session.
+N3. Skill eval cases run outside `make check`, because they use a real
+Claude session.
 
 ## O. Build order
 

@@ -1,6 +1,7 @@
 # ADR 0001: A local desktop app on one machine
 
-- Status: Proposed, 2026-11-01. Accepted when the owner approves plan 0.1.0.
+- Status: Proposed, 2026-11-01. Accepted when the owner accepts design
+  document 0001.
 - Release: Ember 0.1.0.
 
 ## Context
@@ -9,8 +10,8 @@ Ember lets Claude hand coding work to other AI engines (Codex, OpenCode and
 Claude workers) and review and merge the results. The owner needs to see live
 work, check that each engine is installed and signed in, keep dependencies
 current and change settings. The owner decided the shape of Ember on
-2026-11-01; the decisions are listed in plan 0.1.0, draft 1
-(`docs/plans/0.1.0-first-release.md`).
+2026-11-01; the decisions are listed in design document 0001
+(`docs/design/0001-first-release.md`).
 
 ## Decision
 
