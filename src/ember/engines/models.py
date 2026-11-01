@@ -18,6 +18,8 @@ import json
 import math
 import os
 import re
+import shlex
+import subprocess
 import time
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping
@@ -348,15 +350,55 @@ def fetch_json(url: str, timeout: float) -> Any:  # noqa: ANN401
         return json.loads(response.read())
 
 
+def _run_codex(argv: list[str], env: Mapping[str, str]) -> tuple[int, str, str]:
+    """Run the Codex model list command with standard error kept apart.
+
+    Args:
+        argv: The command and its arguments.
+        env: The command's whole environment.
+
+    Returns:
+        The exit code, the standard output and the standard error.
+
+    Raises:
+        ProbeError: The command cannot run or exceeds `TIMEOUT` seconds.
+    """
+    shown = shlex.join([Path(argv[0]).name, *argv[1:]])
+    try:
+        done = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            env=dict(env),
+            timeout=TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise status.ProbeError(
+            f"{shown} did not finish within {TIMEOUT} seconds"
+        ) from None
+    except OSError as error:
+        raise status.ProbeError(
+            f"{shown} could not run: {error.strerror or error}"
+        ) from None
+    return done.returncode, done.stdout, done.stderr
+
+
 def _read_codex(env: Mapping[str, str]) -> tuple[Model, ...]:
+    """Read Codex's model list from the standard output of `codex debug models`.
+
+    Standard error is used only in the failure reason, and standard output
+    when standard error is empty.
+    """
     binary = status.locate("codex", env)
     if binary is None:
         raise status.ProbeError("the codex CLI is not installed")
-    code, output = status.run_probe([binary, *CODEX_COMMAND], env)
+    code, output, errors = _run_codex([binary, *CODEX_COMMAND], env)
     if code != 0:
-        raise status.ProbeError(
-            f"codex debug models exited {code}: {status.first_line(output)}"
-        )
+        shown = status.first_line(errors if errors.strip() else output)
+        raise status.ProbeError(f"codex debug models exited {code}: {shown}")
     try:
         return parse_codex(output)
     except ValueError:

@@ -185,6 +185,34 @@ def test_codex_failure_falls_back_to_cache(env: dict[str, str], tmp_path: Path) 
     assert json.loads(path.read_text())["fetched_at"] == T0
 
 
+def test_codex_stderr_is_kept_out_of_the_list(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    data = tmp_path / "codex-models.json"
+    data.write_text(json.dumps(CODEX_REPLY))
+    stub = Path(env["PATH"]) / "codex"
+    stub.write_text(
+        f"#!/bin/sh\necho 'WARNING: config key deprecated' >&2\nexec /bin/cat {data}\n"
+    )
+    stub.chmod(0o755)
+    result = models.list_models("codex", env, now=T0)
+    assert result.reason is None
+    assert result.source == "cli"
+    assert [model.id for model in result.models] == [
+        model.id for model in models.parse_codex(json.dumps(CODEX_REPLY))
+    ]
+    assert result.models
+
+
+def test_codex_failure_reason_reads_stderr(env: dict[str, str], tmp_path: Path) -> None:
+    stub = Path(env["PATH"]) / "codex"
+    stub.write_text("#!/bin/sh\necho 'partial'\necho 'not signed in' >&2\nexit 3\n")
+    stub.chmod(0o755)
+    result = models.list_models("codex", env, now=T0)
+    assert result.models == ()
+    assert result.reason == "codex debug models exited 3: not signed in"
+
+
 def test_codex_not_installed_without_cache(env: dict[str, str]) -> None:
     result = models.list_models("codex", env, now=T0)
     assert result.models == ()
