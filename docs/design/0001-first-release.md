@@ -120,8 +120,11 @@ D2. Sign-in state is read when the app starts, when the Engines screen opens,
 on Check now, and after a run fails with a sign-in error. It is not read on a
 timer.
 
-D3. Model lists: Codex and Claude models from their CLIs; OpenRouter models
-from OpenRouter's model list, with filters, cached.
+D3. Model lists: Codex models from `codex debug models`; Claude models are
+the aliases the Claude CLI's `--model` option accepts (`fable`, `opus`,
+`sonnet`, `haiku`), as the CLI has no model-list command; OpenRouter models
+from OpenRouter's model list, with filters. Codex and OpenRouter lists are
+cached.
 
 ## E. Single worker runs
 

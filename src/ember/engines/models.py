@@ -14,6 +14,7 @@ returns an empty list and the reason. A failed read never changes the cache.
 """
 
 import contextlib
+import http.client
 import json
 import math
 import os
@@ -458,7 +459,7 @@ def list_models(
             models = parse_openrouter(reply)
     except status.ProbeError as error:
         reason = str(error)
-    except (OSError, ValueError, TypeError) as error:
+    except (OSError, ValueError, TypeError, http.client.HTTPException) as error:
         reason = f"OpenRouter model list: {error}"
     else:
         payload = {"fetched_at": at, "models": [model.to_json() for model in models]}

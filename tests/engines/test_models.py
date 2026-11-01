@@ -1,3 +1,4 @@
+import http.client
 import json
 import stat
 from pathlib import Path
@@ -397,3 +398,17 @@ def test_filter_tools_skips_unknown() -> None:
 def test_filters_combine() -> None:
     found = models.filter_openrouter(SAMPLE, text="o", min_context=100000, tools=True)
     assert _ids(found) == ["openai/gpt-4o"]
+
+
+def test_truncated_openrouter_response_falls_back_to_cache_reason(
+    tmp_path: Path,
+) -> None:
+    env = {"HOME": str(tmp_path), "PATH": str(tmp_path)}
+
+    def truncated(url: str, timeout: float) -> dict[str, object]:
+        raise http.client.IncompleteRead(b"partial")
+
+    result = models.list_models("opencode", env, fetch=truncated, now=1000.0)
+    assert result.models == ()
+    assert result.reason is not None
+    assert result.reason.startswith("OpenRouter model list:")
