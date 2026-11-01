@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ import pytest
 
 from ember import __version__, choices, paths
 from ember.cli import main
+from ember.engines import models, status
 
 
 def test_version_prints_to_stdout(capsys: pytest.CaptureFixture[str]) -> None:
@@ -307,3 +309,150 @@ def test_menu_value_not_shortlisted_exits_64(
     assert data is None
     assert "shortlist" in err
     assert choices.read(env=env)["generation"] == 0
+
+
+# emb engines
+
+
+def _engines(
+    argv: list[str], env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> tuple[int, str, str]:
+    code = main(["engines", *argv], env=env)
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def _stub(env: dict[str, str], name: str, body: str) -> None:
+    path = Path(env["PATH"]) / name
+    path.write_text("#!/bin/sh\n" + body)
+    path.chmod(0o755)
+
+
+CODEX_OK = """case "$1" in
+--version) echo "codex-cli 1.2.3";;
+login) echo "Logged in using ChatGPT";;
+esac
+"""
+
+
+def test_engines_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["engines", "--help"])
+    assert exit_info.value.code == 0
+    assert "--models" in capsys.readouterr().out
+
+
+def test_engines_json(env: dict[str, str], capsys: pytest.CaptureFixture[str]) -> None:
+    _stub(env, "codex", CODEX_OK)
+    code, out, err = _engines(["--json"], env, capsys)
+    assert code == 0
+    assert err == ""
+    data = json.loads(out)
+    assert list(data) == ["codex", "opencode", "claude"]
+    assert data["codex"]["connected"] is True
+    assert data["codex"]["state"] == "connected"
+    assert data["opencode"]["state"] == "not installed"
+    assert data["opencode"]["requirements"][0] == {
+        "label": "the opencode CLI",
+        "met": False,
+        "fix": "curl -fsSL https://opencode.ai/install | bash",
+    }
+
+
+def test_engines_text(env: dict[str, str], capsys: pytest.CaptureFixture[str]) -> None:
+    _stub(env, "codex", CODEX_OK)
+    code, out, err = _engines([], env, capsys)
+    assert code == 0
+    assert err == ""
+    lines = out.splitlines()
+    assert lines[0] == "codex: connected, codex-cli 1.2.3"
+    assert lines[1].startswith("opencode: not installed: ")
+    assert (
+        lines[2] == "  the opencode CLI: curl -fsSL https://opencode.ai/install | bash"
+    )
+    assert lines[3] == "  an OpenRouter credential for OpenCode"
+    assert lines[4].startswith("claude: not installed: ")
+
+
+def test_engines_reads_cache_until_refresh(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    _stub(env, "codex", CODEX_OK)
+    _engines(["--json"], env, capsys)
+    (Path(env["PATH"]) / "codex").unlink()
+    _, out, _ = _engines(["--json"], env, capsys)
+    assert json.loads(out)["codex"]["connected"] is True
+    _, out, _ = _engines(["--json", "--refresh"], env, capsys)
+    assert json.loads(out)["codex"]["state"] == "not installed"
+
+
+def test_engines_models_json(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = _engines(["--models", "claude", "--json"], env, capsys)
+    assert code == 0
+    assert err == ""
+    data = json.loads(out)
+    assert data["source"] == "cli"
+    assert data["reason"] is None
+    assert data["models"][1]["id"] == "opus"
+
+
+def test_engines_models_text_from_cache(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    payload = {
+        "fetched_at": time.time() - 120,
+        "models": [
+            models.Model(
+                "openai/gpt-4o",
+                "GPT-4o",
+                ("low", "high"),
+                "low",
+                128000,
+                0.0000025,
+                0.00001,
+                True,
+            ).to_json()
+        ],
+    }
+    status.save_cache_file(models.cache_path("opencode", env), payload, env)
+    code, out, err = _engines(["--models", "opencode"], env, capsys)
+    assert code == 0
+    assert err == ""
+    assert out.splitlines() == [
+        "opencode models from cache, read 2 min ago",
+        "openai/gpt-4o  GPT-4o  efforts low, high (default low)  context 128000  "
+        "$2.50/M in  $10.00/M out  tools",
+    ]
+
+
+def test_engines_models_failure_reason_on_stderr(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = _engines(["--models", "codex"], env, capsys)
+    assert code == 0
+    assert out == "codex models from cli, never read\n"
+    assert err.startswith("emb engines: ")
+    assert "not installed" in err
+    code, out, err = _engines(["--models", "codex", "--json"], env, capsys)
+    assert code == 0
+    data = json.loads(out)
+    assert data == {
+        "models": [],
+        "source": "cli",
+        "fetched_at": None,
+        "reason": data["reason"],
+    }
+    assert data["reason"] in err
+
+
+def test_engines_models_invalid_engine_exits_64(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["engines", "--models", "gpt"], env=env)
+    assert exit_info.value.code == 64
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--models" in captured.err
