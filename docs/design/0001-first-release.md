@@ -50,12 +50,13 @@ A1. `src/` layout with one package, `ember`. `pyproject.toml` with the
 hatchling build backend. Python 3.12 or later (P7); the owner's machine has
 3.14.
 
-A2. uv manages the environment and lock file. ruff lints and formats. mypy
-checks types in strict mode on `src/`. pytest runs the tests, with
-pytest-qt for the app and pytest-xdist for parallel runs.
+A2. uv manages the environment and lock file. ruff lints and formats.
+Pyrefly checks types on `src/` and `tests/`. pytest runs the tests on all
+cores with pytest-xdist (`-n auto`), with pytest-qt for the app.
 
-A3. `make check` runs lint, format check, type check and every test. It
-needs no network after the environment is built.
+A3. The `Makefile` target `make check` runs lint, format check, type check
+and every test. It needs no network after the environment is built.
+pre-commit runs ruff lint and format on the changed files at each commit.
 
 A4. GitHub Actions runs `make check` on every push and pull request
 (question P5).

@@ -21,6 +21,12 @@ follow `docs/releasing.md`.
   A breaking change adds `!` after the type or scope, or a
   `BREAKING CHANGE:` footer.
 - Never commit a credential, token or login file.
+- `make check` is the full check: ruff lint and format check, Pyrefly type
+  check, and every test with pytest on all cores (pytest-xdist `-n auto`).
+  pre-commit runs ruff on the changed files at each commit.
+- Every test is independent: its own temporary folders and state, no
+  dependence on another test or on run order, safe to run in parallel with
+  every other test.
 
 ## Layout
 
