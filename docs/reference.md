@@ -122,8 +122,12 @@ changes nothing leaves it.
 
 `claim` is `null` without `--id`.
 
-Menu `state` is `set`, `ask`, `engine off`, `not shortlisted` or `invalid`.
-`effort` is the effort in the shortlist entry. `run_as` is the
+Menu `state` is `set`, `ask`, `invalid`, `engine off`, `not connected` or
+`not shortlisted`, checked in that order. `not connected` means the engine is
+on and its status in the cache of `emb engines` says it is not connected; its
+reason is `<engine> is not connected`. A read uses only that cache and never
+runs an engine; with no cache, or a cache that is not valid, no row is
+`not connected`. `effort` is the effort in the shortlist entry. `run_as` is the
 `single.writer_as` or `single.reviewer_as` value for the `claude` engine and
 `null` for the others. `reason` is `null` when `state` is `set`.
 
@@ -137,6 +141,131 @@ Menu `state` is `set`, `ask`, `engine off`, `not shortlisted` or `invalid`.
 | 75 | Stale generation, or the database stayed busy for 5 seconds |
 | 77 | An owner option without a terminal on standard input |
 | 78 | The settings database has an unsupported schema |
+
+## `emb engines`
+
+Shows whether Codex, OpenCode and Claude Code are installed, signed in and
+connected, or lists one engine's models.
+
+| Option | Does |
+|---|---|
+| (none) | Print each engine's status |
+| `--refresh` | Check the engines, or read the model list from its source, instead of using the cache |
+| `--json` | Print JSON |
+| `--models ENGINE` | Print the model list of `codex`, `opencode` or `claude` |
+
+Exit codes: 0 whether or not the engines are connected and whether or not the
+model list could be read; 64 for a usage error, such as an unknown engine.
+
+### Status
+
+An engine is `connected` when its CLI is found and its sign-in check passes.
+Each check is a local command with a 10-second timeout:
+
+| Engine | CLI | Sign-in check | Signed in when |
+|---|---|---|---|
+| `codex` | `codex` on `PATH` | `codex login status` | it exits 0 and names ChatGPT |
+| `opencode` | `opencode` on `PATH`, else `~/.opencode/bin/opencode` | `opencode auth list` | it exits 0 and names OpenRouter |
+| `claude` | `claude` on `PATH` | `claude auth status --json` | it prints `"loggedIn": true` |
+
+Each CLI is also run with `--version`. `claude` runs without the variables
+whose names start with `CLAUDE_CODE_`, `CLAUDECODE` or `ANTHROPIC_`.
+
+`state` is the first that applies:
+
+| State | When |
+|---|---|
+| `not installed` | The CLI is not found |
+| `check failed` | A check could not run, exited with an unexpected code, printed something unexpected or timed out; `reason` names the command and, when it printed something, its first line of output |
+| `not signed in` | The sign-in check ran and found no sign-in |
+| `connected` | Every requirement is met |
+
+`check failed` sets `signed_in` to `null` when the sign-in check is the one
+that failed.
+
+Results are cached in `$XDG_CACHE_HOME/ember/engines.json` (default
+`~/.cache/ember/engines.json`), mode 600 in a mode 700 folder, replaced whole
+on each write. `emb engines` uses the cache while it is valid, and checks the
+engines when there is no valid cache or with `--refresh`. Nothing refreshes it
+on a timer.
+
+Text output has one line per engine, `<engine>: <state>[, <version>][:
+<reason>]`, followed by one indented line per unmet requirement,
+`<label>[: <fix command>]`. The fix command is left out when it is not known.
+
+`--json` prints an object keyed by engine:
+
+```json
+{
+  "codex": {
+    "engine": "codex",
+    "state": "connected",
+    "reason": null,
+    "installed": true,
+    "binary": "/usr/bin/codex",
+    "version": "codex-cli 1.2.3",
+    "signed_in": true,
+    "connected": true,
+    "requirements": [{"label": "...", "met": true, "fix": null}],
+    "checked_at": 1800000000.0
+  }
+}
+```
+
+The requirements are the engine's CLI, with its install command as the fix,
+and its sign-in, with its sign-in command as the fix:
+
+| Engine | Install | Sign in |
+|---|---|---|
+| `codex` | `npm install -g @openai/codex` | `codex login` |
+| `opencode` | `curl -fsSL https://opencode.ai/install \| bash` | `opencode auth login` |
+| `claude` | `curl -fsSL https://claude.ai/install.sh \| bash` | `claude auth login` |
+
+A sign-in command names the CLI by its path when it is not found on `PATH`.
+
+### Models
+
+| Engine | Source | `source` |
+|---|---|---|
+| `codex` | `codex debug models`, models whose visibility is `list` | `cli` |
+| `opencode` | `https://openrouter.ai/api/v1/models`, ids of the form `<provider>/<model>` as `shortlist.opencode` takes them | `openrouter` |
+| `claude` | The aliases Claude Code's `--model` takes: `fable`, `opus`, `sonnet`, `haiku`, each with efforts `low` to `max` | `cli` |
+
+The `codex` and `opencode` lists are cached in
+`$XDG_CACHE_HOME/ember/models-<engine>.json`, mode 600, and read from their
+source again when the cache is 6 hours old, not valid, or with `--refresh`.
+A list served from the cache has `source` `cache`. When the source cannot be
+read, the cached list is used however old, with `reason` set; with no cache
+the list is empty, `source` names the source that was tried, `fetched_at` is
+`null` and `reason` is set. A failed read leaves the cache as it was.
+
+`--json` prints:
+
+```json
+{
+  "models": [
+    {
+      "id": "openai/gpt-4o", "label": "GPT-4o",
+      "efforts": ["low", "high"], "default_effort": "low",
+      "context_length": 128000,
+      "prompt_price": 0.0000025, "completion_price": 0.00001,
+      "supports_tools": true
+    }
+  ],
+  "source": "openrouter",
+  "fetched_at": 1800000000.0,
+  "reason": null
+}
+```
+
+Prices are US dollars per token. `context_length`, the prices and
+`supports_tools` are `null` for `codex` and `claude` and when OpenRouter does
+not report them.
+
+Text output starts with `<engine> models from <source>, read <age> ago` (or
+`never read`), then one line per model: its id, label, efforts, context
+length, prices in US dollars per million tokens and `tools` when it takes tool
+calls. `reason` goes to standard error as `emb engines: <reason>`.
 
 ## Exit codes
 

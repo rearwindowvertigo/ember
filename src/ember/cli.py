@@ -9,10 +9,12 @@ terminal and 78 for an unsupported database schema.
 import argparse
 import json
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NoReturn
 
 from ember import __version__, choices, db
+from ember.engines import models, status
 
 EX_OK = 0
 EX_USAGE = 64
@@ -84,6 +86,21 @@ def _add_choices(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_engines(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="check the engines, or read the model list, instead of the cache",
+    )
+    parser.add_argument("--json", action="store_true", help="print JSON")
+    parser.add_argument(
+        "--models",
+        choices=status.ENGINES,
+        metavar="ENGINE",
+        help="print ENGINE's model list (codex, opencode or claude)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the parser for `emb` and its subcommands.
 
@@ -103,6 +120,16 @@ def build_parser() -> argparse.ArgumentParser:
             description=(
                 "Read settings and choices, claim or release a one-time choice, "
                 "or set settings and one-time choices at a terminal."
+            ),
+        )
+    )
+    _add_engines(
+        subparsers.add_parser(
+            "engines",
+            help="show whether each engine is connected, or its models",
+            description=(
+                "Show whether Codex, OpenCode and Claude Code are installed, "
+                "signed in and connected, or list one engine's models."
             ),
         )
     )
@@ -194,6 +221,81 @@ def _run_choices(args: argparse.Namespace, env: Mapping[str, str] | None) -> int
     return EX_OK
 
 
+def _age(seconds: float) -> str:
+    """Return a short age such as `5 min`."""
+    seconds = max(0, int(seconds))
+    for size, unit in ((86400, "d"), (3600, "h"), (60, "min")):
+        if seconds >= size:
+            return f"{seconds // size} {unit}"
+    return f"{seconds} s"
+
+
+def _status_lines(item: status.EngineStatus) -> list[str]:
+    head = f"{item.engine}: {item.state}"
+    if item.version:
+        head += f", {item.version}"
+    if item.reason:
+        head += f": {item.reason}"
+    lines = [head]
+    for requirement in item.requirements:
+        if not requirement.met:
+            fix = f": {requirement.fix}" if requirement.fix else ""
+            lines.append(f"  {requirement.label}{fix}")
+    return lines
+
+
+def _per_million(value: float) -> str:
+    return f"${value * 1_000_000:.2f}/M"
+
+
+def _model_line(model: models.Model) -> str:
+    parts = [model.id]
+    if model.label != model.id:
+        parts.append(model.label)
+    if model.efforts:
+        efforts = "efforts " + ", ".join(model.efforts)
+        if model.default_effort:
+            efforts += f" (default {model.default_effort})"
+        parts.append(efforts)
+    if model.context_length is not None:
+        parts.append(f"context {model.context_length}")
+    if model.prompt_price is not None:
+        parts.append(f"{_per_million(model.prompt_price)} in")
+    if model.completion_price is not None:
+        parts.append(f"{_per_million(model.completion_price)} out")
+    if model.supports_tools:
+        parts.append("tools")
+    return "  ".join(parts)
+
+
+def _run_engines(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
+    if args.models is not None:
+        listing = models.list_models(args.models, env, refresh=args.refresh)
+        if listing.reason:
+            print(f"emb engines: {listing.reason}", file=sys.stderr)
+        if args.json:
+            print(json.dumps(listing.to_json(), indent=2))
+            return EX_OK
+        fetched = (
+            "never read"
+            if listing.fetched_at is None
+            else f"read {_age(time.time() - listing.fetched_at)} ago"
+        )
+        print(f"{args.models} models from {listing.source}, {fetched}")
+        for model in listing.models:
+            print(_model_line(model))
+        return EX_OK
+    result = status.read(env, refresh=args.refresh)
+    if args.json:
+        reply = {name: item.to_json() for name, item in result.items()}
+        print(json.dumps(reply, indent=2))
+        return EX_OK
+    for item in result.values():
+        for line in _status_lines(item):
+            print(line)
+    return EX_OK
+
+
 def main(
     argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = None
 ) -> int:
@@ -213,6 +315,8 @@ def main(
         return EX_USAGE
     if args.command == "choices":
         return _run_choices(args, env)
+    if args.command == "engines":
+        return _run_engines(args, env)
     return EX_OK
 
 

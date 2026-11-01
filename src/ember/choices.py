@@ -6,6 +6,9 @@ functions are typed: strings, and lists of strings for list keys.
 
 Every function takes an optional `env` mapping, passed to `ember.paths`, and an
 optional `now` in seconds since the epoch, which defaults to the current time.
+
+The worker menu reads each engine's last checked status from the status cache
+of `ember.engines.status`; it never runs an engine.
 """
 
 import json
@@ -20,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ember import db
+from ember.engines import status
 
 EX_USAGE = 64
 
@@ -480,12 +484,19 @@ def _resolve(
     return answers
 
 
-def menu_row(answers: Mapping[str, Mapping[str, Any]], name: str) -> dict[str, Any]:
+def menu_row(
+    answers: Mapping[str, Mapping[str, Any]],
+    name: str,
+    connected: Mapping[str, bool] | None = None,
+) -> dict[str, Any]:
     """Describe one worker menu row from resolved answers.
 
     Args:
         answers: Resolved answers, key to `{"value", "layer"}`.
         name: `single.writer` or `single.reviewer`.
+        connected: Whether each engine was connected when last checked; an
+            engine that is missing, or `None`, is not reported as not
+            connected.
 
     Returns:
         `{"value", "state", "engine", "model", "effort", "run_as", "reason"}`.
@@ -514,6 +525,9 @@ def menu_row(answers: Mapping[str, Mapping[str, Any]], name: str) -> dict[str, A
     if answers[f"engine.{engine}"]["value"] != "on":
         row.update(state="engine off", reason=f"{engine} is off")
         return row
+    if connected is not None and connected.get(engine) is False:
+        row.update(state="not connected", reason=f"{engine} is not connected")
+        return row
     models = shortlist_models(engine, answers[f"shortlist.{engine}"]["value"])
     if model not in models:
         row.update(state="not shortlisted", reason=f"not on the {engine} shortlist")
@@ -530,6 +544,10 @@ def _reply(
 ) -> dict[str, Any]:
     answers = _resolve(state, request, env)
     source_error = bool(state.errors)
+    held = None if source_error else status.cached(env)
+    connected = (
+        None if held is None else {name: item.connected for name, item in held.items()}
+    )
     return {
         "answers": answers,
         "claim": None
@@ -540,7 +558,7 @@ def _reply(
         "source_error": source_error,
         "menu": None
         if source_error
-        else {name: menu_row(answers, name) for name in MENU_KEYS},
+        else {name: menu_row(answers, name, connected) for name in MENU_KEYS},
     }
 
 
