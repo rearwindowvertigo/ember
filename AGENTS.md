@@ -28,6 +28,30 @@ follow `docs/releasing.md`.
   dependence on another test or on run order, safe to run in parallel with
   every other test.
 
+## Conventions
+
+- Where no rule here covers a case, follow the nearest existing Ember code.
+  Where there is none, use the most widely used standard for that language or
+  tool, and name it in the commit message.
+- Python follows PEP 8, enforced by ruff with the rule sets `E`, `W`, `F`,
+  `I`, `N`, `UP`, `B`, `SIM`, `ANN` and `D` (Google docstring convention)
+  set in `pyproject.toml`. Every function has type hints.
+- Ember's own code uses PEP 8 names. Qt's methods and their overrides keep
+  Qt's camelCase names (`setWindowTitle`, `closeEvent`).
+- Tests mirror the source tree: `src/ember/<path>/<module>.py` is tested in
+  `tests/<path>/test_<module>.py`.
+- The `emb` command follows the Command Line Interface Guidelines
+  (clig.dev): long `--options`, `--help` on every command, data on standard
+  output and messages on standard error, `--json` for machine-readable
+  output, exit 0 on success and a documented non-zero code otherwise.
+- Files live in the XDG base directories. The desktop entry, icons and
+  autostart entry follow the freedesktop.org specifications. The app ID is
+  `io.github.rearwindowvertigo.Ember`.
+- Prefer the standard library and dependencies already in use. A commit that
+  adds a dependency names it and the reason in its message.
+- Keep this file short. Add a rule only where an agent would otherwise get it
+  wrong.
+
 ## Layout
 
 | Path | Holds |
