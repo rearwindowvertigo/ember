@@ -10,9 +10,11 @@ Status: in development toward 0.1.0. The design is
 
 ## Development
 
-uv builds the environment, and `make check` runs the full check:
+uv builds the environment, pre-commit runs ruff at each commit, and
+`make check` runs the full check:
 
 ```bash
 uv sync
+uv run pre-commit install
 make check
 ```

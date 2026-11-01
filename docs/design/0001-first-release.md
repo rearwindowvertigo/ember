@@ -127,10 +127,12 @@ from OpenRouter's model list, with filters, cached.
 
 E1. `emb run --engine <codex|opencode|claude> --dir <repo> --task-file
 <brief>` starts one worker. Its first output line is `run <id>`.
+`--trailer <line>`, repeatable, adds a trailer line to each commit the
+worker makes; there is no default trailer.
 
 E2. An editing run gets its own worktree and branch, `ember/<engine>/<id>`,
-cut from the current branch, and commits with the given trailer. A
-`--read-only` run edits nothing.
+cut from the current branch, and commits with the trailers given by
+`--trailer`. A `--read-only` run edits nothing.
 
 E3. The run runs in its own tmux session, on a tmux server private to Ember
 (socket in `$XDG_RUNTIME_DIR/ember/`). Ember opens a window of the owner's
