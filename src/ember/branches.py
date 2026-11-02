@@ -29,7 +29,19 @@ from ember.runs.core import Core, RunError
 from ember.runs.record import Run
 
 GIT_TIMEOUT = 120
-"""Seconds each git command may take."""
+"""Seconds each git command may take, except one that changes the repository
+(a merge, its abort, a worktree removal, a prune or a branch deletion), which
+runs without a time limit."""
+
+IN_PROGRESS = (
+    ("MERGE_HEAD", "merge"),
+    ("REBASE_HEAD", "rebase"),
+    ("rebase-merge", "rebase"),
+    ("rebase-apply", "rebase"),
+    ("CHERRY_PICK_HEAD", "cherry-pick"),
+    ("REVERT_HEAD", "revert"),
+)
+"""The files in a worktree's git folder that show an unfinished operation."""
 
 WORKER_BRANCH = re.compile(
     r"ember/(?P<engine>[a-z0-9]+)/(?P<run>[a-z0-9][a-z0-9-]{5,63})"
@@ -91,8 +103,8 @@ class Result:
     """Why."""
 
     next: str | None
-    """For a keep: the command that resolves it, or the line starting
-    `owner: ` for something only the owner does; `None` otherwise."""
+    """For a keep: the line that resolves it, `next: <command>` or
+    `owner: <step>`; `None` otherwise."""
 
     def to_json(self) -> dict[str, Any]:
         """Return the result as a JSON-ready dict.
@@ -112,15 +124,10 @@ class Result:
         """Return the result's line.
 
         Returns:
-            `<action> <branch>: <reason>`, and for a keep `; next: <command>`
-            or `; owner: <step>`.
+            `<action> <branch>: <reason>`, and for a keep `; ` and its `next`.
         """
         line = f"{self.action} {self.branch}: {self.reason}"
-        if self.next is None:
-            return line
-        if self.next.startswith("owner: "):
-            return f"{line}; {self.next}"
-        return f"{line}; next: {self.next}"
+        return line if self.next is None else f"{line}; {self.next}"
 
 
 def _one_line(text: str) -> str:
@@ -128,21 +135,30 @@ def _one_line(text: str) -> str:
 
 
 def _git(
-    cwd: str | Path, *args: str, env: Mapping[str, str]
+    cwd: str | Path,
+    *args: str,
+    env: Mapping[str, str],
+    timeout: float | None = GIT_TIMEOUT,
+    stdin: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run git in `cwd`; a git that cannot run or times out returns 1."""
+    """Run git in `cwd`; a git that cannot run or times out returns 1.
+
+    `timeout` is `None` for a command that changes the repository, which
+    runs to its end.
+    """
     command = ["git", "-C", str(cwd), *args]
     try:
         return subprocess.run(
             command,
             capture_output=True,
             text=True,
-            stdin=subprocess.DEVNULL,
+            input=stdin,
+            stdin=subprocess.DEVNULL if stdin is None else None,
             env=dict(env),
-            timeout=GIT_TIMEOUT,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        message = f"git {args[0]} timed out after {GIT_TIMEOUT}s\n"
+        message = f"git {args[0]} timed out after {timeout}s\n"
         return subprocess.CompletedProcess(command, 1, "", message)
     except OSError as error:
         return subprocess.CompletedProcess(command, 1, "", f"git cannot run: {error}\n")
@@ -251,18 +267,26 @@ class Repository:
     """The environment of the git commands."""
 
     def git(
-        self, *args: str, cwd: Path | None = None
+        self,
+        *args: str,
+        cwd: Path | None = None,
+        changes: bool = False,
+        stdin: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Run git.
 
         Args:
             *args: The git arguments.
             cwd: The folder; `None` for `top`.
+            changes: The command changes the repository, so it runs without
+                a time limit; otherwise it may take `GIT_TIMEOUT` seconds.
+            stdin: Text for the command's standard input.
 
         Returns:
             The finished command.
         """
-        return _git(cwd or self.top, *args, env=self.env)
+        timeout = None if changes else GIT_TIMEOUT
+        return _git(cwd or self.top, *args, env=self.env, timeout=timeout, stdin=stdin)
 
     def tip(self, branch: str) -> str | None:
         """Return a local branch's commit.
@@ -517,7 +541,8 @@ class Cleanup:
 
         Raises:
             GitFailedError: A git command failed; `results` holds every result
-                before it.
+                before it, then the branch it failed on, kept, with the steps
+                done to it and the failed step.
         """
         for branch in branches:
             self._report(self._one(branch))
@@ -529,15 +554,23 @@ class Cleanup:
             print(result.text(), file=self.out, flush=True)
 
     def _one(self, branch: str) -> Result:
+        """Clean up one branch.
+
+        Raises:
+            GitFailedError: A git command failed; `results` ends with the
+                branch kept, what was done to it and the failed step.
+        """
         match = WORKER_BRANCH.fullmatch(branch)
         run_id = match["run"] if match else None
+        done: list[str] = []
         try:
-            return self._clean(branch, match)
+            return self._clean(branch, match, done)
         except _KeepError as keep:
-            next_step = keep.line
-            if next_step.startswith("next: "):
-                next_step = next_step.removeprefix("next: ")
-            return Result(branch, run_id, KEPT, str(keep), next_step)
+            return Result(branch, run_id, KEPT, str(keep), keep.line)
+        except GitFailedError as error:
+            reason = "; ".join([*done, str(error)])
+            self._report(Result(branch, run_id, KEPT, reason, error.line))
+            raise
 
     def _contained(self, tip: str, target_tip: str) -> bool:
         return is_contained(
@@ -559,7 +592,10 @@ class Cleanup:
             )
         return tip, target_tip
 
-    def _clean(self, branch: str, match: re.Match[str] | None) -> Result:
+    def _clean(
+        self, branch: str, match: re.Match[str] | None, parts: list[str]
+    ) -> Result:
+        """Clean up one branch, adding each step done to `parts`."""
         if branch == self.target:
             raise _KeepError(
                 "the merge target",
@@ -572,9 +608,10 @@ class Cleanup:
         run = self._record(run_id, engine, branch)
         folder = self.repo.run_worktree(run_id)
         present = self._check_worktree(branch, folder)
-        parts = [f"contained in {self.target}"]
+        parts.append(f"contained in {self.target}")
         if self.dry_run:
             if run is not None and run.status != record.CLOSED:
+                _check_closable(run)
                 parts.append(f"closes {run_id}")
             if present:
                 parts.append(f"removes worktree {folder}")
@@ -598,7 +635,9 @@ class Cleanup:
         self._git_step(
             ["worktree", "prune"], "git worktree prune", "git worktree prune"
         )
-        deleted = self.repo.git("update-ref", "-d", f"refs/heads/{branch}", tip)
+        deleted = self.repo.git(
+            "update-ref", "-d", f"refs/heads/{branch}", tip, changes=True
+        )
         if deleted.returncode:
             if self.repo.tip(branch) != tip:
                 raise _KeepError(f"{branch} moved", f"next: {self.again}")
@@ -611,7 +650,7 @@ class Cleanup:
         return Result(branch, run_id, REMOVED, "; ".join(parts), None)
 
     def _git_step(self, args: list[str], step: str, retry: str) -> None:
-        result = self.repo.git(*args, cwd=self.repo.main)
+        result = self.repo.git(*args, cwd=self.repo.main, changes=True)
         if result.returncode:
             raise GitFailedError(
                 exits.WORKTREE_FAILED,
@@ -715,6 +754,23 @@ class Cleanup:
             ) from error
 
 
+def _check_closable(run: Run) -> None:
+    """Keep a run whose record shows that its close would be refused.
+
+    A turn recorded as sent counts as running, and a collected turn of a
+    writing run as not committed, with the reason and line the close gives.
+    """
+    if run.turn_state == record.COLLECTED and not run.read_only:
+        reason = f"turn {run.turn} of {run.id} is collected but not committed"
+        variant = "collected"
+    elif run.turn_state == record.SENT:
+        reason = f"turn {run.turn} of {run.id} is running"
+        variant = "close"
+    else:
+        return
+    raise _KeepError(reason, exits.line(exits.REFUSED, variant, run=run.id) or "")
+
+
 def _print_failure(command: str, error: BranchError, err: TextIO) -> int:
     print(f"emb {command}: {error}", file=err)
     print(error.line, file=err)
@@ -807,6 +863,63 @@ def _target_worktree(repo: Repository, target: str) -> Path:
     )
 
 
+def _check_no_operation(
+    repo: Repository, branch: str, target: str, worktree: Path
+) -> None:
+    """Refuse a target worktree with an unfinished merge, rebase or the like.
+
+    Raises:
+        BranchError: The worktree's git folder shows one (75), or cannot be
+            found (70).
+    """
+    found = repo.git("rev-parse", "--path-format=absolute", "--git-dir", cwd=worktree)
+    if found.returncode or not found.stdout.strip():
+        raise GitFailedError(
+            exits.WORKTREE_FAILED,
+            f"git rev-parse failed in {worktree}: {_git_message(found)}",
+            f"next: git -C {worktree} status",
+        )
+    folder = Path(found.stdout.strip())
+    for name, operation in IN_PROGRESS:
+        if (folder / name).exists():
+            raise BranchError(
+                exits.REFUSED,
+                f"the {target} tree at {worktree} has an unfinished {operation}",
+                f"next: git -C {worktree} status; finish or abort the "
+                f"{operation}, then emb merge {branch} --into {target} "
+                "--verdict keep",
+            )
+
+
+def _merge_title(
+    repo: Repository, branch: str, target: str, tip: str, worktree: Path
+) -> str:
+    """Return git's default merge message for merging the branch by name.
+
+    The merge itself names `refs/heads/<branch>`, so that a tag of the same
+    name is never merged; git would put that full name in its message, so the
+    message is made by `git fmt-merge-msg` for the short name.
+
+    Raises:
+        GitFailedError: `git fmt-merge-msg` failed (70).
+    """
+    made = repo.git(
+        "fmt-merge-msg",
+        "--no-log",
+        cwd=worktree,
+        stdin=f"{tip}\t\tbranch '{branch}' of .\n",
+    )
+    title = made.stdout.strip()
+    if made.returncode or not title:
+        raise GitFailedError(
+            exits.WORKTREE_FAILED,
+            f"git fmt-merge-msg failed in {worktree}: {_git_message(made)}",
+            f"next: git -C {worktree} status, then emb merge {branch} --into "
+            f"{target} --verdict keep",
+        )
+    return title
+
+
 def _merge(
     repo: Repository, branch: str, target: str, worktree: Path
 ) -> tuple[str | None, str]:
@@ -829,6 +942,7 @@ def _merge(
             None,
             f"already contained: {branch} at {branch_tip} in {target} at {head}",
         )
+    _check_no_operation(repo, branch, target, worktree)
     changed = repo.changes(worktree, skip_nested=True)
     if changed:
         raise BranchError(
@@ -838,7 +952,15 @@ def _merge(
             f"changes, then emb merge {branch} --into {target} --verdict keep",
         )
     merged = repo.git(
-        "merge", "--no-ff", "--no-edit", "--end-of-options", branch, cwd=worktree
+        "merge",
+        "--no-ff",
+        "--no-edit",
+        "-m",
+        _merge_title(repo, branch, target, branch_tip, worktree),
+        "--end-of-options",
+        f"refs/heads/{branch}",
+        cwd=worktree,
+        changes=True,
     )
     if merged.returncode == 0:
         commit = repo.git("rev-parse", "HEAD", cwd=worktree).stdout.strip()
@@ -847,11 +969,13 @@ def _merge(
         "diff", "--name-only", "--diff-filter=U", "-z", cwd=worktree
     ).stdout.split("\0")
     conflicts = [path for path in conflicts if path]
+    # The worktree had no merge in progress before this one, so the abort
+    # undoes only this merge.
     if (
         repo.git("rev-parse", "-q", "--verify", "MERGE_HEAD", cwd=worktree).returncode
         == 0
     ):
-        repo.git("merge", "--abort", cwd=worktree)
+        repo.git("merge", "--abort", cwd=worktree, changes=True)
     if conflicts:
         raise BranchError(
             exits.REFUSED,

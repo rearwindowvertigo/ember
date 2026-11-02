@@ -440,10 +440,77 @@ def test_merge_into_a_target_checked_out_in_a_linked_worktree(
     git(repo, "worktree", "add", "-q", "-b", "session", str(lead), env=env)
     streams = Streams()
     assert _merge(env, driver, streams, run.branch, lead, target="session") == 0
+    assert git(lead, "log", "-1", "--format=%s", env=env) == (
+        f"Merge branch '{run.branch}' into session"
+    )
     assert (lead / "work.txt").read_text() == "work\n"
     assert not (repo / "work.txt").exists()
     assert not _branch_exists(repo, run.branch, env)
     assert not Path(run.worktree).exists()
+
+
+@pytest.mark.parametrize(
+    ("name", "operation"),
+    [
+        ("MERGE_HEAD", "merge"),
+        ("REBASE_HEAD", "rebase"),
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+    ],
+)
+def test_merge_refuses_a_target_with_an_unfinished_operation(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    name: str,
+    operation: str,
+) -> None:
+    run = _start(tmp_path, env, repo, driver)
+    assert run.branch is not None
+    head = git(repo, "rev-parse", "HEAD", env=env)
+    marker = Path(git(repo, "rev-parse", "--absolute-git-dir", env=env)) / name
+    if name.startswith("rebase-"):
+        marker.mkdir()
+    else:
+        marker.write_text(f"{head}\n")
+    streams = Streams()
+    assert _merge(env, driver, streams, run.branch, repo) == 75
+    out, err = streams.take()
+    assert out == ""
+    assert f"the main tree at {repo} has an unfinished {operation}" in err
+    assert err.splitlines()[-1] == (
+        f"next: git -C {repo} status; finish or abort the {operation}, then "
+        f"emb merge {run.branch} --into main --verdict keep"
+    )
+    assert marker.exists()
+    assert git(repo, "rev-parse", "HEAD", env=env) == head
+    assert _branch_exists(repo, run.branch, env)
+    assert _session_live(tmp_path, run.id)
+
+
+def test_merge_takes_the_branch_over_a_tag_of_the_same_name(
+    tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    run = _start(tmp_path, env, repo, driver)
+    assert run.branch is not None
+    git(repo, "switch", "-q", "-c", "decoy", env=env)
+    (repo / "decoy.txt").write_text("decoy\n")
+    git(repo, "add", "decoy.txt", env=env)
+    git(repo, "commit", "-q", "-m", "decoy", env=env)
+    git(repo, "tag", run.branch, env=env)
+    git(repo, "switch", "-q", "main", env=env)
+    tip = git(repo, "rev-parse", f"refs/heads/{run.branch}", env=env)
+    streams = Streams()
+    assert _merge(env, driver, streams, run.branch, repo) == 0
+    assert git(repo, "rev-parse", "HEAD^2", env=env) == tip
+    assert git(repo, "log", "-1", "--format=%s", env=env) == (
+        f"Merge branch '{run.branch}'"
+    )
+    assert (repo / "work.txt").read_text() == "work\n"
+    assert not (repo / "decoy.txt").exists()
 
 
 # emb cleanup
@@ -509,7 +576,7 @@ def test_cleanup_keeps_a_session_holding_messages_ember_did_not_send(
     [item] = json.loads(streams.take()[0])
     assert item["action"] == "kept"
     assert "holds messages Ember did not send" in item["reason"]
-    assert item["next"].startswith("ask the owner about the messages")
+    assert item["next"].startswith("next: ask the owner about the messages")
     assert _branch_exists(repo, run.branch, env)
     assert driver.closed == []
 
@@ -744,6 +811,78 @@ def test_cleanup_dry_run_changes_nothing(
     assert streams.take()[0].startswith(f"would remove {run.branch}: contained in main")
 
 
+def test_cleanup_dry_run_keeps_a_run_whose_turn_is_running(
+    tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    run = _start(tmp_path, env, repo, driver, "Task\n@hang\n")
+    assert run.branch is not None
+    assert record.load(run.id, env).turn_state == record.SENT
+    streams = Streams()
+    try:
+        assert _cleanup(env, driver, streams, repo, dry_run=True) == 0
+        dry, _ = streams.take()
+        assert _cleanup(env, driver, streams, repo) == 0
+        real, _ = streams.take()
+    finally:
+        (run.folder / "stub" / "release").write_text("")
+    assert dry == real
+    assert dry.startswith(f"kept {run.branch}: turn 1 of {run.id} is running; ")
+    assert _branch_exists(repo, run.branch, env)
+
+
+def test_cleanup_dry_run_keeps_a_collected_turn_of_a_writing_run(
+    tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    run = _start(tmp_path, env, repo, driver)
+    assert run.branch is not None
+    _squash(repo, run.branch, env)
+    record.update(record.load(run.id, env), {"turn_state": record.COLLECTED})
+    streams = Streams()
+    assert _cleanup(env, driver, streams, repo, dry_run=True, as_json=True) == 0
+    [dry] = json.loads(streams.take()[0])
+    assert _cleanup(env, driver, streams, repo, as_json=True) == 0
+    [real] = json.loads(streams.take()[0])
+    assert dry == real
+    assert dry["action"] == "kept"
+    assert dry["reason"] == (
+        f"turn {run.turn} of {run.id} is collected but not committed"
+    )
+    assert dry["next"].startswith(f"next: emb run --recover {run.id}")
+    assert _branch_exists(repo, run.branch, env)
+    assert _session_live(tmp_path, run.id)
+
+
+def test_cleanup_reports_the_steps_done_before_a_failed_branch_deletion(
+    tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    run = _start(tmp_path, env, repo, driver)
+    assert run.branch is not None
+    _squash(repo, run.branch, env)
+    common = Path(git(repo, "rev-parse", "--git-common-dir", env=env))
+    if not common.is_absolute():
+        common = repo / common
+    lock = common / "refs" / "heads" / f"{run.branch}.lock"
+    lock.write_text("")
+    streams = Streams()
+    assert _cleanup(env, driver, streams, repo, as_json=True) == 70
+    out, err = streams.take()
+    [item] = json.loads(out)
+    assert item["action"] == "kept"
+    assert item["reason"].startswith(
+        f"contained in main; closed {run.id}; removed worktree {run.worktree}; "
+        f"deleting the branch {run.branch} failed: "
+    )
+    assert item["next"] == err.splitlines()[-1]
+    assert item["next"].startswith(f"next: git -C {repo} branch -d {run.branch}")
+    assert not Path(run.worktree).exists()
+    assert record.load(run.id, env).status == record.CLOSED
+    assert _branch_exists(repo, run.branch, env)
+    lock.unlink()
+    assert _cleanup(env, driver, streams, repo) == 0
+    assert streams.take()[0].startswith(f"removed {run.branch}")
+    assert not _branch_exists(repo, run.branch, env)
+
+
 def test_cleanup_from_a_linked_worktree_finds_run_worktrees_in_the_main_checkout(
     tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
 ) -> None:
@@ -795,9 +934,15 @@ def test_cleanup_stops_at_a_git_failure_with_70(
         (second_folder / "sub").chmod(0o755)
     assert code == 70
     out, err = streams.take()
-    [item] = json.loads(out)
+    [item, failed] = json.loads(out)
     assert item["branch"] == first
     assert item["action"] == "removed"
+    assert failed["branch"] == second
+    assert failed["action"] == "kept"
+    assert failed["reason"].startswith(
+        f"contained in main; removing the worktree {second_folder} failed: "
+    )
+    assert failed["next"] == err.splitlines()[-1]
     assert f"emb cleanup: removing the worktree {second_folder} failed: " in err
     assert err.splitlines()[-1].startswith(
         f"next: git -C {repo} worktree remove {second_folder}, then emb cleanup"

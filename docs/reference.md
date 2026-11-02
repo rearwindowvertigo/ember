@@ -592,14 +592,21 @@ the git checkout; the default is the current folder.
 - A branch already contained in `TARGET` (see `emb cleanup`) is not merged
   again; the first line is `already contained: BRANCH at <commit> in TARGET at
   <commit>`.
-- Otherwise the target's tree must have no changes to tracked files and no
-  untracked files that are not ignored (75); other worktrees of the
-  repository inside it are not counted. Ember then runs
-  `git merge --no-ff --no-edit BRANCH` there, which makes a merge commit with
-  git's default message, and prints `merged BRANCH at <commit> into TARGET:
-  <merge commit>`.
-- On a conflict it runs `git merge --abort`, leaves `TARGET` as it was and
-  exits 75. Any other merge failure exits 70.
+- Otherwise the target's worktree must have no unfinished merge, rebase,
+  cherry-pick or revert (`MERGE_HEAD`, `REBASE_HEAD`, `rebase-merge`,
+  `rebase-apply`, `CHERRY_PICK_HEAD` or `REVERT_HEAD` in its git folder) (75),
+  and its tree must have no changes to tracked files and no untracked files
+  that are not ignored (75); other worktrees of the repository inside it are
+  not counted.
+- Ember then runs `git merge --no-ff --no-edit -m <message> refs/heads/BRANCH`
+  there, so a tag named `BRANCH` is never merged instead. `<message>` is git's
+  default message for merging `BRANCH` by its short name, from
+  `git fmt-merge-msg --no-log`: `Merge branch 'BRANCH' into TARGET`, without
+  ` into TARGET` for a target that git's `merge.suppressDest` setting covers
+  (`main` and `master` when it is not set). It prints `merged BRANCH at
+  <commit> into TARGET: <merge commit>`.
+- On a conflict it runs `git merge --abort`, which undoes only that merge,
+  leaves `TARGET` as it was and exits 75. Any other merge failure exits 70.
 - It never pushes.
 
 The cleanup's lines follow the first line. A branch that is not an Ember run
@@ -658,6 +665,10 @@ For each contained run branch, in order:
 A branch with no run record follows the same steps without a session to
 close. Run records are kept. `--dry-run` reports what each branch would get
 and changes nothing; it does not ask the run's session whether it would close.
+It reports a branch as kept, with the reason and line a close would give,
+when the run record shows a turn that is sent (`turn <n> of <run> is
+running`) or, on a run that writes, collected (`turn <n> of <run> is collected
+but not committed`).
 
 Everything else is kept, with a reason and what resolves it:
 
@@ -690,13 +701,21 @@ output and a message on standard error.
 | `run` | The run id in the branch name, or null |
 | `action` | `removed`, `kept` or `would remove` |
 | `reason` | What was done, or why it was kept |
-| `next` | For a keep, the command that resolves it, or the line starting `owner: `; null otherwise |
+| `next` | For a keep, the line that resolves it, `next: <command>` or `owner: <step>`, the same text as the printed line ends with; null otherwise |
 
-A git command that fails while changing the repository (worktree removal,
-`git worktree prune`, branch deletion) stops the cleanup at once with exit
-70. Everything done before it is already printed, or with `--json` is in the
-list; standard error names the failed step and git's message. With
-`emb merge`, a merge already made stays.
+A git command that fails (worktree removal, `git worktree prune`, branch
+deletion, or a git command that reads the repository) stops the cleanup at
+once with exit 70. Everything done before it is already printed, or with
+`--json` is in the list. The branch it failed on follows as kept; its reason
+lists the steps already done to that branch (for example `closed <run>`,
+`removed worktree <path>`) and the failed step with git's message, and its
+`next` is the line printed on standard error. With `emb merge`, a merge
+already made stays.
+
+A git command that changes the repository (the merge, `git merge --abort`,
+worktree removal, `git worktree prune`, branch deletion) runs without a time
+limit. Every other git command may take 120 seconds; one that takes
+longer fails.
 
 ### Exit codes of `emb merge` and `emb cleanup`
 
@@ -709,8 +728,8 @@ Messages go to standard error as `emb merge: <message>` or
 | 0 | Done, whatever was kept |
 | 64 | Usage error, or no Keep verdict |
 | 65 | The folder is not in a git checkout, or a named branch or target does not exist |
-| 70 | A git command failed: the merge, listing worktrees, `git status`, worktree removal, prune or branch deletion |
-| 75 | Refused: the target is checked out nowhere or its tree is not clean, or a merge conflict was aborted |
+| 70 | A git command failed: the merge, making the merge message, finding the target's git folder, listing worktrees, `git status`, worktree removal, prune or branch deletion |
+| 75 | Refused: the target is checked out nowhere, its worktree has an unfinished merge, rebase, cherry-pick or revert, or its tree is not clean, or a merge conflict was aborted |
 
 ## Exit codes
 
