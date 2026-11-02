@@ -195,3 +195,33 @@ def test_summary_keeps_failed_reply_and_unreadable_file(tmp_path: Path) -> None:
         reply.unlink()
         record.write_summary(data, env)
     assert "the reply file cannot be read:" in (folder / "summary.md").read_text()
+
+
+@pytest.mark.parametrize("retained", [{}, {"run": None}, {"run": "codex-old"}])
+def test_retry_attempt_compatible_with_existing_attempts(
+    tmp_path: Path, retained: dict[str, Any]
+) -> None:
+    env = make_env(tmp_path)
+    data = panel()
+    attempts = [
+        {"kind": "start", "at": 1, "exit": 71},
+        {"kind": "retry", "at": 2, "exit": 71, **retained},
+        {"kind": "start", "at": 3, "exit": 0},
+    ]
+    data["members"][0]["attempts"] = attempts
+    with record.hold(data["id"], env):
+        record.create(data, "q", "b", env)
+    assert record.load(data["id"], env)["members"][0]["attempts"] == attempts
+
+
+@pytest.mark.parametrize("retained", [{"run": 42}, {"run": "old", "unknown": 0}])
+def test_retry_attempt_rejects_invalid_fields(
+    tmp_path: Path, retained: dict[str, Any]
+) -> None:
+    env = make_env(tmp_path)
+    data = panel()
+    data["members"][0]["attempts"] = [
+        {"kind": "retry", "at": 1, "exit": None, **retained}
+    ]
+    with record.hold(data["id"], env), pytest.raises(record.PanelError):
+        record.create(data, "q", "b", env)

@@ -934,6 +934,8 @@ def test_panel_help_and_command_order(capsys: pytest.CaptureFixture[str]) -> Non
         "--dry-run",
         "--status",
         "--recover",
+        "--retry",
+        "--close",
         "--json",
     ):
         assert option in help_text
@@ -999,3 +1001,31 @@ def test_parser_errors_end_with_a_next_line(
         main(argv)
     assert exit_info.value.code == 64
     assert capsys.readouterr().err.splitlines()[-1] == f"next: {prog} --help"
+
+
+@pytest.mark.parametrize("options", [["--retry", "bad", "1"], ["--close", "bad"]])
+def test_panel_retry_close_dispatch(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str], options: list[str]
+) -> None:
+    assert main(["panel", *options, "--json"], env=env) == 65
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert "invalid panel id: bad" in captured.err
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--retry", "x", "1", "--close", "x"],
+        ["--retry", "x", "1", "--member", "codex:x"],
+        ["--retry", "x", "1", "--dry-run"],
+        ["--close", "x", "--timeout", "1"],
+        ["--close", "x", "--stall", "1"],
+        ["--close", "x", "--read", "."],
+    ],
+)
+def test_panel_retry_close_usage(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str], options: list[str]
+) -> None:
+    assert main(["panel", *options], env=env) == 64
+    assert capsys.readouterr().err.endswith("next: emb panel --help\n")

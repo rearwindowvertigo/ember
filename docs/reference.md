@@ -1514,6 +1514,8 @@ Asks members the same question in parallel read-only `emb run` runs.
 Each run is closed after its answer is read. Ember writes `summary.md`
 with the question, member outcomes and every available answer.
 `--recover` collects unfinished turns without asking the question again.
+`--retry` asks one failed or not-started member again. `--close` closes
+open member runs without force.
 
 ### Options
 
@@ -1525,16 +1527,19 @@ with the question, member outcomes and every available answer.
 | `--claim ID` | Resolve saved members with this claim's choices; member runs receive no claim |
 | `--read PATH` | An additional path members may read; repeatable; each path must exist |
 | `--stall MINUTES` | Positive minutes without a member's screen changing before a stall; default 10 |
-| `--timeout MINUTES` | Positive minutes from the first start or recovery until the panel stops waiting; default 30 |
+| `--timeout MINUTES` | Positive minutes from the first start, recovery or retry until the panel stops waiting; default 30 |
 | `--dry-run` | Validate inputs and members, print their resolved efforts and sources, and start nothing |
 | `--status [PANEL]` | Print one panel record, or list panels oldest first |
 | `--recover PANEL` | Collect unfinished members under the panel's lifetime lock |
+| `--retry PANEL MEMBER` | Ask one failed or not-started member again, by its printed number |
+| `--close PANEL` | Close every open current or retained member run without force |
 | `--json` | Print JSON in every mode |
 
-Exactly one mode is required: `--question-file`, `--status` or `--recover`.
+Exactly one mode is required: `--question-file`, `--status`, `--recover`,
+`--retry` or `--close`.
 `--dir`, `--member`, `--claim`, `--read` and `--dry-run` require
 `--question-file`. `--stall` and `--timeout` apply to a start without
-`--dry-run`, or to `--recover`. Minutes must be finite and greater than zero.
+`--dry-run`, or to `--recover` or `--retry`. Minutes must be finite and greater than zero.
 Invalid combinations exit 64 with `next: emb panel --help`.
 
 Before a start, Ember reads the question, resolves the checkout, checks that
@@ -1693,12 +1698,12 @@ updates `updated_at` and atomically replaces `panel.json`.
 |---|---|
 | `schema_version` | Integer 1 |
 | `id` | Panel id |
-| `status` | `running`, `done` when no member is unfinished, or `incomplete` |
+| `status` | `running`, `done` or `incomplete`; retry requires every member to be answered for `done`, start and recovery require no unfinished members |
 | `dir` | Absolute checkout top |
 | `question_file` | Absolute source question path |
 | `read` | Absolute additional read paths |
 | `claim` | Claim used to select members, or null; not passed to runs |
-| `stall_minutes`, `timeout_minutes` | Limits of the latest start or recovery |
+| `stall_minutes`, `timeout_minutes` | Limits of the latest start, recovery or retry |
 | `started_at`, `updated_at`, `ended_at` | Epoch seconds; `ended_at` is null until finalization |
 | `exit` | Null while running, then 0, 83 or 74 |
 | `members` | Member records in start order |
@@ -1713,9 +1718,9 @@ updates `updated_at` and atomically replaces `panel.json`.
 | `exit`, `reason` | Last attempt's exit and failure reason, or null |
 | `reply`, `bytes` | Reply path or null, and its UTF-8 byte count, initially 0 |
 | `changed` | Changed paths without duplicates, initially empty |
-| `seconds` | Elapsed time across member jobs, including collection and closing; null before a job begins |
-| `closed`, `close_error` | Whether the run was closed, and any close refusal reason |
-| `attempts` | Attempts with `kind` (`start`, `stall`, `recover`), epoch `at` and `exit` |
+| `seconds` | Elapsed time across member jobs for the current run, including collection and closing; reset on retry, null before a job begins |
+| `closed`, `close_error` | Whether the run was closed, and any close refusal reason; panel close tracks remaining open current and retained runs |
+| `attempts` | Attempts with `kind` (`start`, `stall`, `recover`, `retry`), epoch `at` and `exit`; optional `run` holds a retained run id or null |
 
 Loading rejects missing or unknown fields, wrong types and unknown status
 values. Panel listing returns panels oldest first by `started_at`, then
@@ -1742,7 +1747,8 @@ Recovery requires the panel's lifetime lock. It collects members in
 without start spacing. Pending members left by a crash and unfinished
 members without a saved run id become `failed` with reason
 `the panel ended before this member's run started`; recovery starts no new
-run. Failed and not-started members are not asked again.
+run. Failed and not-started members are not asked again. Runs retained
+only in retry attempts are not recovered.
 
 An already closed run is read without calling `Core.recover`. Its stored
 terminal exit classifies the outcome: a successful nonblank reply is
@@ -1766,6 +1772,69 @@ When there is nothing to collect, recovery still saves no-run failures,
 reconciles the panel's terminal status and exit, and rebuilds the summary
 before reporting that nothing remains to recover (75).
 
+### Retry
+
+`emb panel --retry PANEL MEMBER` holds the panel's lifetime lock for the
+whole operation. `MEMBER` is the one-based number printed on member lines.
+A failed, stalled, timed-out, interrupted or not-started member can be
+retried. Answered, pending, starting and running members are refused (75).
+An unknown panel or member number exits 65.
+
+Before launching, retry closes the member's old run without force, even
+when its record is failed or closed. A refused close exits 75 and names
+that run; no new run starts. Each close result updates `closed` and
+`close_error` and saves the panel. A successful close is followed by a
+`retry` attempt with `at`, `exit` initially null and `run` (the old id, or
+null when no run started). Its exit is filled when the new start returns.
+Existing attempts remain. Records without the optional attempt `run`
+field still load.
+
+Retry starts one read-only run using the saved brief, checkout, engine,
+model, effort and read paths. It waits as a panel start does, including
+stall recovery and the panel deadline. `--stall` and `--timeout` have the
+same defaults as start and recovery. While it runs, the panel is `running`
+with `ended_at` and `exit` null. The member's previous outcome, reply,
+changed paths and elapsed time are replaced; other members are not retried.
+
+Afterward, retry sets `ended_at` to the current time and rewrites
+`summary.md`. Its panel is `done` only when every member answered,
+otherwise `incomplete`. Start and recovery retain their rule: `done` when
+no member is unfinished, even when a member failed or never started.
+Retry returns the recomputed panel exit: 74 if interrupted, 0 if every
+member answered without changed paths, otherwise 83.
+
+### Close
+
+`emb panel --close PANEL` holds the panel's lifetime lock for the whole
+operation. It inspects the current run and ids retained in `retry`
+attempts. A run is open when its record status is neither `closed` nor
+`failed`; the saved member `closed` flag does not determine this.
+Each open run is closed as `emb run --close RUN`, without force. A refusal
+does not stop attempts to close other runs. Duplicate ids within a member
+are closed once. After each close, the member's `closed` flag reflects
+whether any current or retained run remains open, `close_error` holds
+refusal reasons or null, and the panel is saved. A missing or unreadable
+run record is reported as a refusal. Member outcomes and the panel's
+status and result exit are unchanged.
+
+Text output has one line for each open run, with the member number, run
+id and `closed` or the refusal reason:
+
+```text
+member 1 · run codex-20261102-101500-a1b2c3 · closed
+```
+
+JSON contains `panel`, the close command's `exit`, `members` and `next`.
+Each `members` entry has `n`, `run`, `closed` and `close_error`. A member
+with multiple open runs has multiple entries. Closed and failed runs are
+omitted. No open runs prints no result lines, or an empty `members` list.
+The command exits 0 when every open run closed or none was open, and 75
+when any close was refused. An unknown panel exits 65. The next action is
+`next: emb panel --status PANEL`, also printed on standard error.
+
+Retry and close refuse a held panel lock with 75 and
+`next: emb panel --status PANEL`.
+
 ### Output
 
 Data goes to standard output. Diagnostics go to standard error as
@@ -1774,8 +1843,8 @@ start or dry-run result. Each failed command prints one `next:` or `owner:`
 line. Member diagnostics stay in their logs except the warnings described
 under Running.
 
-A start or recovery in text mode first prints `panel <id>` and flushes it.
-After waiting, it prints one line per member, in member order:
+A start, recovery or retry in text mode first prints `panel <id>` and
+flushes it. After waiting, it prints one line per member, in member order:
 
 ```text
 member <n> <engine>:<model> · <effort or default> · <status> · <seconds>s · exit <exit or -> · <bytes> bytes · run <run or ->
@@ -1786,7 +1855,7 @@ without a seconds suffix. Exit zero is printed as `0`. These lines are
 followed by `left out <value>: <reason>` for each excluded member and
 `summary <absolute path to summary.md>`.
 
-With `--json`, a start or recovery prints one object, without an id
+With `--json`, a start, recovery or retry prints one object, without an id
 announcement before it:
 
 ```json
@@ -1850,14 +1919,14 @@ artifacts remain available.
 
 | Code | Meaning | Line |
 |---|---|---|
-| 0 | Every member answered and changed nothing, or a dry run or status printed | The result's next action; none for dry run or status |
+| 0 | Every member answered and changed nothing, a dry run or status printed, or close left no open runs | The result's next action; none for dry run or status |
 | 1 | Unexpected error, broken panel record, persistence failure, or unreadable settings database | `next: emb panel --status [<id>]`; for the database, `owner: repair or remove the settings database the message names` |
-| 64 | Usage error, empty question, invalid or repeated or ninth member, no member to run, explicit engine off or effort refused, invalid or gone or unknown claim, or unknown panel | `next: emb panel --help`, the member or engine owner action, the claim action, or `next: emb panel --status` |
-| 65 | `--dir` is outside a git checkout | `next: emb panel --question-file <file> --dir <a folder in the checkout>` |
+| 64 | Usage error, empty question, invalid or repeated or ninth member, no member to run, explicit engine off or effort refused, invalid or gone or unknown claim, or unknown panel in status or recovery | `next: emb panel --help`, the member or engine owner action, the claim action, or `next: emb panel --status` |
+| 65 | `--dir` is outside a git checkout, or retry/close names an unknown panel or retry names an unknown member | `next: emb panel --question-file <file> --dir <a folder in the checkout>` or `next: emb panel --status [<id>]` |
 | 66 | Unreadable question, missing or non-directory `--dir`, or nonexistent `--read` path | `next: ls -l <path>` |
 | 69 | Explicit engine disconnected or without a driver, git or tmux missing, unusable runtime folder, or panel creation fails with an operating-system error | `owner:` naming the fix; runtime and creation errors name `XDG_RUNTIME_DIR` |
 | 74 | Ctrl+C, SIGTERM or SIGHUP while members ran; member turns keep running | The recovery action, or panel and run status when no run id is known |
-| 75 | Recovery while the panel lock is held, or no unfinished member to collect | `next: emb panel --status <id>` |
+| 75 | Recovery, retry or close while the panel lock is held; no unfinished member to collect; member cannot be retried; or a close was refused | `next: emb panel --status <id>` |
 | 83 | A member did not answer or changed paths | The result's next action above |
 
 ## `emb ground`

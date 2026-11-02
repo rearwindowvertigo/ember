@@ -162,7 +162,8 @@ options:
 usage: emb panel [-h] [--question-file FILE] [--dir DIR] [--member W]
                  [--claim ID] [--read PATH] [--stall MINUTES]
                  [--timeout MINUTES] [--dry-run] [--status [PANEL]]
-                 [--recover PANEL] [--json]
+                 [--recover PANEL] [--retry PANEL MEMBER] [--close PANEL]
+                 [--json]
 
 Ask members the same question in parallel read-only runs and write a summary
 of their answers. Each non-zero exit prints a next: or owner: line.
@@ -179,6 +180,8 @@ options:
   --dry-run             validate inputs and print resolved members
   --status [PANEL]      show one or all panels
   --recover PANEL       collect unfinished members without asking again
+  --retry PANEL MEMBER  ask a failed or not-started member again
+  --close PANEL         close every open member run without force
   --json                print JSON
 ==> emb ground --help <==
 usage: emb ground [-h] [--dir DIR] [--json]
