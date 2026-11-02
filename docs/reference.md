@@ -912,6 +912,15 @@ socket as `emb run`. It holds an exclusive lock at
 runner exits 75. The runner releases the lock before ending its session;
 a crashed session remains available for inspection until resume replaces it.
 
+The runner shares `<flow folder>/lifecycle.lock` with command startup,
+resume and lead-answer enqueueing. It holds that lock from its final answer
+read until after releasing its lifetime lock. An answer queued during this
+handoff either reaches the runner before its final read or sees no live
+runner after acquiring the lifecycle lock. The runner releases the lifecycle
+lock before continuing when that read finds more answers, and never holds
+it during a wave. The command owns the `startup.json` reservation; the
+runner leaves that file unchanged.
+
 At each start the runner reloads the stored `plan.json`, refreshes the flow
 branch tip, clears the previous end time and provider halt, and records a
 new attempt. Events carry the attempt number. Worker effort is frozen

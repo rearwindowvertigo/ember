@@ -66,9 +66,9 @@ class _RunIdStream(io.StringIO):
 
 
 @contextlib.contextmanager
-def _startup_guard(folder: Path) -> Iterator[None]:
+def _lifecycle_guard(folder: Path) -> Iterator[None]:
     """Serialize the final answer read with command startup and enqueueing."""
-    fd = paths.open_private_file(folder / "startup.lock")
+    fd = paths.open_private_file(folder / "lifecycle.lock")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
@@ -1079,8 +1079,8 @@ class _Runner:
         finally:
             executor.shutdown(wait=not self.shutdown.is_set(), cancel_futures=True)
 
-    def execute(self) -> int:
-        """Recover, consume answers, merge and check, then schedule more waves."""
+    def execute(self, closing: contextlib.ExitStack) -> int:
+        """Run waves, transferring the final lifecycle guard to the caller."""
         with self.mutex:
             self.flow.update(
                 runner={
@@ -1123,12 +1123,15 @@ class _Runner:
             if wave:
                 self.jobs(wave)
                 continue
-            with _startup_guard(self.folder):
+            with contextlib.ExitStack() as lifecycle:
+                lifecycle.enter_context(_lifecycle_guard(self.folder))
                 if (
                     len(record.read_answers(self.id, self.env))
                     > self.flow["answers_seen"]
                 ):
                     continue
+                # The caller releases the lifetime lock before closing this guard.
+                closing.enter_context(lifecycle.pop_all())
                 stopped = [
                     t["id"]
                     for t in self.flow["tasks"]
@@ -1158,13 +1161,13 @@ def _run(
     poll_seconds: float,
     shutdown: threading.Event,
 ) -> int:
-    """Own the lifetime lock and serialize failure recording before release."""
+    """Release the lifetime lock before closing the final lifecycle guard."""
     runner = None
     try:
-        with lock.hold(flow_id, env):
+        with contextlib.ExitStack() as closing, lock.hold(flow_id, env):
             try:
                 runner = _Runner(flow_id, env, core_factory, poll_seconds, shutdown)
-                return runner.execute()
+                return runner.execute(closing)
             except Exception as error:
                 if runner is not None:
                     runner.finish("failed", f"{type(error).__name__}: {error}")

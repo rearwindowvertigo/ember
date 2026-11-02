@@ -1,5 +1,8 @@
+import contextlib
+import fcntl
 import io
 import json
+import os
 import signal
 import sys
 import threading
@@ -11,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from ember import branches, choices
+from ember import branches, choices, paths
 from ember.flows import briefs, lock, plan, record, runner
 from ember.runs import record as runs
 from ember.runs.core import Core, StartOptions
@@ -888,3 +891,101 @@ def test_fresh_review_after_unchanged_fix(h: Harness) -> None:
     h.scripts_update(**{"a read-only review;": "@reply " + PASS})
     h.answer("review")
     assert h.run()["tasks"][0]["status"] == "merged"
+
+
+def test_answer_enqueue_waits_until_lifetime_lock_is_released(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h.create([task("a", text="Do nothing")])
+    folder = record.folder(h.id, h.env)
+    reservation = folder / "startup.json"
+    reservation.write_text('{"reservation": "owned by command"}\n')
+    before = reservation.read_bytes()
+    final_read = threading.Event()
+    release_runner = threading.Event()
+    enqueue_attempted = threading.Event()
+    execute = runner._Runner.execute
+
+    def paused_execute(instance: runner._Runner, closing: contextlib.ExitStack) -> int:
+        code = execute(instance, closing)
+        final_read.set()
+        assert release_runner.wait(10)
+        return code
+
+    def enqueue() -> bool:
+        fd = paths.open_private_file(folder / "lifecycle.lock")
+        try:
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                enqueue_attempted.set()
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            h.answer("drop")
+            return lock.live(h.id, h.env)
+        finally:
+            os.close(fd)
+
+    monkeypatch.setattr(runner._Runner, "execute", paused_execute)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        running = pool.submit(h.run)
+        try:
+            assert final_read.wait(10)
+            queued = pool.submit(enqueue)
+            assert enqueue_attempted.wait(10)
+        finally:
+            release_runner.set()
+        assert running.result(timeout=10)["status"] == "stopped"
+        assert not queued.result(timeout=10)
+    answer = record.read_answers(h.id, h.env)[0]
+    assert answer is not None and answer["kind"] == "drop"
+    assert reservation.read_bytes() == before
+    monkeypatch.setattr(runner._Runner, "execute", execute)
+    assert h.run()["tasks"][0]["status"] == "dropped"
+
+
+def test_answer_at_final_read_is_taken_without_locking_the_next_wave(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h.create([task("a", text="Do nothing")])
+    original_read = record.read_answers
+    original_jobs = runner._Runner.jobs
+    queued = False
+    waves = 0
+
+    def read_answers(
+        flow_id: str, env: Mapping[str, str] | None = None
+    ) -> list[dict[str, Any] | None]:
+        nonlocal queued
+        fd = paths.open_private_file(record.folder(flow_id, env) / "lifecycle.lock")
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                # Model a command that appended immediately before the final read.
+                if not queued:
+                    queued = True
+                    correction = h.tmp / "correction.md"
+                    correction.write_text("@write a corrected")
+                    h.answer("send", file=str(correction))
+        finally:
+            os.close(fd)
+        return original_read(flow_id, env)
+
+    def jobs(instance: runner._Runner, wave: list[dict[str, Any]]) -> None:
+        nonlocal waves
+        waves += 1
+        fd = paths.open_private_file(instance.folder / "lifecycle.lock")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            original_jobs(instance, wave)
+        finally:
+            os.close(fd)
+
+    monkeypatch.setattr(record, "read_answers", read_answers)
+    monkeypatch.setattr(runner._Runner, "jobs", jobs)
+    flow = h.run()
+    assert queued and waves == 2
+    assert flow["tasks"][0]["status"] == "merged"
+    assert flow["answers_seen"] == 1
+    assert not (record.folder(h.id, h.env) / "startup.json").exists()
