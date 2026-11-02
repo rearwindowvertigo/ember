@@ -546,7 +546,7 @@ def test_run_start_status_and_close(
     brief.write_text("Write a file\n@write out.txt hello\n")
     argv = [
         "run", "--engine", "claude", "--dir", str(repo), "--task-file", str(brief),
-        "--trailer", "Co-Authored-By: X <x@y>", "--no-window", "--quiet",
+        "--trailer", "Co-Authored-By: X <x@y>", "--quiet",
     ]  # fmt: skip
     assert main(argv, env=run_env) == 0
     out = capsys.readouterr().out.splitlines()
@@ -572,7 +572,7 @@ def test_run_without_driver_exits_69(
     brief = tmp_path / "brief.md"
     brief.write_text("Task\n")
     argv = ["run", "--engine", "codex", "--model", "gpt-5", "--dir", str(repo)]
-    code = main([*argv, "--task-file", str(brief), "--no-window"], env=run_env)
+    code = main([*argv, "--task-file", str(brief)], env=run_env)
     captured = capsys.readouterr()
     assert code == 69
     assert captured.out == ""

@@ -114,7 +114,7 @@ class StartOptions:
     claim: str | None = None
     """The claim id the menu is read with."""
 
-    window: bool = True
+    window: bool = False
     """Open a terminal window on the session."""
 
 

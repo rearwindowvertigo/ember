@@ -289,7 +289,7 @@ line from the exit table below.
 | `--read PATH` | With a start: a path the run may read, in addition to `sandbox.read`; repeatable |
 | `--trailer LINE` | With a start: a trailer line for each commit; repeatable; none by default |
 | `--claim ID` | With a start: read the menu with this claim id |
-| `--no-window` | With a start: open no terminal window |
+| `--window` | With a start: also open a terminal window on the session |
 | `--send RUN --message-file FILE` | Send `FILE` as the next message and wait for its turn |
 | `--screen RUN` | Print the text of the session's pane |
 | `--interrupt RUN` | Send Ctrl+C to the session |
@@ -349,9 +349,10 @@ and records `none`. Claude runs have no sandbox.
 The session is a tmux session named by the run id. Its first message is the
 line `Brief from Claude, the lead, for Ember run <id>.`, a blank line and the
 brief, pasted once the engine is ready; a driver that puts the brief on the
-engine's command line pastes nothing. Unless `--no-window` is given, a window
-of the `terminal` setting opens on the session; a window that cannot open
-prints a `WARNING:` line and the run goes on.
+engine's command line pastes nothing. The session runs with no window. With
+`--window`, a window of the `terminal` setting also opens on the session; a
+window that cannot open prints a `WARNING:` line and the run goes on.
+`--attach` opens a window on a running session at any time.
 
 The first line on standard output is `run <id>`.
 

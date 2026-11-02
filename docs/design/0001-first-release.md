@@ -143,10 +143,11 @@ cut from the current branch, and commits with the trailers given by
 `--trailer`. A `--read-only` run edits nothing.
 
 E3. The run runs in its own tmux session, on a tmux server private to Ember
-(socket in `$XDG_RUNTIME_DIR/ember/`). Ember opens a window of the owner's
-terminal attached to that session. The setting `terminal` holds the command
-that opens it; unset means `xdg-terminal-exec`. Closing the window leaves
-the run going. Commands: `--send` (a correction into the same session,
+(socket in `$XDG_RUNTIME_DIR/ember/`). The session runs with no window.
+`emb run --window` at start, or `--attach` later, opens a window of the
+owner's terminal on the session; the setting `terminal` holds the command
+that opens it; unset means `xdg-terminal-exec`. Closing a window leaves the
+run going. Commands: `--send` (a correction into the same session,
 through tmux `send-keys`), `--screen` (tmux `capture-pane`), `--interrupt`,
 `--attach` (open a new window on the session), `--close`, `--recover`,
 `--status <id> --json`. Each non-zero exit prints a `next:` or `owner:` line.

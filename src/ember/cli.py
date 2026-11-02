@@ -150,7 +150,9 @@ def _add_run(parser: argparse.ArgumentParser) -> None:
     )
     start.add_argument("--claim", metavar="ID", help="read the menu with this claim id")
     start.add_argument(
-        "--no-window", action="store_true", help="do not open a terminal window"
+        "--window",
+        action="store_true",
+        help="also open a terminal window on the session",
     )
     existing = parser.add_argument_group("work with a run")
     existing.add_argument(
@@ -417,7 +419,7 @@ def _run_mode(args: argparse.Namespace) -> str:
         "--read": bool(args.read),
         "--trailer": bool(args.trailer),
         "--claim": args.claim is not None,
-        "--no-window": args.no_window,
+        "--window": args.window,
     }
     if mode == "start":
         missing = [
@@ -460,7 +462,7 @@ def _run_run(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
                 read=tuple(args.read),
                 trailers=tuple(args.trailer),
                 claim=args.claim,
-                window=not args.no_window,
+                window=args.window,
             )
         ),
         "send": lambda: core.send(args.send, args.message_file),
