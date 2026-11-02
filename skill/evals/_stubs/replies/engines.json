@@ -1,0 +1,71 @@
+{
+  "codex": {
+    "engine": "codex",
+    "state": "connected",
+    "reason": null,
+    "installed": true,
+    "binary": "/usr/bin/codex",
+    "version": "codex-cli 1.4.2",
+    "signed_in": true,
+    "connected": true,
+    "requirements": [
+      {
+        "label": "the codex CLI",
+        "met": true,
+        "fix": null
+      },
+      {
+        "label": "a ChatGPT sign-in for Codex",
+        "met": true,
+        "fix": null
+      }
+    ],
+    "checked_at": 1793520000.0
+  },
+  "opencode": {
+    "engine": "opencode",
+    "state": "connected",
+    "reason": null,
+    "installed": true,
+    "binary": "/usr/bin/opencode",
+    "version": "1.18.3",
+    "signed_in": true,
+    "connected": true,
+    "requirements": [
+      {
+        "label": "the opencode CLI",
+        "met": true,
+        "fix": null
+      },
+      {
+        "label": "an OpenRouter credential for OpenCode",
+        "met": true,
+        "fix": null
+      }
+    ],
+    "checked_at": 1793520000.0
+  },
+  "claude": {
+    "engine": "claude",
+    "state": "connected",
+    "reason": null,
+    "installed": true,
+    "binary": "/usr/bin/claude",
+    "version": "2.4.1 (Claude Code)",
+    "signed_in": true,
+    "connected": true,
+    "requirements": [
+      {
+        "label": "the claude CLI",
+        "met": true,
+        "fix": null
+      },
+      {
+        "label": "a Claude Code sign-in",
+        "met": true,
+        "fix": null
+      }
+    ],
+    "checked_at": 1793520000.0
+  }
+}

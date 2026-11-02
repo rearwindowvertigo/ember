@@ -1,0 +1,2 @@
+emb run: the session of {{RUN}} holds messages Ember did not send (1 user message in the rollout); Claude asks the owner before going on
+next: ask the owner about the messages in the session of {{RUN}}; with their go-ahead, repeat the command with --force

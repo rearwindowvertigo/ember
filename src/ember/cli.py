@@ -11,7 +11,7 @@ not a folder, or, without `--dir`, when the current folder cannot be read.
 `emb deps` exits 0 whatever the statuses, 64 for a usage error and 70 when
 the packaged component list cannot be read or is not valid. `emb app` exits 0
 after Quit Ember or when the running app takes over, 64 for a usage error and
-69 without a graphical session.
+69 without a graphical session. `emb skill` uses the codes in `ember.skill`.
 """
 
 import argparse
@@ -21,7 +21,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NoReturn
 
-from ember import __version__, branches, choices, db, deps, ground
+from ember import __version__, branches, choices, db, deps, ground, skill
 from ember.engines import models, status
 from ember.runs import core as run_core
 
@@ -265,6 +265,40 @@ def _add_app(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_skill(parser: argparse.ArgumentParser) -> None:
+    actions = parser.add_subparsers(
+        dest="skill_action", metavar="<action>", required=True
+    )
+    install = actions.add_parser(
+        "install",
+        help="link the skill into Claude Code's skills folder",
+        description=(
+            "Create the link to the skill source. A broken link is replaced; "
+            "a link to another folder only with --force; a folder or file is "
+            "never touched."
+        ),
+    )
+    install.add_argument(
+        "--force", action="store_true", help="replace a link to another folder"
+    )
+    install.add_argument("--json", action="store_true", help="print JSON")
+    uninstall = actions.add_parser(
+        "uninstall",
+        help="remove the skill's link",
+        description=(
+            "Remove the link when it points to an Ember skill or to nothing. "
+            "A folder or file is never touched."
+        ),
+    )
+    uninstall.add_argument("--json", action="store_true", help="print JSON")
+    show = actions.add_parser(
+        "status",
+        help="print the link, its state, its target and the skill source",
+        description="Print the link, its state, its target and the skill source.",
+    )
+    show.add_argument("--json", action="store_true", help="print JSON")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the parser for `emb` and its subcommands.
 
@@ -364,6 +398,20 @@ def build_parser() -> argparse.ArgumentParser:
                 "Start Ember's desktop app, or bring the running one forward. "
                 "With --hidden it starts in the tray; without a tray the "
                 "window shows."
+            ),
+        )
+    )
+    _add_skill(
+        subparsers.add_parser(
+            "skill",
+            help="install or remove the ember skill for Claude Code",
+            description=(
+                "Install, remove or show the ember skill for Claude Code. The "
+                "skill is a link at $CLAUDE_CONFIG_DIR/skills/ember, or "
+                "~/.claude/skills/ember when CLAUDE_CONFIG_DIR is unset or empty, to "
+                "the skill source: the source checkout's skill/ folder when "
+                "emb runs from a checkout, else /usr/share/ember/skill. Each "
+                "non-zero exit prints a next: or owner: line."
             ),
         )
     )
@@ -648,6 +696,29 @@ def _run_deps(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
     return EX_OK
 
 
+def _run_skill(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
+    candidates = skill.source_candidates()
+    if args.skill_action == "status":
+        current = skill.status(env, candidates)
+        if args.json:
+            print(json.dumps(current.to_json(), indent=2))
+        else:
+            for line in skill.status_lines(current):
+                print(line)
+        return EX_OK
+    try:
+        if args.skill_action == "install":
+            result = skill.install(env, candidates, force=args.force)
+        else:
+            result = skill.uninstall(env, candidates)
+    except skill.SkillError as error:
+        print(f"emb skill: {error}", file=sys.stderr)
+        print(error.line, file=sys.stderr)
+        return error.code
+    print(json.dumps(result.to_json(), indent=2) if args.json else result.line())
+    return EX_OK
+
+
 def main(
     argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = None
 ) -> int:
@@ -679,6 +750,8 @@ def main(
         from ember.app import main as app_main  # Qt is imported only for `emb app`
 
         return app_main.run(["--hidden"] if args.hidden else [], env)
+    if args.command == "skill":
+        return _run_skill(args, env)
     if args.command == "merge":
         return branches.merge(
             args.branch,

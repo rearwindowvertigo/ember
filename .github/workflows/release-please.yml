@@ -3,6 +3,12 @@ name: release-please
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag whose .deb is rebuilt and uploaded, such as v0.1.0
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -10,6 +16,41 @@ permissions:
 
 jobs:
   release-please:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - uses: googleapis/release-please-action@v5
+        id: release
+
+  deb:
+    needs: release-please
+    if: >-
+      always() && (
+        (github.event_name == 'push' && needs.release-please.outputs.release_created == 'true') ||
+        github.event_name == 'workflow_dispatch'
+      )
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || needs.release-please.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - uses: astral-sh/setup-uv@v10.3.3
+      - name: Install the packages the .deb depends on
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install --yes --no-install-recommends
+          $(python3 packaging/deb/build_deb.py --depends)
+      - run: make deb
+      - run: sha256sum dist/ember_*_amd64.deb
+      - name: Attach the .deb to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLOBBER: ${{ github.event_name == 'workflow_dispatch' && '--clobber' || '' }}
+        run: gh release upload "$TAG" dist/ember_*_amd64.deb $CLOBBER

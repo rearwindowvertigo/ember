@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Ember
+Comment=Lets Claude lead AI coding workers on this machine
+Exec=emb app
+Icon=io.github.rearwindowvertigo.Ember
+Terminal=false
+Categories=Development;
+StartupNotify=true
+StartupWMClass=io.github.rearwindowvertigo.Ember
