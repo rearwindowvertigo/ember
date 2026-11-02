@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 
 from ember import sandbox
 from ember.app import icons, theme, tray
-from ember.app.flows import FlowItem, FlowsModel, PanelItem
+from ember.app.flows import FlowItem, FlowsModel, PanelItem, plan_wave
 from ember.app.mirror import MirrorView
 from ember.app.screens.common import (
     chain_tab_order,
@@ -105,8 +105,11 @@ def flow_title(flow: Mapping[str, Any]) -> str:
 
 
 def flow_detail(flow: Mapping[str, Any]) -> str:
-    """Return the flow branch, wave and any reason."""
-    text = f"ember/flow/{flow['id']} · wave {flow['wave']}"
+    """Return the flow branch, active plan wave and any reason."""
+    text = f"ember/flow/{flow['id']}"
+    wave = plan_wave(flow)
+    if wave is not None:
+        text += f" · wave {wave[0]} of {wave[1]}"
     return text + (f" · {flow['reason']}" if flow.get("reason") else "")
 
 
@@ -539,8 +542,10 @@ class _FlowRow(_RecordRow):
     """A flow with task status, reviews and current worker runs."""
 
     def entries(self) -> list[tuple[str, bool, str | None]]:
-        """Return each task's lines in plan order."""
-        result: list[tuple[str, bool, str | None]] = []
+        """Return the runner pass count and each task's lines in plan order."""
+        result: list[tuple[str, bool, str | None]] = [
+            (f"passes {self.item.record['wave']}", True, None)
+        ]
         for task in self.item.record["tasks"]:
             result.append((task_line(self.item.record, task), False, None))
             if task["reason"]:
