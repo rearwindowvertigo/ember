@@ -124,8 +124,9 @@ the flow worktree, review its result and merge that correction into the
 flow branch through `emb merge`; do not answer a completed flow with
 `--lead` or merge the rejected result into the session branch. When that
 correction fails too, the verdict is `Keep, with <fix>` naming what is
-missing, or Discard; write it right before any merge, and leave a
-Discard unmerged.
+missing, or Discard; write it right before the merge, and leave a
+Discard unmerged. Merge a `Keep, with <fix>` at once, then make and check
+the fix yourself on the session branch; it needs no question to the owner.
 
 After `Verdict: Keep.` or `Verdict: Keep, with <fix>.`, merge under the skill's merge and cleanup rules:
 

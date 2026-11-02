@@ -5,8 +5,9 @@ tasks. Single runs and panels do not need it.
 
 Write the plan in the session scratchpad with the cases it must handle and
 those it accepts: a nonblank `failure_model` string in a flow plan, or a
-"Failure model" section in a Workflow plan. A blank plan is refused; a
-one-step plan is checked as one step.
+"Failure model" section in a Workflow plan. Keep it to the request: no
+wording, docstrings or tests the owner did not ask for. A blank plan is
+refused; a one-step plan is checked as one step.
 
 ## Run and read
 
