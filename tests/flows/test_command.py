@@ -776,8 +776,11 @@ def test_lead_waits_for_exiting_runner_session(
     monkeypatch.setattr(tmux, "exists", exists)
     monkeypatch.setattr(tmux, "pane_dead", pane_dead)
     monkeypatch.setattr(tmux, "kill", kill)
-    monkeypatch.setattr(command.time, "monotonic", lambda: elapsed)
-    monkeypatch.setattr(command.time, "sleep", sleep)
+    from types import SimpleNamespace
+
+    # Only the flow command sees the fake clock; subprocess keeps the real one.
+    fake_time = SimpleNamespace(time=time.time, monotonic=lambda: elapsed, sleep=sleep)
+    monkeypatch.setattr(command, "time", fake_time)
     code, out, err = invoke(env, "--lead", flow["id"], "a", "--drop")
     assert "queued answer 1: drop for a" in out
     assert err.endswith(f"next: emb flow --watch {flow['id']} --json\n")
