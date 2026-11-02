@@ -70,6 +70,7 @@ HELP_COMMANDS = (
     "engines",
     "run",
     "gapcheck",
+    "flow",
     "ground",
     "merge",
     "cleanup",

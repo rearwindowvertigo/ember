@@ -13,6 +13,7 @@ the packaged component list cannot be read or is not valid. `emb app` exits 0
 after Quit Ember or when the running app takes over, 64 for a usage error and
 69 without a graphical session. `emb skill` uses the codes in `ember.skill`.
 `emb gapcheck` uses the codes in `ember.gapcheck.command`.
+`emb flow` uses the codes in `ember.flows.command`.
 """
 
 import argparse
@@ -236,6 +237,43 @@ def _add_gapcheck(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--reply", metavar="FILE", help="read an existing reply")
 
 
+def _add_flow(parser: argparse.ArgumentParser) -> None:
+    """Add flow modes, worker selections and lead answers."""
+    parser.add_argument("--plan", metavar="FILE", help="the JSON task plan")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="print workers and waves"
+    )
+    parser.add_argument("--start", action="store_true", help="start the flow runner")
+    parser.add_argument("--watch", metavar="FLOW", help="wait for a lead stop or end")
+    parser.add_argument(
+        "--status", nargs="?", const="", metavar="FLOW", help="show one or all flows"
+    )
+    parser.add_argument(
+        "--lead", nargs=2, metavar=("FLOW", "TASK"), help="answer a task's lead stop"
+    )
+    parser.add_argument("--resume", metavar="FLOW", help="restart a flow's runner")
+    parser.add_argument("--writer", metavar="W", help="writer engine:model[@effort]")
+    parser.add_argument(
+        "--reviewer", metavar="W", help="reviewer engine:model[@effort]"
+    )
+    parser.add_argument("--claim", metavar="ID", help="read choices with this claim")
+    parser.add_argument(
+        "--stall",
+        type=_positive_minutes,
+        metavar="MINUTES",
+        help="minutes without a screen change before a task stops (default 10)",
+    )
+    parser.add_argument(
+        "--send", metavar="FILE", help="send a correction to the writer"
+    )
+    parser.add_argument("--accept", action="store_true", help="accept the task branch")
+    parser.add_argument("--commit", metavar="SHA", help="the commit to accept")
+    parser.add_argument("--review", action="store_true", help="start a fresh review")
+    parser.add_argument("--worker", metavar="W", help="replace the writer with W")
+    parser.add_argument("--drop", action="store_true", help="drop the task")
+    parser.add_argument("--json", action="store_true", help="print JSON")
+
+
 def _add_ground(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--dir", metavar="DIR", help="the folder to read (default: the current one)"
@@ -376,6 +414,17 @@ def build_parser() -> argparse.ArgumentParser:
             help="review a plan for undefined or contradictory behaviour",
             description="Review a plan in one read-only run, print its brief, "
             "or read a reply from another worker.",
+        )
+    )
+    _add_flow(
+        subparsers.add_parser(
+            "flow",
+            help="plan, start, watch and answer flows",
+            description=(
+                "Run a JSON task plan in waves with writers, read-only reviews "
+                "and fix rounds. Accepted tasks merge into a flow branch. "
+                "Each non-zero exit prints a next: or owner: line."
+            ),
         )
     )
     _add_ground(
@@ -780,6 +829,10 @@ def main(
         return _run_run(args, env)
     if args.command == "gapcheck":
         from ember.gapcheck import command
+
+        return command.main(args, env)
+    if args.command == "flow":
+        from ember.flows import command
 
         return command.main(args, env)
     if args.command == "ground":
