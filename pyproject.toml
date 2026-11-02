@@ -6,7 +6,9 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "pyside6>=6.12.0",
+]
 
 [project.scripts]
 emb = "ember.cli:main"
@@ -16,6 +18,7 @@ dev = [
     "pre-commit>=4.7.0",
     "pyrefly>=1.4.0",
     "pytest>=9.2.0",
+    "pytest-qt>=4.5.0",
     "pytest-xdist>=3.8.0",
     "ruff>=0.17.3",
 ]
@@ -34,6 +37,9 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "N", "UP", "B", "SIM", "ANN", "D"]
 
+[tool.ruff.lint.pep8-naming]
+extend-ignore-names = ["*Event", "*Hint", "eventFilter", "hitButton", "nextCheckState"]
+
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
@@ -47,3 +53,4 @@ python-version = "3.14"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-n", "auto", "--strict-markers"]
+qt_api = "pyside6"

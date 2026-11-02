@@ -1,0 +1,12 @@
+The files in this folder come from the npm package @lobehub/icons-static-svg,
+version 1.102.0, folder icons/:
+
+  codex.svg     from openai.svg
+  opencode.svg  from opencode.svg
+  claude.svg    from claude-color.svg
+
+The package is published under the MIT licence, as its npm registry entry
+states.
+
+Each logo is a trademark of its owner: the OpenAI logo of OpenAI, the OpenCode
+logo of the OpenCode project, and the Claude logo of Anthropic.
