@@ -831,3 +831,228 @@ def test_expired_resume_reservation_requires_current_record(
         assert result["event"] == "runner_lost"
         assert result["next"] == f"next: emb flow --resume {flow['id']}"
         assert err == result["next"] + "\n"
+
+
+@pytest.mark.parametrize("status", ["starting", "running", "checking", "stopped"])
+@pytest.mark.parametrize("reason", [None, "scope changed"])
+def test_cancel_idle_flow(
+    flow: dict[str, Any], env: dict[str, str], status: str, reason: str | None
+) -> None:
+    flow["status"] = status
+    flow["tasks"][0]["branch"] = "ember/codex/kept"
+    flow["abandoned"] = ["ember/codex/previous"]
+    record.save(flow, env)
+    options = ["--reason", reason] if reason is not None else []
+    code, out, err = invoke(env, "--cancel", flow["id"], *options, "--json")
+    assert code == 0, err
+    assert json.loads(out) == {
+        "flow": flow["id"],
+        "status": "cancelled",
+        "reason": reason,
+        "branch": flow["branch"],
+        "task_branches": [
+            {"task": "a", "branch": "ember/codex/kept"},
+            {"task": None, "branch": "ember/codex/previous"},
+        ],
+        "open_runs": [],
+    }
+    current = record.load(flow["id"], env)
+    assert current["ended_at"] is not None
+    assert current["tasks"] == flow["tasks"]
+    assert Path(current["worktree"]).is_dir()
+    assert not lock.live(flow["id"], env)
+    assert not command._starting(current, env)
+    code, out, err = invoke(env, "--watch", flow["id"], "--json")
+    assert code == 82 and json.loads(out)["status"] == "cancelled"
+    assert err.strip() == f"next: emb flow --resume {flow['id']}"
+    code, out, err = invoke(env, "--status", flow["id"])
+    assert code == 0 and "status: cancelled\n" in out
+    assert f"reason: {reason}\n" in out
+    code, out, err = invoke(env, "--status")
+    suffix = f": {reason}" if reason else ""
+    assert code == 0 and f"cancelled{suffix}  0/2 merged" in out
+
+
+@pytest.mark.parametrize("status", ["done", "failed", "cancelled"])
+def test_cancel_refuses_ended_unchanged(
+    flow: dict[str, Any], env: dict[str, str], status: str
+) -> None:
+    flow.update(status=status, reason="original", ended_at=1.0)
+    record.save(flow, env)
+    directory = record.folder(flow["id"], env)
+    before = (directory / record.FLOW_NAME).read_bytes()
+    events = record.read_events(flow["id"], env)
+    code, out, err = invoke(env, "--cancel", flow["id"], "--reason", "new")
+    assert code == 75 and not out and status in err
+    assert (directory / record.FLOW_NAME).read_bytes() == before
+    assert record.read_events(flow["id"], env) == events
+    assert not (directory / record.CANCEL_NAME).exists()
+
+
+@pytest.mark.parametrize("mode", ["cancel", "resume", "watch", "status", "lead"])
+def test_cancel_missing_code_is_mode_specific(env: dict[str, str], mode: str) -> None:
+    options = ["a", "--drop"] if mode == "lead" else []
+    code, out, err = invoke(env, f"--{mode}", record.new_id(), *options)
+    assert code == (65 if mode == "cancel" else 64)
+    assert not out and "no such flow" in err
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--status", "--reason", "why"],
+        ["--cancel", "FLOW", "--resume", "FLOW"],
+        ["--cancel", "FLOW", "--writer", "codex:m"],
+        ["--cancel", "FLOW", "--drop"],
+        ["--cancel", "FLOW", "--plan", "plan.json"],
+    ],
+)
+def test_cancel_option_validation(env: dict[str, str], options: list[str]) -> None:
+    code, out, err = invoke(env, *options)
+    assert code == 64 and not out and "next: emb flow --help" in err
+
+
+def test_cancelled_lead_refused_and_resume_clears_request(
+    flow: dict[str, Any], env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stopped(flow, env)
+    assert invoke(env, "--cancel", flow["id"])[0] == 0
+    code, out, err = invoke(env, "--lead", flow["id"], "a", "--drop")
+    assert code == 75 and not out
+    assert err.splitlines()[-1] == f"next: emb flow --resume {flow['id']}"
+    assert not record.read_answers(flow["id"], env)
+    monkeypatch.setattr(command, "_require_tool", lambda *args: None)
+    monkeypatch.setattr(command, "_wait_session_exit", lambda *args: None)
+    monkeypatch.setattr(tmux, "new_session", lambda *args, **kwargs: None)
+    code, out, err = invoke(env, "--resume", flow["id"])
+    assert code == 0, err
+    assert record.cancel_request(flow["id"], env) is None
+    assert command._starting(record.load(flow["id"], env), env)
+
+
+def test_cancel_lists_stored_open_run_statuses(
+    flow: dict[str, Any], env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    item = flow["tasks"][0]
+    item.update(writer_run="writer", reviewer_run="reviewer", branch="kept")
+    item["reviews"] = [{"run": "older"}, {"run": "closed"}, {"run": "failed"}]
+    item["answer_effect"] = {"run": "previous", "n": 1}
+    item["cleanup"] = [
+        {"run": "writer", "branch": "kept", "action": "kept"},
+        {"run": "cleanup-only", "branch": "also-kept", "action": "kept"},
+    ]
+    record.save(flow, env)
+    statuses = {
+        "writer": "running",
+        "reviewer": "starting",
+        "older": "waiting",
+        "closed": "closed",
+        "failed": "failed",
+        "previous": "waiting",
+        "cleanup-only": "waiting",
+    }
+    loaded = []
+
+    def load(run_id: str, environment: Mapping[str, str]) -> SimpleNamespace:
+        assert environment == env
+        loaded.append(run_id)
+        return SimpleNamespace(status=statuses[run_id], branch=None)
+
+    monkeypatch.setattr(command.run_record, "load", load)
+    code, out, err = invoke(env, "--cancel", flow["id"], "--reason", "changed")
+    assert code == 0, err
+    assert set(loaded) == set(statuses)
+    assert len(loaded) == len(statuses)
+    assert out.splitlines() == [
+        f"flow {flow['id']} cancelled",
+        "reason changed",
+        f"branch {flow['branch']}",
+        "task a branch kept",
+        "task a branch also-kept",
+        "task a writer run writer",
+        "task a reviewer run reviewer",
+        "task a reviewer run older",
+        "task a writer run cleanup-only",
+        "task a writer run previous",
+    ]
+
+
+@pytest.mark.parametrize("runner_finishes", [False, True])
+def test_cancel_signals_runner_and_records_after_lock_release(
+    flow: dict[str, Any],
+    env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    runner_finishes: bool,
+) -> None:
+    import sys
+
+    flow_id = flow["id"]
+    script = """
+import os, signal, sys, time
+from ember.flows import lock, record
+from ember.flows.command import lifecycle
+from ember.flows.runner import _process_start
+flow_id, finish = sys.argv[1:]
+stopped = False
+def stop(signum, frame):
+    global stopped
+    stopped = True
+signal.signal(signal.SIGTERM, stop)
+with lock.hold(flow_id):
+    with lifecycle(flow_id, os.environ):
+        flow = record.load(flow_id)
+        flow.update(status="running", runner={
+            "pid": os.getpid(), "started_at": time.time(),
+            "start": _process_start(os.getpid()), "exiting": False,
+        })
+        record.save(flow)
+    while not stopped:
+        time.sleep(0.01)
+    if finish == "yes":
+        with lifecycle(flow_id, os.environ):
+            request = record.cancel_request(flow_id)
+            record.finish_cancel(flow, request, os.environ)
+"""
+    monkeypatch.setattr(command, "POLL_SECONDS", 0.01)
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, flow_id, "yes" if runner_finishes else "no"],
+        env=dict(env),
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while record.load(flow_id, env)["runner"] is None:
+            assert process.poll() is None
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        code, out, err = invoke(env, "--cancel", flow_id, "--reason", "stop", "--json")
+        assert code == 0, err
+        assert json.loads(out)["status"] == "cancelled"
+        assert process.wait(timeout=5) == 0
+        assert not lock.live(flow_id, env)
+        ends = [e for e in record.read_events(flow_id, env) if e["kind"] == "end"]
+        assert len(ends) == 1
+        assert ends[0]["reason"] == "stop" and ends[0]["exit"] == 82
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+
+
+def test_cancel_loses_race_to_completed_flow(
+    flow: dict[str, Any], env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = command.lifecycle
+    completed: list[dict[str, Any]] = []
+
+    def lifecycle(flow_id: str, environment: Mapping[str, str]) -> Any:  # noqa: ANN401
+        end(flow, environment)
+        completed.append(record.load(flow_id, environment))
+        return original(flow_id, environment)
+
+    monkeypatch.setattr(command, "lifecycle", lifecycle)
+    code, out, err = invoke(env, "--cancel", flow["id"])
+    assert code == 75 and not out and "is done" in err
+    assert record.load(flow["id"], env) == completed[0]
+    assert record.cancel_request(flow["id"], env) is None

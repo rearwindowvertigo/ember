@@ -864,6 +864,7 @@ emb flow --watch FLOW [--json]
 emb flow --status [FLOW] [--json]
 emb flow --lead FLOW TASK (--send FILE | --accept [--commit SHA] | --review [--reviewer W] | --worker W | --drop)
 emb flow --resume FLOW
+emb flow --cancel FLOW [--reason TEXT] [--json]
 ```
 
 | Option | Does |
@@ -1101,9 +1102,9 @@ explicit request is persisted for recovery; automatic recovery of a failed
 writer turn still stops the task.
 
 SIGHUP and SIGTERM request shutdown without writing from the signal
-handler. The runner terminates an active check group, records `failed`
-with a resume instruction and an end event with exit 82, and releases its
-lock. Worker sessions remain. Each start aborts a recorded unfinished
+handler. The runner terminates an active check group, records `cancelled`
+when a cancel request is pending, or `failed` with a resume instruction
+otherwise. It appends an end event with exit 82 and releases its lock. Worker sessions remain. Each start aborts a recorded unfinished
 merge, resets and cleans the flow worktree, and reconciles merging tasks
 using the same containment rules as `emb merge`. Recovered merges set
 `check_pending`. Writer metadata comes from its run record; recovered
@@ -1115,7 +1116,7 @@ together, and pending closes can be repeated after a crash.
 
 A flow waiting on stopped or conflicting tasks ends `stopped`, with no
 end event. Otherwise it ends `done`, with end exit 0 when every task
-merged or 82 when some were dropped or remain blocked. Failed flows also
+merged or 82 when some were dropped or remain blocked. Failed and cancelled flows also
 emit end exit 82. Flow folders, check logs and briefs remain on disk.
 
 ### Reviews
@@ -1250,6 +1251,53 @@ completed flows refuse answers with 75. With no live runner or pending
 startup, `--lead` starts a runner after queueing the answer. A launch
 failure leaves the queued answer available for `--resume`.
 
+### Cancellation
+
+`--cancel FLOW [--reason TEXT]` cancels a flow that is `starting`, `running`,
+`checking` or `stopped`. It stops the runner and waits for its lifetime lock
+to be released. A running flow check ends through the runner's signal stop
+path. Writer and reviewer turns keep running. Cancellation closes no task
+run and deletes no branch or worktree.
+
+Under `lifecycle.lock`, cancellation clears the startup reservation and
+writes `cancel.json` with `at` (epoch seconds) and `reason` (text or null)
+before signalling the runner. The runner reads that request when finishing
+and records `status=cancelled`, `reason` and `ended_at`, then appends an
+`end` event with the reason and exit 82. A runner that finds a pending
+request at startup finishes without running a wave. If the runner releases
+its lock without recording cancellation, the cancel command records it.
+
+A `done`, `failed` or `cancelled` flow is refused with exit 75 and its record
+is unchanged. A flow that ends before cancellation takes the lifecycle lock
+is also refused. An unknown flow exits 65 for `--cancel`; other flow modes
+return 64 for an unknown flow. Invalid flow id syntax returns 64 in every
+mode. Cancellation waits until the runner releases its lifetime lock.
+
+`--resume` restarts a cancelled flow from its recorded task states. Startup
+clears the cancel request; the runner clears `reason` and `ended_at` when
+it begins. `--lead` is refused with exit 75 on a cancelled flow, with
+`next: emb flow --resume <id>`. Cancelled flows count as ended.
+
+Cancellation output contains the flow id, `cancelled`, the reason, the flow
+branch, each retained task branch and each open run's task, role and id.
+Text prints one line per item. `--json` prints:
+
+| Field | Value |
+|---|---|
+| `flow`, `status`, `reason` | Flow id, `cancelled`, and the supplied reason or null |
+| `branch` | The flow branch |
+| `task_branches` | Objects with `task` and `branch`; includes abandoned branches, with a null task when the record no longer identifies it |
+| `open_runs` | Objects with `task`, `role` (`writer` or `reviewer`) and `run` |
+
+Run ids come from the flow record's current writers and reviewers, previous
+reviews, cleanup entries and pending writer replacement or drop effects. Each run's stored
+record is read; `starting`, `running` and `waiting` count as open. Successful
+cancellation exits 0 and prints `next: emb flow --resume <id>` on standard
+error. A cancelled watch exits 82 with the same action. Status shows
+`cancelled`; its separate `reason` field is null when no reason was supplied.
+The text listing adds `: <reason>` after `cancelled` only when a reason is
+present.
+
 ### Flow records
 
 Flow folders share `$XDG_STATE_HOME/ember/runs/` with run folders. A flow id
@@ -1260,8 +1308,10 @@ Both listings sort oldest first.
 
 | File | Holds |
 |---|---|
-| `flow.json` | The flow record, replaced atomically; written at creation, then by the runner |
+| `flow.json` | The flow record, replaced atomically; written at creation, by the runner, or by cancellation after the runner releases its lock |
 | `plan.json` | The plan's original source text |
+| `cancel.json` | Pending cancellation time and reason; cleared when a runner is restarted |
+| `lifecycle.lock` | Serializes startup, answers, cancellation and runner shutdown |
 | `events.jsonl` | Numbered event objects, one per line |
 | `answers.jsonl` | Numbered answer objects, one per line |
 | `answers/<n>.md` | Private copy of the correction for answer `n` |
@@ -1288,15 +1338,15 @@ refused. `save` updates `updated_at` and atomically replaces `flow.json`.
 | `check`, `trailers`, `read` | Plan argv, commit trailers and readable paths; lists |
 | `stall_minutes` | Stall interval, default 10 |
 | `claim` | Claim id or null; information for the flow |
-| `status` | `starting`, `running`, `checking`, `stopped`, `failed` or `done` |
-| `reason` | Stop or failure reason, or null |
+| `status` | `starting`, `running`, `checking`, `stopped`, `failed`, `done` or `cancelled` |
+| `reason` | Stop, failure or cancellation reason, or null |
 | `wave` | Last wave started; initially 0 |
 | `check_pending` | Whether a merge lacks a durably recorded passing check |
 | `checks` | Entries with `wave`, `exit`, `log`, `at`; one per attempt |
 | `answers_seen` | Complete answer lines already consumed; initially 0 |
 | `halted` | Reason new runs are halted, or null |
 | `abandoned` | Retained branches from dropped or replaced writers |
-| `runner` | Last runner's `pid` and `started_at`, or null |
+| `runner` | Last runner's `pid`, `started_at`, process start ticks (`start`) and `exiting` flag, or null; older records may omit the latter two fields |
 | `started_at`, `updated_at`, `ended_at` | Epoch seconds; `ended_at` is null until an end |
 | `tasks` | Task records in plan order |
 
@@ -1441,18 +1491,18 @@ every top-level field except `tasks`, then each task's state and reason.
 
 | Code | Meaning | Action line |
 |---|---|---|
-| 0 | Dry run printed, flow started, answer queued, runner resumed, lead stop reported, or every task merged | Watch reports give their next action |
+| 0 | Dry run printed, flow started, answer queued, runner resumed, flow cancelled, lead stop reported, or every task merged | Watch reports give their next action |
 | 1 | Unexpected error or unreadable settings database | `next: emb flow --status`; database errors name an owner action |
 | 64 | Invalid option combination, plan, flow, task, worker, commit or claim | `next: emb flow --help`, a worker's owner action, the claim action or `--status` |
-| 65 | The plan directory is not in a checkout | Repeat `--dry-run` with `dir` inside a checkout |
+| 65 | The plan directory is not in a checkout, or `--cancel` names an unknown flow | Repeat `--dry-run` with `dir` inside a checkout, or `next: emb flow --status` |
 | 66 | Unreadable plan or correction, or missing plan directory | `next: ls -l <path>` |
 | 69 | Missing git, tmux, engine or driver, disconnected engine, or unusable runtime folder | `owner:` naming the fix |
 | 70 | Flow branch or worktree creation failed | Prune worktrees, then repeat the start |
 | 71 | Runner session failed to start | `next: emb flow --resume <id>` |
 | 72 | Runner lost before the flow ended | `next: emb flow --resume <id>` |
 | 74 | Interrupted watch; cursor unchanged | `next: emb flow --watch <id> --json` |
-| 75 | Runner live or starting, answer not allowed, or flow already done | `--status` or `--watch` |
-| 82 | Flow failed, or ended with tasks unmerged | The watch report's next action |
+| 75 | Runner live or starting, answer not allowed, flow already done, cancellation pending, cancellation of an ended flow, or a lead answer on a cancelled flow | `--status`, `--watch`, or `--resume` for a cancelled lead answer |
+| 82 | Flow failed, was cancelled, or ended with tasks unmerged | The watch report's next action |
 
 Every nonzero exit prints an `emb flow:` diagnostic or watch report and
 one `next:` or `owner:` line. Flow folders, queued answers and unmerged

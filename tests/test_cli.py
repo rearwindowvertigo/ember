@@ -898,6 +898,7 @@ def test_flow_help_and_order(capsys: pytest.CaptureFixture[str]) -> None:
     assert result.value.code == 0
     output = capsys.readouterr().out
     assert "--lead FLOW TASK" in output and "--resume FLOW" in output
+    assert "--cancel FLOW" in output and "--reason TEXT" in output
     with pytest.raises(SystemExit) as result:
         main(["--help"])
     assert result.value.code == 0
