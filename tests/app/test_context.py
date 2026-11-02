@@ -1,15 +1,20 @@
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
+from PySide6.QtCore import QProcessEnvironment
 from PySide6.QtWidgets import QDialog, QWidget
 from pytestqt.qtbot import QtBot
 
-from ember import choices, db, deps, terminals
+from ember import choices, db, deps, terminals, tmux
 from ember.app import context as context_module
 from ember.app.context import AppContext
 from ember.engines import status
+
+from .test_runs import make_run, write_run  # pyrefly: ignore[missing-import]
 
 type _SettingsTask = tuple[
     Callable[[], Any], Callable[[Any], None], Callable[[Exception], None]
@@ -518,6 +523,30 @@ def test_run_command_start_failure_names_the_terminal(
     assert "Pick another terminal in Settings." in _first(blocker.args)
 
 
+def test_run_command_leaves_the_native_activation_token_alone(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Settings commands use the context snapshot and do not consume a token."""
+    context = _ready(env, qtbot)
+    tasks = _hold_tasks(context, monkeypatch)
+    _accept(monkeypatch, True)
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    name = "XDG_ACTIVATION_TOKEN"
+    monkeypatch.setenv(name, "python-cached-token")
+    os.putenv(name, "tray-click-token")
+    popen = Mock()
+    monkeypatch.setattr(context_module.subprocess, "Popen", popen)
+
+    assert context.run_command(parent, "codex update") is True
+    work, _done, _failed = tasks[0]
+    work()
+
+    assert popen.call_args.kwargs["env"] == env
+    assert name not in env
+    assert QProcessEnvironment.systemEnvironment().value(name) == "tray-click-token"
+
+
 def test_open_run_terminal_reports_the_failure(
     env: dict[str, str], qtbot: QtBot
 ) -> None:
@@ -525,6 +554,77 @@ def test_open_run_terminal_reports_the_failure(
     with qtbot.waitSignal(context.error, timeout=5000) as blocker:
         context.open_run_terminal("codex-20260101-120000-abcdef")
     assert "codex-20260101-120000-abcdef" in _first(blocker.args)
+
+
+@pytest.mark.parametrize("token", [None, "", "tray-click-token"])
+@pytest.mark.parametrize("snapshot_token", [None, "startup-token"])
+def test_open_run_terminal_consumes_the_native_token_once(
+    env: dict[str, str],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    token: str | None,
+    snapshot_token: str | None,
+) -> None:
+    """The terminal gets this click's native token once, on its own copy."""
+    name = "XDG_ACTIVATION_TOKEN"
+    monkeypatch.setenv(name, "python-cached-token")
+    if token is None:
+        os.unsetenv(name)
+    else:
+        os.putenv(name, token)
+    if snapshot_token is not None:
+        env[name] = snapshot_token
+    snapshot = dict(env)
+    choices.set_settings({"terminal": "test-terminal --"}, env=env)
+    run = write_run(make_run(env))
+    monkeypatch.setattr(tmux, "exists", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(tmux, "pane_dead", lambda *_args, **_kwargs: False)
+    popen = Mock(return_value=Mock(pid=123))
+    monkeypatch.setattr(tmux.subprocess, "Popen", popen)
+    context = AppContext(env)
+    tasks = _hold_tasks(context, monkeypatch)
+
+    context.open_run_terminal(run.id)
+    assert not QProcessEnvironment.systemEnvironment().contains(name)
+    context.open_run_terminal(run.id)
+    assert len(tasks) == 2
+    for work, _done, _failed in tasks:
+        assert work() == (0, "")
+
+    first, second = popen.call_args_list
+    assert first.args[0][:2] == ["test-terminal", "--"]
+    assert first.args[0][-3:] == ["attach-session", "-t", f"={run.id}"]
+    expected = {key: value for key, value in snapshot.items() if key != name}
+    assert first.kwargs["env"] == ({**expected, name: token} if token else expected)
+    assert second.kwargs["env"] == expected
+    assert context.env is env
+    assert env == snapshot
+    assert os.environ[name] == "python-cached-token"
+
+
+def test_open_run_terminal_keeps_each_queued_clicks_token(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each queued attachment keeps the token available when clicked."""
+    name = "XDG_ACTIVATION_TOKEN"
+    monkeypatch.setenv(name, "python-cached-token")
+    context = AppContext(env)
+    tasks = _hold_tasks(context, monkeypatch)
+    attach = Mock(return_value=(0, ""))
+    monkeypatch.setattr(context_module, "_attach", attach)
+
+    for token in ("first-click-token", "second-click-token"):
+        os.putenv(name, token)
+        context.open_run_terminal("codex-20260101-120000-abcdef")
+        assert not QProcessEnvironment.systemEnvironment().contains(name)
+    for work, _done, _failed in reversed(tasks):
+        work()
+
+    assert [call.args[0][name] for call in attach.call_args_list] == [
+        "second-click-token",
+        "first-click-token",
+    ]
+    assert name not in env
 
 
 def test_show_screen_and_visibility(env: dict[str, str], qtbot: QtBot) -> None:
