@@ -294,10 +294,6 @@ def _keys() -> dict[str, Key]:
     )
     keys.append(_key("app.autostart", _ON_OFF, "on"))
     keys.append(_key("app.theme", ("system", "light", "dark"), "system"))
-    keys += [
-        _key(f"notify.{event}", _ON_OFF, "on")
-        for event in ("run_finished", "run_failed")
-    ]
     return {key.name: key for key in keys}
 
 

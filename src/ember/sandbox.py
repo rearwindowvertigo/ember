@@ -13,10 +13,14 @@ sandbox is its own: it receives the deny list as a permission profile named
 is on `PATH`, else the one bundled with Codex. Ember runs OpenCode, and each
 Claude Code turn, inside its own `bwrap` command line with the same list.
 
+The last check of each engine is kept in `sandbox.json` in Ember's cache
+folder, so the app can show it without running the check again.
+
 Every function that reads the environment takes an optional `env` mapping,
 which defaults to `os.environ`.
 """
 
+import fcntl
 import json
 import os
 import platform
@@ -31,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from ember import choices, db, paths
+from ember.engines import status
 
 ENGINES = ("codex", "opencode", "claude")
 """The engines with a sandbox switch."""
@@ -1047,3 +1052,128 @@ def check(
     sandbox = "Codex's sandbox" if chosen == CODEX else "bubblewrap"
     detail = f"{PROBE_COMMAND} ran under {sandbox}"
     return result(chosen, probe.bwrap, True, detail)
+
+
+CHECK_CACHE_NAME = "sandbox.json"
+"""The file in Ember's cache folder holding the last check of each engine."""
+
+CHECK_LOCK_NAME = "sandbox.lock"
+"""The file in Ember's cache folder locked while the check cache is written."""
+
+
+def check_cache_path(env: Mapping[str, str] | None = None) -> Path:
+    """Return the path of the sandbox check cache.
+
+    Args:
+        env: The environment; `None` reads `os.environ`.
+
+    Returns:
+        `sandbox.json` in Ember's cache folder.
+    """
+    return paths.cache_dir(env) / CHECK_CACHE_NAME
+
+
+def _optional_str(value: object) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def _check_from_json(engine: str, value: object) -> SandboxCheck | None:
+    """Return a cached check of `engine`, or `None` when it is not valid."""
+    if not isinstance(value, dict) or value.get("engine") != engine:
+        return None
+    provider = value.get("provider")
+    causes = value.get("causes")
+    checked_at = status.finite_number(value.get("checked_at"))
+    if (
+        (provider is not None and provider not in PROVIDERS)
+        or not _optional_str(value.get("bwrap_path"))
+        or not _optional_str(value.get("bwrap_version"))
+        or not isinstance(value.get("ok"), bool)
+        or not isinstance(value.get("detail"), str)
+        or not isinstance(causes, list)
+        or not all(isinstance(cause, str) for cause in causes)
+        or checked_at is None
+    ):
+        return None
+    return SandboxCheck(
+        engine=engine,
+        provider=provider,
+        bwrap_path=value["bwrap_path"],
+        bwrap_version=value["bwrap_version"],
+        ok=value["ok"],
+        detail=value["detail"],
+        causes=tuple(causes),
+        checked_at=checked_at,
+    )
+
+
+def _held_checks(path: Path) -> dict[str, Any]:
+    """Return the cache file's entries that are valid checks, as JSON."""
+    value = status.load_cache_file(path)
+    if not isinstance(value, dict) or not isinstance(value.get("checks"), dict):
+        return {}
+    return {
+        engine: item
+        for engine, item in value["checks"].items()
+        if engine in ENGINES and _check_from_json(engine, item) is not None
+    }
+
+
+def last_checks(env: Mapping[str, str] | None = None) -> dict[str, SandboxCheck]:
+    """Read the last sandbox check of each engine from the cache.
+
+    Args:
+        env: The environment; `None` reads `os.environ`.
+
+    Returns:
+        Each engine's last check, keyed by engine in `ENGINES` order. An
+        engine with no check, or with an entry that is not valid, is left
+        out; a cache that is missing or cannot be read gives `{}`.
+    """
+    try:
+        path = check_cache_path(env)
+    except OSError, KeyError:
+        return {}
+    held = _held_checks(path)
+    result: dict[str, SandboxCheck] = {}
+    for engine in ENGINES:
+        item = _check_from_json(engine, held.get(engine))
+        if item is not None:
+            result[engine] = item
+    return result
+
+
+def save_check(check: SandboxCheck, env: Mapping[str, str] | None = None) -> None:
+    """Keep a check as its engine's last check in the cache.
+
+    The cache holds one entry per engine. This replaces the entry of the
+    check's engine and keeps the others. The read, merge and write run while
+    `sandbox.lock` in Ember's cache folder is locked, so writers in other
+    threads or processes do not drop each other's entries. Writing is best
+    effort: when the cache cannot be written it stays as it was and nothing
+    is raised.
+
+    Args:
+        check: The check to keep.
+        env: The environment; `None` reads `os.environ`.
+
+    Raises:
+        ValueError: The check's engine has no sandbox.
+    """
+    _check_engine(check.engine)
+    try:
+        path = check_cache_path(env)
+        paths.ensure_private_dir(path.parent, root=paths.cache_dir(env))
+        fd = paths.open_private_file(path.parent / CHECK_LOCK_NAME)
+    except OSError, KeyError, ValueError:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        held = _held_checks(path)
+        held[check.engine] = check.to_json()
+        ordered = {engine: held[engine] for engine in ENGINES if engine in held}
+        status.save_cache_file(path, {"checks": ordered}, env)
+    except OSError:
+        return
+    finally:
+        os.close(fd)

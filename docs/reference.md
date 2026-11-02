@@ -55,7 +55,6 @@ empty list.
 | `terminal` | A non-empty command line in shell syntax | `xdg-terminal-exec` | standing |
 | `app.autostart` | `on`, `off` | `on` | standing |
 | `app.theme` | `system`, `light`, `dark` | `system` | standing |
-| `notify.run_finished`, `notify.run_failed` | `on`, `off` | `on` | standing |
 
 A shortlist lists each model once. A request or one-time value for a
 standing-only key is refused.
@@ -218,7 +217,7 @@ and its sign-in, with its sign-in command as the fix:
 | Engine | Install | Sign in |
 |---|---|---|
 | `codex` | `npm install -g @openai/codex` | `codex login` |
-| `opencode` | `curl -fsSL https://opencode.ai/install \| bash` | `opencode auth login` |
+| `opencode` | `curl -fsSL https://opencode.ai/install \| bash` | `opencode auth login --provider openrouter` |
 | `claude` | `curl -fsSL https://claude.ai/install.sh \| bash` | `claude auth login` |
 
 A sign-in command names the CLI by its path when it is not found on `PATH`.
@@ -374,6 +373,11 @@ file exits 69 naming the files. The check runs again on the new worktree
 once it is created, for a tracked `.codex/config.toml`; a conflict there
 records the run failed and exits 69, and the worktree and branch stay. With
 `none`, a run of any engine prints the `WARNING:` line of the sandbox.
+
+The desktop app's sandbox check of an engine keeps its last result per
+engine in `$XDG_CACHE_HOME/ember/sandbox.json` (default
+`~/.cache/ember/sandbox.json`), mode 600; writers hold `sandbox.lock` in the
+same folder while they read, merge and write it.
 
 The session is a tmux session named by the run id. Its first message is the
 line `Brief from Claude, the lead, for Ember run <id>.`, a blank line and the
@@ -789,10 +793,404 @@ Messages go to standard error as `emb merge: <message>` or
 | 70 | A git command failed: the merge, making the merge message, finding the target's git folder, listing worktrees, `git status`, worktree removal, prune or branch deletion |
 | 75 | Refused: the target is checked out nowhere, its worktree has an unfinished merge, rebase, cherry-pick or revert, or its tree is not clean, or a merge conflict was aborted |
 
+## `emb deps`
+
+```
+emb deps [--refresh] [--json]
+```
+
+Shows each component Ember depends on: its installed version, the newest
+version its source offers, its status and the command that updates or
+installs it. It reads installed versions every time and newest versions when
+due. It installs and updates nothing.
+
+| Option | Does |
+|---|---|
+| `--refresh` | Read every newest version now, even when the cached one is recent |
+| `--json` | Print JSON |
+
+Exit codes: 0 whatever the statuses; 64 for a usage error; 70 when the
+packaged component list cannot be read or is not valid, with the reason on
+standard error as `emb deps: <reason>`.
+
+### Components
+
+The list is `ember/data/components.toml` in the package:
+
+| id | Label | Group | Installed version | Newest version | Update | Install |
+|---|---|---|---|---|---|---|
+| `codex` | Codex | `apps` | `codex --version`, `codex-cli (\S+)` | `version` of `https://registry.npmjs.org/@openai/codex/latest` | `codex update` | `npm install -g @openai/codex` |
+| `opencode` | OpenCode | `apps` | `opencode --version`, `^(\S+)$` | `version` of `https://registry.npmjs.org/opencode-ai/latest` | `opencode upgrade` | `curl -fsSL https://opencode.ai/install \| bash` |
+| `claude` | Claude Code | `apps` | `claude --version`, `^(\S+) \(Claude Code\)$` | the text of `https://downloads.claude.ai/claude-code-releases/latest` | `claude update` | `curl -fsSL https://claude.ai/install.sh \| bash` |
+| `claude-desktop` | Claude Desktop | `apps` | apt `claude-desktop` | apt | `sudo apt install --only-upgrade claude-desktop` | none; note "Not installed." |
+| `tmux` | tmux | `system` | apt `tmux` | apt | `sudo apt install --only-upgrade tmux` | `sudo apt install tmux` |
+| `bubblewrap` | bubblewrap | `system` | apt `bubblewrap` | apt | `sudo apt install --only-upgrade bubblewrap` | `sudo apt install bubblewrap` |
+| `git` | git | `system` | apt `git` | apt | `sudo apt install --only-upgrade git` | `sudo apt install git` |
+| `python3` | Python | `system` | apt `python3` | apt | `sudo apt install --only-upgrade python3` | `sudo apt install python3` |
+| `xdg-terminal-exec` | xdg-terminal-exec | `system` | apt `xdg-terminal-exec` | apt | `sudo apt install --only-upgrade xdg-terminal-exec` | `sudo apt install xdg-terminal-exec` |
+| `pyside6` | PySide6 | `libraries` | Python package `PySide6` | PyPI `PySide6` | none; note "Updates with the next Ember release." | none; note "Reinstall Ember." |
+
+The groups are `apps` (engines and apps), `system` (system tools) and
+`libraries` (Ember's libraries).
+
+Each entry is a `[[components]]` table with these fields; any other field,
+a missing required field, an unknown kind or a repeated `id` makes the list
+not valid:
+
+| Field | Holds |
+|---|---|
+| `id` | Unique, `[a-z0-9-]+` |
+| `label` | The shown name |
+| `group` | `apps`, `system` or `libraries` |
+| `installed` | `kind = "apt"` with `package`; `kind = "command"` with `pattern`, a regular expression whose group 1 is the version, and either `engine` (the engine's CLI run with `--version`) or `argv`; or `kind = "python"` with `package` |
+| `newest` | `kind = "apt"` with `package` (only with an apt `installed`); `kind = "json"` with `url` and `field`; `kind = "text"` with `url`; or `kind = "pypi"` with `package` |
+| `update` | Optional: the command shown while an update is available |
+| `install` | Optional: the command shown while the component is missing |
+| `update_note` | Optional: shown while an update is available and there is no `update` |
+| `install_note` | Optional: shown while the component is missing and there is no `install` |
+
+### Reads
+
+| Kind | Read |
+|---|---|
+| `apt` installed | `dpkg-query -W -f='${db:Status-Status}\t${Version}' <package>`; exit 1, or a status other than `installed`, means missing |
+| `command` installed | The engine's CLI as `emb engines` finds it, or `argv` with its program found on `PATH`, matched against `pattern`; a program that is not found means missing. `claude` runs without the variables whose names start with `CLAUDE_CODE_`, `CLAUDECODE` or `ANTHROPIC_` |
+| `python` installed | The package's version in the Python that runs Ember; a package that is not installed means missing |
+| `apt` newest | The `Candidate:` line of `apt-cache policy <package>`; `(none)` or no such line is a check failure |
+| `json` newest | The string at `field` in the JSON object at `url` |
+| `text` newest | The body at `url`, stripped; it must be one word |
+| `pypi` newest | `info.version` of `https://pypi.org/pypi/<package>/json` |
+
+Every command runs with `LC_ALL=C`, standard input from `/dev/null` and a
+10-second deadline, in its own process group; at the deadline the whole group
+is killed. Every network read has a 10-second timeout.
+
+Versions read with apt are compared with `dpkg --compare-versions`, with the
+epoch and revision. Every other version is compared as dotted numbers: a
+leading `v` is removed and trailing `.0` parts are ignored, so `v1.2.0` equals
+`1.2`. A version that is not dotted numbers is a check failure; it is never
+compared as text.
+
+### Status
+
+`status` is the first that applies:
+
+| Status | When |
+|---|---|
+| `missing` | The installed read found nothing; the newest version is not read |
+| `check failed` | A read failed, a needed version was neither read nor cached, or the versions cannot be compared; `error` names each read that failed (`installed version`, `newest version` or `comparison`) and why. The installed version is kept when it was read |
+| `update available` | The installed version is older than the newest |
+| `current` | Otherwise |
+
+`command` is the update command while an update is available and the install
+command while missing, with `command_kind` `update` or `install`; otherwise
+both are null. `note` is `update_note` or `install_note` for that status when
+there is no command for it; otherwise null.
+
+### Cache
+
+The last reads are cached in `$XDG_CACHE_HOME/ember/dependencies.json`
+(default `~/.cache/ember/dependencies.json`), mode 600 in a mode 700 folder,
+replaced whole on each write. Per component it holds the last installed read
+with its `read_at` and the last newest version read with its `read_at`, in
+seconds since the epoch. A newest version is read again when its cached read
+is missing or six hours old or more; `--refresh` reads it now. A newest read
+that fails is reported and not cached, so the next run reads it again. A cache
+that cannot be read is treated as empty; one that cannot be written is left as
+it was.
+
+### Output
+
+Text output has one line per component, in the order of the list:
+`<label>: <status>[, installed <version>][, newest <version>][: <error>]`,
+then an indented `update: <command>` or `install: <command>` line when there
+is a command.
+
+`--json` prints one object:
+
+```json
+{
+  "components": [
+    {
+      "id": "tmux",
+      "label": "tmux",
+      "group": "system",
+      "status": "update available",
+      "installed": "3.6a-2ubuntu0.1",
+      "newest": "3.6a-2ubuntu0.2",
+      "error": null,
+      "command": "sudo apt install --only-upgrade tmux",
+      "command_kind": "update",
+      "note": null
+    }
+  ],
+  "installed_read_at": {"tmux": 1800000000.0},
+  "newest_read_at": {"tmux": 1800000000.0},
+  "counts": 1,
+  "newest_read_oldest": 1800000000.0,
+  "newest_read_complete": true
+}
+```
+
+| Key | Holds |
+|---|---|
+| `installed_read_at` | When each component's installed version was read, by id; null when it was never read |
+| `newest_read_at` | When each component's reported newest version was read, by id; null when none is reported |
+| `counts` | How many components are `update available` or `missing` |
+| `newest_read_oldest` | The oldest `newest_read_at` among components that are not missing; null when there is none |
+| `newest_read_complete` | Whether every component that is not missing has a newest version read |
+
+## `emb app`
+
+```
+emb app [--hidden]
+```
+
+Starts the desktop app, or brings the running one forward. One instance runs
+at a time.
+
+| Option | Does |
+|---|---|
+| `--hidden` | Start in the tray with the window hidden; without a tray the window shows. Given to a running app, it changes nothing |
+
+Without `WAYLAND_DISPLAY`, `DISPLAY` and `QT_QPA_PLATFORM` it prints
+`emb app: no graphical session (WAYLAND_DISPLAY and DISPLAY are unset)` to
+standard error.
+
+| Code | Meaning |
+|---|---|
+| 0 | Quit Ember was chosen, or the running app took over |
+| 64 | Usage error |
+| 69 | No graphical session, or no runtime folder for the single-instance socket |
+
+`emb` imports Qt only for `emb app`.
+
+## Desktop app
+
+### Start
+
+The app listens on `$XDG_RUNTIME_DIR/ember/app.sock`. A second start
+connects to it, sends `show` (nothing with `--hidden`) and exits 0; the
+running app then shows, raises and activates its window. A socket file with
+no app listening is removed and the start goes on.
+
+At start the app:
+
+- shows the window, unless `--hidden` was given and a tray is available;
+- applies the Fusion style with the colours of the desktop's light or dark
+  scheme;
+- reads the settings, the engine status (checking every engine), the
+  dependency report (installed versions now, newest versions when due) and
+  the run records, each off the window's thread;
+- once the settings are read, applies `app.theme` and writes or removes the
+  autostart entry to match `app.autostart`; it does so again each time
+  either setting changes.
+
+Until the settings are read the content area shows "Reading settings"; when
+they cannot be read it shows the reason and Try again.
+
+### Window
+
+The window opens at 1100 by 720 pixels and is never smaller than 900 by 600.
+Its size and last screen are kept between starts. The sidebar shows the Ember
+mark and name, one row per screen (Overview, Menu, Engines, Dependencies,
+Settings) and `Ember <version>` at the bottom. Overview's row shows the
+number of live runs and Dependencies' row the number of components with an
+update available or missing, each only above zero. A screen is created the
+first time it is shown.
+
+Saves run one at a time: a change made while a save is in flight is sent
+after it, with the settings generation that save produced. Choosing the
+value already saved saves nothing. A save refused because the settings
+changed elsewhere drops the changes waiting behind it, reloads the settings
+and shows "Settings changed elsewhere. This screen now shows the new values.
+Make your change again." above the screen. Other failures of a save or
+command show what happened and what to do there, with Dismiss, and the next
+waiting change is sent.
+
+With `app.theme` set to `system`, the app follows the desktop when it
+switches between light and dark.
+
+Screens show times in local time as `Today 10:42`, `Yesterday 17:03` or
+`30 Oct 14:05`, with English month abbreviations in every locale, and
+durations as `18 min`, `1 h 5 min` or `2 h`.
+
+### Keyboard
+
+| Keys | Do |
+|---|---|
+| Ctrl+1 to Ctrl+5 | Open Overview, Menu, Engines, Dependencies, Settings |
+| Ctrl+W | Hide the window to the tray; quit when there is no tray |
+| Ctrl+Q | Quit |
+| Left, Right, Home, End | In a screen mirror that has focus: scroll it sideways |
+| Up, Down, Page Up, Page Down | In a screen mirror that has focus: scroll it, or the screen around it when it shows every line |
+
+A screen mirror takes focus with Tab and then shows the focus ring. Keys
+pressed in it never reach the run's session.
+
+### Tray
+
+The tray icon shows whether any run is live, always in the drawings for a
+dark top bar. Its tooltip is `Ember · 2 runs live` or `Ember · No runs live`.
+The menu holds:
+
+- a status line: `No runs live`, `1 run live` or `2 runs live`;
+- one line per live run, `<Engine> · <repository folder> · <HH:MM>` with the
+  local start time, which opens a terminal window on the run as
+  `emb run --attach` does;
+- Open Ember and Quit Ember.
+
+Clicking the icon also shows the window. Closing the window hides it to the
+tray. When the desktop has no tray, the window shows at start and closing it
+quits.
+
+While the menu is open it keeps its lines; a change to the live runs
+redraws it after it closes. Quit Ember hides the window and the tray icon at
+once, then waits up to 12 seconds for running background tasks to end before
+the app exits.
+
+### Run records
+
+The app reads every run record off the window's thread. It watches the runs
+folder (created at mode 700 when missing), each run's folder and each run's
+`run.json`, and reads again after a change; it also reads every sixty
+seconds, while the window is hidden too. At most one read runs at a time and
+one more follows it when a change came in meanwhile. Live runs are those
+`starting`, `running` or `waiting`, oldest first; finished runs are the last
+twenty `closed` or `failed`, newest `ended_at` first. A record that cannot be
+read is skipped and counted. When the runs folder itself cannot be read, the
+app keeps the records it read last and Overview shows the reason with Try
+again, which reads the folder again at once. A run whose turn failed since
+the last read makes the app check the engines again.
+
+### Commands
+
+An update, install or sign-in command runs only after the "Run this
+command?" dialog and Run in terminal. It starts detached in a new window of
+the `terminal` setting's terminal:
+
+```
+<terminal> sh -c 'sh -c "$1"; code=$?; printf "\nExit code %s. Press Enter to close.\n" "$code"; read -r _' ember-command <command>
+```
+
+The command is passed as an argument, never written into the script. When
+the terminal cannot start, the app names the terminal command and says to
+pick another terminal in Settings.
+
+Known terminals, in the order Settings offers them; Other command takes any
+command line:
+
+| Terminal | `terminal` value |
+|---|---|
+| System default | `xdg-terminal-exec` |
+| GNOME Terminal | `gnome-terminal --` |
+| Ptyxis | `ptyxis --new-window --` |
+| Console | `kgx --` |
+| kitty | `kitty` |
+| Alacritty | `alacritty -e` |
+| foot | `foot` |
+| WezTerm | `wezterm start --` |
+| Ghostty | `ghostty -e` |
+| Konsole | `konsole -e` |
+| Xfce Terminal | `xfce4-terminal -x` |
+| XTerm | `xterm -e` |
+
+### Overview
+
+Overview's subtitle is the tray's status line. Above the lists, an alert
+names each engine that is on and whose `sandbox.<engine>` setting gives it
+no sandbox, read from the last settings snapshot, with Open Engines; an
+alert counts run records that could not be read.
+
+The Live card holds one row per live run, oldest first: an expand arrow,
+the status badge (Starting, Running, Waiting for Claude),
+`<Engine> · <model> · <effort>`, `<repository folder> · <branch or
+read-only> · turn <n>`, the time since the start, redrawn every 30 seconds
+while the screen shows, and Open terminal, which opens a terminal window on
+the run as `emb run --attach` does. The Finished card holds the last twenty
+finished runs, newest first: the badge (Closed, Failed), the same first
+line, `<subject> · <branch or read-only>`, and the end time with the
+duration. Expanding a finished row shows its record: run, subject, engine,
+repository, branch, sandbox, turns and commits, start, end, last exit and
+last reason. One row of each card is expanded at a time.
+
+Rows are kept per run id across reloads. A finished row is redrawn only
+when a value it shows changes, so focus, an expanded record and selected
+text stay when another run saves its record.
+
+Expanding a live row shows the run's screen mirror. The mirror is a tmux
+control-mode client attached to the run's session with the `read-only` and
+`ignore-size` flags, so it cannot type into the pane or change its size.
+After the pane writes output it captures the pane with its colours and
+cursor and redraws; nothing runs on a timer. It closes
+when the row collapses, the run leaves the live list, the screen is left or
+the window hides, and shows "Session ended" when the session ends.
+
+When the runs folder cannot be read, the screen shows the reason and Try
+again in place of the cards.
+
+### Menu
+
+Menu shows the standing worker menu: the Writer and Reviewer pickers
+(`single.writer`, `single.reviewer`). Each lists Ask each time (`ask`), then,
+for Codex, OpenCode and Claude in that order, each engine that is on and has
+shortlisted models, under the engine's name, with its models as
+`<model> · <effort>` (OpenCode entries without an effort show the model
+alone). The engine names are headers and cannot be chosen. While a picker
+holds a Claude model, a row under it picks how it runs, CLI or Subagent
+(`single.writer_as`, `single.reviewer_as`).
+
+A saved value that the picker no longer offers stays chosen and shows as
+`<engine>:<model> (not on the shortlist)` or `<engine>:<model> (<Engine> is
+off)`, with a warning line giving that reason. A saved model whose engine was
+not connected at its last check shows a warning line too; the check is the
+app's last engine status read, or before the first read the status cache the
+settings snapshot reports. When no engine
+offers a model, the pickers hold Ask each time only and the screen shows
+"Shortlist models in Engines to offer them here." with Open Engines.
+One-time choices are not shown. Each change saves at once.
+
+### Settings
+
+Settings has two groups. Each change saves at once.
+
+| Group | Row | Key | Control |
+|---|---|---|---|
+| General | Start at login | `app.autostart` | Switch |
+| General | Theme | `app.theme` | System, Light, Dark; applies at once |
+| Workers | Worker network | `worker.network` | Switch |
+| Workers | Terminal | `terminal` | Picker; Other command shows a text field |
+| Workers | Sandbox read paths | `sandbox.read` | One row per folder with a remove button; Add folder |
+
+After Start at login changes, the app writes or removes the autostart entry
+and shows the reason under the switch when it could not.
+
+Terminal lists System default first, marked "(not installed)" when
+`xdg-terminal-exec` is not on `PATH`, then each other known terminal found on
+`PATH`, then Other command. A saved known terminal that is not installed
+shows as an unavailable entry, marked "(not installed)", until another value
+is chosen. A saved value that matches no known terminal shows as Other
+command with that value. Other command's text is saved on Enter or when the
+field loses focus; empty text or text that is not a valid command line is not
+saved, and the line under the field says why. Leaving the field with such
+text returns the picker to the saved value.
+
+Add folder opens the desktop's folder chooser. A folder already in the list
+is not added again.
+
+### Files
+
+| File | Holds |
+|---|---|
+| `$XDG_STATE_HOME/ember/app.json` | The window's `width`, `height` and last `screen`, mode 600; content that cannot be read gives the defaults |
+| `$XDG_RUNTIME_DIR/ember/app.sock` | The single-instance socket |
+| `$XDG_CONFIG_HOME/autostart/io.github.rearwindowvertigo.Ember.desktop` | The autostart entry while `app.autostart` is on, mode 600: `Exec=<absolute path of emb> app --hidden`. When `emb` is not on `PATH` nothing is written, and the app prints the reason to standard error and shows it in Settings |
+
 ## Exit codes
 
 These are the exit codes of `emb choices` and `emb engines`; `emb run`,
-`emb ground`, `emb merge` and `emb cleanup` have their own tables above.
+`emb ground`, `emb merge`, `emb cleanup`, `emb deps` and `emb app` have their
+own tables above.
 
 | Code | Meaning |
 |---|---|

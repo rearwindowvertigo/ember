@@ -1,8 +1,10 @@
+import json
 import os
 import stat
 import subprocess
 import tomllib
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -761,3 +763,107 @@ def test_check_bad_version_output(env: dict[str, str]) -> None:
 def test_check_rejects_other_engines(env: dict[str, str]) -> None:
     with pytest.raises(ValueError):
         sandbox.check("gemini", env, run=FakeRun())
+
+
+# check cache
+
+
+def _sample(engine: str, *, ok: bool = True, at: float = 100.0) -> sandbox.SandboxCheck:
+    return sandbox.SandboxCheck(
+        engine=engine,
+        provider="bubblewrap",
+        bwrap_path="/usr/bin/bwrap",
+        bwrap_version="0.11.1",
+        ok=ok,
+        detail="/bin/true ran under bubblewrap" if ok else "the sandbox test failed",
+        causes=() if ok else ("AppArmor blocks it",),
+        checked_at=at,
+    )
+
+
+@pytest.fixture
+def cache_env(env: dict[str, str], tmp_path: Path) -> dict[str, str]:
+    return {**env, "XDG_CACHE_HOME": str(tmp_path / "cache")}
+
+
+def _cache_file(env: dict[str, str]) -> Path:
+    return Path(env["XDG_CACHE_HOME"]) / "ember" / "sandbox.json"
+
+
+def test_last_checks_without_cache(cache_env: dict[str, str]) -> None:
+    assert sandbox.last_checks(cache_env) == {}
+
+
+def test_save_check_round_trip(cache_env: dict[str, str]) -> None:
+    check = _sample("opencode", ok=False)
+    sandbox.save_check(check, cache_env)
+    assert sandbox.last_checks(cache_env) == {"opencode": check}
+    path = _cache_file(cache_env)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert json.loads(path.read_text()) == {"checks": {"opencode": check.to_json()}}
+
+
+def test_save_check_replaces_only_its_engine(cache_env: dict[str, str]) -> None:
+    sandbox.save_check(_sample("claude", at=1.0), cache_env)
+    sandbox.save_check(_sample("codex", at=2.0), cache_env)
+    newer = _sample("claude", ok=False, at=3.0)
+    sandbox.save_check(newer, cache_env)
+    checks = sandbox.last_checks(cache_env)
+    assert list(checks) == ["codex", "claude"]
+    assert checks["claude"] == newer
+    assert checks["codex"] == _sample("codex", at=2.0)
+
+
+def test_save_check_from_threads_keeps_every_engine(
+    cache_env: dict[str, str],
+) -> None:
+    engines = ["codex", "opencode", "claude"] * 4
+
+    def save(index: int) -> None:
+        sandbox.save_check(_sample(engines[index], at=float(index)), cache_env)
+
+    with ThreadPoolExecutor(max_workers=len(engines)) as pool:
+        list(pool.map(save, range(len(engines))))
+    assert set(sandbox.last_checks(cache_env)) == {"codex", "opencode", "claude"}
+
+
+@pytest.mark.parametrize("text", ["not json", "[]", '{"checks": []}', ""])
+def test_corrupt_cache_reads_empty_and_is_replaced(
+    cache_env: dict[str, str], text: str
+) -> None:
+    path = _cache_file(cache_env)
+    path.parent.mkdir(parents=True)
+    path.write_text(text)
+    assert sandbox.last_checks(cache_env) == {}
+    sandbox.save_check(_sample("codex"), cache_env)
+    assert sandbox.last_checks(cache_env) == {"codex": _sample("codex")}
+
+
+def test_invalid_entries_are_skipped(cache_env: dict[str, str]) -> None:
+    good = _sample("codex").to_json()
+    path = _cache_file(cache_env)
+    path.parent.mkdir(parents=True)
+    entries = {
+        "codex": good,
+        "opencode": {**good, "engine": "opencode", "ok": "yes"},
+        "claude": {**good, "engine": "codex"},
+        "gemini": {**good, "engine": "gemini"},
+    }
+    path.write_text(json.dumps({"checks": entries}))
+    assert sandbox.last_checks(cache_env) == {"codex": _sample("codex")}
+    sandbox.save_check(_sample("claude"), cache_env)
+    assert set(json.loads(path.read_text())["checks"]) == {"codex", "claude"}
+
+
+def test_save_check_that_cannot_write_raises_nothing(
+    cache_env: dict[str, str],
+) -> None:
+    Path(cache_env["XDG_CACHE_HOME"]).write_text("a file, not a folder")
+    sandbox.save_check(_sample("codex"), cache_env)
+    assert sandbox.last_checks(cache_env) == {}
+
+
+def test_save_check_rejects_other_engines(cache_env: dict[str, str]) -> None:
+    with pytest.raises(ValueError):
+        sandbox.save_check(_sample("gemini"), cache_env)

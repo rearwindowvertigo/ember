@@ -1,0 +1,189 @@
+import re
+from typing import cast
+
+import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QGuiApplication
+from PySide6.QtWidgets import QApplication, QLabel
+from pytestqt.qtbot import QtBot
+
+from ember.app import theme
+
+OPAQUE_BACKGROUNDS = [
+    name
+    for name, values in theme.TOKENS.items()
+    if name.startswith("bg-") and all(len(v) == 7 for v in values)
+]
+TEXT_TOKENS = [
+    name
+    for name in theme.TOKENS
+    if (name.startswith("text-") or name.endswith("-text")) and name != "text-disabled"
+]
+
+
+def test_tokens_have_two_valid_values() -> None:
+    for name, values in theme.TOKENS.items():
+        assert len(values) == 2, name
+        for value in values:
+            assert re.fullmatch(r"#[0-9a-f]{6}([0-9a-f]{2})?", value), (name, value)
+
+
+def test_token_values_match_the_plan() -> None:
+    assert theme.TOKENS["bg-page"] == ("#ffffff", "#191919")
+    assert theme.TOKENS["bg-hover"] == ("#0000000d", "#ffffff13")
+    assert theme.TOKENS["accent"] == theme.TOKENS["focus-ring"]
+    assert theme.TOKENS["term-15"] == ("#3a3a3a", "#ffffff")
+
+
+def test_opaque_backgrounds_found() -> None:
+    assert set(OPAQUE_BACKGROUNDS) == {
+        "bg-page",
+        "bg-sidebar",
+        "bg-card",
+        "bg-raised",
+        "bg-subtle",
+        "bg-accent",
+    }
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_term_colours_meet_5_8_on_term_bg(mode: str) -> None:
+    palette = theme.mirror_palette(mode)
+    assert len(palette.colors) == 16
+    for index, value in enumerate(palette.colors):
+        assert theme.contrast(value, palette.bg) >= 5.8, (mode, index)
+    assert theme.contrast(palette.fg, palette.bg) >= 5.8
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_text_tokens_meet_4_5_on_every_background(mode: str) -> None:
+    for text in TEXT_TOKENS:
+        for background in OPAQUE_BACKGROUNDS:
+            ratio = theme.contrast(
+                theme.color(text, mode), theme.color(background, mode)
+            )
+            assert ratio >= 4.5, (mode, text, background, ratio)
+
+
+def test_contrast_known_values() -> None:
+    assert theme.contrast("#000000", "#ffffff") == pytest.approx(21.0)
+    assert theme.contrast("#ffffff", "#ffffff") == pytest.approx(1.0)
+    assert theme.contrast(QColor("#777777"), "#ffffff") == pytest.approx(4.48, abs=0.01)
+
+
+@pytest.mark.parametrize(
+    ("color", "background"),
+    [
+        ("#333333", "#141414"),
+        ("#0000ff", "#141414"),
+        ("#ffff00", "#f7f7f7"),
+        ("#cccccc", "#f7f7f7"),
+        ("#808080", "#808080"),
+    ],
+)
+def test_readable_reaches_minimum(color: str, background: str) -> None:
+    result = theme.readable(color, background)
+    assert theme.contrast(result, background) >= 4.5
+
+
+def test_readable_moves_away_from_background() -> None:
+    dark_bg = theme.readable("#333333", "#141414")
+    assert dark_bg.lightnessF() > QColor("#333333").lightnessF()
+    light_bg = theme.readable("#cccccc", "#f7f7f7")
+    assert light_bg.lightnessF() < QColor("#cccccc").lightnessF()
+
+
+def test_readable_leaves_passing_colour_unchanged() -> None:
+    result = theme.readable("#e0e0e0", "#141414")
+    assert result.name() == "#e0e0e0"
+
+
+def test_readable_with_higher_minimum() -> None:
+    result = theme.readable("#3366cc", "#141414", minimum=7.0)
+    assert theme.contrast(result, "#141414") >= 7.0
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_style_sheet_has_no_unresolved_tokens(mode: str) -> None:
+    sheet = theme.style_sheet(mode)
+    assert "@" not in sheet
+    for name in theme.TOKENS:
+        assert f"@{name}" not in sheet
+    assert "rgba(" in sheet
+
+
+def test_style_sheet_writes_alpha_as_rgba() -> None:
+    sheet = theme.style_sheet("light")
+    assert "rgba(0, 0, 0, 13)" in sheet  # bg-hover, #0000000d
+
+
+def test_unknown_mode_refused() -> None:
+    with pytest.raises(ValueError, match="mode"):
+        theme.style_sheet("sepia")
+
+
+def test_apply_sets_style_palette_and_emits(qapp: QApplication, qtbot: QtBot) -> None:
+    previous = theme.current_mode()
+    try:
+        with qtbot.waitSignal(theme.signals.changed) as blocker:
+            theme.apply(qapp, "dark")
+        assert blocker.args == ["dark"]
+        assert theme.current_mode() == "dark"
+        assert qapp.styleSheet() == theme.style_sheet("dark")
+        window = qapp.palette().color(qapp.palette().ColorRole.Window)
+        assert window.name() == "#191919"
+    finally:
+        theme.apply(qapp, previous)
+        qapp.setStyleSheet("")
+
+
+@pytest.mark.parametrize(
+    ("setting", "scheme", "expected"),
+    [
+        ("light", Qt.ColorScheme.Dark, "light"),
+        ("dark", Qt.ColorScheme.Light, "dark"),
+        ("system", Qt.ColorScheme.Dark, "dark"),
+        ("system", Qt.ColorScheme.Light, "light"),
+        ("system", Qt.ColorScheme.Unknown, "light"),
+    ],
+)
+def test_resolve_mode(setting: str, scheme: Qt.ColorScheme, expected: str) -> None:
+    class Hints:
+        def colorScheme(self) -> Qt.ColorScheme:  # noqa: N802
+            return scheme
+
+    class App:
+        def styleHints(self) -> Hints:  # noqa: N802
+            return Hints()
+
+    assert theme.resolve_mode(setting, cast(QGuiApplication, App())) == expected
+
+
+def test_font_steps(qapp: QApplication) -> None:  # noqa: ARG001
+    display = theme.font("display")
+    assert display.pixelSize() == 28
+    assert display.weight() == 500
+    assert theme.font("term").pixelSize() == 12
+
+
+@pytest.mark.parametrize(
+    ("step", "size"), [("title", 20), ("term", 12), ("display", 28)]
+)
+def test_font_step_survives_apply(
+    qapp: QApplication, qtbot: QtBot, step: str, size: int
+) -> None:
+    previous = theme.current_mode()
+    try:
+        theme.apply(qapp, "light")
+        label = QLabel("text")
+        label.setFont(theme.font(step))
+        qtbot.addWidget(label)
+        label.show()
+        assert label.fontInfo().pixelSize() == size
+        plain = QLabel("text")
+        qtbot.addWidget(plain)
+        plain.show()
+        assert plain.fontInfo().pixelSize() == theme.TYPE["body"].size
+    finally:
+        theme.apply(qapp, previous)
+        qapp.setStyleSheet("")
