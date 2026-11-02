@@ -93,7 +93,7 @@ B1. Ember follows the XDG base directories:
 | What | Where |
 |---|---|
 | Settings database | `$XDG_CONFIG_HOME/ember/settings.db` (default `~/.config/ember/`) |
-| Run and flow records | `$XDG_STATE_HOME/ember/runs/` (default `~/.local/state/ember/`) |
+| Run, flow and panel records | `$XDG_STATE_HOME/ember/runs/` (default `~/.local/state/ember/`) |
 | Caches (model lists, version reads) | `$XDG_CACHE_HOME/ember/` |
 | Runtime files (locks, sockets) | `$XDG_RUNTIME_DIR/ember/` |
 

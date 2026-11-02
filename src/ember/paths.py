@@ -148,7 +148,7 @@ def settings_db_path(env: Mapping[str, str] | None = None) -> Path:
 
 
 def runs_dir(env: Mapping[str, str] | None = None) -> Path:
-    """Return the folder of run and flow records.
+    """Return the folder of run, flow and panel records.
 
     Args:
         env: The environment; `None` reads `os.environ`.
