@@ -157,7 +157,7 @@ The runner:
 `owner-replies.md` lists the replies as numbered lines, `<n>. <which
 question>: <reply>`; the runner sends the text after the first colon.
 
-The out dir holds `work/`, `scaffold.log`, `prompt.txt`, `trace.jsonl` (the
+The out dir holds `work/`, `tmp/` (the session's `/tmp`, kept across turns), `scaffold.log`, `prompt.txt`, `trace.jsonl` (the
 stream-json of every turn, appended in order), `stderr.txt`, `owner.log`
 (each reply sent), `calls.log` and `run.json` (`exit` and `seconds`).
 

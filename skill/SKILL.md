@@ -117,7 +117,8 @@ the enabled shortlists. Put worker, model and effort in each label; give
 the recommendation in one or two plain sentences and one or two real
 alternatives. Put the task and every decision fact inside the question:
 text before the picker is hidden. Without the picker tool (print mode),
-ask the same question in plain text and stop until the owner answers.
+ask the same question in plain text, as one direct question ending in a
+question mark, and stop until the owner answers.
 
 Resolve two or more separately started tasks one at a time, numbered
 `Task N of M`. Same-worker corrections, recoveries and retries after an

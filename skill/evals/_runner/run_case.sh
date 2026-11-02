@@ -46,11 +46,14 @@ mkdir -p "$H/.claude/skills"
 # The cases, graders and stubs stay out of the session's view of the skill.
 hide_evals=()
 [ -d "$skill/evals" ] && hide_evals=(--tmpfs "$H/.claude/skills/ember/evals")
+# One private /tmp for every turn, so files Claude writes there survive a
+# resumed turn.
+mkdir -p "$out/tmp"
 printf '%s\n' "$prompt" > "$out/prompt.txt"
 start=$(date +%s)
 run_claude() {  # run_claude <out file> <claude args...>
     local file=$1; shift
-    bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
+    bwrap --ro-bind / / --dev /dev --proc /proc --bind "$out/tmp" /tmp \
         --bind "$work" "$work" \
         --bind "$H/.claude" "$H/.claude" --bind "$H/.claude.json" "$H/.claude.json" \
         --tmpfs "$H/.claude/skills" \

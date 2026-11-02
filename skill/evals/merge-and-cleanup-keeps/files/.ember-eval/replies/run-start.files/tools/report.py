@@ -47,13 +47,11 @@ def main(argv: list[str] | None = None) -> int:
         index = argv.index("--since")
         if index + 1 >= len(argv):
             print("report.py: --since needs a day", file=sys.stderr)
-            print(USAGE, file=sys.stderr)
             return 64
         text = argv[index + 1]
         day = parse_day(text)
         if day is None:
             print(f"report.py: {text!r} is not a day (YYYY-MM-DD)", file=sys.stderr)
-            print(USAGE, file=sys.stderr)
             return 64
         del argv[index : index + 2]
     if len(argv) != 1:

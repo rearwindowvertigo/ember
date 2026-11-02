@@ -85,7 +85,8 @@ commit, subject the brief's first non-empty line (` (turn <n>)` after turn
 
 `--send` refuses with 75 when the session holds messages Ember did not
 send, with `Claude asks the owner` in the message. Ask the owner about
-those messages. Only with their go-ahead for that run repeat the command
+those messages with one direct question, such as whether to send anyway.
+Only with their go-ahead for that run repeat the command
 with `--force`, which records the messages as accepted.
 
 ## Sandbox
