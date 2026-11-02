@@ -62,6 +62,8 @@ def test_unknown_argument_exits_64(
 def test_starts_with_the_window_and_reads(
     app_env: dict[str, str], qtbot: QtBot, qapp: QApplication
 ) -> None:
+    # Only the test's own folder, so an installed emb is not found on PATH.
+    app_env = {**app_env, "PATH": app_env["PATH"].split(":")[0]}
     for parts in _start([], app_env, qtbot):
         assert parts.window.isVisible()
         assert parts.tray is None
