@@ -1,16 +1,18 @@
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from typing import Any
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from pytestqt.qtbot import QtBot
 
 from ember import choices, sandbox
+from ember.app import theme
 from ember.app.context import AppContext
+from ember.app.screens.common import inline, when
 from ember.app.screens.engines import (
     NO_EFFORT_NOTE,
     EnginesScreen,
@@ -26,6 +28,18 @@ from ember.app.widgets import CommandLine
 from ember.engines import models, status
 
 NOW = time.time()
+
+
+@pytest.fixture(params=theme.MODES)
+def engine_theme(qapp: QApplication, request: pytest.FixtureRequest) -> Iterator[None]:
+    previous = theme.current_mode()
+    sheet = qapp.styleSheet()
+    theme.apply(qapp, request.param)
+    try:
+        yield
+    finally:
+        theme.apply(qapp, previous)
+        qapp.setStyleSheet(sheet)
 
 
 def _status(engine: str, state: str, reason: str | None = None) -> status.EngineStatus:
@@ -208,6 +222,173 @@ def test_number_formats() -> None:
     assert per_token(None) is None
 
 
+@pytest.mark.parametrize("engine", status.ENGINES)
+def test_model_rows_share_columns_and_centres(
+    env: dict[str, str],
+    qtbot: QtBot,
+    stubs: dict[str, Any],
+    engine_theme: None,
+    engine: str,
+) -> None:
+    prefix = "provider/" if engine == "opencode" else ""
+    long_id = prefix + "model-" + "long-" * 30
+    missing_id = prefix + "missing-" + "long-" * 40
+    short_id = prefix + "short"
+    choices.set_settings({f"shortlist.{engine}": [f"{missing_id}@high"]}, env=env)
+    stubs["lists"] = {
+        engine: models.ModelList(
+            (
+                models.Model(
+                    long_id, "Long model", ("low", "high"), supports_tools=True
+                ),
+                models.Model(short_id, short_id, supports_tools=True),
+            ),
+            models.CLI,
+            NOW,
+            None,
+        )
+    }
+    screen, context = _screen(env, qtbot)
+    panel = _open(screen, context, qtbot, engine)
+    screen.resize(1300, 1000)
+    screen.show()
+    QApplication.processEvents()
+    first, second = panel.rows
+    missing = panel.missing[0]
+    assert first.note.isHidden() and second.note.isHidden()
+    assert first.height() == second.height() == missing.height()
+    assert panel.name_width == 320
+    assert panel.name_header.width() == first.name.width() == missing.name.width()
+    assert first.name.display_text().endswith("…")
+    assert first.name.text() == long_id
+    assert first.name.toolTip() == f"{long_id}\nLong model"
+    assert second.name.toolTip() == short_id
+    assert missing.name.display_text().endswith("…")
+    assert missing.name.toolTip() == missing_id
+    assert isinstance(second.effort_cell, QLabel)
+    assert second.effort_cell.text() == ""
+    for row in panel.rows:
+        cells = [row.name, *row.figures, row.effort_cell, row.switch]
+        centres = [cell.mapTo(row, cell.rect().center()).y() for cell in cells]
+        assert max(centres) - min(centres) <= 1
+        assert row.effort_cell.width() == 130
+    headers = panel.header.findChildren(QLabel)
+    for row in panel.rows:
+        cells = [row.name, *row.figures, row.effort_cell]
+        for cell, heading in zip(cells, headers, strict=False):
+            assert cell.mapTo(panel, QPoint()).x() == heading.mapTo(panel, QPoint()).x()
+    adjacent = [first.name, *first.figures, first.effort_cell]
+    for left, right in zip(adjacent, adjacent[1:], strict=False):
+        assert right.x() == left.x() + left.width() + 12
+    assert (
+        missing.info.mapTo(panel, QPoint()).x()
+        == adjacent[1].mapTo(panel, QPoint()).x()
+    )
+    assert missing.info.width() == sum(cell.width() for cell in adjacent[1:]) + 12 * (
+        len(adjacent) - 2
+    )
+    use_header = headers[-1]
+    assert (
+        missing.remove_button.mapTo(panel, QPoint()).x()
+        == use_header.mapTo(panel, QPoint()).x()
+    )
+    assert missing.remove_button.width() == use_header.width()
+    assert (
+        abs(
+            first.switch.mapTo(panel, first.switch.rect().center()).x()
+            - use_header.mapTo(panel, use_header.rect().center()).x()
+        )
+        <= 1
+    )
+    assert first.switch.mapTo(panel, QPoint()).x() > (
+        first.effort_cell.mapTo(panel, QPoint()).x() + first.effort_cell.width() + 12
+    )
+    height = second.height()
+    second.show_note(NO_EFFORT_NOTE)
+    QApplication.processEvents()
+    assert second.height() > height
+    assert not screen.grab().isNull()
+
+
+def test_name_width_measures_missing_ids_and_rebuilds(
+    env: dict[str, str],
+    qtbot: QtBot,
+    stubs: dict[str, Any],
+    engine_theme: None,
+) -> None:
+    choices.set_settings({"shortlist.codex": ["a-longer-missing-name@high"]}, env=env)
+    stubs["lists"] = {"codex": _codex_list()}
+    screen, context = _screen(env, qtbot)
+    panel = _open(screen, context, qtbot, "codex")
+    metrics = panel.rows[0].name.fontMetrics()
+    assert panel.name_width == metrics.horizontalAdvance("a-longer-missing-name")
+    _save(context, qtbot, lambda: panel.remove("a-longer-missing-name"))
+    assert not panel.missing
+    assert panel.name_width == metrics.horizontalAdvance("gpt-mini")
+    assert all(row.name.width() == panel.name_width for row in panel.rows)
+    panel.show_list(models.ModelList((), models.CLI, NOW, None))
+    assert panel.rows == [] and panel.missing == []
+    assert panel.header.isHidden()
+    assert not screen.grab().isNull()
+
+
+def test_card_rows_stay_level_with_long_version(
+    env: dict[str, str],
+    qtbot: QtBot,
+    stubs: dict[str, Any],
+    engine_theme: None,
+) -> None:
+    long_version = "2.1.316 (Claude Code) " + "build " * 25
+    stubs["engines"]["claude"] = replace(
+        stubs["engines"]["claude"], version=long_version
+    )
+    choices.set_settings(
+        {f"sandbox.{engine}": "on" for engine in status.ENGINES}, env=env
+    )
+    screen, context = _screen(env, qtbot)
+    _shown(screen, context, qtbot)
+    screen.resize(1000, 900)
+    screen.show()
+    QApplication.processEvents()
+    version = screen.cards["claude"].version_label
+    assert version.text() == version.toolTip() == long_version
+    assert version.display_text().endswith("…")
+    assert not version.wordWrap()
+    for attribute in (
+        "version_label",
+        "use_switch",
+        "sandbox_switch",
+        "provider_label",
+        "bwrap_label",
+        "check_label",
+        "models_button",
+    ):
+        cells = [getattr(card, attribute) for card in screen.cards.values()]
+        centres = [cell.mapTo(screen, cell.rect().center()).y() for cell in cells]
+        assert max(centres) - min(centres) <= 1, attribute
+    assert not screen.grab().isNull()
+
+
+def test_sandbox_check_line_wording(
+    env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
+) -> None:
+    screen, context = _screen(env, qtbot)
+    context.tasks.wait(5000)
+    QApplication.processEvents()
+    card = screen.cards["codex"]
+    card._draw_check(None, False, True)
+    assert card.check_label.text() == "Sandbox check: not run"
+    card._draw_check(None, True, True)
+    assert card.check_label.text() == "Sandbox check: checking now"
+    card._draw_check(_check("codex"), False, True)
+    assert card.check_label.text() == f"Sandbox check: passed, {inline(when(NOW))}"
+    card._draw_check(_check("codex", ok=False, detail="blocked"), False, True)
+    assert (
+        card.check_label.text()
+        == f"Sandbox check: failed, {inline(when(NOW))}: blocked"
+    )
+
+
 def test_cause_advice_names_what_to_do() -> None:
     assert "sandbox_mode" in cause_advice(
         "/etc/codex/config.toml sets sandbox_mode or cannot be read"
@@ -341,10 +522,10 @@ def test_check_now_checks_engines_with_use_and_sandbox_on(
     assert (
         screen.cards["codex"]
         .check_label.text()
-        .startswith("Last check: Passed, today ")
+        .startswith("Sandbox check: passed, today ")
     )
-    assert screen.cards["opencode"].check_label.text() == "Last check: Not run"
-    assert screen.cards["claude"].check_label.text() == "Sandbox off"
+    assert screen.cards["opencode"].check_label.text() == "Sandbox check: not run"
+    assert screen.cards["claude"].check_label.text() == "Sandbox check: not run"
     assert set(sandbox.last_checks(env)) == {"codex"}
 
 
@@ -359,7 +540,7 @@ def test_sandbox_switch_on_saves_then_runs_the_check(
     _shown(screen, context, qtbot)
     card = screen.cards["opencode"]
     assert not card.sandbox_switch.isChecked()
-    assert card.check_label.text() == "Sandbox off"
+    assert card.check_label.text() == "Sandbox check: not run"
     _save(
         context,
         qtbot,
@@ -368,13 +549,13 @@ def test_sandbox_switch_on_saves_then_runs_the_check(
     assert context.setting("sandbox.opencode") == "on"
     qtbot.waitUntil(lambda: stubs["checks"] == ["opencode"], timeout=5000)
     qtbot.waitUntil(lambda: not screen.checking, timeout=5000)
-    assert "Failed, today" in card.check_label.text()
+    assert "Sandbox check: failed, today" in card.check_label.text()
     assert card.check_label.text().endswith(": the sandbox test failed")
     assert card.bwrap_label.text() == "bwrap: /usr/bin/bwrap, 0.11.1"
     assert sandbox.last_checks(env)["opencode"].ok is False
 
 
-def test_sandbox_switch_off_shows_sandbox_off_and_runs_nothing(
+def test_sandbox_switch_off_shows_not_run_and_runs_nothing(
     env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
 ) -> None:
     choices.set_settings({"sandbox.claude": "on"}, env=env)
@@ -382,7 +563,7 @@ def test_sandbox_switch_off_shows_sandbox_off_and_runs_nothing(
     screen, context = _screen(env, qtbot)
     _shown(screen, context, qtbot)
     card = screen.cards["claude"]
-    assert card.check_label.text().startswith("Last check: Passed, today ")
+    assert card.check_label.text().startswith("Sandbox check: passed, today ")
     _save(
         context,
         qtbot,
@@ -392,8 +573,8 @@ def test_sandbox_switch_off_shows_sandbox_off_and_runs_nothing(
     QApplication.processEvents()
     assert context.setting("sandbox.claude") == "off"
     assert stubs["checks"] == []
-    assert card.check_label.text() == "Sandbox off"
-    assert "Passed" not in card.check_label.text()
+    assert card.check_label.text() == "Sandbox check: not run"
+    assert "passed" not in card.check_label.text()
 
 
 def test_a_check_without_a_sandbox_never_shows_passed(
@@ -404,7 +585,7 @@ def test_a_check_without_a_sandbox_never_shows_passed(
     sandbox.save_check(unsandboxed, env)
     screen, context = _screen(env, qtbot)
     _shown(screen, context, qtbot)
-    assert screen.cards["codex"].check_label.text() == "Last check: Not run"
+    assert screen.cards["codex"].check_label.text() == "Sandbox check: not run"
 
 
 def test_cached_checks_never_overwrite_a_newer_check(
@@ -432,7 +613,7 @@ def test_cached_checks_never_overwrite_a_newer_check(
     context.tasks.wait(5000)
     QApplication.processEvents()
     assert screen.checks["codex"].ok
-    assert screen.cards["codex"].check_label.text().startswith("Last check: Passed")
+    assert screen.cards["codex"].check_label.text().startswith("Sandbox check: passed")
 
     held = screen.checks["codex"]
     release.clear()

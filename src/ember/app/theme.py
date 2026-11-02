@@ -227,6 +227,9 @@ QLabel {
     background: transparent;
     border: none;
 }
+QLabel[focusPolicy="ClickFocus"] {
+    outline: none;
+}
 QLabel[role="muted"] {
     color: @text-muted;
 }
