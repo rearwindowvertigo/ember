@@ -578,6 +578,126 @@ the run's read paths are added with `--add-dir` and edits to them are
 refused. While a tool call or a model message runs, Claude's pane prints a
 line such as `· running Bash for 3 min` at least once a minute.
 
+### Plan steps
+
+The gap check tries these splits in order:
+
+1. A JSON object with a non-empty `tasks` array of objects gives one step
+   per task. Its title is `task <id>: <summary>` when `id` is a string,
+   otherwise `task <n>: <summary>`. The summary is the task's `task` value
+   on one line; an empty summary leaves just `task <id>` or `task <n>`.
+2. Two or more unindented numbered items (`1.` or `1)`, followed by
+   whitespace and text) give one step per item.
+3. Otherwise, sections at the shallowest heading level that occurs at
+   least twice give one step per section. Headings start at the left margin
+   with one to six `#` characters, whitespace and text. A section ends
+   before the next heading of the same or a shallower level.
+4. Otherwise, the whole file is one step titled `the whole plan`, with
+   lines 1 to the line count (at least 1).
+
+Numbered items and headings inside code fences are ignored. A fence starts
+with three backticks or three tildes, with up to three spaces of indentation;
+only the same marker closes it. Trailing blank lines are removed from
+numbered-item and heading ranges. Each step has a consecutive number
+starting at 1 and a one-line title cut to 100 characters in total. JSON
+tasks have no line range; other ranges are one-based and inclusive. An
+empty or blank file splits as a whole-file step; the command refuses it.
+
+A JSON object has a failure model when its `failure_model` value is a
+nonblank string, including when its tasks do not provide the step split.
+A Markdown plan has one when a heading outside code fences contains
+`failure model`, without regard to case. Body text alone does not count.
+The brief asks the reviewer to report a missing failure model as the first
+gap of step 1, with harm `high`.
+
+### Reply
+
+The reply schema is packaged as `ember/data/gapcheck-reply.schema.json`:
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ember/gapcheck-reply/1",
+  "title": "Gap check reply",
+  "description": "A read-only review of a plan, with one entry per step and a list of undefined or contradictory behaviours. A step with no gaps has an empty gaps list.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["steps"],
+  "properties": {
+    "steps": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/step"}
+    }
+  },
+  "$defs": {
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step", "gaps"],
+      "properties": {
+        "step": {"type": "integer", "minimum": 1},
+        "gaps": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/gap"}
+        }
+      }
+    },
+    "gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gap", "harm", "why", "default"],
+      "properties": {
+        "gap": {"type": "string", "minLength": 1},
+        "harm": {"type": "string", "minLength": 1, "enum": ["high", "medium", "low"]},
+        "why": {"type": "string", "minLength": 1},
+        "default": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
+```
+
+Each step entry names its step number and a list of gaps. Empty gap lists
+and an empty `steps` list are valid for the schema. Every expected step
+must still have a valid entry. Strings must contain at least one character;
+whitespace counts as a character. Step numbers must be integers at least
+1; JSON numbers such as `1.0` count as integers, and booleans do not.
+No object may have keys beyond those in the schema.
+
+The reader tries the whole reply as JSON, then the last backtick code block
+(unlabelled or labelled `json`), then the span from the
+first `{` to the last `}`. The first candidate that parses as an object is
+used. If it fails the schema, each independently valid step entry is kept;
+an entry with an invalid gap is discarded in full.
+
+Duplicate step entries are joined. Covered steps appear in plan order.
+Gaps within each step and in `ranked` sort by `high`, `medium`, `low`,
+keeping reply order within each harm. `counts` counts only gaps for known
+steps. `uncovered_steps` follows plan order; `unknown_steps` lists unknown
+numbers once, in numeric order. Unknown steps are excluded from `steps`,
+`ranked` and `counts`.
+
+`parse_error` is null when the reply matches the schema and covers exactly
+the expected steps. Otherwise it uses these message forms:
+
+- `the reply is not a JSON object`
+- `the reply does not match the schema at <path>: <message>`
+- `the reply misses step <numbers>`
+- `the reply names step <numbers>, which the plan does not have`
+- `the run produced no reply` when a run has no reply file
+
+A schema path starts at `$`, with fields and zero-based array indices,
+for example `$.steps[2].gaps[0].harm`. Schema messages are `expected an
+object`, `missing required key '<key>'`, `unexpected key '<key>'`,
+`expected an array`, `expected an integer`, `expected an integer at least
+1`, `expected a string`, `expected a non-empty string`, or `expected one
+of high, medium, low`. The first schema error is reported: object type,
+required keys in schema order, extra keys in alphabetical order, then
+fields and list entries in order. Step and gap fields follow their schema
+order. Schema, missing-step and unknown-step problems are joined with
+`; ` in that order; number lists use `, `. A reply with no JSON object
+reports only that error and leaves every step uncovered.
+
 ## `emb ground`
 
 Prints, in one call, what Claude reads before choosing a worker: the machine,
