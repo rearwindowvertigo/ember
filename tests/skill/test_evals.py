@@ -421,15 +421,34 @@ def test_merge_merges_and_cleans_up(tmp_path: Path, env: dict[str, str]) -> None
     refused = work.emb("merge", branch, "--into", "claude/report-since")
     assert refused.returncode == 64
     missing = work.emb(
-        "merge", "nope", "--into", "claude/report-since", "--verdict", "keep"
+        "merge",
+        "nope",
+        "--into",
+        "claude/report-since",
+        "--verdict",
+        "keep",
+        "--note",
+        "Keep",
     )
     assert missing.returncode == 65
-    result = work.emb(
+    unnoted = work.emb(
         "merge", branch, "--into", "claude/report-since", "--verdict", "keep"
+    )
+    assert unnoted.returncode == 64 and "--note" in unnoted.stderr
+    result = work.emb(
+        "merge",
+        branch,
+        "--into",
+        "claude/report-since",
+        "--verdict",
+        "keep",
+        "--note",
+        "Keep",
     )
     assert result.returncode == 0, result.stderr
     merge = work.git("rev-parse", "HEAD")
     assert result.stdout == (
+        "Verdict: Keep\n"
         f"merged {branch} at {tip} into claude/report-since: {merge}\n"
         f"removed {branch}: closed {run_id}; removed worktree {worktree}; "
         f"deleted at {tip}\n"
@@ -452,10 +471,17 @@ def test_merge_keeps_a_dirty_worktree(tmp_path: Path, env: dict[str, str]) -> No
     _, branch, worktree = start(work)
     assert (worktree / "tools" / "__pycache__" / "report.cpython-314.pyc").is_file()
     result = work.emb(
-        "merge", branch, "--into", "claude/report-since", "--verdict", "keep"
+        "merge",
+        branch,
+        "--into",
+        "claude/report-since",
+        "--verdict",
+        "keep",
+        "--note",
+        "Keep",
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines()[1] == (
+    assert result.stdout.splitlines()[2] == (
         f"kept {branch}: the worktree {worktree} has changes; "
         f"next: git -C {worktree} status --short"
     )
@@ -465,9 +491,16 @@ def test_merge_keeps_a_dirty_worktree(tmp_path: Path, env: dict[str, str]) -> No
         f"Merge branch '{branch}' into claude/report-since"
     )
     again = work.emb(
-        "merge", branch, "--into", "claude/report-since", "--verdict", "keep"
+        "merge",
+        branch,
+        "--into",
+        "claude/report-since",
+        "--verdict",
+        "keep",
+        "--note",
+        "Keep",
     )
-    assert again.stdout.startswith(f"already contained: {branch} at ")
+    assert again.stdout.startswith(f"Verdict: Keep\nalready contained: {branch} at ")
 
 
 def test_merge_refuses_a_dirty_target(tmp_path: Path, env: dict[str, str]) -> None:
@@ -475,7 +508,14 @@ def test_merge_refuses_a_dirty_target(tmp_path: Path, env: dict[str, str]) -> No
     _, branch, _ = start(work)
     (work.work / "notes.txt").write_text("mine\n")
     result = work.emb(
-        "merge", branch, "--into", "claude/report-since", "--verdict", "keep"
+        "merge",
+        branch,
+        "--into",
+        "claude/report-since",
+        "--verdict",
+        "keep",
+        "--note",
+        "Keep",
     )
     assert result.returncode == 75
     assert result.stderr.splitlines()[-1] == f"next: git -C {work.work} status --short"
@@ -826,7 +866,16 @@ def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) ->
     assert all(task["status"] == "merged" for task in report["tasks"])
     assert report["next"] + "\n" == watch.stderr
     tip = work.git("rev-parse", branch)
-    merged = work.emb("merge", branch, "--into", f"claude/{name}", "--verdict", "keep")
+    merged = work.emb(
+        "merge",
+        branch,
+        "--into",
+        f"claude/{name}",
+        "--verdict",
+        "keep",
+        "--note",
+        "Keep",
+    )
     assert merged.returncode == 0, merged.stderr
     assert (
         f"removed {branch}: removed worktree {tree}; deleted at {tip}" in merged.stdout
@@ -901,7 +950,14 @@ def test_flow_cleanup_keeps_dirty_worktree(tmp_path: Path, env: dict[str, str]) 
     extra = tree / "untracked.txt"
     extra.write_text("kept\n")
     merged = work.emb(
-        "merge", branch, "--into", "claude/flow-gap-check-first", "--verdict", "keep"
+        "merge",
+        branch,
+        "--into",
+        "claude/flow-gap-check-first",
+        "--verdict",
+        "keep",
+        "--note",
+        "Keep",
     )
     assert merged.returncode == 0, merged.stderr
     assert f"kept {branch}: the worktree {tree} has changes" in merged.stdout

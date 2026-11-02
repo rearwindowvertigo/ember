@@ -991,13 +991,19 @@ def merge(args: list[str], state: dict[str, Any], variables: dict[str, str]) -> 
         word
         for index, word in enumerate(args)
         if not word.startswith("-")
-        and (index == 0 or args[index - 1] not in ("--into", "--verdict", "--dir"))
+        and (
+            index == 0
+            or args[index - 1] not in ("--into", "--verdict", "--note", "--dir")
+        )
     ]
     branch = words[0] if words else None
     target = option(args, "--into")
     usage = "next: emb merge --help"
     if branch is None or target is None:
         return merge_failure(64, "give a branch and --into TARGET", usage)
+    note = (option(args, "--note") or "").strip()
+    if not note or "\n" in note:
+        return merge_failure(64, "the following arguments are required: --note", usage)
     if option(args, "--verdict") != "keep":
         return merge_failure(
             64, "only a keep verdict merges; nothing was changed", usage
@@ -1048,6 +1054,8 @@ def merge(args: list[str], state: dict[str, Any], variables: dict[str, str]) -> 
             "--no-edit",
             "-m",
             message,
+            "-m",
+            f"Ember-Verdict: {note}",
             f"refs/heads/{branch}",
             check=False,
         )
@@ -1060,7 +1068,7 @@ def merge(args: list[str], state: dict[str, Any], variables: dict[str, str]) -> 
             )
         commit = out(worktree, "rev-parse", "HEAD")
         first = f"merged {branch} at {tip} into {target}: {commit}"
-    lines = [first, cleanup_branch(repo, branch, state)]
+    lines = [f"Verdict: {note}", first, cleanup_branch(repo, branch, state)]
     return Reply(0, "\n".join(lines) + "\n")
 
 

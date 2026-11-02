@@ -196,7 +196,8 @@ options:
   --dir DIR   the folder to read (default: the current one)
   --json      print JSON
 ==> emb merge --help <==
-usage: emb merge [-h] --into TARGET [--verdict VERDICT] [--dir DIR] [--json]
+usage: emb merge [-h] --into TARGET [--verdict VERDICT] --note TEXT
+                 [--dir DIR] [--json]
                  BRANCH
 
 Merge a reviewed branch into a local branch with a merge commit, in the
@@ -211,6 +212,8 @@ options:
   -h, --help         show this help message and exit
   --into TARGET      the branch to merge into
   --verdict VERDICT  the lead's verdict; only keep merges
+  --note TEXT        the verdict line, printed first and kept in the merge
+                     commit
   --dir DIR          a folder in the git checkout
   --json             print JSON
 ==> emb cleanup --help <==

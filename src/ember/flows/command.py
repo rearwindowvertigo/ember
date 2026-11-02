@@ -771,14 +771,15 @@ def _next(flow: Mapping[str, Any], event: str, code: int | None, live: bool) -> 
             return (
                 "next: fix the flow branch "
                 f"(an emb run on {shlex.quote(flow['worktree'])}, "
-                f"then emb merge <its branch> --into {branch} --verdict keep), "
+                f"then emb merge <its branch> --into {branch} --verdict keep "
+                "--note '<verdict line>'), "
                 f"then emb flow --resume {flow_id}"
             )
         return f"next: emb flow --status {flow_id}"
     prefix = "report the unmerged tasks to the owner; " if code else ""
     return (
         f"next: {prefix}review {branch}, then emb merge {branch} --into <your branch> "
-        f"--verdict keep --dir {shlex.quote(flow['dir'])}"
+        f"--verdict keep --note '<verdict line>' --dir {shlex.quote(flow['dir'])}"
     )
 
 

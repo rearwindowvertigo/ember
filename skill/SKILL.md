@@ -308,14 +308,16 @@ owner's work. Report runs parked and runs left open, with reasons.
 
 ### 9. Merge, clean up and finish
 
-Write the verdict line, such as `Verdict: Keep.`, as reply text in the
-same message as the merge call and before it; a verdict only in thinking
-does not count. Then run `emb merge` as its own Bash call, with no other command chained before
-or after it; do the same after a correction. Merge only Keep or Keep-with-fix work into
-the session branch:
+Give the verdict line as `--note`, such as `--note 'Keep, with a docstring
+fix'`. `emb merge` prints it as `Verdict: <note>` before the merge and keeps
+it as a trailer on the merge commit, so the owner sees it with the merge.
+Repeat the same verdict in the step 8 report. Run `emb merge` as its own
+Bash call, with no other command chained before or after it; do the same
+after a correction. Merge only Keep or Keep-with-fix work into the session
+branch:
 
 ```bash
-emb merge <branch> --into <session branch> --verdict keep
+emb merge <branch> --into <session branch> --verdict keep --note '<verdict line>'
 ```
 
 A Keep verdict needs no question to the owner. Do not merge while the
@@ -333,7 +335,7 @@ it. What happens to it is the owner's decision.
 
 | Exit of `emb merge` or `emb cleanup` | Response |
 |---|---|
-| 64 | Fix the call; `emb merge` needs `--verdict keep` and two different branches. |
+| 64 | Fix the call; `emb merge` needs `--verdict keep`, a one-line `--note` and two different branches. |
 | 65 | Run it inside the checkout, with branches that exist. |
 | 70 | A git command failed; a merge already made stays. Report the message and the `next:` line. |
 | 75 | Refused: the target is checked out nowhere, is mid-merge, mid-rebase, mid-cherry-pick or mid-revert, has changes, or the merge conflicted and was aborted. Report it; do not retry or force it. After a conflict, ask the owner: a new run cut from the updated session branch redoes the work, or the owner resolves it. Keep the claim open until then. |

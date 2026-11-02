@@ -1479,7 +1479,7 @@ Retained abandoned branches print separately.
 At a lead stop the action says to report every stop and choice to the
 owner, then watch again if a runner is live; otherwise an answer starts
 the runner. At a successful end it says to review the flow branch and run
-`emb merge <flow branch> --into <your branch> --verdict keep --dir <dir>`.
+`emb merge <flow branch> --into <your branch> --verdict keep --note '<verdict line>' --dir <dir>`.
 An end with unmerged tasks first says to report them to the owner. A failed
 pending check says to fix the flow branch with an `emb run` and merge,
 then resume. Other failures name `--status`; runner loss names `--resume`.
@@ -1995,13 +1995,18 @@ Managed settings are not read.
 ## `emb merge`
 
 ```
-emb merge BRANCH --into TARGET --verdict keep [--dir DIR] [--json]
+emb merge BRANCH --into TARGET --verdict keep --note TEXT [--dir DIR] [--json]
 ```
 
 Merges a reviewed branch into a local branch, then cleans it up as
 `emb cleanup --merged-into TARGET --branch BRANCH` does. `DIR` is a folder in
 the git checkout; the default is the current folder.
 
+- `--note TEXT` is the lead's verdict line, such as `Keep, with a docstring
+  fix`. It is required, and it must be one non-blank line (64 otherwise).
+  The output starts with `Verdict: TEXT`, before the merge line, also when
+  the branch is already contained. A merge commit carries it as the trailer
+  `Ember-Verdict: TEXT`, and `--json` gives it as `note`.
 - Without `--verdict keep` it changes nothing and exits 64.
 - `BRANCH` and `TARGET` must be existing local branches (65), and different
   (64).
@@ -2043,6 +2048,7 @@ the same rules.
 |---|---|
 | `branch` | `BRANCH` |
 | `target` | `TARGET` |
+| `note` | `TEXT` from `--note` |
 | `merge_commit` | The merge commit; null when the branch was already contained |
 | `contained_before` | Whether the branch was already contained |
 | `cleanup` | The cleanup's list, as `emb cleanup --json` prints it |
@@ -2202,7 +2208,7 @@ Everything else is kept, with a reason and what resolves it:
 |---|---|---|
 | `TARGET` itself | `the merge target` | `next: emb cleanup --merged-into <the branch it was merged into>` |
 | A branch that is not a run branch (with `--branch`) | `not an Ember run branch` | `next: git branch -d BRANCH` |
-| A branch not contained | `not contained in TARGET` | `next: emb merge BRANCH --into TARGET --verdict keep (after a Keep verdict)` |
+| A branch not contained | `not contained in TARGET` | `next: emb merge BRANCH --into TARGET --verdict keep --note '<verdict line>' (after a Keep verdict)` |
 | A flow branch whose runner is live | `the flow <id> is running` | `next: emb flow --status <id>` |
 | A flow branch whose runner lock cannot be checked | The lock error | `next: emb flow --status <id>` |
 | A run record that is not this branch's | `the run record <run> is not this branch's: ...` | `next: emb run --status <run>` |

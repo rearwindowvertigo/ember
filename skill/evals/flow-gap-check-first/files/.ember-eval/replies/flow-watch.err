@@ -1,1 +1,1 @@
-next: review the flow branch and run emb merge ember/flow/{{FLOW}} --into <your branch> --verdict keep --dir {{DIR}}
+next: review the flow branch and run emb merge ember/flow/{{FLOW}} --into <your branch> --verdict keep --note '<verdict line>' --dir {{DIR}}

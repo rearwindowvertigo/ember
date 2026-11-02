@@ -50,5 +50,5 @@
   ],
   "stops": [],
   "abandoned": [],
-  "next": "next: review the flow branch and run emb merge ember/flow/{{FLOW}} --into <your branch> --verdict keep --dir {{DIR}}"
+  "next": "next: review the flow branch and run emb merge ember/flow/{{FLOW}} --into <your branch> --verdict keep --note '<verdict line>' --dir {{DIR}}"
 }

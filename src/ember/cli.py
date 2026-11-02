@@ -354,9 +354,22 @@ def _add_merge(parser: argparse.ArgumentParser) -> None:
         "--verdict", metavar="VERDICT", help="the lead's verdict; only keep merges"
     )
     parser.add_argument(
+        "--note",
+        required=True,
+        type=_one_line,
+        metavar="TEXT",
+        help="the verdict line, printed first and kept in the merge commit",
+    )
+    parser.add_argument(
         "--dir", default=".", metavar="DIR", help="a folder in the git checkout"
     )
     parser.add_argument("--json", action="store_true", help="print JSON")
+
+
+def _one_line(text: str) -> str:
+    if not text.strip() or "\n" in text or "\r" in text:
+        raise argparse.ArgumentTypeError(f"{text!r} is not one non-blank line")
+    return text.strip()
 
 
 def _whole_days(text: str) -> int:
@@ -957,6 +970,7 @@ def main(
             args.branch,
             args.into,
             args.verdict,
+            note=args.note,
             directory=args.dir,
             as_json=args.json,
             env=env,

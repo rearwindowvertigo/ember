@@ -63,6 +63,9 @@ ACTIONS = (REMOVED, KEPT, WOULD_REMOVE)
 NOT_WORKER = "not an Ember run branch"
 """The reason a branch that is not a worker branch is kept."""
 
+VERDICT_TRAILER = "Ember-Verdict"
+"""The merge commit trailer that holds the lead's verdict line."""
+
 
 class BranchError(Exception):
     """A branch operation's exit, with its message and follow-up line."""
@@ -433,7 +436,9 @@ def _common(directory: str | Path, env: Mapping[str, str]) -> Path | None:
 
 
 def open_repository(
-    directory: str | Path, env: Mapping[str, str], command: str
+    directory: str | Path,
+    env: Mapping[str, str],
+    command: str,
 ) -> Repository:
     """Find the repository of a folder and its main checkout.
 
@@ -686,7 +691,7 @@ class Cleanup:
             raise _KeepError(
                 f"not contained in {self.target}",
                 f"next: emb merge {branch} --into {self.target} --verdict keep "
-                "(after a Keep verdict)",
+                "--note '<verdict line>' (after a Keep verdict)",
             )
         return tip, target_tip
 
@@ -993,7 +998,7 @@ def _check_no_operation(
                 f"the {target} tree at {worktree} has an unfinished {operation}",
                 f"next: git -C {worktree} status; finish or abort the "
                 f"{operation}, then emb merge {branch} --into {target} "
-                "--verdict keep",
+                "--verdict keep --note '<verdict line>'",
             )
 
 
@@ -1021,15 +1026,17 @@ def _merge_title(
             exits.WORKTREE_FAILED,
             f"git fmt-merge-msg failed in {worktree}: {_git_message(made)}",
             f"next: git -C {worktree} status, then emb merge {branch} --into "
-            f"{target} --verdict keep",
+            f"{target} --verdict keep --note '<verdict line>'",
         )
     return title
 
 
 def _merge(
-    repo: Repository, branch: str, target: str, worktree: Path
+    repo: Repository, branch: str, target: str, worktree: Path, note: str | None
 ) -> tuple[str | None, str]:
     """Merge `branch` into `target` in `worktree` unless it is contained.
+
+    A `note` is added to the merge commit as an `Ember-Verdict:` trailer.
 
     Returns:
         The merge commit, or `None` when the branch was contained, and the
@@ -1055,7 +1062,8 @@ def _merge(
             exits.REFUSED,
             f"the {target} tree at {worktree} is not clean: {', '.join(changed)}",
             f"next: git -C {worktree} status --short; commit or set aside those "
-            f"changes, then emb merge {branch} --into {target} --verdict keep",
+            f"changes, then emb merge {branch} --into {target} --verdict keep "
+            "--note '<verdict line>'",
         )
     merged = repo.git(
         "merge",
@@ -1063,6 +1071,7 @@ def _merge(
         "--no-edit",
         "-m",
         _merge_title(repo, branch, target, branch_tip, worktree),
+        *(("-m", f"{VERDICT_TRAILER}: {note}") if note is not None else ()),
         "--end-of-options",
         f"refs/heads/{branch}",
         cwd=worktree,
@@ -1094,7 +1103,7 @@ def _merge(
         exits.WORKTREE_FAILED,
         f"git merge failed, {target} at {repo.tip(target)}: {_git_message(merged)}",
         f"next: git -C {worktree} status, then emb merge {branch} --into {target} "
-        "--verdict keep",
+        "--verdict keep --note '<verdict line>'",
     )
 
 
@@ -1103,6 +1112,7 @@ def merge(
     target: str,
     verdict: str | None,
     *,
+    note: str | None = None,
     directory: str | Path = ".",
     as_json: bool = False,
     env: Mapping[str, str] | None = None,
@@ -1116,6 +1126,8 @@ def merge(
         branch: The branch to merge.
         target: The branch to merge into.
         verdict: The lead's verdict; only `keep` merges.
+        note: The lead's verdict line, printed first and kept as a trailer
+            on the merge commit; `None` prints and records none.
         directory: A folder in the git checkout.
         as_json: Print one JSON object.
         env: The environment; `None` reads `os.environ`.
@@ -1137,7 +1149,7 @@ def merge(
                 exits.USAGE,
                 f"{given} does not merge; only --verdict keep merges",
                 f"next: review {branch}, then emb merge {branch} --into {target} "
-                "--verdict keep",
+                "--verdict keep --note '<verdict line>'",
             ),
             err,
         )
@@ -1161,11 +1173,13 @@ def merge(
                     f"next: git -C {repo.top} branch --list",
                 )
         worktree = _target_worktree(repo, target)
-        commit, line = _merge(repo, branch, target, worktree)
+        commit, line = _merge(repo, branch, target, worktree, note)
     except BranchError as error:
         return _print_failure("merge", error, err)
     contained_before = commit is None
     if not as_json:
+        if note is not None:
+            print(f"Verdict: {note}", file=out)
         print(line, file=out, flush=True)
     job = Cleanup(
         repo,
@@ -1184,6 +1198,7 @@ def merge(
         document = {
             "branch": branch,
             "target": target,
+            "note": note,
             "merge_commit": commit,
             "contained_before": contained_before,
             "cleanup": [item.to_json() for item in job.results],
