@@ -307,7 +307,7 @@ class DependenciesScreen(QWidget):
         """
         report = self.context.deps()
         if report is None:
-            self.scroll_area.hide()
+            self._show_state()
             self.state_view.show_loading("Reading dependencies")
             self.context.refresh_deps(check_now=False)
             return
@@ -318,7 +318,7 @@ class DependenciesScreen(QWidget):
         """Read installed versions, and newest versions when due."""
         self._set_checking(True)
         if self.context.deps() is None:
-            self.scroll_area.hide()
+            self._show_state()
             self.state_view.show_loading("Reading dependencies")
         self.context.refresh_deps(check_now=True)
 
@@ -340,7 +340,7 @@ class DependenciesScreen(QWidget):
     def _failed(self, text: str) -> None:
         self._set_checking(False)
         if self.context.deps() is None:
-            self.scroll_area.hide()
+            self._show_state()
             self.subtitle.setText("")
             self.state_view.show_error(text, self.check_now)
             return
@@ -359,6 +359,11 @@ class DependenciesScreen(QWidget):
 
     # Drawing
 
+    def _show_state(self) -> None:
+        """Hide the tiles and give the state view the content area."""
+        self.scroll_area.hide()
+        self.state_view.show()
+
     def draw(self, report: deps.DepsReport) -> None:
         """Draw a report: the subtitle and one tile per component.
 
@@ -371,12 +376,13 @@ class DependenciesScreen(QWidget):
         self.groups = []
         groups = ordered(report)
         if not groups:
-            self.scroll_area.hide()
+            self._show_state()
             self.state_view.show_empty(
                 "package", "No components", "Ember lists no components to check."
             )
             return
         self.state_view.clear()
+        self.state_view.hide()
         content = QWidget()
         column = QVBoxLayout(content)
         column.setContentsMargins(0, 0, 0, 0)

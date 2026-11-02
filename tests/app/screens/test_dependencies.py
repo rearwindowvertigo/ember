@@ -242,6 +242,7 @@ def test_no_report_shows_loading_then_report(
     context._deps = report
     context.deps_changed.emit(report)
     assert not widget.state_view.loading.isVisible()
+    assert widget.state_view.isHidden()
     assert not widget.scroll_area.isHidden()
     assert "claude-desktop" in widget.tiles
 
@@ -290,7 +291,18 @@ def test_empty_report(
 ) -> None:
     widget, _context, _calls = _screen(env, qtbot, monkeypatch, _report())
     assert widget.state_view.empty.isVisible()
+    assert not widget.state_view.isHidden()
     assert widget.scroll_area.isHidden()
+
+
+def test_tiles_take_the_whole_content_area(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    widget, _context, _calls = _screen(env, qtbot, monkeypatch, _report(*SAMPLE))
+    widget.resize(1000, 800)
+    qtbot.waitUntil(lambda: widget.scroll_area.height() > 0, timeout=2000)
+    assert widget.state_view.isHidden()
+    assert widget.scroll_area.geometry().top() < 200
 
 
 def test_subtitle_counts() -> None:
