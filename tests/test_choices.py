@@ -151,6 +151,7 @@ def test_defaults(env: dict[str, str]) -> None:
         "single.writer_as": "cli",
         "single.reviewer": "ask",
         "single.reviewer_as": "cli",
+        "multi.runs_as": "ask",
         "sandbox.codex": "off",
         "sandbox.opencode": "off",
         "sandbox.claude": "off",
@@ -982,3 +983,67 @@ def test_opencode_shortlist_takes_tilde_provider_ids(tmp_path: Path) -> None:
     )
     answers = choices.read(env=env)["answers"]
     assert answers["single.writer"]["value"] == "opencode:~anthropic/claude-opus-latest"
+
+
+def test_multi_runs_as_default(env: dict[str, str]) -> None:
+    reply = choices.read(env=env)
+    assert reply["menu"]["multi.runs_as"] == {
+        "value": "ask",
+        "state": "ask",
+        "reason": "asks at each run",
+    }
+    assert choices.MENU_KEYS == ("single.writer", "single.reviewer")
+    assert choices.allowed_values(reply["answers"])["multi.runs_as"] == {
+        "values": ["ask", "flow", "workflow"],
+    }
+
+
+def test_multi_runs_as_layers(env: dict[str, str]) -> None:
+    choices.set_settings({"multi.runs_as": "flow"}, env=env)
+    assert choices.read(env=env)["menu"]["multi.runs_as"] == {
+        "value": "flow",
+        "state": "set",
+        "reason": None,
+    }
+    choices.set_once({"multi.runs_as": "workflow"}, env=env)
+    claimed = choices.claim("flow-choice-123", env=env)
+    assert claimed["menu"]["multi.runs_as"]["value"] == "workflow"
+    assert (
+        choices.read(id="flow-choice-123", env=env)["answers"]["multi.runs_as"]["layer"]
+        == "one-time"
+    )
+    requested = choices.read(
+        id="flow-choice-123", request={"multi.runs_as": "ask"}, env=env
+    )
+    assert requested["menu"]["multi.runs_as"]["state"] == "ask"
+    choices.finish("flow-choice-123", env=env)
+    assert choices.read(env=env)["menu"]["multi.runs_as"]["value"] == "flow"
+
+
+def test_multi_runs_as_invalid(env: dict[str, str]) -> None:
+    with pytest.raises(choices.InvalidChoiceError):
+        choices.set_settings({"multi.runs_as": "panel"}, env=env)
+    with pytest.raises(choices.InvalidChoiceError):
+        choices.set_once({"multi.runs_as": "panel"}, env=env)
+
+
+def test_flow_plan_schema_agreement(env: dict[str, str]) -> None:
+    from ember.flows import plan
+
+    schema = json.loads(plan.schema_text())
+    assert schema["$id"] == "ember/flow-plan/1"
+    assert schema["required"] == ["dir", "tasks"]
+    assert schema["properties"]["tasks"]["minItems"] == 1
+    assert schema["additionalProperties"] is False
+    definitions = schema["$defs"]
+    assert definitions["task"]["required"] == ["id", "task", "files"]
+    assert definitions["task"]["additionalProperties"] is False
+    assert definitions["worker"]["required"] == ["engine", "model"]
+    assert definitions["worker"]["additionalProperties"] is False
+    assert definitions["worker"]["properties"]["engine"]["enum"] == list(status.ENGINES)
+    fields = definitions["task"]["properties"]
+    assert fields["id"]["pattern"] == "^" + plan.TASK_ID + r"$(?![\s\S])"
+    assert fields["subject"]["maxLength"] == plan.SUBJECT_LIMIT
+    for key, minimum, maximum in (("rounds", 0, 3), ("parallel", 1, 8)):
+        assert schema["properties"][key]["minimum"] == minimum
+        assert schema["properties"][key]["maximum"] == maximum

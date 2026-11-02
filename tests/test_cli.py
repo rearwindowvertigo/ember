@@ -890,3 +890,28 @@ def test_other_commands_do_not_import_qt(tmp_path: Path) -> None:
         cwd=tmp_path,
     )
     assert result.stdout.splitlines()[-1] == "[]"
+
+
+def test_flow_help_and_order(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as result:
+        main(["flow", "--help"])
+    assert result.value.code == 0
+    output = capsys.readouterr().out
+    assert "--lead FLOW TASK" in output and "--resume FLOW" in output
+    with pytest.raises(SystemExit) as result:
+        main(["--help"])
+    assert result.value.code == 0
+    output = capsys.readouterr().out
+    assert output.index("gapcheck") < output.index("flow") < output.index("ground")
+
+
+def test_flow_unknown_option(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as result:
+        main(["flow", "--unknown"])
+    assert result.value.code == 64
+    assert "unrecognized arguments" in capsys.readouterr().err
+
+
+def test_flow_dispatch(env: dict[str, str], capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["flow", "--status", "bad-id"], env=env) == 64
+    assert "emb flow: invalid flow id" in capsys.readouterr().err

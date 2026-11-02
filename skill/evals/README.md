@@ -109,7 +109,7 @@ program a stub runs is git, on the case's own repository.
 from the repository top:
 
 ```
-for c in "" choices engines run gapcheck ground merge cleanup deps app skill "skill install" "skill uninstall" "skill status"; do
+for c in "" choices engines run gapcheck flow ground merge cleanup deps app skill "skill install" "skill uninstall" "skill status"; do
     echo "==> emb${c:+ $c} --help <=="
     COLUMNS=80 NO_COLOR=1 uv run --frozen emb $c --help
 done > skill/evals/_stubs/replies/help.out

@@ -103,8 +103,8 @@ and every sandboxed worker is denied them.
 ## C. Settings and choices
 
 C1. Standing settings: the worker menu (which engine, model and effort writes
-single tasks, which reviews; in 0.2.0 also how multi-task work runs and
-panel members),
+single tasks, which reviews; in 0.2.0 also how multi-task work runs
+(`multi.runs_as`: ask, a flow or a Claude Workflow) and panel members),
 per-engine on or off, model shortlists with efforts, worker network access,
 a sandbox switch per engine, the terminal that shows worker sessions and
 start at login.
@@ -183,9 +183,11 @@ session takes no typed messages.
 
 Target release: 0.2.0.
 
-F1. `emb flow --plan <file>` runs a JSON plan of tasks in waves by their
-`after` dependencies. Each task has a writer in an editing worktree and a
-read-only reviewer, up to two fix rounds, and a declared list of files.
+F1. `emb flow --plan <file> --start` runs a JSON plan of tasks in waves by
+their `after` dependencies. Each task has a writer in an editing worktree
+and a read-only reviewer, two fix rounds by default (zero to three), and a
+declared list of files. `--writer` and `--reviewer`, the plan, or the menu
+rows name the workers.
 
 F2. Accepted tasks merge into the flow's run branch, `ember/flow/<id>`. The
 plan's check command runs after each wave's merges.
@@ -193,13 +195,15 @@ plan's check command runs after each wave's merges.
 F3. A task that fails, stays unresolved or conflicts stops at a lead stop.
 Claude reports it to the owner with every available choice: send a
 correction, accept a reviewed commit, start a fresh review, use another
-worker, or drop the task.
+worker, or drop the task. Claude answers with `emb flow --lead`.
 
 F4. Reviews use one written review bar with three severities: must, should
 and lead.
 
-F5. `--dry-run`, `--start` in the background, `--watch --json` and
-`--status`.
+F5. `--dry-run` prints the waves and the gap check command. `--start`
+starts a runner in its own tmux session. `--watch --json` waits for a lead
+stop or the end, `--status` reads flow records, `--lead` queues an answer,
+and `--resume` starts another runner attempt.
 
 ## G. Panels
 

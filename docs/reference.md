@@ -48,6 +48,7 @@ empty list.
 | `shortlist.claude`, `shortlist.codex` | List of `<model>@<effort>`; model `[A-Za-z0-9][A-Za-z0-9._-]*`, effort `[a-z]+` | `[]` | standing |
 | `shortlist.opencode` | List of `<provider>/<model>`, with optional `@<effort>`; each part `[A-Za-z0-9][A-Za-z0-9._-]*`, the provider part may start with `~` and the model part may also contain `:` | `[]` | standing |
 | `single.writer`, `single.reviewer` | `ask`, or `<engine>:<model>` with the model on that engine's shortlist when saved | `ask` | request, one-time, standing |
+| `multi.runs_as` | `ask`, `flow`, `workflow` | `ask` | request, one-time, standing |
 | `single.writer_as`, `single.reviewer_as` | `cli`, `subagent` | `cli` | request, one-time, standing |
 | `sandbox.codex` | `on`, `off` | `on` when `bwrap` is on `PATH` or the `codex` on `PATH` has a bundled `bwrap`, else `off` | standing |
 | `sandbox.opencode`, `sandbox.claude` | `on`, `off` | `on` when `bwrap` is on `PATH`, else `off` | standing |
@@ -114,14 +115,19 @@ changes nothing leaves it.
       "value": "...", "state": "...", "engine": "...", "model": "...",
       "effort": "...", "run_as": "...", "reason": "..."
     },
-    "single.reviewer": {}
+    "single.reviewer": {},
+    "multi.runs_as": {"value": "ask", "state": "ask", "reason": "asks at each run"}
   }
 }
 ```
 
 `claim` is `null` without `--id`.
 
-Menu `state` is `set`, `ask`, `invalid`, `engine off`, `not connected` or
+`multi.runs_as` has only `value`, `state` (`set` or `ask`) and `reason`;
+it names no worker. `ask` has reason `asks at each run`; `flow` and
+`workflow` have state `set` and reason `null`.
+
+Worker menu `state` is `set`, `ask`, `invalid`, `engine off`, `not connected` or
 `not shortlisted`, checked in that order. `not connected` means the engine is
 on and its status in the cache of `emb engines` says it is not connected; its
 reason is `<engine> is not connected`. A read uses only that cache and never
@@ -483,7 +489,11 @@ lock. Changes to `run.json` are made under the run's record lock,
 ### Run records
 
 Each run has a folder `$XDG_STATE_HOME/ember/runs/<id>/` (default
-`~/.local/state/ember/runs/<id>/`), mode 700, holding:
+`~/.local/state/ember/runs/<id>/`), mode 700.
+The runs folder also holds flow folders, `runs/<flow id>/` (see
+`emb flow`); `--status` lists runs only.
+
+Each run folder holds:
 
 | File | Holds |
 |---|---|
@@ -809,6 +819,613 @@ existing reply exits 66. A successful turn with no reply file exits 81.
 | 81 | Invalid reply, missing or unknown steps, or a successful run without a reply file | `next: emb gapcheck --plan <plan> --reply <reply>` after fixing the reply, or a new check |
 | Other | The run's exit from the `emb run` table | The run's line, then a gap check action |
 
+## `emb flow`
+
+A flow runs a JSON plan of tasks in waves, in a runner's own session. Each
+task has a writer run and read-only review runs with fix rounds. Accepted
+tasks merge into `ember/flow/<id>`; the plan's check runs after each wave's
+merges. Tasks that need a decision produce lead stops. Claude answers the
+stops, reviews the flow branch and merges it with `emb merge`.
+
+### Options
+
+```text
+emb flow --plan FILE --dry-run [--writer W] [--reviewer W] [--claim ID] [--json]
+emb flow --plan FILE --start [--writer W] [--reviewer W] [--claim ID] [--stall MINUTES]
+emb flow --watch FLOW [--json]
+emb flow --status [FLOW] [--json]
+emb flow --lead FLOW TASK (--send FILE | --accept [--commit SHA] | --review [--reviewer W] | --worker W | --drop)
+emb flow --resume FLOW
+```
+
+| Option | Does |
+|---|---|
+| `--plan FILE` | Read the JSON plan; required with `--dry-run` or `--start` |
+| `--dry-run` | Validate the plan and workers, then print waves and a gap check command |
+| `--start` | Create the flow branch, worktree and records, then start the runner |
+| `--writer W`, `--reviewer W` | Name a worker as `<engine>:<model>[@<effort>]`; override the plan and menu |
+| `--claim ID` | Read choices with this claim; store it on the flow without creating or finishing a claim |
+| `--stall MINUTES` | With `--start`: minutes without screen changes before a task stops waiting; default 10 |
+| `--watch FLOW` | Wait for a lead stop or terminal outcome, using the shared watch cursor |
+| `--status [FLOW]` | Read one full record, or summaries of every flow, oldest first |
+| `--lead FLOW TASK` | Queue exactly one answer for a task |
+| `--send FILE` | Copy a nonblank UTF-8 correction for the existing writer |
+| `--accept` | Accept the current task branch tip without another review |
+| `--commit SHA` | With `--accept`: use this commit instead; resolve it to a full commit hash before queueing |
+| `--review` | Collect a running writer turn and request fresh reviews with a new fix budget |
+| `--reviewer W` | Also accepted with `--lead ... --review`; change this task's reviewer |
+| `--worker W` | Replace this task's writer and run its pipeline from the flow tip |
+| `--drop` | Drop the task; its dependants remain blocked |
+| `--resume FLOW` | Start another runner attempt for an idle, unfinished flow |
+| `--json` | Print JSON with `--dry-run`, `--watch` or `--status` |
+| `--help` | Print the options |
+
+Exactly one mode is required. `--plan`, `--writer` and `--claim` are
+accepted only with `--dry-run` or `--start`. Answer options require
+`--lead`, which accepts exactly one of `--send`, `--accept`, `--review`,
+`--worker` and `--drop`. Other combinations exit 64 before reading files.
+
+Validation reads the plan, checks that its directory exists and belongs to
+a checkout, resolves the base commit, reads the claim and settings, then
+resolves and checks both workers. All plan problems print together. A
+`gone` or `unknown` claim exits 64 even with explicit workers. The command
+resolves omitted effort from a matching set menu row, then the driver's
+default. Stored workers include `effort_frozen: true`; `null` effort denotes
+an engine default. Replacement-worker answers carry the same marker.
+
+Dry runs create no flow record, branch, worktree or session. The gap check
+command uses the resolved reviewer. Starting a flow does not run or require
+a gap check. A start requires tmux and a usable private runtime folder.
+A dirty source checkout is allowed; the flow starts from the base commit.
+
+Startup commands serialize through `lifecycle.lock` in the flow folder.
+`startup.json` records a timestamp and the last event sequence before the
+attempt. A reservation allows 30 seconds for the runner to take its lifetime
+lock. Concurrent starts of the same flow are refused during that interval.
+A resume refuses a live runner or a completed flow, removes an existing
+dead session, and starts a new session. A live session without a runner
+lock gets up to 10 seconds to end. Once its pane dies or the session ends,
+startup removes any dead session and launches the replacement. A session
+still running after the wait is kept and reported with exit 75. Module
+loading uses Python's `-I` mode and the absolute package root of the
+invoking Ember installation.
+
+### Plan
+
+A flow plan is a UTF-8 JSON object. The packaged schema is
+`ember/data/flow-plan.schema.json`, with id `ember/flow-plan/1`.
+Unknown keys are refused at every object level. Validation collects every
+problem before returning code 64. A missing, unreadable or non-UTF-8 plan
+file gives code 66; an empty or blank file gives 64. An empty `tasks` list
+is refused with code 64.
+
+| Field | Default | Rule |
+|---|---|---|
+| `schema_version` | Omitted | Integer `1` |
+| `dir` | Required | String starting with `/`; existence and checkout checks belong to the command |
+| `base` | `HEAD` | Non-blank string |
+| `trailers` | `[]` | List of non-blank strings without CR or LF |
+| `writer`, `reviewer` | Menu row | Objects with required `engine` and `model`, optional `effort`, and no other keys |
+| `rounds` | `2` | Integer from 0 to 3 |
+| `parallel` | `4` | Integer from 1 to 8; maximum concurrent jobs within a wave |
+| `check` | No check | Non-empty argv list of strings; first argument non-blank; no NUL in any argument |
+| `check_timeout` | `1800` | Integer seconds, at least 1 |
+| `context`, `failure_model` | `""` | Strings |
+| `read` | `[]` | List of strings starting with `/`, without duplicates |
+| `tasks` | Required | Non-empty list of task objects, in execution and merge order |
+
+Integers exclude booleans and JSON numbers written with a decimal point.
+Worker `engine` is `codex`, `opencode` or `claude`. The model is non-blank,
+contains no whitespace or `@`, and need not be shortlisted. Effort matches
+`[a-z]+`; its driver checks whether it accepts that effort.
+
+| Task field | Default | Rule |
+|---|---|---|
+| `id` | Required | Unique string matching `[a-z0-9][a-z0-9-]{0,39}` |
+| `subject` | `<id>: <first line of task>`, cut to 72 characters | Non-blank string without CR or LF, at most 72 characters; the writer brief's first line |
+| `task` | Required | Non-blank string |
+| `files` | Required | Non-empty list of unique relative POSIX paths; no leading slash, empty component, `.` component, `..` component or NUL |
+| `after` | `[]` | List of ids of other tasks; every id exists, no self dependency and no cycle |
+| `review` | `""` | String |
+
+Cycle diagnostics name the path, such as `cycle: a -> b -> a`.
+A wave takes eligible tasks greedily in plan order: all their dependencies
+have merged, and none of their declared files overlaps an already selected
+file. Equal paths and folder prefixes overlap; `src` overlaps `src/a.py`,
+but `src/a` does not overlap `src/ab.py`. The dry-run waves assume every
+preceding task merges. A wave can contain more than `parallel` tasks.
+
+Warnings do not refuse a plan:
+
+- `no failure_model; every unsettled case is a gap`
+- `no check; waves are merged without a check`
+- `<id>: <path> is a folder; list the files the task changes`, when the path
+  is a tree at `base`, read with `git cat-file -t`
+- `<id>: no test file in its files`, when no file is under `test` or `tests`,
+  starts with `test_`, or has a name matching `*_test.*`
+
+A failed or timed-out folder probe emits no folder warning. It does not
+change plan validation. Git probes omit checkout override variables and
+`EMBER_FLOW_RUNNER` from their environment.
+
+### Workers
+
+Each role resolves in this order: its `--writer` or `--reviewer` option,
+its plan object, then `single.writer` or `single.reviewer` in the choices
+reply. Options use `<engine>:<model>[@<effort>]`; model names may contain
+colons and slashes. The result records `engine`, `model`, `effort` and
+`source` (`option`, `plan`, `menu`, or `answer` for a lead answer).
+
+Menu resolution requires a readable settings source and a row in state
+`set`. A Claude row set to run as a subagent is refused: a flow runs CLI
+workers. These refusals give code 64 with an `owner:` line naming the
+role's explicit option and Menu screen. Explicit options and plan workers
+work when the rows are `ask`; they do not require a shortlist entry.
+
+The worker check requires its engine switch to be `on` (64), a connected
+engine (69), an available driver (69), and an accepted explicit effort
+(64). Connection status comes from the engine cache, or a status read
+when no usable cache exists. The connection error names the unmet
+requirement's fix when present.
+
+The flow record stores the selected workers. The runner passes model and
+effort to each run. A claim used to read choices is recorded on the flow;
+individual runs receive no claim. Worker resolution preserves an omitted
+effort as `null`; callers must freeze the effective effort before starting
+runs that could otherwise reread menu effort.
+
+### Runner
+
+The runner runs in a tmux session named `<flow id>` on Ember's private
+server. Attach with `tmux -S <socket> attach -t <flow id>`, using the same
+socket as `emb run`. It holds an exclusive lock at
+`$XDG_RUNTIME_DIR/ember/locks/<flow id>.lock` for its lifetime. A second
+runner exits 75. The runner releases the lock before ending its session;
+a crashed session remains available for inspection until resume replaces it.
+
+The runner shares `<flow folder>/lifecycle.lock` with command startup,
+resume and lead-answer enqueueing. It holds that lock from its final answer
+read until after releasing its lifetime lock. Every attempt outcome uses
+this handoff: completion, lead stops, provider halts, failed checks or
+merges, signals and unexpected errors. When that read finds unread answers,
+the runner takes them and continues before deciding whether to end. Valid
+answers clear a provider halt; pending checks run before further work.
+An answer queued during this handoff either reaches the runner before its
+final read or sees no live
+runner after acquiring the lifecycle lock. The runner releases the lifecycle
+lock before continuing when that read finds more answers, and never holds
+it during a wave. The command owns the `startup.json` reservation; the
+runner leaves that file unchanged.
+
+At each start the runner reloads the stored `plan.json`, refreshes the flow
+branch tip, clears the previous end time and provider halt, and records a
+new attempt. Events carry the attempt number. Worker effort is frozen
+before starting runs: the stored effort, otherwise the driver's default
+for the model. A driver without a default keeps `null`; runs do not fall
+back to the current menu's effort. Every writer and reviewer receives the
+stored model and effort, the plan's read paths, and no claim.
+
+Between waves the runner takes queued answers, recomputes dependency
+blocking, merges accepted tasks in plan order and runs the check when a
+merge is pending. It then selects the next wave of pending tasks with
+merged dependencies or an operation scheduled by a lead answer. File
+declarations select disjoint tasks in plan order. At most `parallel` jobs
+run at once; each job has its own Core and output streams. Every task
+state change is saved under the runner's record mutex. Dependencies are
+recomputed transitively after merges and before the runner ends.
+
+Each job starts a writer in a new editing run from the flow tip, checks its
+committed changes, and starts a fresh read-only review in the writer's
+worktree. The run id is saved as soon as Core prints it. Must findings
+within the round budget go back to the same writer as a fix message;
+another fresh review follows. Immediately before sending a correction the
+runner reads and saves the branch's actual tip, message file and target
+turn. It compares the resulting tip against that saved tip, including on
+recovery, and supplies it as the next review's fix base. Lead corrections
+start a fresh round budget. Brief artifact numbers increase per task across
+fresh budgets and replacement writers.
+
+An unchanged first turn stops with `the writer made no change`; an
+unchanged correction stops with `the fix made no change`. Changed paths
+include both sides of renames. A change to another task's declaration in
+the same wave stops before review with `changed <file>, which task <id> in
+this wave declares`. Other outside paths are recorded and sent to the
+reviewer. A failed run stops with Core's diagnostic and action line. An
+unlaunched captured writer stops with a worker-replacement instruction.
+Unreadable reviews, exhausted fix rounds, lead findings and fix verdicts
+without blocking findings stop as described under Reviews. Each stop
+emits a lead event with the available answer commands.
+
+Accepted heads merge one at a time through `emb merge`'s implementation.
+The branch tip must still equal the accepted or reviewed commit. A changed
+tip stops with `the branch moved from <commit> to <tip>`. Merge conflicts
+stop that task and leave the flow branch unchanged; other tasks continue.
+Other merge failures fail the flow. A completed merge is recorded even when
+its cleanup fails, with cleanup details kept separately. Equivalent changes
+already contained in the flow can have a null `merge_commit`. Cleanup
+closes writer runs without force and removes their merged branches and
+worktrees when allowed. A refused close retains the branch and worktree
+with the cleanup reason. Dropped and replaced branches stay in `abandoned`.
+
+The check runs once after a wave's merges in the flow worktree, in its own
+process group. Git, runs and checks receive the flow environment without
+`GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`,
+`GIT_OBJECT_DIRECTORY`, `GIT_NAMESPACE`, `GIT_PREFIX` or
+`EMBER_FLOW_RUNNER`. Each attempt writes a private
+`check-<wave>-<attempt>.log`; its check entry names that file, and its event
+contains the last 4000 characters. A timeout kills the process group and
+records exit 124; failure to start records 127. After a check, the runner
+resets and cleans the flow worktree. A failed check or cleanup fails the
+flow with `check_pending` retained. Resume reconciles any recorded check
+process, retries cleanup, and runs the check before further work. With no
+check command the runner clears `check_pending` and returns to `running`.
+
+Provider exit 73 stops the task and halts new runs. Active jobs finish;
+queued writers remain pending. The flow stops with
+`provider error on <engine>; new runs halted`. Resume clears that halt and
+continues pending work; the task that failed still needs a lead answer.
+Exit 124 stops with `stalled; the turn keeps running in <run>`;
+a lead review answer collects that turn before reviewing it. An explicit
+review answer reviews the branch's current tip against the task base even
+when the writer's last turn failed or left no reply. The tip must differ
+from the task base, and the usual changed-file checks still apply. The
+explicit request is persisted for recovery; automatic recovery of a failed
+writer turn still stops the task.
+
+SIGHUP and SIGTERM request shutdown without writing from the signal
+handler. The runner terminates an active check group, records `failed`
+with a resume instruction and an end event with exit 82, and releases its
+lock. Worker sessions remain. Each start aborts a recorded unfinished
+merge, resets and cleans the flow worktree, and reconciles merging tasks
+using the same containment rules as `emb merge`. Recovered merges set
+`check_pending`. Writer metadata comes from its run record; recovered
+turns receive the same change checks as uninterrupted turns. A missing
+review id starts a new review; a completed or closed review is read from
+its saved reply. Scheduled corrections reconcile the target turn before
+another send. Answer effects and their consumption marker are saved
+together, and pending closes can be repeated after a crash.
+
+A flow waiting on stopped or conflicting tasks ends `stopped`, with no
+end event. Otherwise it ends `done`, with end exit 0 when every task
+merged or 82 when some were dropped or remain blocked. Failed flows also
+emit end exit 82. Flow folders, check logs and briefs remain on disk.
+
+### Reviews
+
+Each flow review is a fresh read-only run in the writer's worktree. The
+review run is closed without `--force` after its reply is read. A refused
+close leaves the run open and is reported by the runner.
+
+The writer brief starts with the task's commit subject and preserves the
+task text as written. It lists the task's files, the other tasks' files in
+the wave, context and failure model when present, limits, the rule against
+running git, checks and closing report headings. Lead corrections also
+preserve their text as written.
+
+The review brief starts with `Review of task <id>, round <n>, in flow
+<flow id>: a read-only review; change no file.` It includes the task and
+subject, declared files and the other tasks' files, review focus, context,
+failure model, the base and head for `git diff` and `git log`, changed and
+outside files, and up to 20,000 characters of the writer's last report.
+It includes the review bar from `skill/SKILL.md` and the whole reply schema
+from `ember/data/review-reply.schema.json` (`ember/review-reply/1`). Pasted
+text in review briefs and generated fix messages is indented so it starts
+no line with `@`.
+
+The reviewer replies with one JSON object, no prose or code fence:
+
+```json
+{
+  "verdict": "fix",
+  "findings": [
+    {
+      "severity": "must",
+      "file": "src/parser.py",
+      "line": 12,
+      "problem": "An empty input raises an exception.",
+      "fix": "Return the empty result.",
+      "scenario": "An empty input file crashes the command.",
+      "earlier": null
+    }
+  ]
+}
+```
+
+The schema requires `verdict` (`pass` or `fix`) and a `findings` array,
+which may be empty. Each finding requires `severity` (`must`, `should` or
+`lead`), `file` (a non-empty string or null), `line` (an integer or null),
+`problem`, `fix` and `scenario` (strings), and `earlier` (an integer at least
+1 or null). `note` is an optional string set by normalization. The schema
+allows no other keys. The verdict is `fix` when a finding is `must` or
+`lead`.
+
+The reader tries the whole reply as JSON, the last backtick code block
+(unlabelled or labelled `json`), then the span from the first `{` to the
+last `}`. It uses the first candidate that parses as an object. A missing
+object, a verdict other than `pass` or `fix`, or findings other than an
+array makes the review unreadable. Extra keys are ignored by the reader.
+Findings are normalized individually:
+
+- A non-object becomes a finding whose problem is its JSON text.
+- An unknown severity becomes `must`.
+- `file` is kept only when it is a non-empty string. `line` is kept only
+  when it is an integer, excluding booleans; otherwise each is null.
+- `problem`, `fix` and `scenario` keep strings, use empty text for null,
+  and use JSON text for other values.
+- `earlier` is kept only when it is an integer from 1 through the number
+  of earlier must findings; otherwise it is null. Booleans do not count.
+- A `must` with no nonblank scenario becomes `should`, with
+  `note: "demoted: no scenario"`. A `lead` with no nonblank problem becomes
+  `should`, with `note: "demoted: no decision named"`. Other notes are empty.
+
+The decision uses normalized findings in this order: an unreadable review
+stops the task; any `must` with rounds left sends a fix turn to the same
+writer; any `must` without rounds left stops with `unresolved after <n> fix
+rounds`; any `lead` stops with `needs the lead`; verdict `pass` accepts;
+otherwise the task stops with `the review says fix but names no must or
+lead finding`. The round budget is the plan's `rounds`, including zero.
+
+A fix message starts with `Fix round <n> of task <id> in flow <flow id>.`
+It numbers only must findings, with location, problem, scenario and fix,
+and asks the writer to fix each or explain it under `Disputed`. It repeats
+the Git rule and closing report. Review rounds after the first include
+that earlier numbered must list and the fix diff; they check those
+findings and the fix only. A new must or lead must be caused by the fix.
+
+After a writer or fix turn, a changed file declared by another task in the
+same wave stops the task before review. Other changed files outside the
+task's declarations are recorded in `outside_files` and included in the
+review brief for the reviewer to judge.
+
+### Lead stops
+
+A failed writer or review, an unresolved review, a lead finding or a merge
+conflict stops the task. Other tasks may continue. Claude reports each stop
+to the owner with its findings and every available choice.
+
+| Task state | Accepted answers |
+|---|---|
+| `stopped`, with a branch | `send`, `accept`, `review`, `worker`, `drop` |
+| `stopped`, without a branch | `worker`, `drop` |
+| `conflict` | `worker`, `drop` |
+| `blocked` | `drop` |
+| Other | None |
+
+`--send` copies the correction to `answers/<n>.md` under the same lock
+that allocates its number and appends its answer. Intentional commands in
+the correction remain as written. The writer receives it, then gets a
+fresh review and fix budget. An unreadable correction exits 66; a blank
+correction exits 64.
+
+`--accept` records the task branch's tip at queue time, or the full commit
+resolved from `--commit`. Invalid or ambiguous commits exit 64 before an
+answer is appended. The runner checks the tip again before applying the
+answer and preserves that approved commit through merging; a moved tip is
+refused.
+
+`--review` collects any running writer turn before a fresh review budget.
+An optional reviewer applies to this task from then on. `--worker` closes
+the old writer without force, retains its branch, and starts a new writer
+from the flow tip. `--drop` closes the writer without force and retains its
+branch. Dropped tasks leave their dependants blocked. Retained branches
+are listed in the flow's `abandoned` field.
+
+Answers are queued, then taken between waves. The runner checks each
+answer again against the task's current state. A refused answer produces
+a lead stop naming its number and reason. An answer refused at queue time
+exits 75 and lists the allowed answers. Unknown flows or tasks exit 64;
+completed flows refuse answers with 75. With no live runner or pending
+startup, `--lead` starts a runner after queueing the answer. A launch
+failure leaves the queued answer available for `--resume`.
+
+### Flow records
+
+Flow folders share `$XDG_STATE_HOME/ember/runs/` with run folders. A flow id
+is `flow-<yyyymmdd>-<hhmmss>-<6 hex digits>`, with a UTC timestamp. Its folder
+is mode 700 and its record files are mode 600. Run listings skip flow ids;
+flow listings skip run ids and report unreadable flow records separately.
+Both listings sort oldest first.
+
+| File | Holds |
+|---|---|
+| `flow.json` | The flow record, replaced atomically; written at creation, then by the runner |
+| `plan.json` | The plan's original source text |
+| `events.jsonl` | Numbered event objects, one per line |
+| `answers.jsonl` | Numbered answer objects, one per line |
+| `answers/<n>.md` | Private copy of the correction for answer `n` |
+| `briefs/<task>-write-<n>.md`, `briefs/<task>-review-<n>.md`, `briefs/<task>-fix-<n>.md` | Writer briefs, review briefs and fix messages; artifact numbers increase across replacement writers and fresh round budgets |
+| Check logs | Each check attempt's output in a distinct file named by its `checks` entry |
+| `watch.json` | `{"seq": <last reported event>}` |
+| `watch.lock` | The watch command's lock across event selection, output and cursor advancement |
+| `cursor.lock` | Serializes cursor writes and prevents regression |
+| `events.jsonl.incomplete-<timestamp>`, `answers.jsonl.incomplete-<timestamp>` | Preserved incomplete tails removed before another append |
+
+The runner's lifetime lock is
+`$XDG_RUNTIME_DIR/ember/locks/<flow id>.lock`. Record saving does not acquire
+it; the runner serializes its writes. Creating an existing flow folder is
+refused. `save` updates `updated_at` and atomically replaces `flow.json`.
+
+| Flow field | Value |
+|---|---|
+| `id`, `plan` | Flow id and absolute source plan path |
+| `dir`, `main` | Checkout top and main checkout |
+| `base`, `tip` | Resolved base commit and current flow branch tip |
+| `branch`, `worktree` | `ember/flow/<id>` and `<main>/.ember/worktrees/<id>` |
+| `writer`, `reviewer` | Stored worker objects: `engine`, `model`, `effort`, `source` |
+| `rounds`, `parallel`, `check_timeout` | Plan limits |
+| `check`, `trailers`, `read` | Plan argv, commit trailers and readable paths; lists |
+| `stall_minutes` | Stall interval, default 10 |
+| `claim` | Claim id or null; information for the flow |
+| `status` | `starting`, `running`, `checking`, `stopped`, `failed` or `done` |
+| `reason` | Stop or failure reason, or null |
+| `wave` | Last wave started; initially 0 |
+| `check_pending` | Whether a merge lacks a durably recorded passing check |
+| `checks` | Entries with `wave`, `exit`, `log`, `at`; one per attempt |
+| `answers_seen` | Complete answer lines already consumed; initially 0 |
+| `halted` | Reason new runs are halted, or null |
+| `abandoned` | Retained branches from dropped or replaced writers |
+| `runner` | Last runner's `pid` and `started_at`, or null |
+| `started_at`, `updated_at`, `ended_at` | Epoch seconds; `ended_at` is null until an end |
+| `tasks` | Task records in plan order |
+
+| Task field | Value |
+|---|---|
+| `id`, `subject` | Plan values |
+| `status` | `pending`, `writing`, `reviewing`, `fixing`, `accepted`, `merging`, `merged`, `stopped`, `conflict`, `blocked` or `dropped` |
+| `reason` | Stop, conflict, blocking or drop reason, or null |
+| `wave` | Last wave used, or null |
+| `writer`, `reviewer` | Task-specific worker override, or null for the flow's worker |
+| `writer_run`, `reviewer_run` | Current writer and review run ids, or null |
+| `branch`, `worktree` | Writer branch and worktree, or null |
+| `task_base`, `head` | Starting flow tip and latest reviewed task head, or null |
+| `round` | Fix rounds in the current budget; initially 0 |
+| `reviews` | Entries with `round`, `run`, `verdict`, `must`, `should`, `lead`, `at`; verdict is `pass`, `fix` or `unreadable` |
+| `findings` | Latest findings and retained earlier `should` and `lead` findings |
+| `changed_files`, `outside_files` | Last turn's changed paths and paths outside its declarations |
+| `entry` | Next operation: `write`, `send`, `review` or null |
+| `answer` | Answer number being applied, or null |
+| `merge_tip`, `merge_commit` | Approved tip being merged and resulting merge commit, or null; containment may succeed without a merge commit |
+| `cleanup` | Cleanup result objects from the merge |
+
+Record loading checks required field types and status values. Additional
+fields are retained for runner recovery metadata. Each task starts with
+independent empty lists.
+
+Events have `seq` starting at 1, `at` in epoch seconds, and `kind`:
+
+| Kind | Fields |
+|---|---|
+| `flow` | `status`, `reason` |
+| `task` | `task`, `status`, `reason` |
+| `lead_stop` | `task` or null, `status`, `reason`, `choices` |
+| `check` | `wave`, `exit`, `log`, `output` |
+| `end` | `status`, `reason`, `exit` |
+
+Creation writes event 1 with kind `flow` and status `starting`. Event reads
+can start after a sequence number and skip unreadable complete lines.
+
+An answer has `n`, `at`, `task`, `kind`, `file`, `commit`, `worker`. Kinds are
+`send`, `accept`, `review`, `worker`, `drop`; optional values are null.
+`worker` uses the worker option syntax. The answer append function takes
+`flock` on `answers.jsonl`, allocates the number, copies a send source file
+to `answers/<n>.md`, and appends the object with that path, all under the
+same lock. Callers supply the source filename and do not allocate `n`.
+A missing or empty correction is not appended.
+
+Both logs use a single append write per complete line, followed by `fsync`.
+Readers ignore incomplete last lines. Before appending, a writer preserves
+any incomplete bytes in a private timestamped file and removes them from
+the log while holding its lock. An unreadable complete answer line returns
+`None` and still occupies a line number. Number allocation is greater than
+the complete line count and every stored valid number. Answer numbers also
+exceed every existing `answers/<n>.md` number, including copies left by an
+interrupted append. Correction copies are created exclusively and never
+replace an existing file. Cursor writes
+cannot decrease `seq`; a missing cursor reads as 0, a malformed cursor is
+an error.
+
+### Output
+
+Data goes to standard output; diagnostics and action lines go to standard
+error. `--dry-run` text prints the resolved writer and reviewer with their
+sources, the base commit, the check as shell words (or `none`), numbered
+waves with each task's declared files, and `gap check: <command>`.
+Warnings print as `WARNING: <text>`. JSON has `plan`, `dir`, `base`,
+`writer`, `reviewer`, `check`, `waves` (arrays of task ids), `warnings` and
+`gapcheck` (the shell command). Empty lists and zero finding counts remain
+in JSON.
+
+`--start` prints:
+
+```text
+flow <id>
+branch ember/flow/<id>
+worktree <path>
+```
+
+Its action line is `next: emb flow --watch <id> --json`. `--resume` prints
+`flow <id>`. `--lead` prints `queued answer <n>: <kind> for <task>`, then
+`flow <id>` when it starts a runner. Both end with the same watch action.
+
+`--watch` polls files once a second. It returns on an unread lead stop or
+the current attempt's terminal outcome. A missing runner in a nonterminal
+flow gives `runner_lost` after the startup grace period. A stopped flow
+without a runner returns immediately, including when its stop events were
+already read. A completed flow returns its current terminal outcome even
+when its end event was already read. Events before the latest startup or
+`flow running` event remain history and do not end a resumed watch.
+After a startup reservation, the stored status applies only when
+`runner.started_at` is at or after the reservation timestamp. If the new
+runner never writes its record and the reservation expires, watch reports
+`runner_lost` with exit 72, even if the previous attempt failed or stopped.
+
+Watchers share `watch.json`. A separate `watch.lock` serializes event
+selection, reporting and cursor advancement; the cursor advances only
+after output is flushed. An interrupted watch exits 74 without advancing
+its cursor. Repeated reports of an idle stopped flow describe current task
+states and choices without delivering the same event again.
+
+The JSON watch report contains:
+
+| Field | Value |
+|---|---|
+| `event` | `lead_stop`, `end` or `runner_lost` |
+| `flow`, `status`, `reason` | Flow id and current state |
+| `exit` | Null at a lead stop, 0 or 82 at the end, 72 when the runner is lost |
+| `branch`, `worktree`, `tip`, `dir` | Flow branch, worktree, tip and source checkout |
+| `tasks` | Task reports in plan order |
+| `stops` | Unread lead-stop events with their sequence, task, reason and available choices |
+| `abandoned` | Retained branches of dropped or replaced writers |
+| `next` | The action line, also printed on standard error |
+
+Each task report has `id`, `status`, `reason`, `round`, `writer_run`,
+`branch`, `worktree`, `merge_commit`, `outside_files`, `cleanup` and
+`choices` (the available `emb flow --lead` command forms). `findings`
+counts `must`, `should` and `lead`; `finding_details` holds the finding
+objects. Cleanup results retain the branch and reason when cleanup keeps
+work; the task report includes its worktree.
+
+Text reports print the flow state, one line per task with its reason,
+finding objects, choices, retained cleanup details and stop events.
+Retained abandoned branches print separately.
+
+At a lead stop the action says to report every stop and choice to the
+owner, then watch again if a runner is live; otherwise an answer starts
+the runner. At a successful end it says to review the flow branch and run
+`emb merge <flow branch> --into <your branch> --verdict keep --dir <dir>`.
+An end with unmerged tasks first says to report them to the owner. A failed
+pending check says to fix the flow branch with an `emb run` and merge,
+then resume. Other failures name `--status`; runner loss names `--resume`.
+
+`--status FLOW --json` prints `flow.json` plus `runner_live`. Text prints
+every top-level field except `tasks`, then each task's state and reason.
+`--status` alone lists flows oldest first as
+`<id>  <status>  <n>/<m> merged  <dir>`, or as JSON objects containing `id`,
+`status`, `reason`, `dir`, `branch`, `runner_live`, `merged` and `tasks`
+(the task count). An unreadable flow is skipped with
+`emb flow: skipped <error>` on standard error.
+
+### Exit codes
+
+| Code | Meaning | Action line |
+|---|---|---|
+| 0 | Dry run printed, flow started, answer queued, runner resumed, lead stop reported, or every task merged | Watch reports give their next action |
+| 1 | Unexpected error or unreadable settings database | `next: emb flow --status`; database errors name an owner action |
+| 64 | Invalid option combination, plan, flow, task, worker, commit or claim | `next: emb flow --help`, a worker's owner action, the claim action or `--status` |
+| 65 | The plan directory is not in a checkout | Repeat `--dry-run` with `dir` inside a checkout |
+| 66 | Unreadable plan or correction, or missing plan directory | `next: ls -l <path>` |
+| 69 | Missing git, tmux, engine or driver, disconnected engine, or unusable runtime folder | `owner:` naming the fix |
+| 70 | Flow branch or worktree creation failed | Prune worktrees, then repeat the start |
+| 71 | Runner session failed to start | `next: emb flow --resume <id>` |
+| 72 | Runner lost before the flow ended | `next: emb flow --resume <id>` |
+| 74 | Interrupted watch; cursor unchanged | `next: emb flow --watch <id> --json` |
+| 75 | Runner live or starting, answer not allowed, or flow already done | `--status` or `--watch` |
+| 82 | Flow failed, or ended with tasks unmerged | The watch report's next action |
+
+Every nonzero exit prints an `emb flow:` diagnostic or watch report and
+one `next:` or `owner:` line. Flow folders, queued answers and unmerged
+work remain after a startup failure.
+
 ## `emb ground`
 
 Prints, in one call, what Claude reads before choosing a worker: the machine,
@@ -905,6 +1522,13 @@ the git checkout; the default is the current folder.
 The cleanup's lines follow the first line. A branch that is not an Ember run
 branch is kept with `not an Ember run branch; next: git branch -d BRANCH`.
 
+A flow branch `ember/flow/<flow id>` follows the run-branch cleanup path
+without a run record, with its worktree at `.ember/worktrees/<flow id>` in
+the main checkout. Cleanup keeps it while the flow's runner is live, with
+`the flow <id> is running` and `next: emb flow --status <id>`. A task branch
+merged into a flow branch is merged in the flow worktree and cleaned up by
+the same rules.
+
 `--json` prints one object:
 
 | Field | Value |
@@ -931,6 +1555,13 @@ of `git worktree list`), also when `DIR` is in a linked worktree. No other
 branch is ever removed, and a read-only run, which has no branch, is never
 touched. Without `--branch` every run branch is handled; with it, only
 `BRANCH`.
+
+A flow branch `ember/flow/<flow id>` is a run branch with no run record;
+its worktree is `.ember/worktrees/<flow id>` in the main checkout. Before
+reading a run record, cleanup checks the flow's runner lock and keeps the
+branch when it is held or cannot be checked. With no live runner, the
+ordinary containment and worktree checks apply; `--dry-run` reports
+`would remove` when they pass. Flow records are kept.
 
 A branch is contained in `TARGET` when it is an ancestor of `TARGET`, or when
 merging it into `TARGET` gives no conflict and `TARGET`'s own tree, as after a
@@ -970,6 +1601,8 @@ Everything else is kept, with a reason and what resolves it:
 | `TARGET` itself | `the merge target` | `next: emb cleanup --merged-into <the branch it was merged into>` |
 | A branch that is not a run branch (with `--branch`) | `not an Ember run branch` | `next: git branch -d BRANCH` |
 | A branch not contained | `not contained in TARGET` | `next: emb merge BRANCH --into TARGET --verdict keep (after a Keep verdict)` |
+| A flow branch whose runner is live | `the flow <id> is running` | `next: emb flow --status <id>` |
+| A flow branch whose runner lock cannot be checked | The lock error | `next: emb flow --status <id>` |
 | A run record that is not this branch's | `the run record <run> is not this branch's: ...` | `next: emb run --status <run>` |
 | A run record that cannot be read | `cannot read the run record: ...` | `owner: repair or remove <the run.json file>` |
 | A branch checked out in another worktree | `checked out in <path>` | `next: git -C <path> switch --detach, then <the cleanup>` |
@@ -1530,7 +2163,7 @@ skill into Claude Code; `emb skill install` does.
 ## Exit codes
 
 These are the exit codes of `emb choices` and `emb engines`; `emb run`,
-`emb gapcheck`, `emb ground`, `emb merge`, `emb cleanup`, `emb deps`, `emb skill` and
+`emb gapcheck`, `emb flow`, `emb ground`, `emb merge`, `emb cleanup`, `emb deps`, `emb skill` and
 `emb app` have their own tables above.
 
 | Code | Meaning |
