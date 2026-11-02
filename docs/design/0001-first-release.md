@@ -321,7 +321,7 @@ missing items, each only when above zero.
 | Screen | Holds |
 |---|---|
 | Overview | Live runs; the last twenty finished runs; flows with their tasks, and panels with their members (0.2.0) |
-| Menu | The worker menu (C1) |
+| Menu | The worker menu (C1): single tasks, multi-task work and panel members |
 | Engines | One card per engine: logo, status, Use switch, sandbox switch, provider and checks; open for models, efforts and shortlists; OpenCode's OpenRouter model browser and filters; setup steps with copyable commands when not connected |
 | Dependencies | One tile per component, grouped (engines and apps, system tools, Ember's libraries): installed and newest version, status, and the update or install command; Claude Desktop installed and its version |
 | Settings | General: start at login, theme. Workers: worker network, terminal, sandbox read paths |
@@ -353,6 +353,8 @@ missing items, each only when above zero.
 - Menu holds the Writer and Reviewer pickers and, for a Claude model, how it
   runs (CLI or subagent). Each picker lists Ask each time, then the
   shortlisted models under their engine. Engines that are off are left out.
+  Multi-task work offers Ask each time, Flow and Claude Workflow. The Panel
+  card lists members with Add member and Remove, at most eight.
   One-time choices (C2) are not shown in the app.
 - Engines shows three cards side by side, each with the engine maker's logo.
   Models opens that engine's model list below the cards, with a switch per

@@ -1,4 +1,4 @@
-"""The Menu screen: which worker Claude uses for a single task (design C1, J2).
+"""The Menu screen: Single tasks, Work of several tasks and Panel cards.
 
 Two rows, Writer and Reviewer, each a picker of Ask each time and the
 shortlisted models of every engine that is on, under the engine's name. While
@@ -7,24 +7,36 @@ CLI or as a subagent. A saved value that the picker no longer offers stays
 chosen, with a warning saying why. A saved model whose engine was not
 connected shows a warning too, from the engine status the app read last, or
 from the snapshot's menu rows before the first read. Each change saves at
-once; choosing the value already saved saves nothing. One-time choices are
-not shown.
+once; choosing the value already saved saves nothing. Multi-task work chooses
+Ask each time, Flow or Claude Workflow. Panel lists up to eight members with
+Add member and Remove. Panel controls wait for a save and refresh before
+accepting another edit. One-time choices are not shown.
 """
 
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QGridLayout,
+    QHBoxLayout,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ember import choices
-from ember.app import widgets
+from ember.app import icons, theme, widgets
 from ember.app.screens.common import (
     ToneLine,
+    chain_tab_order,
+    clear_layout,
     engine_name,
     label,
     name_and_help,
     screen_header,
     scrolled,
+    titled_card,
 )
 
 if TYPE_CHECKING:
@@ -36,8 +48,20 @@ ENGINE_ORDER = ("codex", "opencode", "claude")
 ENGINE_LABELS = {engine: engine_name(engine) for engine in ENGINE_ORDER}
 """Each engine's shown name."""
 
-SUBTITLE = (
-    "Which worker Claude uses for a single task. Ask each time means Claude asks you."
+SUBTITLE = "Which workers Claude uses. Ask each time means Claude asks you."
+
+MULTI = (("ask", "Ask each time"), ("flow", "Flow"), ("workflow", "Claude Workflow"))
+MULTI_HELP = "How Claude runs two or more tasks that each need a worker."
+PANEL_HELP = "The models a panel asks when Claude is given no members."
+PANEL_LIMIT = 8
+ADD_MEMBER = "Add member"
+NO_MEMBERS = (
+    "No members. Claude asks for members, or uses the ones it is given, each time."
+)
+FULL = "A panel has at most eight members."
+ADD_BLOCKED = (
+    "Remove the members not on their shortlist, or shortlist them "
+    "in Engines, to add a member."
 )
 
 ROLES = (
@@ -64,7 +88,9 @@ def _split(value: object) -> tuple[str, str] | None:
     return engine, model
 
 
-def offered(answers: dict[str, Any]) -> list[tuple[str, list[tuple[str, str | None]]]]:
+def offered(
+    answers: Mapping[str, Any],
+) -> list[tuple[str, list[tuple[str, str | None]]]]:
     """Return what a picker offers besides Ask each time.
 
     Args:
@@ -89,6 +115,65 @@ def offered(answers: dict[str, Any]) -> list[tuple[str, list[tuple[str, str | No
 def option_text(model: str, effort: str | None) -> str:
     """Return a shortlisted model's text in a picker: `<model> · <effort>`."""
     return model if effort is None else f"{model} · {effort}"
+
+
+def member_text(row: Mapping[str, Any]) -> str:
+    """Return a panel member's engine, model and effort, or its saved value."""
+    if row["state"] != "set":
+        return str(row["value"])
+    return f"{engine_name(row['engine'])} · {option_text(row['model'], row['effort'])}"
+
+
+def member_warning(row: Mapping[str, Any]) -> str | None:
+    """Describe why a saved panel member cannot run and how to change it."""
+    engine = engine_name(str(row.get("engine")))
+    match row["state"]:
+        case "engine off":
+            return f"{engine} is off. Turn it on in Engines or remove this member."
+        case "not connected":
+            return (
+                f"{engine} was not connected when last checked. Set it up in "
+                "Engines or remove this member."
+            )
+        case "not shortlisted":
+            return (
+                f"{row['model']} is not on the {engine} shortlist. Shortlist it "
+                "in Engines or remove this member."
+            )
+        case "invalid":
+            return f"{row['value']} is not a worker Ember knows. Remove this member."
+    return None
+
+
+def addable(
+    answers: Mapping[str, Any], members: Sequence[str]
+) -> list[tuple[str, list[tuple[str, str | None]]]]:
+    """Return offered models excluding the panel's saved members."""
+    result = []
+    for engine, models in offered(answers):
+        remaining = [
+            (model, effort)
+            for model, effort in models
+            if f"{engine}:{model}" not in members
+        ]
+        if remaining:
+            result.append((engine, remaining))
+    return result
+
+
+def blocks_save(answers: Mapping[str, Any], members: Sequence[str]) -> list[str]:
+    """Return members missing from their shortlists, even when engines are off."""
+    blocked = []
+    for member in members:
+        parts = _split(member)
+        if parts is None:
+            continue
+        engine, model = parts
+        if model not in choices.shortlist_models(
+            engine, answers[f"shortlist.{engine}"]["value"]
+        ):
+            blocked.append(member)
+    return blocked
 
 
 def orphan(value: object, answers: dict[str, Any]) -> tuple[str, str] | None:
@@ -140,7 +225,7 @@ class _Role:
 
 
 class MenuScreen(QWidget):
-    """The Menu screen: which worker Claude uses for a single task."""
+    """The standing choices for single tasks, multi-task work and panels."""
 
     TITLE = "Menu"
 
@@ -155,9 +240,10 @@ class MenuScreen(QWidget):
         layout = scrolled(self)
         screen_header(layout, self.TITLE, SUBTITLE)
 
-        card = widgets.Card()
-        grid = QGridLayout(card)
-        grid.setContentsMargins(20, 20, 20, 20)
+        card, column = titled_card("Single tasks")
+        grid = QGridLayout()
+        column.addLayout(grid)
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(24)
         grid.setVerticalSpacing(16)
         grid.setColumnStretch(0, 1)
@@ -202,11 +288,49 @@ class MenuScreen(QWidget):
         self.open_engines.clicked.connect(lambda: context.show_screen("engines"))
         empty_layout.addWidget(self.open_engines)
         layout.addWidget(self.empty)
+
+        multi_card, multi_layout = titled_card("Work of several tasks")
+        multi_row = QHBoxLayout()
+        multi_row.addWidget(name_and_help("Multi-task work", MULTI_HELP), 1)
+        self.multi = widgets.Segmented(MULTI)
+        self.multi.setAccessibleName("Multi-task work")
+        self.multi.changed.connect(self._multi_picked)
+        multi_row.addWidget(self.multi)
+        multi_layout.addLayout(multi_row)
+        layout.addWidget(multi_card)
+
+        panel_card, panel_layout = titled_card("Panel")
+        panel_layout.addWidget(label(PANEL_HELP, "secondary"))
+        self.members_layout = QVBoxLayout()
+        panel_layout.addLayout(self.members_layout)
+        self.member_removes: dict[str, QPushButton] = {}
+        self._panel_pending = False
+        self._panel_refresh = False
+        self._panel_refresh_failed = False
+        self._remove_blocker: str | None = None
+        self.remove_warning = ToneLine("warning")
+        panel_layout.addWidget(self.remove_warning)
+        self.remove_all = widgets.button("Remove all", "secondary", size="sm")
+        self.remove_all.clicked.connect(lambda: self._save_panel([]))
+        panel_layout.addWidget(self.remove_all, 0, Qt.AlignmentFlag.AlignLeft)
+        self.add_warning = ToneLine("warning")
+        panel_layout.addWidget(self.add_warning)
+        self.full = label(FULL, "secondary")
+        panel_layout.addWidget(self.full)
+        self.add_member = widgets.Picker()
+        self.add_member.setAccessibleName("Add panel member")
+        self.add_member.setMinimumWidth(280)
+        self.add_member.activated.connect(self._add_member)
+        panel_layout.addWidget(self.add_member, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(panel_card)
         layout.addStretch(1)
 
-        context.settings_changed.connect(self._redraw)
+        context.settings_changed.connect(self._settings_changed)
         context.engines_changed.connect(self._redraw)
-        context.error.connect(self._redraw)
+        context.error.connect(self._save_failed)
+        context.stale.connect(self._panel_done)
+        context.settings_failed.connect(self._settings_failed)
+        theme.signals.changed.connect(self._draw_icons)
         self._redraw()
 
     def shown(self) -> None:
@@ -224,6 +348,131 @@ class MenuScreen(QWidget):
         menu = self.context.settings().get("menu") or {}
         for controls in self.roles.values():
             self._fill(controls, answers, groups, menu.get(controls.key) or {})
+        multi = menu.get("multi.runs_as") or choices.runs_as_row(answers)
+        panel = menu.get("panel.members") or choices.panel_row(answers)
+        engines = self.context.engines()
+        if engines is not None:
+            connected = {name: item.connected for name, item in engines.items()}
+            panel = choices.panel_row(answers, connected)
+            multi = choices.runs_as_row(answers)
+        self.multi.set_value(multi["value"])
+        self._fill_panel(answers, panel)
+        self._chain_focus()
+
+    def _fill_panel(self, answers: dict[str, Any], panel: dict[str, Any]) -> None:
+        """Draw saved members and the available additions from the snapshot."""
+        clear_layout(self.members_layout)
+        self.member_removes = {}
+        members = panel["value"]
+        if not members:
+            self.members_layout.addWidget(label(NO_MEMBERS, "secondary"))
+        for member in panel["members"]:
+            row = QWidget()
+            line = QHBoxLayout(row)
+            line.setContentsMargins(0, 0, 0, 0)
+            text = member_text(member)
+            title = label(text)
+            title.setTextFormat(Qt.TextFormat.PlainText)
+            line.addWidget(title, 1)
+            remove = widgets.button("", "ghost", size="sm")
+            remove.setAccessibleName(f"Remove {text}")
+            remove.setToolTip(f"Remove {text}")
+            value = member["value"]
+            remove.clicked.connect(
+                lambda _checked=False, value=value: self._remove_member(value)
+            )
+            remove.setEnabled(not self._panel_pending)
+            line.addWidget(remove)
+            self.members_layout.addWidget(row)
+            self.member_removes[value] = remove
+            warning = ToneLine("warning")
+            self.members_layout.addWidget(warning)
+            warning.show_text(member_warning(member))
+        self._draw_icons()
+        blocked = blocks_save(answers, members)
+        if self._remove_blocker not in blocked:
+            self._remove_blocker = None
+        warning_text = None
+        if self._remove_blocker is not None:
+            model = self._remove_blocker.partition(":")[2]
+            warning_text = (
+                f"Shortlist {model} in Engines, or remove every member "
+                "not on its shortlist."
+            )
+        self.remove_warning.show_text(warning_text)
+        self.remove_all.setVisible(warning_text is not None)
+        self.remove_all.setEnabled(not self._panel_pending)
+        self.add_warning.show_text(ADD_BLOCKED if blocked else None)
+        self.full.setVisible(len(members) >= PANEL_LIMIT)
+        groups = addable(answers, members)
+        self.add_member.blockSignals(True)
+        try:
+            self.add_member.clear()
+            self.add_member.add_option(ADD_MEMBER, None)
+            for engine, models in groups:
+                self.add_member.add_header(ENGINE_LABELS[engine])
+                for model, effort in models:
+                    self.add_member.add_option(
+                        option_text(model, effort), f"{engine}:{model}"
+                    )
+        finally:
+            self.add_member.blockSignals(False)
+        self.add_member.setEnabled(
+            not self._panel_pending
+            and not blocked
+            and len(members) < PANEL_LIMIT
+            and bool(groups)
+        )
+
+    def _draw_icons(self) -> None:
+        """Keep the member removal icons in the current theme's text colour."""
+        for remove in self.member_removes.values():
+            remove.setIcon(icons.icon("x", theme.color("text-primary"), 16))
+
+    def _chain_focus(self) -> None:
+        """Put the controls in reading order, including rebuilt member rows."""
+        order: list[QWidget] = []
+        for controls in self.roles.values():
+            order.append(controls.picker)
+            order.extend(controls.run_as.buttons())
+        order.append(self.open_engines)
+        order.extend(self.multi.buttons())
+        order.extend(self.member_removes.values())
+        order.extend((self.remove_all, self.add_member))
+        chain_tab_order(order)
+
+    def _settings_changed(self, *_args: object) -> None:
+        """Redraw settings, allowing a retry after the Panel refresh failed."""
+        if self._panel_refresh_failed:
+            self._panel_refresh_failed = False
+            self.context.reload_settings(self._panel_done)
+        self._redraw()
+
+    def _panel_done(self, *_args: object) -> None:
+        """Release Panel controls after the save and its settings refresh."""
+        self._panel_pending = self._panel_refresh = self._panel_refresh_failed = False
+        self._redraw()
+
+    def _save_failed(self, message: str) -> None:
+        """Refresh after a failed Panel save before enabling another edit."""
+        # The context emits errors for other actions and earlier queued saves.
+        # Its save callback leaves the queue only when that save starts; success
+        # calls _panel_done, while a stale save drops the queue and emits stale.
+        queued = any(done == self._panel_done for _, done in self.context._save_queue)
+        if (
+            self._panel_pending
+            and not queued
+            and not self._panel_refresh
+            and message.startswith("The setting was not saved:")
+        ):
+            self._panel_refresh = True
+            self.context.reload_settings(self._panel_done)
+        self._redraw()
+
+    def _settings_failed(self, *_args: object) -> None:
+        """Keep Panel disabled until a failed settings refresh succeeds."""
+        if self._panel_refresh:
+            self._panel_refresh_failed = True
 
     def _fill(
         self,
@@ -273,6 +522,51 @@ class MenuScreen(QWidget):
         controls.run_as_row.setVisible(parts is not None and parts[0] == "claude")
 
     # Saving
+
+    def _multi_picked(self, value: str) -> None:
+        """Save the multi-task choice only when it changed."""
+        if value != self.context.setting("multi.runs_as"):
+            self._save({"multi.runs_as": value})
+
+    def _add_member(self, _index: int) -> None:
+        """Append the selected member and reset the picker to its prompt."""
+        value = self.add_member.value()
+        self.add_member.set_value(None)
+        if self._panel_pending or value is None:
+            return
+        answers = self.context.settings()["answers"]
+        members = answers["panel.members"]["value"]
+        if len(members) >= PANEL_LIMIT or blocks_save(answers, members):
+            return
+        available = {
+            f"{engine}:{model}"
+            for engine, models in addable(answers, members)
+            for model, _effort in models
+        }
+        if value in available:
+            self._save_panel([*members, str(value)])
+
+    def _remove_member(self, value: str) -> None:
+        """Remove a member, or explain which remaining member blocks saving."""
+        if self._panel_pending:
+            return
+        answers = self.context.settings()["answers"]
+        members = [m for m in answers["panel.members"]["value"] if m != value]
+        blocked = blocks_save(answers, members)
+        if blocked:
+            self._remove_blocker = blocked[0]
+            self._redraw()
+            return
+        self._save_panel(members)
+
+    def _save_panel(self, members: list[str]) -> None:
+        """Serialize Panel edits through the context's save and refresh."""
+        if self._panel_pending:
+            return
+        self._panel_pending = True
+        self._remove_blocker = None
+        self._redraw()
+        self.context.save_settings({"panel.members": members}, self._panel_done)
 
     def _picked(self, controls: _Role) -> None:
         self._show_run_as(controls)
