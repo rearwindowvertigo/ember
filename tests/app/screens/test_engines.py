@@ -169,6 +169,9 @@ def _physical_rect(rect: QRect, ratio: float) -> QRect:
     return QRect(left, top, right - left, bottom - top)
 
 
+_ANTIALIAS_TOLERANCE = 8
+
+
 def _assert_label_background(image: QImage, screen: QWidget, name: QLabel) -> None:
     """Assert the card background outside a label's tight text bounds."""
     origin = name.mapTo(screen, QPoint())
@@ -187,7 +190,15 @@ def _assert_label_background(image: QImage, screen: QWidget, name: QLabel) -> No
             if text_pixels.contains(x, y):
                 continue
             checked += 1
-            assert image.pixelColor(x, y) == background, (
+            pixel = image.pixelColor(x, y)
+            # Font antialiasing may tint a pixel next to the glyphs by a step
+            # or two; a border line differs by about 25 on every channel.
+            difference = max(
+                abs(pixel.red() - background.red()),
+                abs(pixel.green() - background.green()),
+                abs(pixel.blue() - background.blue()),
+            )
+            assert difference <= _ANTIALIAS_TOLERANCE, (
                 name.text(),
                 x,
                 y,
