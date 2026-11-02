@@ -10,6 +10,7 @@ positional arguments:
     run       start a worker run, or work with one
     gapcheck  review a plan for undefined or contradictory behaviour
     flow      plan, start, watch and answer flows
+    panel     ask several models one question and collect their answers
     ground    print what to read before choosing a worker
     merge     merge a reviewed worker branch, then clean it up
     cleanup   remove merged worker branches, their worktrees and sessions
@@ -155,6 +156,28 @@ options:
   --worker W        replace the writer with W
   --drop            drop the task
   --json            print JSON
+==> emb panel --help <==
+usage: emb panel [-h] [--question-file FILE] [--dir DIR] [--member W]
+                 [--claim ID] [--read PATH] [--stall MINUTES]
+                 [--timeout MINUTES] [--dry-run] [--status [PANEL]]
+                 [--recover PANEL] [--json]
+
+Ask members the same question in parallel read-only runs and write a summary
+of their answers. Each non-zero exit prints a next: or owner: line.
+
+options:
+  -h, --help            show this help message and exit
+  --question-file FILE  the question as UTF-8 text
+  --dir DIR             a checkout folder (default: current folder)
+  --member W            engine:model[@effort]; repeatable
+  --claim ID            read choices with this claim
+  --read PATH           an additional path members may read; repeatable
+  --stall MINUTES       minutes without a screen change (default 10)
+  --timeout MINUTES     panel deadline in minutes (default 30)
+  --dry-run             validate inputs and print resolved members
+  --status [PANEL]      show one or all panels
+  --recover PANEL       collect unfinished members without asking again
+  --json                print JSON
 ==> emb ground --help <==
 usage: emb ground [-h] [--dir DIR] [--json]
 

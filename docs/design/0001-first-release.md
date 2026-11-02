@@ -93,7 +93,7 @@ B1. Ember follows the XDG base directories:
 | What | Where |
 |---|---|
 | Settings database | `$XDG_CONFIG_HOME/ember/settings.db` (default `~/.config/ember/`) |
-| Run and flow records | `$XDG_STATE_HOME/ember/runs/` (default `~/.local/state/ember/`) |
+| Run, flow and panel records | `$XDG_STATE_HOME/ember/runs/` (default `~/.local/state/ember/`) |
 | Caches (model lists, version reads) | `$XDG_CACHE_HOME/ember/` |
 | Runtime files (locks, sockets) | `$XDG_RUNTIME_DIR/ember/` |
 
@@ -104,7 +104,8 @@ and every sandboxed worker is denied them.
 
 C1. Standing settings: the worker menu (which engine, model and effort writes
 single tasks, which reviews; in 0.2.0 also how multi-task work runs
-(`multi.runs_as`: ask, a flow or a Claude Workflow) and panel members),
+(`multi.runs_as`: ask, a flow or a Claude Workflow) and panel members
+(`panel.members`)),
 per-engine on or off, model shortlists with efforts, worker network access,
 a sandbox switch per engine, the terminal that shows worker sessions and
 start at login.
@@ -209,8 +210,15 @@ and `--resume` starts another runner attempt.
 
 Target release: 0.2.0.
 
-G1. `emb panel` sends one prompt to the configured members (OpenRouter,
-Codex and Claude models) and collects each answer and a summary file.
+G1. `emb panel --question-file <file>` asks each member the same question
+in a read-only `emb run` run, in parallel, and writes `summary.md` with
+every answer.
+
+G2. Members come from repeatable `--member <engine>:<model>[@<effort>]`
+options or `panel.members`: at most eight, using Codex, OpenCode or Claude.
+
+G3. A member that fails, stalls or passes the deadline is reported and the
+other members' answers are kept. `--recover` collects late members.
 
 ## H. Supporting commands
 
