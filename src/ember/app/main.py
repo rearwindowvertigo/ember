@@ -149,6 +149,7 @@ class _Controller(QObject):
             return
         self._autostart_on = on
         self.parts.autostart_reason = autostart.sync(on, self.parts.context.env)
+        self.parts.context.set_autostart_reason(self.parts.autostart_reason)
         if self.parts.autostart_reason:
             print(f"emb app: {self.parts.autostart_reason}", file=sys.stderr)
 

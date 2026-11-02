@@ -1080,13 +1080,59 @@ command line:
 | Xfce Terminal | `xfce4-terminal -x` |
 | XTerm | `xterm -e` |
 
+### Menu
+
+Menu shows the standing worker menu: the Writer and Reviewer pickers
+(`single.writer`, `single.reviewer`). Each lists Ask each time (`ask`), then,
+for Codex, OpenCode and Claude in that order, each engine that is on and has
+shortlisted models, under the engine's name, with its models as
+`<model> · <effort>` (OpenCode entries without an effort show the model
+alone). The engine names are headers and cannot be chosen. While a picker
+holds a Claude model, a row under it picks how it runs, CLI or Subagent
+(`single.writer_as`, `single.reviewer_as`).
+
+A saved value that the picker no longer offers stays chosen and shows as
+`<engine>:<model> (not on the shortlist)` or `<engine>:<model> (<Engine> is
+off)`, with a warning line giving that reason. A saved model whose engine was
+not connected at its last check shows a warning line too. When no engine
+offers a model, the pickers hold Ask each time only and the screen shows
+"Shortlist models in Engines to offer them here." with Open Engines.
+One-time choices are not shown. Each change saves at once.
+
+### Settings
+
+Settings has two groups. Each change saves at once.
+
+| Group | Row | Key | Control |
+|---|---|---|---|
+| General | Start at login | `app.autostart` | Switch |
+| General | Theme | `app.theme` | System, Light, Dark; applies at once |
+| Workers | Worker network | `worker.network` | Switch |
+| Workers | Terminal | `terminal` | Picker; Other command shows a text field |
+| Workers | Sandbox read paths | `sandbox.read` | One row per folder with a remove button; Add folder |
+
+After Start at login changes, the app writes or removes the autostart entry
+and shows the reason under the switch when it could not.
+
+Terminal lists System default first, marked "(not installed)" when
+`xdg-terminal-exec` is not on `PATH`, then each other known terminal found on
+`PATH`, then Other command. A saved known terminal that is not installed
+shows as an unavailable entry, marked "(not installed)", until another value
+is chosen. A saved value that matches no known terminal shows as Other
+command with that value. Other command's text is saved on Enter or when the
+field loses focus; empty text or text that is not a valid command line is not
+saved, and the line under the field says why.
+
+Add folder opens the desktop's folder chooser. A folder already in the list
+is not added again.
+
 ### Files
 
 | File | Holds |
 |---|---|
 | `$XDG_STATE_HOME/ember/app.json` | The window's `width`, `height` and last `screen`, mode 600; content that cannot be read gives the defaults |
 | `$XDG_RUNTIME_DIR/ember/app.sock` | The single-instance socket |
-| `$XDG_CONFIG_HOME/autostart/io.github.rearwindowvertigo.Ember.desktop` | The autostart entry while `app.autostart` is on, mode 600: `Exec=<absolute path of emb> app --hidden`. When `emb` is not on `PATH` nothing is written and the app prints the reason to standard error |
+| `$XDG_CONFIG_HOME/autostart/io.github.rearwindowvertigo.Ember.desktop` | The autostart entry while `app.autostart` is on, mode 600: `Exec=<absolute path of emb> app --hidden`. When `emb` is not on `PATH` nothing is written, and the app prints the reason to standard error and shows it in Settings |
 
 ## Exit codes
 
