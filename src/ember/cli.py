@@ -1,9 +1,10 @@
 """The `emb` command.
 
-Exit codes follow BSD `sysexits.h`: 0 on success, 64 for a usage error or an
-invalid value, 74 when the settings database cannot be opened or read, 75 for
-a stale generation or a busy database, 77 for an owner option without a
-terminal and 78 for an unsupported database schema.
+Exit codes follow BSD `sysexits.h`. For `emb choices` and `emb engines`: 0 on
+success, 64 for a usage error or an invalid value, 74 when the settings
+database cannot be opened or read, 75 for a stale generation or a busy
+database, 77 for an owner option without a terminal and 78 for an unsupported
+database schema. `emb run` uses the table in `ember.runs.exits`.
 """
 
 import argparse
@@ -15,6 +16,7 @@ from typing import Any, NoReturn
 
 from ember import __version__, choices, db
 from ember.engines import models, status
+from ember.runs import core as run_core
 
 EX_OK = 0
 EX_USAGE = 64
@@ -101,6 +103,97 @@ def _add_engines(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _positive_minutes(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        value = 0.0
+    if not 0 < value < float("inf"):
+        raise argparse.ArgumentTypeError(f"{text!r} is not a positive number")
+    return value
+
+
+_RUN_MODES = ("send", "screen", "interrupt", "attach", "close", "recover", "status")
+_ALL_RUNS = ""
+
+
+def _add_run(parser: argparse.ArgumentParser) -> None:
+    start = parser.add_argument_group("start a run")
+    start.add_argument(
+        "--engine",
+        choices=status.ENGINES,
+        metavar="ENGINE",
+        help="codex, opencode or claude",
+    )
+    start.add_argument("--dir", metavar="DIR", help="a folder in the git checkout")
+    start.add_argument("--task-file", metavar="FILE", help="the brief")
+    start.add_argument("--model", metavar="MODEL", help="the model (default: menu)")
+    start.add_argument(
+        "--effort", metavar="EFFORT", help="the effort (default: menu or engine)"
+    )
+    start.add_argument(
+        "--read-only", action="store_true", help="work in the checkout, edit nothing"
+    )
+    start.add_argument(
+        "--read",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="a path the run may read; repeatable",
+    )
+    start.add_argument(
+        "--trailer",
+        action="append",
+        default=[],
+        metavar="LINE",
+        help="a trailer line for each commit; repeatable",
+    )
+    start.add_argument("--claim", metavar="ID", help="read the menu with this claim id")
+    start.add_argument(
+        "--no-window", action="store_true", help="do not open a terminal window"
+    )
+    existing = parser.add_argument_group("work with a run")
+    existing.add_argument(
+        "--send", metavar="RUN", help="send a message and wait for its turn"
+    )
+    existing.add_argument("--message-file", metavar="FILE", help="the message")
+    existing.add_argument("--screen", metavar="RUN", help="print the session's screen")
+    existing.add_argument(
+        "--interrupt", metavar="RUN", help="interrupt the current turn"
+    )
+    existing.add_argument(
+        "--attach", metavar="RUN", help="open a new window on the session"
+    )
+    existing.add_argument(
+        "--close", metavar="RUN", help="end the session; keep worktree and branch"
+    )
+    existing.add_argument(
+        "--force", action="store_true", help="with --close: close even while busy"
+    )
+    existing.add_argument(
+        "--recover", metavar="RUN", help="collect a turn that ended unwatched"
+    )
+    existing.add_argument(
+        "--status",
+        nargs="?",
+        const=_ALL_RUNS,
+        metavar="RUN",
+        help="print a run's record, or every run's",
+    )
+    existing.add_argument("--json", action="store_true", help="with --status: JSON")
+    output = parser.add_argument_group("waiting and output")
+    output.add_argument(
+        "--quiet", action="store_true", help="print only the first line and summary"
+    )
+    output.add_argument(
+        "--stall",
+        type=_positive_minutes,
+        default=run_core.STALL_MINUTES,
+        metavar="MINUTES",
+        help="minutes without a screen change before exit 124 (default 10)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the parser for `emb` and its subcommands.
 
@@ -130,6 +223,17 @@ def build_parser() -> argparse.ArgumentParser:
             description=(
                 "Show whether Codex, OpenCode and Claude Code are installed, "
                 "signed in and connected, or list one engine's models."
+            ),
+        )
+    )
+    _add_run(
+        subparsers.add_parser(
+            "run",
+            help="start a worker run, or work with one",
+            description=(
+                "Start one worker in its own worktree and tmux session and wait "
+                "for its turn, or send to, read, interrupt, close or recover a "
+                "run. Each non-zero exit prints a next: or owner: line."
             ),
         )
     )
@@ -296,6 +400,80 @@ def _run_engines(args: argparse.Namespace, env: Mapping[str, str] | None) -> int
     return EX_OK
 
 
+def _run_mode(args: argparse.Namespace) -> str:
+    """Return the one `emb run` mode the arguments ask for, checking options."""
+    given = [mode for mode in _RUN_MODES if getattr(args, mode) is not None]
+    if len(given) > 1:
+        options = " and ".join(f"--{mode}" for mode in given)
+        raise UsageError(f"{options} cannot be combined")
+    mode = given[0] if given else "start"
+    start_only = {
+        "--engine": args.engine is not None,
+        "--dir": args.dir is not None,
+        "--task-file": args.task_file is not None,
+        "--model": args.model is not None,
+        "--effort": args.effort is not None,
+        "--read-only": args.read_only,
+        "--read": bool(args.read),
+        "--trailer": bool(args.trailer),
+        "--claim": args.claim is not None,
+        "--no-window": args.no_window,
+    }
+    if mode == "start":
+        missing = [
+            name
+            for name in ("--engine", "--dir", "--task-file")
+            if not start_only[name]
+        ]
+        if missing:
+            raise UsageError(f"a new run needs {', '.join(missing)}")
+    else:
+        extra = [name for name, present in start_only.items() if present]
+        if extra:
+            raise UsageError(f"{', '.join(extra)} cannot be used with --{mode}")
+    if (args.message_file is not None) != (mode == "send"):
+        raise UsageError("--send and --message-file go together")
+    if args.force and mode != "close":
+        raise UsageError("--force needs --close")
+    if args.json and mode != "status":
+        raise UsageError("--json needs --status")
+    return mode
+
+
+def _run_run(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
+    try:
+        mode = _run_mode(args)
+    except UsageError as error:
+        print(f"emb run: {error}", file=sys.stderr)
+        print("next: emb run --help", file=sys.stderr)
+        return EX_USAGE
+    core = run_core.Core(env, stall_minutes=args.stall, quiet=args.quiet)
+    actions: dict[str, Callable[[], int]] = {
+        "start": lambda: core.start(
+            run_core.StartOptions(
+                engine=args.engine,
+                dir=args.dir,
+                task_file=args.task_file,
+                model=args.model,
+                effort=args.effort,
+                read_only=args.read_only,
+                read=tuple(args.read),
+                trailers=tuple(args.trailer),
+                claim=args.claim,
+                window=not args.no_window,
+            )
+        ),
+        "send": lambda: core.send(args.send, args.message_file),
+        "screen": lambda: core.screen(args.screen),
+        "interrupt": lambda: core.interrupt(args.interrupt),
+        "attach": lambda: core.attach(args.attach),
+        "close": lambda: core.close(args.close, force=args.force),
+        "recover": lambda: core.recover(args.recover),
+        "status": lambda: core.status(args.status or None, as_json=args.json),
+    }
+    return core.execute(actions[mode])
+
+
 def main(
     argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = None
 ) -> int:
@@ -317,6 +495,8 @@ def main(
         return _run_choices(args, env)
     if args.command == "engines":
         return _run_engines(args, env)
+    if args.command == "run":
+        return _run_run(args, env)
     return EX_OK
 
 
