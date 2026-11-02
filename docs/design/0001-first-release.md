@@ -132,6 +132,11 @@ E1. `emb run --engine <codex|opencode|claude> --dir <repo> --task-file
 <brief>` starts one worker. Its first output line is `run <id>`.
 `--trailer <line>`, repeatable, adds a trailer line to each commit the
 worker makes; there is no default trailer.
+Ember pastes the whole brief into the worker's session as its first
+message, under a first line stating that Claude, the lead, wrote it. The
+worker's session starts in its worktree, or in the repository for a
+`--read-only` run. `--read <path>`, repeatable, lets that run read the path,
+read-only, in addition to the `sandbox.read` setting.
 
 E2. An editing run gets its own worktree and branch, `ember/<engine>/<id>`,
 cut from the current branch, and commits with the trailers given by
@@ -199,8 +204,8 @@ I1. Settings `sandbox.codex` (`bubblewrap`, `codex-bundled`, `none`) and
 
 I2. With a sandbox, each worker gets a deny list built at launch: every
 entry in the home folder except the worktree, the repository's git folder,
-`~/.local/bin`, `~/.local/lib`, git's config and the paths in the
-`sandbox.read` setting; and all of `$XDG_RUNTIME_DIR`, which holds Ember's
+`~/.local/bin`, `~/.local/lib`, git's config, the paths in the
+`sandbox.read` setting and the run's `--read` paths; and all of `$XDG_RUNTIME_DIR`, which holds Ember's
 tmux socket. Git writes are blocked. Codex receives the list as a
 permission profile in `-c` options and applies it with its own `bwrap`
 (I4). Ember runs OpenCode inside `bwrap` with the same list. Codex gets
