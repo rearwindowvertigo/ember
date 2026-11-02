@@ -999,10 +999,14 @@ number of live runs and Dependencies' row the number of components with an
 update available or missing, each only above zero. A screen is created the
 first time it is shown.
 
-A save refused because the settings changed elsewhere reloads them and shows
-"Settings changed elsewhere. This screen now shows the new values. Make your
-change again." above the screen. Other failures of a save or command show
-what happened and what to do there, with Dismiss.
+Saves run one at a time: a change made while a save is in flight is sent
+after it, with the settings generation that save produced. Choosing the
+value already saved saves nothing. A save refused because the settings
+changed elsewhere drops the changes waiting behind it, reloads the settings
+and shows "Settings changed elsewhere. This screen now shows the new values.
+Make your change again." above the screen. Other failures of a save or
+command show what happened and what to do there, with Dismiss, and the next
+waiting change is sent.
 
 With `app.theme` set to `system`, the app follows the desktop when it
 switches between light and dark.
@@ -1139,7 +1143,9 @@ holds a Claude model, a row under it picks how it runs, CLI or Subagent
 A saved value that the picker no longer offers stays chosen and shows as
 `<engine>:<model> (not on the shortlist)` or `<engine>:<model> (<Engine> is
 off)`, with a warning line giving that reason. A saved model whose engine was
-not connected at its last check shows a warning line too. When no engine
+not connected at its last check shows a warning line too; the check is the
+app's last engine status read, or before the first read the status cache the
+settings snapshot reports. When no engine
 offers a model, the pickers hold Ask each time only and the screen shows
 "Shortlist models in Engines to offer them here." with Open Engines.
 One-time choices are not shown. Each change saves at once.
@@ -1166,7 +1172,8 @@ shows as an unavailable entry, marked "(not installed)", until another value
 is chosen. A saved value that matches no known terminal shows as Other
 command with that value. Other command's text is saved on Enter or when the
 field loses focus; empty text or text that is not a valid command line is not
-saved, and the line under the field says why.
+saved, and the line under the field says why. Leaving the field with such
+text returns the picker to the saved value.
 
 Add folder opens the desktop's folder chooser. A folder already in the list
 is not added again.

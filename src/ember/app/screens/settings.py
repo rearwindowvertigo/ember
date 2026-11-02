@@ -300,6 +300,9 @@ class SettingsScreen(QWidget):
         self.context.save_settings(values, done)
 
     def _theme_picked(self, value: str) -> None:
+        if value == self.context.setting("app.theme"):
+            return
+
         def applied(_snapshot: dict[str, Any]) -> None:
             app = QApplication.instance()
             if isinstance(app, QApplication):
@@ -323,18 +326,29 @@ class SettingsScreen(QWidget):
             self._save({"terminal": value})
 
     def _other_entered(self) -> None:
+        """Save Other command's text on Enter or when the field loses focus.
+
+        Text that cannot be saved keeps the field open on Enter; leaving the
+        field with it returns the picker to the saved value. Either way the
+        line under the field says why.
+        """
         if self.terminal.value() != OTHER:
             return
         text = self.other.text().strip()
+        problem = None
         if not text:
-            self.terminal_line.show_text(
-                "Enter a command line, such as gnome-terminal --."
-            )
-            return
-        try:
-            choices.validate_value("terminal", text)
-        except choices.InvalidChoiceError as error:
-            self.terminal_line.show_text(f"Not saved: {error}.")
+            problem = "Enter a command line, such as gnome-terminal --."
+        else:
+            try:
+                choices.validate_value("terminal", text)
+            except choices.InvalidChoiceError as error:
+                problem = f"Not saved: {error}."
+        if problem is not None:
+            if not self.other.hasFocus():
+                self._other_open = False
+                self.other.clear()
+                self._redraw()
+            self.terminal_line.show_text(problem)
             return
         self.terminal_line.show_text(None)
         self._other_open = False

@@ -4,8 +4,11 @@ Two rows, Writer and Reviewer, each a picker of Ask each time and the
 shortlisted models of every engine that is on, under the engine's name. While
 a row holds a Claude model, a row under it picks how that model runs: as a
 CLI or as a subagent. A saved value that the picker no longer offers stays
-chosen, with a warning saying why. Each change saves at once. One-time
-choices are not shown.
+chosen, with a warning saying why. A saved model whose engine was not
+connected shows a warning too, from the engine status the app read last, or
+from the snapshot's menu rows before the first read. Each change saves at
+once; choosing the value already saved saves nothing. One-time choices are
+not shown.
 """
 
 from typing import TYPE_CHECKING, Any
@@ -185,9 +188,7 @@ class MenuScreen(QWidget):
                 lambda _index, controls=controls: self._picked(controls)
             )
             controls.run_as.changed.connect(
-                lambda value, controls=controls: self._save(
-                    {f"{controls.key}_as": value}
-                )
+                lambda value, controls=controls: self._run_as_picked(controls, value)
             )
         layout.addWidget(card)
 
@@ -204,6 +205,7 @@ class MenuScreen(QWidget):
         layout.addStretch(1)
 
         context.settings_changed.connect(self._redraw)
+        context.engines_changed.connect(self._redraw)
         context.error.connect(self._redraw)
         self._redraw()
 
@@ -247,6 +249,10 @@ class MenuScreen(QWidget):
         finally:
             picker.blockSignals(False)
         warning = None if missing is None else missing[1]
+        engines = self.context.engines()
+        if engines is not None:
+            connected = {name: item.connected for name, item in engines.items()}
+            row = choices.menu_row(answers, controls.key, connected)
         if warning is None and row.get("state") == "not connected":
             engine = ENGINE_LABELS.get(str(row.get("engine")), "The engine")
             warning = (
@@ -274,6 +280,11 @@ class MenuScreen(QWidget):
         if value is None or value == self.context.setting(controls.key):
             return
         self._save({controls.key: value})
+
+    def _run_as_picked(self, controls: _Role, value: str) -> None:
+        key = f"{controls.key}_as"
+        if value != self.context.setting(key):
+            self._save({key: value})
 
     def _save(self, values: dict[str, object]) -> None:
         self.context.save_settings(values)

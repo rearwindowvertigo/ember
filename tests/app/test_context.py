@@ -67,6 +67,51 @@ def test_stale_save_reloads_then_emits_stale(env: dict[str, str], qtbot: QtBot) 
     assert context.setting("worker.network") == "off"
 
 
+def test_quick_saves_wait_and_use_the_new_generation(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    context = _ready(env, qtbot)
+    first = context.settings()["generation"]
+    stale: list[bool] = []
+    context.stale.connect(lambda: stale.append(True))
+    done: list[int] = []
+    context.save_settings({"app.theme": "dark"}, lambda s: done.append(1))
+    context.save_settings({"worker.network": "on"}, lambda s: done.append(2))
+    context.save_settings({"app.theme": "light"}, lambda s: done.append(3))
+    qtbot.waitUntil(lambda: done == [1, 2, 3], timeout=5000)
+    assert stale == []
+    assert context.setting("app.theme") == "light"
+    assert context.setting("worker.network") == "on"
+    assert context.settings()["generation"] > first
+
+
+def test_stale_save_drops_the_saves_behind_it(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    context = _ready(env, qtbot)
+    choices.set_settings({"app.theme": "dark"}, env=env)
+    done: list[int] = []
+    with qtbot.waitSignal(context.stale, timeout=5000):
+        context.save_settings({"worker.network": "on"}, lambda s: done.append(1))
+        context.save_settings({"app.theme": "light"}, lambda s: done.append(2))
+    context.tasks.wait(5000)
+    assert done == []
+    assert context.setting("app.theme") == "dark"
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        context.save_settings({"worker.network": "on"}, lambda s: done.append(3))
+    assert done == [3]
+
+
+def test_a_failed_save_lets_the_next_one_run(env: dict[str, str], qtbot: QtBot) -> None:
+    context = _ready(env, qtbot)
+    done: list[int] = []
+    with qtbot.waitSignal(context.error, timeout=5000):
+        context.save_settings({"app.theme": "purple"}, lambda s: done.append(1))
+        context.save_settings({"app.theme": "dark"}, lambda s: done.append(2))
+    qtbot.waitUntil(lambda: done == [2], timeout=5000)
+    assert context.setting("app.theme") == "dark"
+
+
 def test_invalid_value_emits_error(env: dict[str, str], qtbot: QtBot) -> None:
     context = _ready(env, qtbot)
     with qtbot.waitSignal(context.error, timeout=5000) as blocker:
