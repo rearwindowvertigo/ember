@@ -273,19 +273,29 @@ class DependenciesScreen(QWidget):
 
     def check_now(self) -> None:
         """Read installed versions, and newest versions when due."""
-        self._set_checking(True)
         if self.context.deps() is None:
             self._show_state()
             self.state_view.show_loading("Reading dependencies")
+        self._set_checking(True)
         self.context.refresh_deps(check_now=True)
 
     def _set_checking(self, checking: bool) -> None:
+        """Show the header spinner while checking and a report is shown.
+
+        Without a report the state view's spinner shows the read instead.
+        """
         self._checking = checking
-        self.spinner.setVisible(checking)
-        self.checking_label.setVisible(checking)
+        shown = checking and self.context.deps() is not None
+        self.spinner.setVisible(shown)
+        self.checking_label.setVisible(shown)
+
+    def _read_ended(self) -> None:
+        # A read that ended may be an earlier one; the check goes on while
+        # the context still has a read in flight or waiting.
+        self._set_checking(self._checking and self.context.deps_refreshing())
 
     def _changed(self, report: object) -> None:
-        self._set_checking(False)
+        self._read_ended()
         self._clear_alert()
         if not isinstance(report, deps.DepsReport):
             return
@@ -295,7 +305,7 @@ class DependenciesScreen(QWidget):
             self._dirty = True
 
     def _failed(self, text: str) -> None:
-        self._set_checking(False)
+        self._read_ended()
         if self.context.deps() is None:
             self._show_state()
             self.subtitle.setText("")

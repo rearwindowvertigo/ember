@@ -283,6 +283,10 @@ class AppContext(QObject):
         """Return the last dependency report, or `None` before the first."""
         return self._deps
 
+    def deps_refreshing(self) -> bool:
+        """Return whether a dependency read is in flight or waiting."""
+        return self._deps_busy
+
     def refresh_deps(self, check_now: bool) -> None:
         """Read the dependency report in a task and emit `deps_changed`.
 
