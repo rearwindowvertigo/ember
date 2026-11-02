@@ -1,9 +1,7 @@
-import gc
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QCoreApplication, Qt, QThreadPool
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget
 from pytestqt.qtbot import QtBot
 
@@ -14,16 +12,6 @@ from ember.app.screens import KEYS, SCREENS
 from ember.app.window import MINIMUM_HEIGHT, MINIMUM_WIDTH, MainWindow, app_version
 
 from .test_runs import make_run, write_run  # pyrefly: ignore[missing-import]
-
-
-@pytest.fixture(autouse=True)
-def _collect_on_gui_thread() -> Iterator[None]:
-    # Qt objects left in reference cycles must be freed on the GUI thread,
-    # not by a garbage collection that happens to run on a pool thread.
-    yield
-    QThreadPool.globalInstance().waitForDone(10_000)
-    QCoreApplication.processEvents()
-    gc.collect()
 
 
 class _Quit:

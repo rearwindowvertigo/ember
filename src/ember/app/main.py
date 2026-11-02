@@ -3,6 +3,8 @@
 One instance runs at a time. It listens on a local socket,
 `<runtime dir>/app.sock`; a second start connects, sends `show` (nothing with
 `--hidden`) and exits 0, and the first instance raises its window on `show`.
+Two starts at the same moment can both find no instance listening; both then
+run, and only the later one to listen is reachable on the socket.
 """
 
 import argparse
@@ -13,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QCoreApplication, QObject
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication
@@ -40,8 +42,11 @@ EX_UNAVAILABLE = 69
 CONNECT_MS = 1000
 """How long a second start waits to reach the running instance."""
 
-QUIT_WAIT_MS = 3000
-"""How long quitting waits for background reads to end."""
+QUIT_WAIT_MS = 12_000
+"""How long quitting waits for background reads to end.
+
+Longer than the 10-second deadline of every engine and dependency read.
+"""
 
 NO_DISPLAY = "emb app: no graphical session (WAYLAND_DISPLAY and DISPLAY are unset)"
 
@@ -110,6 +115,7 @@ class _Controller(QObject):
         super().__init__(parts.context)
         self.parts = parts
         self._first_settings = True
+        self._autostart_on: bool | None = None
         parts.server.newConnection.connect(self._connection)
         parts.context.settings_changed.connect(self._settings_changed)
         hints = parts.app.styleHints()
@@ -137,12 +143,14 @@ class _Controller(QObject):
 
     def _settings_changed(self, _snapshot: dict) -> None:
         self._apply_theme()
-        if self._first_settings:
-            self._first_settings = False
-            on = self.parts.context.setting("app.autostart") != "off"
-            self.parts.autostart_reason = autostart.sync(on, self.parts.context.env)
-            if self.parts.autostart_reason:
-                print(f"emb app: {self.parts.autostart_reason}", file=sys.stderr)
+        self._first_settings = False
+        on = self.parts.context.setting("app.autostart") != "off"
+        if on == self._autostart_on:
+            return
+        self._autostart_on = on
+        self.parts.autostart_reason = autostart.sync(on, self.parts.context.env)
+        if self.parts.autostart_reason:
+            print(f"emb app: {self.parts.autostart_reason}", file=sys.stderr)
 
     def _scheme_changed(self, *_args: Any) -> None:  # noqa: ANN401 - Qt passes the scheme
         if (self.parts.context.setting("app.theme") or "system") == "system":
@@ -211,7 +219,15 @@ def start(argv: list[str], env: Mapping[str, str] | None = None) -> EmberApp | i
     theme.apply(app, theme.resolve_mode("system", app))
 
     context = AppContext(environment)
-    window = MainWindow(context, has_tray=has_tray, quit_app=app.quit)
+
+    def quit_app() -> None:
+        # The window and the icon go at once; `stop` waits for the reads.
+        window.hide()
+        if tray is not None:
+            tray.hide()
+        app.quit()
+
+    window = MainWindow(context, has_tray=has_tray, quit_app=quit_app)
     tray = (
         tray_module.Tray(context, window.bring_forward, window.quit_app)
         if has_tray
@@ -232,15 +248,21 @@ def start(argv: list[str], env: Mapping[str, str] | None = None) -> EmberApp | i
 
 
 def stop(parts: EmberApp) -> None:
-    """Close the socket and the tray, and wait briefly for background reads.
+    """Hide the window and the tray, close the socket, and wait for reads.
+
+    The window and the tray icon are hidden first. The wait, up to
+    `QUIT_WAIT_MS`, lets running background reads end before the interpreter
+    shuts down.
 
     Args:
         parts: The running app.
     """
-    parts.context.runs.stop()
-    parts.server.close()
+    parts.window.hide()
     if parts.tray is not None:
         parts.tray.hide()
+    parts.context.runs.stop()
+    parts.server.close()
+    QCoreApplication.processEvents()
     parts.context.tasks.wait(QUIT_WAIT_MS)
 
 

@@ -1,10 +1,9 @@
-import gc
 import socket
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QThreadPool
 from PySide6.QtWidgets import QApplication
 from pytestqt.qtbot import QtBot
 
@@ -14,16 +13,6 @@ from ember.app import tray as tray_module
 from ember.engines import status
 
 EMPTY_REPORT = deps.DepsReport(components=(), installed_read_at={}, newest_read_at={})
-
-
-@pytest.fixture(autouse=True)
-def _collect_on_gui_thread() -> Iterator[None]:
-    # Qt objects left in reference cycles must be freed on the GUI thread,
-    # not by a garbage collection that happens to run on a pool thread.
-    yield
-    QThreadPool.globalInstance().waitForDone(10_000)
-    QCoreApplication.processEvents()
-    gc.collect()
 
 
 @pytest.fixture
@@ -169,3 +158,72 @@ def test_parse() -> None:
     assert parsed.hidden
     assert not main._parse([]).hidden  # type: ignore[union-attr]
     assert main._parse(["extra"]) is None
+
+
+def test_autostart_follows_the_setting(app_env: dict[str, str], qtbot: QtBot) -> None:
+    emb = Path(app_env["PATH"].split(":")[0]) / "emb"
+    emb.write_text("#!/bin/sh\nexit 0\n")
+    emb.chmod(0o755)
+    entry = autostart.path(app_env)
+    for parts in _start(["--hidden"], app_env, qtbot):
+        assert parts.autostart_reason is None
+        assert entry.exists()
+        with qtbot.waitSignal(parts.context.settings_changed, timeout=5000):
+            parts.context.save_settings({"app.autostart": "off"})
+        assert not entry.exists()
+        with qtbot.waitSignal(parts.context.settings_changed, timeout=5000):
+            parts.context.save_settings({"app.autostart": "on"})
+        assert entry.exists()
+        assert parts.autostart_reason is None
+
+
+def test_quit_hides_the_window_and_tray_at_once(
+    app_env: dict[str, str],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    qapp: QApplication,
+) -> None:
+    monkeypatch.setattr(tray_module, "available", lambda: True)
+    quits: list[bool] = []
+    monkeypatch.setattr(qapp, "quit", lambda: quits.append(True))
+    for parts in _start([], app_env, qtbot):
+        assert parts.tray is not None
+        parts.window.bring_forward()
+        assert parts.window.isVisible()
+        assert parts.tray.icon.isVisible()
+        parts.window.quit_app()
+        assert not parts.window.isVisible()
+        assert not parts.tray.icon.isVisible()
+        assert quits == [True]
+
+
+def test_stop_hides_everything_before_waiting_for_reads(
+    app_env: dict[str, str],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tray_module, "available", lambda: True)
+    started = main.start([], app_env)
+    assert isinstance(started, main.EmberApp)
+    qtbot.addWidget(started.window)
+    qtbot.waitUntil(started.context.settings_ready, timeout=5000)
+    tray = started.tray
+    assert tray is not None
+    waits: list[tuple[int, bool, bool, bool]] = []
+    real_wait = started.context.tasks.wait
+
+    def wait(msecs: int = -1) -> bool:
+        waits.append(
+            (
+                msecs,
+                started.window.isVisible(),
+                tray.icon.isVisible(),
+                started.server.isListening(),
+            )
+        )
+        return real_wait(msecs)
+
+    monkeypatch.setattr(started.context.tasks, "wait", wait)
+    main.stop(started)
+    assert waits == [(12_000, False, False, False)]
+    assert main.QUIT_WAIT_MS > 10_000

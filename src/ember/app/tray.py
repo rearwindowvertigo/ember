@@ -2,14 +2,15 @@
 
 The icon shows whether any run is live, always in the drawings for a dark
 top bar. The menu holds a status line, one line per live run, which opens a
-terminal on that run, Open Ember and Quit Ember.
+terminal on that run, Open Ember and Quit Ember. The menu is not rebuilt
+while it is open; a change that comes in meanwhile is drawn after it closes.
 """
 
 import time
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
@@ -72,6 +73,10 @@ class Tray(QObject):
         self.icon.setContextMenu(self.menu)
         self.icon.activated.connect(self._activated)
         self._live: bool | None = None
+        self._menu_open = False
+        self._stale = False
+        self.menu.aboutToShow.connect(self._menu_shown)
+        self.menu.aboutToHide.connect(self._menu_hidden)
         context.runs.changed.connect(self.update)
         self.update()
 
@@ -91,13 +96,24 @@ class Tray(QObject):
         ]
 
     def update(self) -> None:
-        """Redraw the icon, tooltip and menu from the live runs."""
+        """Redraw the icon and tooltip from the live runs, and the menu.
+
+        While the menu is open it is marked stale instead, and rebuilt once
+        it has closed.
+        """
         runs = self._context.runs.live()
         live = bool(runs)
         if live != self._live:
             self._live = live
             self.icon.setIcon(icons.tray_icon(live))
         self.icon.setToolTip(tooltip(len(runs)))
+        if self._menu_open:
+            self._stale = True
+            return
+        self._stale = False
+        self._build_menu(runs)
+
+    def _build_menu(self, runs: list[Run]) -> None:
         self.menu.clear()
         status = QAction(status_line(len(runs)), self.menu)
         status.setEnabled(False)
@@ -117,6 +133,20 @@ class Tray(QObject):
         quit_action = QAction("Quit Ember", self.menu)
         quit_action.triggered.connect(self._quit)
         self.menu.addAction(quit_action)
+
+    def _menu_shown(self) -> None:
+        self._menu_open = True
+
+    def _menu_hidden(self) -> None:
+        self._menu_open = False
+        if self._stale:
+            # The chosen action is triggered after aboutToHide, so the rebuild,
+            # which deletes the old actions, waits for the event loop.
+            QTimer.singleShot(0, self, self._rebuild_if_stale)
+
+    def _rebuild_if_stale(self) -> None:
+        if self._stale and not self._menu_open:
+            self.update()
 
     def _activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:

@@ -65,9 +65,20 @@ def test_found_with_nothing_on_path(tmp_path: Path) -> None:
         ("'unclosed", None),
     ],
 )
-def test_match(value: str, expected: str | None) -> None:
-    found = terminals.match(value)
+def test_match(value: str, expected: str | None, tmp_path: Path) -> None:
+    found = terminals.match(value, {"PATH": str(tmp_path)})
     assert (None if found is None else found.id) == expected
+
+
+def test_match_reports_whether_the_terminal_is_installed(tmp_path: Path) -> None:
+    missing = terminals.match("kitty", {"PATH": str(tmp_path)})
+    assert missing is not None
+    assert missing.id == "kitty"
+    assert not missing.available
+    _stub(tmp_path, "kitty")
+    installed = terminals.match("kitty", {"PATH": str(tmp_path)})
+    assert installed is not None
+    assert installed.available
 
 
 @pytest.mark.parametrize("value", ["", "   ", "'unclosed"])

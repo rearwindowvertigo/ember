@@ -92,22 +92,30 @@ def _split(value: str) -> list[str] | None:
         return None
 
 
-def match(value: str) -> Terminal | None:
+def match(value: str, env: Mapping[str, str] | None = None) -> Terminal | None:
     """Return the known terminal a `terminal` setting value names.
+
+    A saved known terminal is returned whether or not it is installed, so
+    Settings can show it as unavailable until another value is chosen.
 
     Args:
         value: The setting's value.
+        env: The environment whose `PATH` is searched; `None` reads
+            `os.environ`.
 
     Returns:
         The known terminal whose prefix splits into the same words as the
-        value, or `None` (shown as Other command).
+        value, with `available` false when its executable is not on `PATH`,
+        or `None` (shown as Other command).
     """
     words = _split(value)
     if not words:
         return None
+    path = (os.environ if env is None else env).get("PATH", "")
     for terminal in KNOWN:
         if shlex.split(terminal.prefix) == words:
-            return terminal
+            available = shutil.which(terminal.executable, path=path) is not None
+            return replace(terminal, available=available)
     return None
 
 

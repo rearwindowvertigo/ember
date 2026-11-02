@@ -1,11 +1,7 @@
-import gc
 import json
 import os
-from collections.abc import Iterator
 from dataclasses import replace
 
-import pytest
-from PySide6.QtCore import QCoreApplication, QThreadPool
 from pytestqt.qtbot import QtBot
 
 from ember import paths
@@ -13,16 +9,6 @@ from ember.app.runs import RunsModel
 from ember.app.tasks import TaskRunner
 from ember.runs import record
 from ember.runs.record import Run
-
-
-@pytest.fixture(autouse=True)
-def _collect_on_gui_thread() -> Iterator[None]:
-    # Qt objects left in reference cycles must be freed on the GUI thread,
-    # not by a garbage collection that happens to run on a pool thread.
-    yield
-    QThreadPool.globalInstance().waitForDone(10_000)
-    QCoreApplication.processEvents()
-    gc.collect()
 
 
 def make_run(

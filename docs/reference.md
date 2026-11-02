@@ -983,7 +983,8 @@ At start the app:
   dependency report (installed versions now, newest versions when due) and
   the run records, each off the window's thread;
 - once the settings are read, applies `app.theme` and writes or removes the
-  autostart entry to match `app.autostart`.
+  autostart entry to match `app.autostart`; it does so again each time
+  either setting changes.
 
 Until the settings are read the content area shows "Reading settings"; when
 they cannot be read it shows the reason and Try again.
@@ -1029,6 +1030,11 @@ The menu holds:
 Clicking the icon also shows the window. Closing the window hides it to the
 tray. When the desktop has no tray, the window shows at start and closing it
 quits.
+
+While the menu is open it keeps its lines; a change to the live runs
+redraws it after it closes. Quit Ember hides the window and the tray icon at
+once, then waits up to 12 seconds for running background tasks to end before
+the app exits.
 
 ### Run records
 

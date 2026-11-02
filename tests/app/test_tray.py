@@ -1,9 +1,6 @@
-import gc
 import time
-from collections.abc import Iterator
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QThreadPool
 from PySide6.QtWidgets import QSystemTrayIcon
 from pytestqt.qtbot import QtBot
 
@@ -13,16 +10,6 @@ from ember.app.tray import Tray
 from ember.runs import record
 
 from .test_runs import make_run, write_run  # pyrefly: ignore[missing-import]
-
-
-@pytest.fixture(autouse=True)
-def _collect_on_gui_thread() -> Iterator[None]:
-    # Qt objects left in reference cycles must be freed on the GUI thread,
-    # not by a garbage collection that happens to run on a pool thread.
-    yield
-    QThreadPool.globalInstance().waitForDone(10_000)
-    QCoreApplication.processEvents()
-    gc.collect()
 
 
 def _tray(env: dict[str, str], qtbot: QtBot) -> tuple[Tray, AppContext, list[str]]:
@@ -105,4 +92,28 @@ def test_actions(
     tray._activated(QSystemTrayIcon.ActivationReason.Trigger)
     tray._activated(QSystemTrayIcon.ActivationReason.Context)
     assert calls == ["open", "quit", "open"]
+    context.runs.stop()
+
+
+def test_menu_is_not_rebuilt_while_open(env: dict[str, str], qtbot: QtBot) -> None:
+    first = write_run(make_run(env, repo="/home/owner/alpha"))
+    tray, context, _calls = _tray(env, qtbot)
+    tray.menu.aboutToShow.emit()
+    shown = tray.menu.actions()
+    second = make_run(
+        env,
+        "claude-20260101-130000-bbbbbb",
+        engine="claude",
+        repo="/home/owner/beta",
+        started_at=first.started_at + 3600,
+    )
+    with qtbot.waitSignal(context.runs.changed, timeout=5000):
+        write_run(second)
+    qtbot.waitUntil(lambda: tray.icon.toolTip() == "Ember · 2 runs live")
+    assert tray.menu.actions() == shown
+    assert tray.lines()[0] == "1 run live"
+    tray.menu.aboutToHide.emit()
+    assert tray.menu.actions() == shown
+    qtbot.waitUntil(lambda: tray.lines()[0] == "2 runs live")
+    assert len(tray.lines()) == 6
     context.runs.stop()
