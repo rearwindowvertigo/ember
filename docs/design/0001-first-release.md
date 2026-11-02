@@ -320,7 +320,7 @@ missing items, each only when above zero.
 
 | Screen | Holds |
 |---|---|
-| Overview | Live runs; the last twenty finished runs. In 0.2.0 also flows with their tasks and steps |
+| Overview | Live runs; the last twenty finished runs; flows with their tasks, and panels with their members (0.2.0) |
 | Menu | The worker menu (C1) |
 | Engines | One card per engine: logo, status, Use switch, sandbox switch, provider and checks; open for models, efforts and shortlists; OpenCode's OpenRouter model browser and filters; setup steps with copyable commands when not connected |
 | Dependencies | One tile per component, grouped (engines and apps, system tools, Ember's libraries): installed and newest version, status, and the update or install command; Claude Desktop installed and its version |
@@ -345,6 +345,11 @@ missing items, each only when above zero.
 - The app does not interrupt, close or send to a run.
 - While an engine's sandbox method is `none`, Overview and Engines show a
   warning naming the engine (I3).
+- Overview's Flows and Panels cards show flow tasks and panel members,
+  read-only. Runner gone and Process gone come from lifetime lock ownership
+  read through `/proc/locks`, after sixty seconds without a record update.
+  A stopped flow needs no runner. Show run expands a task's or member's
+  live or finished run row when that row is on Overview.
 - Menu holds the Writer and Reviewer pickers and, for a Claude model, how it
   runs (CLI or subagent). Each picker lists Ask each time, then the
   shortlisted models under their engine. Engines that are off are left out.
@@ -385,6 +390,8 @@ J6. Run records are watched with Qt's `QFileSystemWatcher` (inotify), with a
 check every sixty seconds as a backstop. While the window is hidden, the app
 reads only what the tray needs, besides the reads at start and the engine
 status read after a run fails with a sign-in error; screens do not redraw.
+Flow and panel records are watched the same way, only while Overview is
+shown and the window is visible.
 
 J7. Theme follows the desktop's light or dark setting, with an override in
 Settings (System, Light, Dark).
