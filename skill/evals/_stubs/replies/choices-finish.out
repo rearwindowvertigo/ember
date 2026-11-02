@@ -1,0 +1,8 @@
+{
+  "claim": {
+    "id": "{{ID}}",
+    "status": "gone"
+  },
+  "generation": 3,
+  "errors": []
+}

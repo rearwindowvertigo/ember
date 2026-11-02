@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from ember import __version__, choices, deps, paths
+from ember import __version__, choices, deps, paths, skill
 from ember.cli import main
 from ember.engines import models, status
 
@@ -680,6 +680,130 @@ def test_run_without_driver_exits_69(
     assert captured.err.splitlines()[-1] == (
         "owner: this Ember build has no driver for codex; update Ember"
     )
+
+
+# emb skill
+
+
+@pytest.fixture
+def skill_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    folder = tmp_path / "checkout" / "skill"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text("---\nname: ember\n---\n")
+    monkeypatch.setattr(skill, "source_candidates", lambda: (folder,))
+    return folder.resolve()
+
+
+def test_skill_help_names_link_and_source(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["skill", "--help"])
+    assert exit_info.value.code == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "$CLAUDE_CONFIG_DIR/skills/ember" in out
+    assert "~/.claude/skills/ember" in out
+    assert "/usr/share/ember/skill" in out
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    assert "install or remove the ember skill for Claude Code" in (
+        capsys.readouterr().out
+    )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["skill"], ["skill", "nope"], ["skill", "status", "--force"]],
+)
+def test_skill_usage_errors_exit_64(
+    argv: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(argv)
+    assert exit_info.value.code == 64
+    assert capsys.readouterr().out == ""
+
+
+def test_skill_install_status_uninstall(
+    env: dict[str, str], skill_source: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    link = Path(env["HOME"]) / ".claude" / "skills" / "ember"
+    assert main(["skill", "install"], env=env) == 0
+    assert capsys.readouterr().out == f"installed: {link} -> {skill_source}\n"
+    assert main(["skill", "install", "--json"], env=env) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "link": str(link),
+        "action": "already installed",
+        "target": str(skill_source),
+    }
+    assert main(["skill", "status"], env=env) == 0
+    assert capsys.readouterr().out == (
+        f"link: {link}\nstate: installed\ntarget: {skill_source}\n"
+        f"source: {skill_source}\n"
+    )
+    assert main(["skill", "status", "--json"], env=env) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "link": str(link),
+        "state": "installed",
+        "target": str(skill_source),
+        "source": str(skill_source),
+        "source_reason": None,
+    }
+    assert main(["skill", "uninstall", "--json"], env=env) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "link": str(link),
+        "action": "removed",
+        "target": str(skill_source),
+    }
+    assert main(["skill", "uninstall"], env=env) == 0
+    assert capsys.readouterr().out == f"not installed: {link}\n"
+
+
+def test_skill_install_refusals(
+    env: dict[str, str],
+    skill_source: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    link = Path(env["HOME"]) / ".claude" / "skills" / "ember"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(tmp_path)
+    assert main(["skill", "install"], env=env) == 75
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        f"emb skill: {link} links to {tmp_path.resolve()}, not to {skill_source}\n"
+        "next: emb skill install --force\n"
+    )
+    assert main(["skill", "install", "--force"], env=env) == 0
+    capsys.readouterr()
+    link.unlink()
+    link.mkdir()
+    assert main(["skill", "uninstall"], env=env) == 75
+    assert capsys.readouterr().err.splitlines()[-1] == (
+        f"owner: move or remove {link}, then emb skill install"
+    )
+    assert link.is_dir()
+
+
+def test_skill_without_source(
+    env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    missing = tmp_path / "nowhere"
+    monkeypatch.setattr(skill, "source_candidates", lambda: (missing,))
+    assert main(["skill", "status"], env=env) == 0
+    assert capsys.readouterr().out.splitlines()[-1] == (
+        f"source: null (the skill is missing from {missing})"
+    )
+    assert main(["skill", "install", "--json"], env=env) == 66
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "emb skill: no skill source found\n"
+        f"owner: reinstall Ember; the skill is missing from {missing}\n"
+    )
+    assert main(["skill", "uninstall"], env=env) == 0
 
 
 # emb app

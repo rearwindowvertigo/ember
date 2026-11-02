@@ -1,0 +1,4 @@
+link: /home/owner/.claude/skills/ember
+state: installed
+target: /usr/share/ember/skill
+source: /usr/share/ember/skill

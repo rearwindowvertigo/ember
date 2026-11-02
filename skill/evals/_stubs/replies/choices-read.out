@@ -1,0 +1,103 @@
+{
+  "answers": {
+    "worker.network": {
+      "value": "off",
+      "layer": "default"
+    },
+    "engine.claude": {
+      "value": "on",
+      "layer": "default"
+    },
+    "engine.codex": {
+      "value": "on",
+      "layer": "default"
+    },
+    "engine.opencode": {
+      "value": "on",
+      "layer": "default"
+    },
+    "shortlist.claude": {
+      "value": [],
+      "layer": "default"
+    },
+    "shortlist.codex": {
+      "value": [
+        "gpt-6.1-sol@high",
+        "gpt-6.1-sol-mini@medium"
+      ],
+      "layer": "setting"
+    },
+    "shortlist.opencode": {
+      "value": [],
+      "layer": "default"
+    },
+    "single.writer": {
+      "value": "codex:gpt-6.1-sol",
+      "layer": "setting"
+    },
+    "single.writer_as": {
+      "value": "cli",
+      "layer": "default"
+    },
+    "single.reviewer": {
+      "value": "codex:gpt-6.1-sol-mini",
+      "layer": "setting"
+    },
+    "single.reviewer_as": {
+      "value": "cli",
+      "layer": "default"
+    },
+    "sandbox.codex": {
+      "value": "on",
+      "layer": "default"
+    },
+    "sandbox.opencode": {
+      "value": "on",
+      "layer": "default"
+    },
+    "sandbox.claude": {
+      "value": "on",
+      "layer": "default"
+    },
+    "sandbox.read": {
+      "value": [],
+      "layer": "default"
+    },
+    "terminal": {
+      "value": "xdg-terminal-exec",
+      "layer": "default"
+    },
+    "app.autostart": {
+      "value": "on",
+      "layer": "default"
+    },
+    "app.theme": {
+      "value": "system",
+      "layer": "default"
+    }
+  },
+  "claim": null,
+  "generation": 2,
+  "errors": [],
+  "source_error": false,
+  "menu": {
+    "single.writer": {
+      "value": "codex:gpt-6.1-sol",
+      "state": "set",
+      "engine": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "run_as": null,
+      "reason": null
+    },
+    "single.reviewer": {
+      "value": "codex:gpt-6.1-sol-mini",
+      "state": "set",
+      "engine": "codex",
+      "model": "gpt-6.1-sol-mini",
+      "effort": "medium",
+      "run_as": null,
+      "reason": null
+    }
+  }
+}
