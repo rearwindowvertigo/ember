@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ember/flow-plan/1",
+  "title": "Ember flow plan",
+  "description": "Tasks, workers and checks for an Ember flow. Task ids are unique and dependencies name other tasks without cycles.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "dir",
+    "tasks"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "dir": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "base": {
+      "type": "string",
+      "pattern": "\\S",
+      "description": "a non-blank string",
+      "default": "HEAD"
+    },
+    "trailers": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(?=[\\s\\S]*\\S)[^\\r\\n]*$(?![\\s\\S])",
+        "description": "a non-blank one-line string"
+      },
+      "default": []
+    },
+    "writer": {
+      "$ref": "#/$defs/worker"
+    },
+    "reviewer": {
+      "$ref": "#/$defs/worker"
+    },
+    "rounds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3,
+      "default": 2
+    },
+    "parallel": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8,
+      "default": 4
+    },
+    "check": {
+      "type": "array",
+      "minItems": 1,
+      "prefixItems": [
+        {
+          "type": "string",
+          "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000]*$(?![\\s\\S])"
+        }
+      ],
+      "items": {
+        "type": "string",
+        "pattern": "^[^\\u0000]*$(?![\\s\\S])"
+      }
+    },
+    "check_timeout": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1800
+    },
+    "context": {
+      "type": "string",
+      "default": ""
+    },
+    "failure_model": {
+      "type": "string",
+      "default": ""
+    },
+    "read": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^/"
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/task"
+      }
+    }
+  },
+  "$defs": {
+    "worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "engine",
+        "model"
+      ],
+      "properties": {
+        "engine": {
+          "type": "string",
+          "enum": [
+            "codex",
+            "opencode",
+            "claude"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "pattern": "^[^\\s@]+$(?![\\s\\S])",
+          "description": "a non-empty model without whitespace or @"
+        },
+        "effort": {
+          "type": "string",
+          "pattern": "^[a-z]+$(?![\\s\\S])"
+        }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "task",
+        "files"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,39}$(?![\\s\\S])"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^(?=[\\s\\S]*\\S)[^\\r\\n]*$(?![\\s\\S])",
+          "description": "a non-blank one-line string",
+          "maxLength": 72
+        },
+        "task": {
+          "type": "string",
+          "pattern": "\\S",
+          "description": "a non-blank string"
+        },
+        "files": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/path"
+          }
+        },
+        "after": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,39}$(?![\\s\\S])"
+          },
+          "default": []
+        },
+        "review": {
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "path": {
+      "type": "string",
+      "pattern": "^(?!/)(?![\\s\\S]*\\u0000)(?!\\.?\\.?(/|$))(?![\\s\\S]*/\\.?\\.?(/|$))[^/]+(?:/[^/]+)*$(?![\\s\\S])",
+      "description": "a relative POSIX path without empty, dot, parent or NUL components"
+    }
+  }
+}

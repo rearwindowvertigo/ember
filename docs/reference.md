@@ -48,6 +48,7 @@ empty list.
 | `shortlist.claude`, `shortlist.codex` | List of `<model>@<effort>`; model `[A-Za-z0-9][A-Za-z0-9._-]*`, effort `[a-z]+` | `[]` | standing |
 | `shortlist.opencode` | List of `<provider>/<model>`, with optional `@<effort>`; each part `[A-Za-z0-9][A-Za-z0-9._-]*`, the provider part may start with `~` and the model part may also contain `:` | `[]` | standing |
 | `single.writer`, `single.reviewer` | `ask`, or `<engine>:<model>` with the model on that engine's shortlist when saved | `ask` | request, one-time, standing |
+| `multi.runs_as` | `ask`, `flow`, `workflow` | `ask` | request, one-time, standing |
 | `single.writer_as`, `single.reviewer_as` | `cli`, `subagent` | `cli` | request, one-time, standing |
 | `sandbox.codex` | `on`, `off` | `on` when `bwrap` is on `PATH` or the `codex` on `PATH` has a bundled `bwrap`, else `off` | standing |
 | `sandbox.opencode`, `sandbox.claude` | `on`, `off` | `on` when `bwrap` is on `PATH`, else `off` | standing |
@@ -114,14 +115,19 @@ changes nothing leaves it.
       "value": "...", "state": "...", "engine": "...", "model": "...",
       "effort": "...", "run_as": "...", "reason": "..."
     },
-    "single.reviewer": {}
+    "single.reviewer": {},
+    "multi.runs_as": {"value": "ask", "state": "ask", "reason": "asks at each run"}
   }
 }
 ```
 
 `claim` is `null` without `--id`.
 
-Menu `state` is `set`, `ask`, `invalid`, `engine off`, `not connected` or
+`multi.runs_as` has only `value`, `state` (`set` or `ask`) and `reason`;
+it names no worker. `ask` has reason `asks at each run`; `flow` and
+`workflow` have state `set` and reason `null`.
+
+Worker menu `state` is `set`, `ask`, `invalid`, `engine off`, `not connected` or
 `not shortlisted`, checked in that order. `not connected` means the engine is
 on and its status in the cache of `emb engines` says it is not connected; its
 reason is `<engine> is not connected`. A read uses only that cache and never
@@ -483,7 +489,11 @@ lock. Changes to `run.json` are made under the run's record lock,
 ### Run records
 
 Each run has a folder `$XDG_STATE_HOME/ember/runs/<id>/` (default
-`~/.local/state/ember/runs/<id>/`), mode 700, holding:
+`~/.local/state/ember/runs/<id>/`), mode 700.
+The runs folder also holds flow folders, `runs/<flow id>/` (see
+`emb flow`); `--status` lists runs only.
+
+Each run folder holds:
 
 | File | Holds |
 |---|---|
@@ -808,6 +818,193 @@ existing reply exits 66. A successful turn with no reply file exits 81.
 | 74 | Interrupted | The run's recovery line when a run exists, then a gap check action |
 | 81 | Invalid reply, missing or unknown steps, or a successful run without a reply file | `next: emb gapcheck --plan <plan> --reply <reply>` after fixing the reply, or a new check |
 | Other | The run's exit from the `emb run` table | The run's line, then a gap check action |
+
+### Plan
+
+A flow plan is a UTF-8 JSON object. The packaged schema is
+`ember/data/flow-plan.schema.json`, with id `ember/flow-plan/1`.
+Unknown keys are refused at every object level. Validation collects every
+problem before returning code 64. A missing, unreadable or non-UTF-8 plan
+file gives code 66; an empty or blank file gives 64. An empty `tasks` list
+is valid and has no waves.
+
+| Field | Default | Rule |
+|---|---|---|
+| `schema_version` | Omitted | Integer `1` |
+| `dir` | Required | String starting with `/`; existence and checkout checks belong to the command |
+| `base` | `HEAD` | Non-blank string |
+| `trailers` | `[]` | List of non-blank strings without CR or LF |
+| `writer`, `reviewer` | Menu row | Objects with required `engine` and `model`, optional `effort`, and no other keys |
+| `rounds` | `2` | Integer from 0 to 3 |
+| `parallel` | `4` | Integer from 1 to 8; maximum concurrent jobs within a wave |
+| `check` | No check | Non-empty argv list of strings; first argument non-blank; no NUL in any argument |
+| `check_timeout` | `1800` | Integer seconds, at least 1 |
+| `context`, `failure_model` | `""` | Strings |
+| `read` | `[]` | List of strings starting with `/`, without duplicates |
+| `tasks` | Required | List of task objects, in execution and merge order |
+
+Integers exclude booleans and JSON numbers written with a decimal point.
+Worker `engine` is `codex`, `opencode` or `claude`. The model is non-blank,
+contains no whitespace or `@`, and need not be shortlisted. Effort matches
+`[a-z]+`; its driver checks whether it accepts that effort.
+
+| Task field | Default | Rule |
+|---|---|---|
+| `id` | Required | Unique string matching `[a-z0-9][a-z0-9-]{0,39}` |
+| `subject` | `<id>: <first line of task>`, cut to 72 characters | Non-blank string without CR or LF, at most 72 characters; the writer brief's first line |
+| `task` | Required | Non-blank string |
+| `files` | Required | Non-empty list of unique relative POSIX paths; no leading slash, empty component, `.` component, `..` component or NUL |
+| `after` | `[]` | List of ids of other tasks; every id exists, no self dependency and no cycle |
+| `review` | `""` | String |
+
+Cycle diagnostics name the path, such as `cycle: a -> b -> a`.
+A wave takes eligible tasks greedily in plan order: all their dependencies
+have merged, and none of their declared files overlaps an already selected
+file. Equal paths and folder prefixes overlap; `src` overlaps `src/a.py`,
+but `src/a` does not overlap `src/ab.py`. The dry-run waves assume every
+preceding task merges. A wave can contain more than `parallel` tasks.
+
+Warnings do not refuse a plan:
+
+- `no failure_model; every unsettled case is a gap`
+- `no check; waves are merged without a check`
+- `<id>: <path> is a folder; list the files the task changes`, when the path
+  is a tree at `base`, read with `git cat-file -t`
+- `<id>: no test file in its files`, when no file is under `test` or `tests`,
+  starts with `test_`, or has a name matching `*_test.*`
+
+A failed or timed-out folder probe emits no folder warning. It does not
+change plan validation. Git probes omit checkout override variables and
+`EMBER_FLOW_RUNNER` from their environment.
+
+### Workers
+
+Each role resolves in this order: its `--writer` or `--reviewer` option,
+its plan object, then `single.writer` or `single.reviewer` in the choices
+reply. Options use `<engine>:<model>[@<effort>]`; model names may contain
+colons and slashes. The result records `engine`, `model`, `effort` and
+`source` (`option`, `plan`, `menu`, or `answer` for a lead answer).
+
+Menu resolution requires a readable settings source and a row in state
+`set`. A Claude row set to run as a subagent is refused: a flow runs CLI
+workers. These refusals give code 64 with an `owner:` line naming the
+role's explicit option and Menu screen. Explicit options and plan workers
+work when the rows are `ask`; they do not require a shortlist entry.
+
+The worker check requires its engine switch to be `on` (64), a connected
+engine (69), an available driver (69), and an accepted explicit effort
+(64). Connection status comes from the engine cache, or a status read
+when no usable cache exists. The connection error names the unmet
+requirement's fix when present.
+
+The flow record stores the selected workers. The runner passes model and
+effort to each run. A claim used to read choices is recorded on the flow;
+individual runs receive no claim. Worker resolution preserves an omitted
+effort as `null`; callers must freeze the effective effort before starting
+runs that could otherwise reread menu effort.
+
+### Flow records
+
+Flow folders share `$XDG_STATE_HOME/ember/runs/` with run folders. A flow id
+is `flow-<yyyymmdd>-<hhmmss>-<6 hex digits>`, with a UTC timestamp. Its folder
+is mode 700 and its record files are mode 600. Run listings skip flow ids;
+flow listings skip run ids and report unreadable flow records separately.
+Both listings sort oldest first.
+
+| File | Holds |
+|---|---|
+| `flow.json` | The flow record, replaced atomically; written at creation, then by the runner |
+| `plan.json` | The plan's original source text |
+| `events.jsonl` | Numbered event objects, one per line |
+| `answers.jsonl` | Numbered answer objects, one per line |
+| `answers/<n>.md` | Private copy of the correction for answer `n` |
+| `briefs/<task>-write-<n>.md`, `briefs/<task>-review-<n>.md`, `briefs/<task>-fix-<n>.md` | Writer briefs, review briefs and fix messages; artifact numbers increase across replacement writers and fresh round budgets |
+| Check logs | Each check attempt's output in a distinct file named by its `checks` entry |
+| `watch.json` | `{"seq": <last reported event>}` |
+| `watch.lock` | The watch command's lock across event selection, output and cursor advancement |
+| `cursor.lock` | Serializes cursor writes and prevents regression |
+| `events.jsonl.incomplete-<timestamp>`, `answers.jsonl.incomplete-<timestamp>` | Preserved incomplete tails removed before another append |
+
+The runner's lifetime lock is
+`$XDG_RUNTIME_DIR/ember/locks/<flow id>.lock`. Record saving does not acquire
+it; the runner serializes its writes. Creating an existing flow folder is
+refused. `save` updates `updated_at` and atomically replaces `flow.json`.
+
+| Flow field | Value |
+|---|---|
+| `id`, `plan` | Flow id and absolute source plan path |
+| `dir`, `main` | Checkout top and main checkout |
+| `base`, `tip` | Resolved base commit and current flow branch tip |
+| `branch`, `worktree` | `ember/flow/<id>` and `<main>/.ember/worktrees/<id>` |
+| `writer`, `reviewer` | Stored worker objects: `engine`, `model`, `effort`, `source` |
+| `rounds`, `parallel`, `check_timeout` | Plan limits |
+| `check`, `trailers`, `read` | Plan argv, commit trailers and readable paths; lists |
+| `stall_minutes` | Stall interval, default 10 |
+| `claim` | Claim id or null; information for the flow |
+| `status` | `starting`, `running`, `checking`, `stopped`, `failed` or `done` |
+| `reason` | Stop or failure reason, or null |
+| `wave` | Last wave started; initially 0 |
+| `check_pending` | Whether a merge lacks a durably recorded passing check |
+| `checks` | Entries with `wave`, `exit`, `log`, `at`; one per attempt |
+| `answers_seen` | Complete answer lines already consumed; initially 0 |
+| `halted` | Reason new runs are halted, or null |
+| `abandoned` | Retained branches from dropped or replaced writers |
+| `runner` | Last runner's `pid` and `started_at`, or null |
+| `started_at`, `updated_at`, `ended_at` | Epoch seconds; `ended_at` is null until an end |
+| `tasks` | Task records in plan order |
+
+| Task field | Value |
+|---|---|
+| `id`, `subject` | Plan values |
+| `status` | `pending`, `writing`, `reviewing`, `fixing`, `accepted`, `merging`, `merged`, `stopped`, `conflict`, `blocked` or `dropped` |
+| `reason` | Stop, conflict, blocking or drop reason, or null |
+| `wave` | Last wave used, or null |
+| `writer`, `reviewer` | Task-specific worker override, or null for the flow's worker |
+| `writer_run`, `reviewer_run` | Current writer and review run ids, or null |
+| `branch`, `worktree` | Writer branch and worktree, or null |
+| `task_base`, `head` | Starting flow tip and latest reviewed task head, or null |
+| `round` | Fix rounds in the current budget; initially 0 |
+| `reviews` | Entries with `round`, `run`, `verdict`, `must`, `should`, `lead`, `at`; verdict is `pass`, `fix` or `unreadable` |
+| `findings` | Latest findings and retained earlier `should` and `lead` findings |
+| `changed_files`, `outside_files` | Last turn's changed paths and paths outside its declarations |
+| `entry` | Next operation: `write`, `send`, `review` or null |
+| `answer` | Answer number being applied, or null |
+| `merge_tip`, `merge_commit` | Approved tip being merged and resulting merge commit, or null; containment may succeed without a merge commit |
+| `cleanup` | Cleanup result objects from the merge |
+
+Record loading checks required field types and status values. Additional
+fields are retained for runner recovery metadata. Each task starts with
+independent empty lists.
+
+Events have `seq` starting at 1, `at` in epoch seconds, and `kind`:
+
+| Kind | Fields |
+|---|---|
+| `flow` | `status`, `reason` |
+| `task` | `task`, `status`, `reason` |
+| `lead_stop` | `task` or null, `status`, `reason`, `choices` |
+| `check` | `wave`, `exit`, `log`, `output` |
+| `end` | `status`, `reason`, `exit` |
+
+Creation writes event 1 with kind `flow` and status `starting`. Event reads
+can start after a sequence number and skip unreadable complete lines.
+
+An answer has `n`, `at`, `task`, `kind`, `file`, `commit`, `worker`. Kinds are
+`send`, `accept`, `review`, `worker`, `drop`; optional values are null.
+`worker` uses the worker option syntax. The answer append function takes
+`flock` on `answers.jsonl`, allocates the number, copies a send source file
+to `answers/<n>.md`, and appends the object with that path, all under the
+same lock. Callers supply the source filename and do not allocate `n`.
+A missing or empty correction is not appended.
+
+Both logs use a single append write per complete line, followed by `fsync`.
+Readers ignore incomplete last lines. Before appending, a writer preserves
+any incomplete bytes in a private timestamped file and removes them from
+the log while holding its lock. An unreadable complete answer line returns
+`None` and still occupies a line number. Number allocation is greater than
+both the complete line count and every stored valid number. Cursor writes
+cannot decrease `seq`; a missing cursor reads as 0, a malformed cursor is
+an error.
 
 ## `emb ground`
 

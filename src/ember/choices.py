@@ -263,6 +263,15 @@ def _keys() -> dict[str, Key]:
                 allowed=("cli", "subagent"),
             )
         )
+    keys.append(
+        Key(
+            "multi.runs_as",
+            _ALL,
+            _enum("ask", "flow", "workflow"),
+            _constant("ask"),
+            allowed=("ask", "flow", "workflow"),
+        )
+    )
     for engine in SANDBOXED:
         keys.append(
             Key(
@@ -554,6 +563,16 @@ def menu_row(
     return row
 
 
+def runs_as_row(answers: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """Describe how multi-task work runs, without naming a worker."""
+    value = answers["multi.runs_as"]["value"]
+    return {
+        "value": value,
+        "state": "ask" if value == "ask" else "set",
+        "reason": "asks at each run" if value == "ask" else None,
+    }
+
+
 def _reply(
     state: _State,
     run_id: str | None,
@@ -576,7 +595,10 @@ def _reply(
         "source_error": source_error,
         "menu": None
         if source_error
-        else {name: menu_row(answers, name, connected) for name in MENU_KEYS},
+        else {
+            **{name: menu_row(answers, name, connected) for name in MENU_KEYS},
+            "multi.runs_as": runs_as_row(answers),
+        },
     }
 
 
