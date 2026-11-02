@@ -81,7 +81,9 @@ def test_segmented_click_and_set_value(qtbot: QtBot) -> None:
         [("a", "A"), ("a", "B")],
     ],
 )
-def test_segmented_refuses_bad_options(options: list[tuple[str, str]]) -> None:
+def test_segmented_refuses_bad_options(
+    qtbot: QtBot, options: list[tuple[str, str]]
+) -> None:
     with pytest.raises(ValueError):
         widgets.Segmented(options)
 
