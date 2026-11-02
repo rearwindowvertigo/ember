@@ -239,6 +239,7 @@ stalled partial edits without the owner's approval.
 ### 7. Verify and review
 
 Verify in the worker's own worktree and branch, not the session checkout.
+Write scratch output to `/tmp`, never into a worker's worktree.
 After every editing worker, run:
 
 ```bash
@@ -307,8 +308,10 @@ owner's work. Report runs parked and runs left open, with reasons.
 
 ### 9. Merge, clean up and finish
 
-Write the verdict line, such as `Verdict: Keep.`, as visible text, then
-run `emb merge` as its own command; do the same after a correction. Merge only Keep or Keep-with-fix work into
+Write the verdict line, such as `Verdict: Keep.`, as reply text in the
+same message as the merge call and before it; a verdict only in thinking
+does not count. Then run `emb merge` as its own Bash call, with no other command chained before
+or after it; do the same after a correction. Merge only Keep or Keep-with-fix work into
 the session branch:
 
 ```bash
@@ -323,7 +326,10 @@ worker. The rerun keeps the task's claim id, which is finished only when the
 task ends; a different worker needs the owner's answer first.
 
 Exit 0 proves the merge, not that cleanup removed everything. Report the
-worker tip and every `kept` line with its reason.
+worker branch's tip commit (not the merge commit) and every `kept` line
+with its reason. Leave a kept worktree as
+it is: do not delete, clean or commit its files so that cleanup removes
+it. What happens to it is the owner's decision.
 
 | Exit of `emb merge` or `emb cleanup` | Response |
 |---|---|
@@ -360,7 +366,9 @@ also refuse without a terminal (exit 77). A worker pick does not authorize
 changing the owner's settings. Point the owner to Ember's Menu or Settings
 screen (`emb app`), or give the exact command to run at their terminal:
 `emb choices --set <key>=<value>` for a standing setting, or
-`emb choices --once <key>=<value>` for a one-time choice.
+`emb choices --once <key>=<value>` for a one-time choice. A
+`single.writer` or `single.reviewer` value is `<engine>:<model>` or `ask`,
+with no effort; an effort comes from the engine's shortlist.
 
 Never run `sudo`, or an install, update or sign-in command, for the owner.
 On an `owner:` line or a missing engine or tool, give the owner the

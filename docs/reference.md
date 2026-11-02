@@ -434,8 +434,10 @@ worker changed files, with the subject
 `<subject> (turn <n>, incomplete: <reason>)`, where `<subject>` is cut to 72
 characters and `<reason>` is `sign-in failure` (69), `engine failure` (71),
 `provider error` (73) or `no reply` (80). The turn's exit is unchanged. Nothing is committed when the worktree's branch or
-`HEAD` is not where the run left it (76); a refused commit exits 77 and
-leaves the work uncommitted.
+`HEAD` is not where the run left it (76); a refused commit or failed
+`git add` exits 77 and leaves the work uncommitted. A refused commit saves
+its full stdout then stderr as UTF-8 with replacement for bad bytes in
+`<run folder>/hook-refusal.txt`. A successful commit clears that file.
 
 A read-only run has no commit step. Before and after each turn Ember reads
 `git status --porcelain=v1 -z --untracked-files=all` and a SHA-256 hash of
@@ -469,12 +471,20 @@ send (<what the driver found>); Claude asks the owner before going on` and
 `next: ask the owner about the messages in the session of <run>; with their
 go-ahead, repeat the command with --force`. `--force` skips only this
 check, and records the messages then in the session as accepted, so they do
-not refuse later commands. `--send` then commits a turn that was collected but not committed.
+not refuse later commands. `--send` then retries a collected turn's commit.
+If it succeeds, the correction is sent as written. If `git commit` is
+refused again, the stored hook output is refreshed and sent ahead of the
+correction, under `The commit hook refused your last turn's commit:` in a
+fenced block. Sent output is capped at its last 200 lines and last 64 KiB,
+whichever is smaller, with a note when cut. The following turn makes one
+commit with its normal subject and the files from both turns. A failed
+`git add` still stops the send with exit 77 and points to `--recover`.
 It sends only when the driver reports the session idle; a busy or unknown
-session exits 75. The message is sent as
-written. When the driver fails (71) or Ctrl+C (74) stops the command before
-the message is known to be delivered, the run's previous turn state is
-restored and the line is `next: emb run --send <run> --message-file <file>
+session exits 75. The stored output is cleared after the driver confirms
+delivery; a failed send keeps it. When the driver fails (71) or Ctrl+C (74)
+stops the command before the message is known to be delivered, the run's
+previous turn state is restored and the line is
+`next: emb run --send <run> --message-file <file>
 (the message was not sent)`.
 
 `--recover` finishes the current turn from its recorded state: it waits for a
@@ -584,7 +594,7 @@ prints one `<field>: <value>` line per field, and `--status` one line per run:
 | 74 | Interrupted | `next: emb run --recover <run>`; for an interrupted send, `next: emb run --send <run> ...` |
 | 75 | Close refused while a turn runs or is collected but not committed, a busy session, another command on the run, or a session holding messages Ember did not send | `next: emb run --recover <run>` or `--status`; for messages Ember did not send, `next: ask the owner ...` |
 | 76 | Branch or `HEAD` moved; nothing committed | `next: git -C <worktree> log --oneline -3` |
-| 77 | A hook refused the commit | `next: git -C <worktree> status` |
+| 77 | `git commit was refused`, or `git add failed` | `next: emb run --send <run> --message-file <file>` sends hook output with the correction for a refused commit; a failed `git add` points to `next: emb run --recover <run>` |
 | 80 | The turn ended with no reply | `next: emb run --screen <run>, then emb run --send <run> ...` |
 | 124 | Stall; the turn may still be running | `next: emb run --recover <run>` |
 
@@ -1212,7 +1222,11 @@ to the owner with its findings and every available choice.
 `--send` copies the correction to `answers/<n>.md` under the same lock
 that allocates its number and appends its answer. Intentional commands in
 the correction remain as written. The writer receives it, then gets a
-fresh review and fix budget. An unreadable correction exits 66; a blank
+fresh review and fix budget. After `git commit was refused` (exit 77), the
+send retries the commit and, if refused again, delivers the refreshed hook
+output ahead of the correction as `emb run --send` does. This send counts
+as a fix round in the existing budget, even when all rounds are used; it
+does not raise the limit. An unreadable correction exits 66; a blank
 correction exits 64.
 
 `--accept` records the task branch's tip at queue time, or the full commit

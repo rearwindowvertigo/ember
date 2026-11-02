@@ -6,12 +6,13 @@ and listen to the signals; every read and save runs in a task.
 """
 
 import io
+import os
 import subprocess
 from collections import deque
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QProcessEnvironment, Signal
 from PySide6.QtWidgets import QDialog, QWidget
 
 from ember import choices, db, terminals
@@ -116,7 +117,11 @@ class AppContext(QObject):
         self._visible = False
         self._autostart_reason: str | None = None
         self._save_queue: deque[
-            tuple[dict[str, object], Callable[[dict[str, Any]], None] | None]
+            tuple[
+                dict[str, object],
+                Callable[[dict[str, Any]], None] | None,
+                Callable[[dict[str, Any] | Exception], None] | None,
+            ]
         ] = deque()
         self._saving = False
 
@@ -153,27 +158,31 @@ class AppContext(QObject):
     def _read_settings(
         self,
         done: Callable[[], None] | None,
-        after: Callable[[], None] | None,
+        after: Callable[[bool], None] | None,
     ) -> None:
-        """Read the settings; `after` runs once the read ends either way."""
+        """Read settings; `after` receives whether the read succeeded."""
         env = self.env
 
         def loaded(snapshot: dict[str, Any]) -> None:
+            """Publish the snapshot and notify the read's callbacks."""
             self._settings = snapshot
             self.settings_changed.emit(snapshot)
-            if done is not None:
-                done()
-            if after is not None:
-                after()
+            try:
+                if done is not None:
+                    done()
+            finally:
+                if after is not None:
+                    after(True)
 
         def failed(error: Exception) -> None:
+            """Report the read failure and notify its completion callback."""
             self.settings_failed.emit(
                 f"Ember could not read its settings: {error}. "
                 "Try again; if this keeps happening, check the settings "
                 "database's folder."
             )
             if after is not None:
-                after()
+                after(False)
 
         self.tasks.run(lambda: choices.snapshot(env=env), loaded, failed)
 
@@ -181,62 +190,105 @@ class AppContext(QObject):
         self,
         values: dict[str, object],
         done: Callable[[dict[str, Any]], None] | None = None,
+        *,
+        result: Callable[[dict[str, Any] | Exception], None] | None = None,
     ) -> None:
         """Save standing settings in a task, one save at a time.
 
         A save asked for while another is in flight waits for it, then is
         sent with the generation of the snapshot read after it. On success
         the new snapshot is read, `settings_changed` is emitted and `done`
-        is called with it. A save refused as stale drops the saves waiting
-        behind it, reloads the settings, then emits `stale`. Any other
-        failure emits `error`, and the next waiting save is sent.
+        is called with it, followed by `result`. A save refused as stale drops
+        the saves waiting behind it and reloads the settings. Each affected
+        save's `result` receives the stale error in queue order, then `stale`
+        is emitted if the reload succeeded. Saves queued during that reload
+        run afterwards. Any other failure emits `error` and calls `result`
+        with the exception. The next waiting save runs even if a callback
+        raises.
 
         Args:
             values: Key to typed value.
             done: Called with the new snapshot after this save succeeds.
+            result: Called once with the new snapshot or this save's exception.
         """
-        self._save_queue.append((values, done))
+        self._save_queue.append((values, done, result))
         if not self._saving:
             self._next_save()
 
     def _next_save(self) -> None:
+        """Send the next save and deliver its callbacks before advancing."""
         if not self._save_queue:
             self._saving = False
             return
         self._saving = True
-        values, done = self._save_queue.popleft()
+        values, done, result = self._save_queue.popleft()
         env = self.env
         expect = self.settings().get("generation")
 
         def save() -> dict[str, Any]:
+            """Write this save and read its new snapshot."""
             choices.set_settings(values, expect_generation=expect, env=env)
             return choices.snapshot(env=env)
 
         def saved(snapshot: dict[str, Any]) -> None:
+            """Publish the snapshot and call both success callbacks."""
             self._settings = snapshot
             self.settings_changed.emit(snapshot)
-            if done is not None:
-                done(snapshot)
-            self._next_save()
+            try:
+                try:
+                    if done is not None:
+                        done(snapshot)
+                finally:
+                    if result is not None:
+                        result(snapshot)
+            finally:
+                self._next_save()
 
         def failed(error: Exception) -> None:
+            """Report this save's error and finish every refused save."""
             if isinstance(error, db.StaleGenerationError):
+                affected = [result, *(entry[2] for entry in self._save_queue)]
                 self._save_queue.clear()
-                self._read_settings(self.stale.emit, self._next_save)
+
+                def reloaded(succeeded: bool) -> None:
+                    """Notify refused saves after the reload, then resume saves."""
+                    callback_error: Exception | None = None
+                    try:
+                        for callback in affected:
+                            if callback is not None:
+                                try:
+                                    callback(error)
+                                except Exception as exc:
+                                    if callback_error is None:
+                                        callback_error = exc
+                        if callback_error is not None:
+                            raise callback_error
+                    finally:
+                        try:
+                            if succeeded:
+                                self.stale.emit()
+                        finally:
+                            self._next_save()
+
+                self._read_settings(None, reloaded)
                 return
-            if isinstance(error, choices.InvalidChoiceError):
-                self.error.emit(f"The setting was not saved: {error}")
-            elif isinstance(error, db.DatabaseBusyError):
-                self.error.emit(
-                    "The setting was not saved: the settings database is busy. "
-                    "Try again."
-                )
-            else:
-                self.error.emit(
-                    f"The setting was not saved: {error}. Try again; if this "
-                    "keeps happening, check the settings database's folder."
-                )
-            self._next_save()
+            try:
+                if isinstance(error, choices.InvalidChoiceError):
+                    self.error.emit(f"The setting was not saved: {error}")
+                elif isinstance(error, db.DatabaseBusyError):
+                    self.error.emit(
+                        "The setting was not saved: the settings database is busy. "
+                        "Try again."
+                    )
+                else:
+                    self.error.emit(
+                        f"The setting was not saved: {error}. Try again; if this "
+                        "keeps happening, check the settings database's folder."
+                    )
+                if result is not None:
+                    result(error)
+            finally:
+                self._next_save()
 
         self.tasks.run(save, saved, failed)
 
@@ -363,12 +415,19 @@ class AppContext(QObject):
     def open_run_terminal(self, run_id: str) -> None:
         """Open a terminal window on a run's session, as `emb run --attach`.
 
+        The native process's activation token is consumed for this launch.
         A failure emits `error` with what `emb run` reported.
 
         Args:
             run_id: The run.
         """
-        env = self.env
+        env = dict(self.env)
+        env.pop("XDG_ACTIVATION_TOKEN", None)
+        # Qt's tray adaptor sets the native environment with qputenv.
+        token = QProcessEnvironment.systemEnvironment().value("XDG_ACTIVATION_TOKEN")
+        os.unsetenv("XDG_ACTIVATION_TOKEN")
+        if token:
+            env["XDG_ACTIVATION_TOKEN"] = token
 
         def opened(result: tuple[int, str]) -> None:
             code, text = result

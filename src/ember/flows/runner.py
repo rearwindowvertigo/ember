@@ -19,7 +19,7 @@ from ember import branches, paths, tmux
 from ember.engines import Driver
 from ember.flows import briefs, lock, plan, record, verdict
 from ember.runs import record as runs
-from ember.runs.core import Core, StartOptions
+from ember.runs.core import HOOK_REFUSAL_NAME, Core, StartOptions
 
 POLL_SECONDS = 1.0
 OUTPUT_LIMIT = 4000
@@ -308,7 +308,11 @@ class _Runner:
             recovered = runs.load(run_id, self.env)
             if recovered.turn_state == runs.COMMITTED:
                 return not self.shutdown.is_set()
-        reason = "; ".join(line for line in err.getvalue().splitlines() if line.strip())
+        reason = "; ".join(
+            line
+            for line in err.getvalue().splitlines()
+            if line.strip() and not line.lstrip().startswith(("next:", "owner:"))
+        )
         if code == 124:
             reason = f"stalled; the turn keeps running in {run_id}"
         if code == 73:
@@ -586,13 +590,18 @@ class _Runner:
             if not self.start(task, "writer", path) or not self.post_turn(task, True):
                 return
         elif entry == "send":
+            run = self.metadata(task)
+            hook_refused = (
+                run.turn_state == runs.COLLECTED
+                and (run.folder / HOOK_REFUSAL_NAME).exists()
+            )
             text = Path(task["answer_file"]).read_text(encoding="utf-8")
             path = self.artifact(
                 task,
                 "fix",
                 briefs.send_message(self.id, self.plan.task(task["id"]), text),
             )
-            if not self.send(task, path, fresh=True):
+            if not self.send(task, path, fresh=not hook_refused):
                 return
         elif task.get("explicit_review"):
             # A recovered review covers only the head it started on; a moved
@@ -969,10 +978,17 @@ class _Runner:
                         )
                     fields.update(status="accepted", head=tip)
                 elif kind in ("send", "review", "worker"):
+                    hook_refused = False
+                    if kind == "send" and task["writer_run"]:
+                        run = runs.load(task["writer_run"], self.env)
+                        hook_refused = (
+                            run.turn_state == runs.COLLECTED
+                            and (run.folder / HOOK_REFUSAL_NAME).exists()
+                        )
                     fields.update(
                         status="pending",
                         entry="write" if kind == "worker" else kind,
-                        round=0,
+                        round=task["round"] if hook_refused else 0,
                         review_action=None,
                         recover_review=False,
                     )
@@ -1095,6 +1111,7 @@ class _Runner:
     def jobs(self, wave: list[dict[str, Any]]) -> None:
         """Wait for a whole wave, allowing main to observe handled signals."""
         with self.mutex:
+            # Each job batch increments the runner pass count.
             self.flow["wave"] += 1
             for task in wave:
                 # Recovery retains the declarations of the interrupted wave.

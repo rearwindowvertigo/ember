@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ember import paths
-from ember.flows.plan import Plan, Worker
+from ember.flows.plan import Plan, Worker, waves
 from ember.runs import record
 
 FLOW_NAME, PLAN_NAME, EVENTS_NAME, ANSWERS_NAME, WATCH_NAME = (
@@ -43,6 +43,7 @@ ANSWER_KINDS = ("send", "accept", "review", "worker", "drop")
 _FLOW_FIELDS = {
     "id": "str",
     "plan": "str",
+    "plan_waves": "[[str]]",
     "dir": "str",
     "main": "str",
     "base": "str",
@@ -61,7 +62,7 @@ _FLOW_FIELDS = {
     "claim": "str?",
     "status": "str",
     "reason": "str?",
-    "wave": "int",
+    "wave": "int",  # The flow's runner pass count.
     "check_pending": "bool",
     "checks": "[dict]",
     "answers_seen": "int",
@@ -78,7 +79,7 @@ _TASK_FIELDS = {
     "subject": "str",
     "status": "str",
     "reason": "str?",
-    "wave": "int?",
+    "wave": "int?",  # The runner pass assigned to the task.
     "writer": "worker?",
     "reviewer": "worker?",
     "writer_run": "str?",
@@ -160,6 +161,7 @@ def new_flow(
     return {
         "id": flow_id,
         "plan": str(plan.path),
+        "plan_waves": [[task.id for task in wave] for wave in waves(plan)],
         "dir": top,
         "main": main,
         "base": base,
@@ -298,6 +300,8 @@ def load(flow_id: str, env: Mapping[str, str] | None = None) -> dict[str, Any]:
         raise FlowMissingError(flow_id, "no such flow") from error
     except (OSError, ValueError) as error:
         raise FlowError(flow_id, f"cannot read flow.json: {error}") from error
+    if isinstance(value, dict):
+        value.setdefault("plan_waves", [])
     _validate(flow_id, value)
     return value
 

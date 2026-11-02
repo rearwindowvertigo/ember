@@ -18,6 +18,16 @@ BACKSTOP_MS = 60_000
 ENDED_LIMIT = 5
 GONE_AFTER = 60.0
 ACTIVE_FLOW = ("starting", "running", "checking", "stopped")
+ACTIVE_TASK = (
+    "writing",
+    "reviewing",
+    "fixing",
+    "accepted",
+    "merging",
+    "stopped",
+    "conflict",
+    "blocked",
+)
 RUNNER_FLOW = ("starting", "running", "checking")
 ENDED_FLOW = ("done", "failed")
 ENDED_PANEL = ("done", "incomplete")
@@ -52,6 +62,16 @@ class Snapshot:
     unreadable_flows: int
     unreadable_panels: int
     watch: list[str]
+
+
+def plan_wave(flow: Mapping[str, Any]) -> tuple[int, int] | None:
+    """Return the highest active plan wave's position and the stored total."""
+    waves = flow.get("plan_waves", [])
+    active = {task["id"] for task in flow["tasks"] if task["status"] in ACTIVE_TASK}
+    for index in range(len(waves) - 1, -1, -1):
+        if active.intersection(waves[index]):
+            return index + 1, len(waves)
+    return None
 
 
 def held_locks(text: str) -> set[tuple[int, int, int]]:

@@ -126,7 +126,9 @@ def h(tmp_path: Path) -> Iterator[Harness]:
 
 def test_parallel_wave_merges_cleans_and_checks(h: Harness) -> None:
     h.create([task("a"), task("b")], check=[sys.executable, "-c", "print('checked')"])
+    assert h.flow()["plan_waves"] == [["a", "b"]]
     flow = h.run()
+    assert flow["plan_waves"] == [["a", "b"]]
     assert flow["status"] == "done"
     assert flow["wave"] == 1
     assert [t["status"] for t in flow["tasks"]] == ["merged", "merged"]
@@ -158,7 +160,9 @@ def test_dependencies_and_overlaps_form_two_waves(h: Harness, overlap: bool) -> 
         after=[] if overlap else ["a"],
     )
     h.create([task("a"), second])
+    assert h.flow()["plan_waves"] == [["a"], ["b"]]
     flow = h.run()
+    assert flow["plan_waves"] == [["a"], ["b"]]
     assert flow["wave"] == 2
     a, b = flow["tasks"]
     assert runs.load(b["writer_run"], h.env).base == a["merge_commit"]
@@ -288,7 +292,8 @@ def test_writer_failure_and_provider_halt(h: Harness, failure: str) -> None:
     h.create([task("a", text=failure), task("b")], parallel=1)
     flow = h.run()
     assert flow["tasks"][0]["status"] == "stopped"
-    assert "next:" in flow["tasks"][0]["reason"]
+    assert "next:" not in flow["tasks"][0]["reason"]
+    assert "owner:" not in flow["tasks"][0]["reason"]
     if failure.startswith("@provider"):
         assert flow["halted"] == "provider error on codex; new runs halted"
         assert flow["tasks"][1]["writer_run"] is None
@@ -298,6 +303,46 @@ def test_writer_failure_and_provider_halt(h: Harness, failure: str) -> None:
         assert resumed["tasks"][1]["status"] == "merged"
     else:
         assert flow["tasks"][1]["status"] == "merged"
+
+
+@pytest.mark.parametrize("role", ["writer", "reviewer"])
+@pytest.mark.parametrize(
+    ("error_output", "reason"),
+    [
+        (
+            "emb run: failed\nnext: retry\n\n  detail stays  \n\towner: lead\n"
+            " \t\nlast diagnostic\n  next: inspect\nowner: user\n",
+            "emb run: failed;   detail stays  ; last diagnostic",
+        ),
+        (
+            "detail next: retry\n  detail owner: lead\nnext steps\nowner name\n",
+            "detail next: retry;   detail owner: lead; next steps; owner name",
+        ),
+        ("next: retry\n", "the run exited 77"),
+        ("\towner: lead\n", "the run exited 77"),
+        ("\n  next: retry\n \t\n\towner: lead\n", "the run exited 77"),
+        ("\n \t\n", "the run exited 77"),
+        ("", "the run exited 77"),
+    ],
+)
+def test_run_error_stop_reason(
+    h: Harness, role: str, error_output: str, reason: str
+) -> None:
+    """Keep diagnostics in order and omit next and owner instruction lines."""
+    h.create()
+    instance = h.instance()
+    item = instance.flow["tasks"][0]
+
+    def fail(core: Core) -> int:
+        """Write the run's error output and return its failure code."""
+        assert core.err is not None
+        core.err.write(error_output)
+        return 77
+
+    assert not instance.call(item, role, fail)
+    saved = h.flow()["tasks"][0]
+    assert saved["status"] == "stopped"
+    assert saved["reason"] == reason
 
 
 def test_failed_check_resumes_with_a_distinct_log(h: Harness) -> None:
@@ -353,6 +398,7 @@ def test_check_cleans_files_and_environment(h: Harness) -> None:
 def test_answers_resume_stopped_tasks(h: Harness, kind: str) -> None:
     h.scripts_update(**{"Review of task a,": "@reply " + FIX})
     h.create([task("a"), task("b", after=["a"])], rounds=0)
+    assert h.flow()["plan_waves"] == [["a"], ["b"]]
     before = h.run()["tasks"][0]
     h.script_data = {"a read-only review;": "@reply " + PASS}
     h.scripts_update()
@@ -367,6 +413,7 @@ def test_answers_resume_stopped_tasks(h: Harness, kind: str) -> None:
         fields["worker"] = "codex:another@low"
     h.answer(kind, **fields)
     flow = h.run()
+    assert flow["plan_waves"] == [["a"], ["b"]]
     item = flow["tasks"][0]
     assert flow["answers_seen"] == 1
     assert item["entry"] is None
@@ -385,6 +432,87 @@ def test_answers_resume_stopped_tasks(h: Harness, kind: str) -> None:
         assert runs.load(item["writer_run"], h.env).model == "another"
     if kind == "review":
         assert runs.load(item["reviews"][-1]["run"], h.env).model == "another"
+    if kind == "send":
+        assert item["round"] == 0
+
+
+@pytest.mark.parametrize("rounds", [0, 1])
+@pytest.mark.parametrize("retry_succeeds", [False, True])
+def test_hook_refusal_send_uses_the_existing_fix_budget(
+    h: Harness, rounds: int, retry_succeeds: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h.create(rounds=rounds)
+    if rounds:
+        h.scripts_update(
+            **{
+                "Review of task a, round 1,": "@reply " + FIX,
+                "Fix round 1 of task a": "@write a needs-hook-fix",
+            }
+        )
+    hook = h.repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text(
+        "#!/bin/sh\n"
+        'case "$(git show :a)" in\n'
+        + ("value) exit 0;;\n" if rounds else "")
+        + "corrected) exit 0;;\nesac\necho hook refused >&2\nexit 1\n"
+    )
+    hook.chmod(0o755)
+    before = h.run()["tasks"][0]
+    assert before["status"] == "stopped"
+    assert "git commit was refused" in before["reason"]
+    assert before["round"] == rounds
+    writer = runs.load(before["writer_run"], h.env)
+    assert writer.turn_state == runs.COLLECTED
+    if retry_succeeds:
+        hook.unlink()
+    correction = h.tmp / "correction.md"
+    correction.write_text("@write a corrected\n")
+    sent: list[str] = []
+    deliver = h.driver.send
+
+    def capture(run: runs.Run, text: str) -> None:
+        if run.id == writer.id:
+            sent.append(text)
+        deliver(run, text)
+
+    monkeypatch.setattr(h.driver, "send", capture)
+    h.answer("send", file=str(correction))
+    instance = h.instance()
+    instance.answers()
+    assert instance.flow["tasks"][0]["round"] == rounds
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["status"] == "merged"
+    assert item["round"] == rounds + 1
+    assert flow["rounds"] == rounds
+    writer = runs.load(item["writer_run"], h.env)
+    assert len(sent) == 1
+    assert sent[0].endswith("@write a corrected\n")
+    assert sent[0].startswith("The commit hook refused") == (not retry_succeeds)
+    if not retry_succeeds:
+        assert "```\nhook refused\n```\n\n" in sent[0]
+    assert len(writer.commits) == rounds + (2 if retry_succeeds else 1)
+    assert git(h.repo, "show", f"{writer.commits[-1]}:a", env=h.env) == "corrected"
+    subject = git(h.repo, "log", "-1", "--format=%s", writer.commits[-1], env=h.env)
+    assert subject == writer.subject[:72] + f" (turn {rounds + 2})"
+
+
+def test_hook_correction_does_not_grant_more_automatic_fix_rounds(h: Harness) -> None:
+    h.create(rounds=0)
+    hook = h.repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text(
+        '#!/bin/sh\n[ "$(git show :a)" = corrected ] && exit 0\n'
+        "echo hook refused >&2\nexit 1\n"
+    )
+    hook.chmod(0o755)
+    assert h.run()["tasks"][0]["status"] == "stopped"
+    correction = h.tmp / "correction.md"
+    correction.write_text("@write a corrected\n")
+    h.scripts_update(**{"a read-only review;": "@reply " + FIX})
+    h.answer("send", file=str(correction))
+    item = h.run()["tasks"][0]
+    assert item["round"] == 1
+    assert item["reason"] == "unresolved after 1 fix rounds"
 
 
 def test_stale_and_unreadable_answers_advance_cursor(h: Harness) -> None:

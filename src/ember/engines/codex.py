@@ -11,9 +11,10 @@ input. The driver reads every turn from Codex's own files in its home folder
   driver finds the run's rollout by its working folder and the first line of
   its first message, which names the run, and skips rollouts that another
   run has claimed. `task_started` begins a turn; `task_complete`, with the
-  final reply in `last_agent_message`, or `turn_aborted` ends it; `error`
-  reports a provider or sign-in failure. `user_message` events hold the
-  messages typed or pasted into the session.
+  final reply in `last_agent_message`, or `turn_aborted` ends it. `error`
+  events and non-null `task_complete.error` fields report provider or
+  sign-in failures. `user_message` events hold the messages typed or
+  pasted into the session.
 - The queue database, `queue_1.sqlite`, which holds messages waiting for a
   running turn. It is read from a private copy in memory, built under shared
   locks from the database and its write-ahead log, so reading it never
@@ -145,10 +146,13 @@ class Turns:
     """Each ended turn's event and final reply, in order."""
 
     errors: list[str] = field(default_factory=list)
-    """Each error's message, in order."""
+    """Each `error` event's message, in order."""
 
     errors_at_end: list[int] = field(default_factory=list)
-    """For each ended turn, the number of errors before its end event."""
+    """For each ended turn, the number of `error` events before its end event."""
+
+    completion_errors: list[str | None] = field(default_factory=list)
+    """For each ended turn, its completion error's message, or `None`."""
 
 
 def read_turns(path: str | Path) -> Turns:
@@ -169,6 +173,13 @@ def read_turns(path: str | Path) -> Turns:
             reply = event.get("last_agent_message") if kind == "task_complete" else None
             turns.ended.append((str(kind), reply if isinstance(reply, str) else None))
             turns.errors_at_end.append(len(turns.errors))
+            error = event.get("error") if kind == "task_complete" else None
+            message = error.get("message") if isinstance(error, dict) else None
+            turns.completion_errors.append(
+                (message if isinstance(message, str) and message else "error")
+                if error is not None
+                else None
+            )
         elif kind == "error":
             message = event.get("message")
             turns.errors.append(
@@ -939,6 +950,9 @@ class CodexDriver(Driver):
         new_errors = turns.errors[errors:]
         if len(turns.ended) > ended:
             kind, reply = turns.ended[ended]
+            completion_error = turns.completion_errors[ended]
+            if completion_error is not None:
+                return error_outcome(completion_error)
             during = turns.errors[errors : turns.errors_at_end[ended]]
             if during:
                 return error_outcome(during[-1])

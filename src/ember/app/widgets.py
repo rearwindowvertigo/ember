@@ -14,6 +14,7 @@ from PySide6.QtCore import (
     QObject,
     QPersistentModelIndex,
     QPoint,
+    QPointF,
     QRect,
     QRectF,
     QSize,
@@ -35,6 +36,8 @@ from PySide6.QtGui import (
     QShowEvent,
     QStandardItem,
     QStandardItemModel,
+    QTextCharFormat,
+    QTextLayout,
 )
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -45,6 +48,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -133,6 +137,66 @@ def set_icon(target: QPushButton, icon: QIcon) -> None:
         target.setText(ICON_GAP + text)
         if not target.accessibleName():
             target.setAccessibleName(text)
+
+
+class ElidedLabel(QLabel):
+    """A plain-text label that paints one elided line and retains its full text."""
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        """Create a label whose tooltip holds its full text."""
+        super().__init__(text, parent)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.setToolTip(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        """Set the full text and its tooltip."""
+        super().setText(text)
+        self.setToolTip(text)
+
+    def display_text(self) -> str:
+        """Return the text that fits the label's contents rectangle."""
+        return self.fontMetrics().elidedText(
+            self.text(), Qt.TextElideMode.ElideRight, self.contentsRect().width()
+        )
+
+    def sizeHint(self) -> QSize:  # noqa: D102
+        return QSize(0, super().sizeHint().height())
+
+    def minimumSizeHint(self) -> QSize:  # noqa: D102
+        return self.sizeHint()
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: D102
+        shown = self.display_text()
+        if shown == self.text():
+            super().paintEvent(event)
+            return
+        if not shown:
+            return
+        painter = QPainter(self)
+        painter.setPen(self.palette().windowText().color())
+        text = QTextLayout(shown, self.font())
+        if self.hasSelectedText():
+            # The selection indexes the full text; the ellipsis spans its hidden suffix.
+            start = self.selectionStart()
+            end = min(start + len(self.selectedText()), len(shown))
+            selection = QTextLayout.FormatRange()
+            selection.start = min(start, len(shown) - 1)  # type: ignore[assignment]
+            selection.length = end - selection.start  # type: ignore[assignment]
+            selected_format = QTextCharFormat()
+            selected_format.setBackground(self.palette().highlight())
+            selected_format.setForeground(self.palette().highlightedText())
+            selection.format = selected_format  # type: ignore[assignment]
+            text.setFormats([selection])
+        text.beginLayout()
+        line = text.createLine()
+        line.setLineWidth(self.contentsRect().width())
+        text.endLayout()
+        rect = self.contentsRect()
+        text.draw(
+            painter,
+            QPointF(rect.x(), rect.y() + (rect.height() - line.height()) / 2),
+        )
 
 
 class Switch(QAbstractButton):

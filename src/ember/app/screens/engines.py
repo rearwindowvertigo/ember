@@ -9,8 +9,8 @@ shortlist with an effort.
 
 Opening the screen reads the engine status again. Check now reads it and
 runs the sandbox check of every engine whose Use and Sandbox switches are
-on; a card whose sandbox is off shows "Sandbox off" in place of a check
-result. Every read, check and save runs in a task.
+on. A card whose sandbox is off shows its sandbox check as not run.
+Every read, check and save runs in a task.
 """
 
 from collections.abc import Sequence
@@ -18,7 +18,14 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ember import choices, sandbox
 from ember.app import icons, theme
@@ -40,6 +47,7 @@ from ember.app.widgets import (
     Badge,
     Card,
     CommandLine,
+    ElidedLabel,
     Picker,
     StateView,
     Switch,
@@ -82,9 +90,6 @@ CONTEXT_CHOICES: tuple[tuple[str, int | None], ...] = (
 
 NO_EFFORT_NOTE = "This model reports no effort, so it cannot be shortlisted."
 """Shown on a Codex or Claude model row that has no effort to save."""
-
-SANDBOX_OFF = "Sandbox off"
-"""Shown in place of the last check while an engine's sandbox switch is off."""
 
 CHECK_AGAIN = "Check again after the command finishes."
 """Shown on a card after the owner ran one of its setup commands."""
@@ -256,7 +261,8 @@ class _EngineCard(Card):
         self.name_label = QLabel(name)
         self.name_label.setFont(theme.font("heading"))
         names.addWidget(self.name_label)
-        self.version_label = label(role="secondary")
+        self.version_label = ElidedLabel()
+        self.version_label.setProperty("role", "secondary")
         names.addWidget(self.version_label)
         head.addLayout(names, 1)
         self.badge = Badge("Not checked")
@@ -397,9 +403,8 @@ class _EngineCard(Card):
     ) -> None:
         """Draw the bwrap line, the last sandbox check and its blocking causes.
 
-        With the sandbox switch off the card shows "Sandbox off" in place of
-        a check result; a check that ran without a sandbox is never shown as
-        passed.
+        With the sandbox switch off the card shows the check as not run.
+        A check that ran without a sandbox is never shown as passed.
         """
         if check is not None and check.provider == sandbox.NONE:
             check = None
@@ -411,18 +416,18 @@ class _EngineCard(Card):
             version = check.bwrap_version or "version unknown"
             self.bwrap_label.setText(f"bwrap: {check.bwrap_path}, {version}")
         if not switched_on:
-            self.check_label.setText(SANDBOX_OFF)
+            self.check_label.setText("Sandbox check: not run")
             check = None
         elif checking:
-            self.check_label.setText("Last check: checking the sandbox now")
+            self.check_label.setText("Sandbox check: checking now")
         elif check is None:
-            self.check_label.setText("Last check: Not run")
+            self.check_label.setText("Sandbox check: not run")
         else:
             at = inline(when(check.checked_at))
             if check.ok:
-                self.check_label.setText(f"Last check: Passed, {at}")
+                self.check_label.setText(f"Sandbox check: passed, {at}")
             else:
-                self.check_label.setText(f"Last check: Failed, {at}: {check.detail}")
+                self.check_label.setText(f"Sandbox check: failed, {at}: {check.detail}")
         text = ""
         if check is not None and check.causes:
             text = "\n".join(
@@ -498,18 +503,26 @@ class _ModelRow(QWidget):
         super().__init__()
         self.panel = panel
         self.model = model
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         engine = panel.engine
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 4, 0, 4)
         outer.setSpacing(2)
         layout = QHBoxLayout()
         layout.setSpacing(12)
-        outer.addLayout(layout)
-        name = QLabel(model.id)
-        name.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.cells = QWidget()
+        self.cells.setLayout(layout)
+        self.cells.setFixedHeight(theme.CONTROL_MD)
+        outer.addWidget(self.cells)
+        self.name = ElidedLabel(model.id)
+        self.name.setFixedWidth(panel.name_width)
+        self.name.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         if model.label != model.id:
-            name.setToolTip(model.label)
-        layout.addWidget(name, 1)
+            self.name.setToolTip(f"{model.id}\n{model.label}")
+        layout.addWidget(self.name, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.figures: list[QLabel] = []
         if columns:
             for text in (
                 context_text(model.context_length),
@@ -519,8 +532,11 @@ class _ModelRow(QWidget):
                 cell = QLabel(text)
                 cell.setProperty("role", "secondary")
                 cell.setFixedWidth(_COLUMN)
-                cell.setAlignment(Qt.AlignmentFlag.AlignRight)
-                layout.addWidget(cell)
+                cell.setAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
+                layout.addWidget(cell, 0, Qt.AlignmentFlag.AlignVCenter)
+                self.figures.append(cell)
         self.picker: Picker | None = None
         if model.efforts:
             self.picker = Picker()
@@ -532,16 +548,22 @@ class _ModelRow(QWidget):
                 self.picker.add_option(item, item)
             self.picker.set_value(effort)
             self.picker.activated.connect(lambda _index: panel.effort_changed(self))
-            layout.addWidget(self.picker)
+            self.effort_cell = self.picker
         else:
-            none = QLabel("No effort" if engine != "opencode" else "")
-            none.setProperty("role", "muted")
+            none = QLabel()
             none.setFixedWidth(_EFFORT_WIDTH)
-            layout.addWidget(none)
+            self.effort_cell = none
+        layout.addWidget(self.effort_cell, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addStretch(1)
         self.switch = Switch()
         self.switch.setAccessibleName(f"Shortlist {model.id}")
         self.switch.clicked.connect(lambda on: panel.use_changed(self, on))
-        layout.addWidget(self.switch)
+        use = QWidget()
+        use.setFixedWidth(panel.use_width)
+        use_layout = QHBoxLayout(use)
+        use_layout.setContentsMargins(0, 0, 0, 0)
+        use_layout.addWidget(self.switch, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(use, 0, Qt.AlignmentFlag.AlignVCenter)
         self.note = label(role="secondary")
         self.note.hide()
         outer.addWidget(self.note)
@@ -569,20 +591,28 @@ class _MissingRow(QWidget):
     def __init__(self, panel: _ModelPanel, model: str, effort: str | None) -> None:
         super().__init__()
         self.model_id = model
+        self.setFixedHeight(theme.CONTROL_MD + 8)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 4, 0, 4)
         layout.setSpacing(12)
-        layout.addWidget(QLabel(model), 1)
+        self.name = ElidedLabel(model)
+        self.name.setFixedWidth(panel.name_width)
+        self.name.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.name, 0, Qt.AlignmentFlag.AlignVCenter)
         state = "Not in the list"
         if effort is not None:
             state += f" · effort {effort}"
-        info = QLabel(state)
-        info.setProperty("role", "secondary")
-        layout.addWidget(info)
+        self.info = ElidedLabel(state)
+        self.info.setProperty("role", "secondary")
+        figures_width = 3 * (_COLUMN + 12) if panel.columns else 0
+        self.info.setFixedWidth(figures_width + _EFFORT_WIDTH)
+        layout.addWidget(self.info, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addStretch(1)
         self.remove_button = button("Remove", "secondary", size="sm")
         self.remove_button.setAccessibleName(f"Remove {model} from the shortlist")
+        self.remove_button.setFixedWidth(panel.use_width)
         self.remove_button.clicked.connect(lambda: panel.remove(model))
-        layout.addWidget(self.remove_button)
+        layout.addWidget(self.remove_button, 0, Qt.AlignmentFlag.AlignVCenter)
 
 
 _COLUMN = 80
@@ -597,6 +627,10 @@ class _ModelPanel(Card):
         self.owner = screen
         self.engine = engine
         self.columns = engine == "opencode"
+        self.name_width = 0
+        measure = button("Remove", "secondary", size="sm")
+        self.use_width = max(Switch.WIDTH + 4, measure.sizeHint().width())
+        measure.deleteLater()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(CARD_MARGIN, CARD_MARGIN, CARD_MARGIN, CARD_MARGIN)
         layout.setSpacing(12)
@@ -626,21 +660,26 @@ class _ModelPanel(Card):
         header = QHBoxLayout(self.header)
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(12)
-        header.addWidget(label("Model", "muted"), 1)
+        self.name_header = label("Model", "muted", wrap=False)
+        header.addWidget(self.name_header)
         if self.columns:
             for text in ("Context", "Input $/M", "Output $/M"):
                 cell = QLabel(text)
                 cell.setProperty("role", "muted")
                 cell.setFixedWidth(_COLUMN)
-                cell.setAlignment(Qt.AlignmentFlag.AlignRight)
+                cell.setAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
                 header.addWidget(cell)
         effort = QLabel("Effort")
         effort.setProperty("role", "muted")
         effort.setFixedWidth(_EFFORT_WIDTH)
         header.addWidget(effort)
+        header.addStretch(1)
         use = QLabel("Use")
         use.setProperty("role", "muted")
-        use.setFixedWidth(Switch.WIDTH + 4)
+        use.setFixedWidth(self.use_width)
+        use.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header.addWidget(use)
         self.header.hide()
         layout.addWidget(self.header)
@@ -801,6 +840,7 @@ class _ModelPanel(Card):
         return [(m, e) for m, e in saved.items() if m not in known]
 
     def _draw_missing(self, saved: dict[str, str | None]) -> None:
+        self._measure_names(saved)
         clear_layout(self.missing_area)
         self.missing = []
         absent = self._absent(saved)
@@ -813,6 +853,19 @@ class _ModelPanel(Card):
             self.missing_area.addWidget(row)
             self.missing.append(row)
         self.missing_widget.setVisible(bool(absent))
+
+    def _measure_names(self, saved: dict[str, str | None]) -> None:
+        """Fit the name column to all model ids, up to 320 logical pixels."""
+        name_label = self.rows[0].name if self.rows else self.name_header
+        metrics = name_label.fontMetrics()
+        names = [model.id for model in self.models or ()]
+        names += [model for model, _effort in self._absent(saved)]
+        self.name_width = min(
+            320, max((metrics.horizontalAdvance(n) for n in names), default=0)
+        )
+        self.name_header.setFixedWidth(self.name_width)
+        for row in self.rows:
+            row.name.setFixedWidth(self.name_width)
 
     def sync(self) -> None:
         """Show the saved shortlist on the rows."""
