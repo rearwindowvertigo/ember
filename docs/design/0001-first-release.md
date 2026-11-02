@@ -433,28 +433,58 @@ them at once.
 ## L. Skill
 
 L1. An `ember` skill for Claude Code in `skill/`: `SKILL.md` and references
-for claims, wrappers and Claude agents; references for flows, panels and
-gap checks are added in 0.2.0. It covers grounding, claiming, choosing a worker, the editing boundary, briefs,
-following a run, verification against the review bar, reporting, merging
-and cleanup.
+for claims, runs and Claude agents; references for flows, panels and gap
+checks are added in 0.2.0. It covers grounding, claiming, choosing a worker,
+the editing boundary, briefs, following a run, verification against the
+review bar, reporting, merging and cleanup. Until `emb gapcheck` (H2), the
+plan check before a Claude Workflow runs `assets/plan-check-brief.md` with
+the `single.reviewer` row.
 
-L2. Eval cases in `skill/evals/` run against stub engines and check the
-skill's rules.
+L2. Eval cases in `skill/evals/` run in a real Claude session against a stub
+`emb` command and check the skill's rules.
 
-L3. `emb skill install` links the skill into `~/.claude/skills/ember`.
+L3. `emb skill install` links the skill into Claude Code's skills folder:
+`$CLAUDE_CONFIG_DIR/skills/ember` when `CLAUDE_CONFIG_DIR` is set and not
+empty, else `~/.claude/skills/ember`. The link's target is the checkout's
+`skill/` when `emb` runs from a source checkout, else
+`/usr/share/ember/skill`. `emb skill uninstall` removes the link and
+`emb skill status` reports it. The package does not create the link.
+
+L4. `scripts/verify_branch.py` in the skill prints a branch's tip, its
+numstat against the session branch and its worktree's status. It decides no
+verdict.
 
 ## M. Packaging
 
-M1. A `.deb` built by `packaging/deb/`, installing the package, the `emb`
-command, the desktop entry, icons and the autostart entry template.
+M1. A `.deb` built by `packaging/deb/build_deb.py` (`make deb`), with no
+maintainer scripts:
 
-M2. The `.deb` carries its own Python environment under `/usr/lib/ember/`,
-built from uv's lock file, with PySide6 and Ember's other libraries from
-PyPI. It runs on the system's Python 3.14. It depends on `python3` (3.14 or
-later), `tmux` and `git`, and recommends `bubblewrap`.
+| Path | Holds |
+|---|---|
+| `/usr/bin/emb` | `exec /usr/lib/ember/bin/python -I -m ember.cli "$@"`, mode 755 |
+| `/usr/lib/ember/` | A virtual environment on `/usr/bin/python3.14` |
+| `/usr/lib/ember/lib/python3.14/site-packages/ember/` | Ember |
+| `/usr/share/ember/skill/` | The skill, `skill/` without `evals/` |
+| `/usr/share/applications/io.github.rearwindowvertigo.Ember.desktop` | The desktop entry |
+| `/usr/share/icons/hicolor/scalable/apps/io.github.rearwindowvertigo.Ember.svg` | The icon |
+| `/usr/share/doc/ember/copyright` | The copyright file |
+| `/usr/share/doc/ember/changelog.gz` | `CHANGELOG.md`, when present |
 
-M3. `ember-app` was free on PyPI on 2026-11-01. It is checked again before
-the first release.
+The package installs no autostart file; the app writes the user's own
+autostart entry while `app.autostart` is on.
+
+M2. The `.deb`'s Python environment is built from uv's lock file, with
+PySide6-Essentials and Ember's other libraries from PyPI. It runs on
+`/usr/bin/python3.14`. The package depends on `python3.14`, `git`, `tmux`
+and the libraries Qt loads, and recommends `bubblewrap` and
+`xdg-terminal-exec`.
+
+M3. `ember-app` was free on PyPI on 2026-11-01 and on 2026-11-02.
+
+M4. When Release Please creates a release, the `deb` job in
+`.github/workflows/release-please.yml` builds the `.deb` from the release
+tag on `ubuntu-26.04` and attaches it to the GitHub release. A manual run of
+the workflow with a tag rebuilds and replaces it.
 
 ## N. Tests
 
@@ -464,7 +494,7 @@ N1. Unit tests per module with stub `codex`, `opencode`, `claude`, `tmux`,
 N2. App tests with pytest-qt on Qt's offscreen platform.
 
 N3. Skill eval cases run outside `make check`, because they use a real
-Claude session.
+Claude session against a stub `emb` command.
 
 ## O. Build order
 
