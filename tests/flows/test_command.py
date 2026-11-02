@@ -983,6 +983,35 @@ def test_cancel_lists_stored_open_run_statuses(
     ]
 
 
+def test_cancel_text_leaves_out_missing_reason(
+    flow: dict[str, Any], env: dict[str, str]
+) -> None:
+    flow["status"] = "stopped"
+    record.save(flow, env)
+    code, out, err = invoke(env, "--cancel", flow["id"])
+    assert code == 0, err
+    assert out.splitlines() == [
+        f"flow {flow['id']} cancelled",
+        f"branch {flow['branch']}",
+    ]
+
+
+def test_cancel_reports_with_unreadable_run_record(
+    flow: dict[str, Any], env: dict[str, str]
+) -> None:
+    flow["status"] = "stopped"
+    flow["tasks"][0].update(writer_run="codex-20261102-000000-abcdef", branch="kept")
+    record.save(flow, env)
+    code, out, err = invoke(env, "--cancel", flow["id"], "--json")
+    assert code == 0, err
+    result = json.loads(out)
+    assert result["status"] == "cancelled"
+    assert result["task_branches"] == [{"task": "a", "branch": "kept"}]
+    assert result["open_runs"] == []
+    assert "WARNING: task a writer run codex-20261102-000000-abcdef" in err
+    assert record.load(flow["id"], env)["status"] == "cancelled"
+
+
 @pytest.mark.parametrize("runner_finishes", [False, True])
 def test_cancel_signals_runner_and_records_after_lock_release(
     flow: dict[str, Any],

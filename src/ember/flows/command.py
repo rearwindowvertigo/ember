@@ -487,8 +487,13 @@ def _resume(
     print(f"flow {flow_id}", file=out)
 
 
-def _cancel_report(flow: Mapping[str, Any], env: Mapping[str, str]) -> dict[str, Any]:
-    """List recorded task branches and runs whose stored status is open."""
+def _cancel_report(
+    flow: Mapping[str, Any], env: Mapping[str, str], err: TextIO
+) -> dict[str, Any]:
+    """List recorded task branches and runs whose stored status is open.
+
+    A run record that does not load is left out with a warning on `err`.
+    """
     task_branches: list[dict[str, Any]] = []
     open_runs: list[dict[str, str]] = []
     seen_runs: set[str] = set()
@@ -522,7 +527,15 @@ def _cancel_report(flow: Mapping[str, Any], env: Mapping[str, str]) -> dict[str,
             if not run_id or run_id in seen_runs:
                 continue
             seen_runs.add(run_id)
-            run = run_record.load(run_id, env)
+            try:
+                run = run_record.load(run_id, env)
+            except run_record.RecordError as error:
+                print(
+                    f"WARNING: task {task['id']} {role} run {run_id} "
+                    f"is not listed: {error}",
+                    file=err,
+                )
+                continue
             if run.status in (
                 run_record.STARTING,
                 run_record.RUNNING,
@@ -578,6 +591,7 @@ def _cancel(
     as_json: bool,
     env: Mapping[str, str],
     out: TextIO,
+    err: TextIO,
 ) -> None:
     """Request cancellation, stop the runner and report the retained work."""
     _load(flow_id, env, missing_code=65)
@@ -609,14 +623,15 @@ def _cancel(
                         f"the flow {flow_id} is {flow['status']}",
                         f"next: emb flow --status {flow_id}",
                     )
-                result = _cancel_report(flow, env)
+                result = _cancel_report(flow, env, err)
                 break
         time.sleep(POLL_SECONDS)
     if as_json:
         print(json.dumps(result, indent=2), file=out)
     else:
         print(f"flow {flow_id} cancelled", file=out)
-        print(f"reason {result['reason']}", file=out)
+        if result["reason"] is not None:
+            print(f"reason {result['reason']}", file=out)
         print(f"branch {result['branch']}", file=out)
         for item in result["task_branches"]:
             print(f"task {item['task']} branch {item['branch']}", file=out)
@@ -980,7 +995,7 @@ def main(
         elif mode == "watch":
             return _watch(args.watch, args.json, environment, out, err)
         elif mode == "cancel":
-            _cancel(args.cancel, args.reason, args.json, environment, out)
+            _cancel(args.cancel, args.reason, args.json, environment, out, err)
             print(f"next: emb flow --resume {args.cancel}", file=err)
             return 0
         else:

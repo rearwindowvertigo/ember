@@ -1281,7 +1281,8 @@ it begins. `--lead` is refused with exit 75 on a cancelled flow, with
 
 Cancellation output contains the flow id, `cancelled`, the reason, the flow
 branch, each retained task branch and each open run's task, role and id.
-Text prints one line per item. `--json` prints:
+Text prints one line per item; the `reason` line is left out when no reason
+was supplied. `--json` prints:
 
 | Field | Value |
 |---|---|
@@ -1292,7 +1293,9 @@ Text prints one line per item. `--json` prints:
 
 Run ids come from the flow record's current writers and reviewers, previous
 reviews, cleanup entries and pending writer replacement or drop effects. Each run's stored
-record is read; `starting`, `running` and `waiting` count as open. Successful
+record is read; `starting`, `running` and `waiting` count as open. A run
+whose record does not load is left out of the listing, and a `WARNING:` line
+on standard error names its task, role and id. Successful
 cancellation exits 0 and prints `next: emb flow --resume <id>` on standard
 error. A cancelled watch exits 82 with the same action. Status shows
 `cancelled`; its separate `reason` field is null when no reason was supplied.

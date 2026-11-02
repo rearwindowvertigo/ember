@@ -1458,7 +1458,7 @@ def test_cancel_live_runner_keeps_turns_and_stops_check(
                 time.sleep(0.01)
             check_pid = (flow.get("active_check") or {}).get("pid")
             out = io.StringIO()
-            command._cancel(h.id, "scope changed", True, h.env, out)
+            command._cancel(h.id, "scope changed", True, h.env, out, io.StringIO())
             assert future.result(timeout=10) == 0
         finally:
             shutdown.set()
