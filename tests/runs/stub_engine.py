@@ -9,7 +9,8 @@ up to an Enter key), acts on `@` lines in each message, writes the screen and
 writes each turn's outcome to `turn-<n>.json` in its output folder:
 
 - `@write <path> <text>`: write a file in the working folder.
-- `@reply <text>`: the reply (default `done: <first line>`).
+- `@reply <text>`: the reply (default the `reply_file` text when supplied,
+  otherwise `done: <first line>`).
 - `@empty`: an empty reply.
 - `@sleep <seconds>`: work for a while, changing the screen.
 - `@hang`: stop changing the screen until `release` exists in the output
@@ -193,7 +194,8 @@ def check_alive():
 def handle(message, turn):
     lines = message.splitlines()
     first = next((line for line in lines if line.strip()), "")
-    reply = f"done: {first}"
+    reply_file = os.environ.get("STUB_REPLY_FILE")
+    reply = Path(reply_file).read_text() if reply_file else f"done: {first}"
     for line in lines:
         word, _, rest = line.partition(" ")
         if word == "@write":
@@ -272,6 +274,7 @@ class StubDriver(Driver):
         on_wait: Callable[[Run], None] | None = None,
         idle: str | None = None,
         foreign: str | None = None,
+        reply_file: Path | None = None,
     ) -> None:
         self.name = name
         self.script = script
@@ -279,6 +282,7 @@ class StubDriver(Driver):
         self.on_wait = on_wait
         self.idle = idle
         self.foreign = foreign
+        self.reply_file = reply_file
         self.foreign_checks = 0
         self.commands: list[tuple[Run, str]] = []
         self.closed: list[str] = []
@@ -292,9 +296,12 @@ class StubDriver(Driver):
         argv += (str(self.out(run)),)
         if not self.paste:
             argv += (first_message,)
+        environment = {"STUB_ENGINE": self.name}
+        if self.reply_file is not None:
+            environment["STUB_REPLY_FILE"] = str(self.reply_file)
         return LaunchSpec(
             argv=argv,
-            env={"STUB_ENGINE": self.name},
+            env=environment,
             cwd=Path(run.worktree),
             first_message=first_message if self.paste else None,
         )
