@@ -195,7 +195,8 @@ brief, never as an absolute path it cannot reach. Tell it to stay in its
 own folder and use relative paths.
 
 Keep the brief to the request: a fix you noticed elsewhere goes in your
-report, because the owner did not ask for it. Do not fan out beyond what
+report, because the owner did not ask for it. Do not set message wording,
+docstrings or tests the request does not ask for. Do not fan out beyond what
 you can review.
 
 Before a flow or a Claude Workflow of two or more tasks starts, run the gap
@@ -230,7 +231,9 @@ line to the owner, naming the action, and wait. Do not retry a refusal: a
 refusal is Ember or the owner saying no, and repeating it changes nothing.
 
 When your check of a worker fails, correct it first with `--send` or
-SendMessage; offer another worker after a correction fails. Do not discard
+SendMessage; offer another worker after a correction fails. When the
+owner named the workers or said they will not answer worker questions,
+do not offer one: give the verdict and say what is missing. Do not discard
 stalled partial edits without the owner's approval.
 
 ### 7. Verify and review
@@ -304,7 +307,9 @@ owner's work. Report runs parked and runs left open, with reasons.
 
 ### 9. Merge, clean up and finish
 
-Merge only Keep or Keep-with-fix work into the session branch:
+State the verdict before `emb merge`, and state it again when a branch
+under correction comes back. Merge only Keep or Keep-with-fix work into
+the session branch:
 
 ```bash
 emb merge <branch> --into <session branch> --verdict keep

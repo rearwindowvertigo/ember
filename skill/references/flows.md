@@ -118,7 +118,9 @@ name the failed check, and make a separately reviewed correction on the
 flow branch before repeating verification. Use an editing run based on
 the flow worktree, review its result and merge that correction into the
 flow branch through `emb merge`; do not answer a completed flow with
-`--lead` or merge the rejected result into the session branch.
+`--lead` or merge the rejected result into the session branch. When that
+correction fails too, the verdict is `Keep, with <fix>` naming what is
+missing, or Discard; state it before any merge.
 
 After Keep, merge under the skill's merge and cleanup rules:
 

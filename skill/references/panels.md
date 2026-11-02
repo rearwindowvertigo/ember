@@ -7,7 +7,9 @@ research step. A panel has one question, one claim, and no branch or verdict.
 ## Members
 
 Pass the owner's named models as repeatable
-`--member <engine>:<model>[@<effort>]` options. Without named models, use
+`--member <engine>:<model>[@<effort>]` options. An OpenCode model is the
+bare OpenRouter id, such as `opencode:deepseek/deepseek-v4.1-flash-1017`;
+Ember adds the provider itself, so never prefix it with `openrouter/`. Without named models, use
 saved `panel.members` by omitting `--member`. If none are saved, ask the
 owner in plain text and pass the answer as explicit members. Never set
 `panel.members` yourself. A panel accepts one to eight distinct
@@ -48,7 +50,8 @@ path before writing the comparison or answer. It holds every available
 reply, including partial replies from failed members. Read it after an
 interruption too if the owner chooses to use the available answers.
 
-Compare in five parts:
+Compare in five parts, every part every time; an empty part says
+"none", and with two answers part 3 says "none beyond part 4":
 
 1. What all or most agree on.
 2. Where they disagree.
