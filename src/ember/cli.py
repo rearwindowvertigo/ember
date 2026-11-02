@@ -39,13 +39,13 @@ class ArgumentParser(argparse.ArgumentParser):
     """An argument parser whose usage errors exit 64."""
 
     def error(self, message: str) -> NoReturn:
-        """Print the usage and `message` to standard error and exit 64.
+        """Print the usage, `message` and a `next:` line to standard error, exit 64.
 
         Args:
             message: What is wrong with the arguments.
         """
         self.print_usage(sys.stderr)
-        self.exit(EX_USAGE, f"{self.prog}: {message}\n")
+        self.exit(EX_USAGE, f"{self.prog}: {message}\nnext: {self.prog} --help\n")
 
 
 class UsageError(Exception):

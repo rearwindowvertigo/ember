@@ -980,3 +980,21 @@ def test_panel_status_dispatch(
     assert main(["panel", "--status", "--json"], env=env) == 0
     captured = capsys.readouterr()
     assert captured.out == "[]\n" and not captured.err
+
+
+@pytest.mark.parametrize(
+    ("argv", "prog"),
+    [
+        (["panel", "--recover", "x", "--timeout", "0"], "emb panel"),
+        (["flow", "--start", "--stall", "x"], "emb flow"),
+        (["run", "--no-such-option"], "emb"),
+        (["--no-such-option"], "emb"),
+    ],
+)
+def test_parser_errors_end_with_a_next_line(
+    argv: list[str], prog: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(argv)
+    assert exit_info.value.code == 64
+    assert capsys.readouterr().err.splitlines()[-1] == f"next: {prog} --help"
