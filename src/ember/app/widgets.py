@@ -705,7 +705,8 @@ class CommandLine(QFrame):
 class RunCommandDialog(QDialog):
     """Asks before a command runs in the owner's terminal (design J5).
 
-    Cancel is the default button and has focus, so Enter and Escape cancel.
+    Cancel is the default button and has focus when the dialog opens, so
+    Enter and Escape cancel; Enter on a focused Run in terminal presses it.
     The dialog runs nothing; it returns `Accepted` only from Run in terminal.
     """
 
@@ -747,7 +748,7 @@ class RunCommandDialog(QDialog):
         self.cancel_button = button("Cancel", "secondary")
         self.cancel_button.clicked.connect(self.reject)
         self.run_button = button("Run in terminal", "primary")
-        self.run_button.setAutoDefault(False)
+        self.run_button.setAutoDefault(True)
         self.run_button.clicked.connect(self.accept)
         row.addWidget(self.cancel_button)
         row.addWidget(self.run_button)

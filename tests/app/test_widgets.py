@@ -276,11 +276,12 @@ def test_run_command_dialog_enter_rejects(qtbot: QtBot) -> None:
     assert not dialog.isVisible()
 
 
-def test_run_command_dialog_enter_on_run_still_rejects(qtbot: QtBot) -> None:
+def test_run_command_dialog_enter_on_focused_run_accepts(qtbot: QtBot) -> None:
     dialog = _dialog(qtbot)
+    dialog.show()
     dialog.run_button.setFocus()
-    qtbot.keyClick(dialog, Qt.Key.Key_Return)
-    assert dialog.result() == QDialog.DialogCode.Rejected
+    qtbot.keyClick(dialog.run_button, Qt.Key.Key_Return)
+    assert dialog.result() == QDialog.DialogCode.Accepted
 
 
 def test_run_command_dialog_cancel_rejects(qtbot: QtBot) -> None:

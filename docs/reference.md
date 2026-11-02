@@ -374,6 +374,11 @@ once it is created, for a tracked `.codex/config.toml`; a conflict there
 records the run failed and exits 69, and the worktree and branch stay. With
 `none`, a run of any engine prints the `WARNING:` line of the sandbox.
 
+The desktop app's sandbox check of an engine keeps its last result per
+engine in `$XDG_CACHE_HOME/ember/sandbox.json` (default
+`~/.cache/ember/sandbox.json`), mode 600; writers hold `sandbox.lock` in the
+same folder while they read, merge and write it.
+
 The session is a tmux session named by the run id. Its first message is the
 line `Brief from Claude, the lead, for Ember run <id>.`, a blank line and the
 brief, pasted once the engine is ready; a driver that puts the brief on the
@@ -938,7 +943,8 @@ is a command.
 ## Exit codes
 
 These are the exit codes of `emb choices` and `emb engines`; `emb run`,
-`emb ground`, `emb merge` and `emb cleanup` have their own tables above.
+`emb ground`, `emb merge`, `emb cleanup` and `emb deps` have their own
+tables above.
 
 | Code | Meaning |
 |---|---|
