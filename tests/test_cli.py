@@ -915,3 +915,68 @@ def test_flow_unknown_option(capsys: pytest.CaptureFixture[str]) -> None:
 def test_flow_dispatch(env: dict[str, str], capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["flow", "--status", "bad-id"], env=env) == 64
     assert "emb flow: invalid flow id" in capsys.readouterr().err
+
+
+def test_panel_help_and_command_order(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as result:
+        main(["panel", "--help"])
+    assert result.value.code == 0
+    help_text = capsys.readouterr().out
+    for option in (
+        "--question-file",
+        "--dir",
+        "--member",
+        "--claim",
+        "--read",
+        "--stall",
+        "--timeout",
+        "--dry-run",
+        "--status",
+        "--recover",
+        "--json",
+    ):
+        assert option in help_text
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    help_text = capsys.readouterr().out
+    assert (
+        help_text.index("flow") < help_text.index("panel") < help_text.index("ground")
+    )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        [],
+        ["--status", "--member", "codex:x"],
+        ["--recover", "x", "--dry-run"],
+        ["--question-file", "x", "--dry-run", "--stall", "1"],
+        ["--question-file", "x", "--status"],
+    ],
+)
+def test_panel_usage_dispatch(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str], options: list[str]
+) -> None:
+    assert main(["panel", *options], env=env) == 64
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert captured.err.endswith("next: emb panel --help\n")
+
+
+@pytest.mark.parametrize("option", ["--stall", "--timeout"])
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "bad"])
+def test_panel_requires_positive_finite_minutes(
+    capsys: pytest.CaptureFixture[str], option: str, value: str
+) -> None:
+    with pytest.raises(SystemExit) as result:
+        main(["panel", "--recover", "x", option, value])
+    assert result.value.code == 64
+    assert "not a positive number" in capsys.readouterr().err
+
+
+def test_panel_status_dispatch(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["panel", "--status", "--json"], env=env) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "[]\n" and not captured.err

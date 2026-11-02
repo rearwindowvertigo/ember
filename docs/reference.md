@@ -1444,6 +1444,48 @@ Every nonzero exit prints an `emb flow:` diagnostic or watch report and
 one `next:` or `owner:` line. Flow folders, queued answers and unmerged
 work remain after a startup failure.
 
+## `emb panel`
+
+Asks members the same question in parallel read-only `emb run` runs.
+Each run is closed after its answer is read. Ember writes `summary.md`
+with the question, member outcomes and every available answer.
+`--recover` collects unfinished turns without asking the question again.
+
+### Options
+
+| Option | Does |
+|---|---|
+| `--question-file FILE` | Start a panel with the UTF-8 question in `FILE`; it must contain a non-empty line |
+| `--dir DIR` | A folder in the checkout members read; defaults to the current folder; the panel records the checkout top |
+| `--member W` | A member as `<engine>:<model>[@<effort>]`; repeatable, replaces the saved member list |
+| `--claim ID` | Resolve saved members with this claim's choices; member runs receive no claim |
+| `--read PATH` | An additional path members may read; repeatable; each path must exist |
+| `--stall MINUTES` | Positive minutes without a member's screen changing before a stall; default 10 |
+| `--timeout MINUTES` | Positive minutes from the first start or recovery until the panel stops waiting; default 30 |
+| `--dry-run` | Validate inputs and members, print their resolved efforts and sources, and start nothing |
+| `--status [PANEL]` | Print one panel record, or list panels oldest first |
+| `--recover PANEL` | Collect unfinished members under the panel's lifetime lock |
+| `--json` | Print JSON in every mode |
+
+Exactly one mode is required: `--question-file`, `--status` or `--recover`.
+`--dir`, `--member`, `--claim`, `--read` and `--dry-run` require
+`--question-file`. `--stall` and `--timeout` apply to a start without
+`--dry-run`, or to `--recover`. Minutes must be finite and greater than zero.
+Invalid combinations exit 64 with `next: emb panel --help`.
+
+Before a start, Ember reads the question, resolves the checkout, checks that
+each `--read` path exists, reads choices and checks the claim, then selects
+and validates members. A missing path fails this existence check; access
+failures encountered later are reported by the member. Git location
+variables are removed from the environment used by these checks and runs.
+An invalid, gone or unknown claim exits 64 before any member starts.
+
+Dry run stops after input and member validation. It checks neither tmux nor
+runtime locking, record storage, sandbox readiness or member launch. A
+start then requires tmux, acquires its new panel's lock, creates the record
+and publishes its id. The lock remains held through execution and
+finalization.
+
 ### Members
 
 Panel members use repeatable `--member <engine>:<model>[@<effort>]`
@@ -1659,6 +1701,100 @@ stop condition ends its wait, regardless of its earlier status.
 When there is nothing to collect, recovery still saves no-run failures,
 reconciles the panel's terminal status and exit, and rebuilds the summary
 before reporting that nothing remains to recover (75).
+
+### Output
+
+Data goes to standard output. Diagnostics go to standard error as
+`emb panel: <message>`. Saved members left out are named there before a
+start or dry-run result. Each failed command prints one `next:` or `owner:`
+line. Member diagnostics stay in their logs except the warnings described
+under Running.
+
+A start or recovery in text mode first prints `panel <id>` and flushes it.
+After waiting, it prints one line per member, in member order:
+
+```text
+member <n> <engine>:<model> · <effort or default> · <status> · <seconds>s · exit <exit or -> · <bytes> bytes · run <run or ->
+```
+
+Seconds are rounded to the nearest integer. Unknown elapsed time is `-`
+without a seconds suffix. Exit zero is printed as `0`. These lines are
+followed by `left out <value>: <reason>` for each excluded member and
+`summary <absolute path to summary.md>`.
+
+With `--json`, a start or recovery prints one object, without an id
+announcement before it:
+
+```json
+{
+  "panel": "panel-20261102-101500-a1b2c3",
+  "status": "done",
+  "exit": 0,
+  "dir": "/abs/checkout",
+  "folder": "/abs/state/ember/runs/panel-20261102-101500-a1b2c3",
+  "summary": "/abs/state/ember/runs/panel-20261102-101500-a1b2c3/summary.md",
+  "members": [],
+  "left_out": [],
+  "next": "next: read <summary>, then compare the answers"
+}
+```
+
+`members` contains each panel record member dictionary except `attempts`;
+the empty list above stands for those dictionaries. `left_out` contains
+`{"value", "reason"}` entries. `next` contains the same complete action
+line printed on standard error.
+
+A text dry run prints `checkout <dir>`, then
+`member <n> <engine>:<model> · <effort or default> · <source>` per member,
+then the left-out lines. Its JSON object has `dir`, `members` and
+`left_out`. Each member has `n`, `engine`, `model`, `effort` and `source`.
+A dry run prints no next action.
+
+`--status PANEL` prints each top-level record field except `members` and
+`left_out` as `<field>: <value>`, adds `live: true` or `live: false`, then
+prints the member lines above. Its JSON object is the complete panel
+record plus `live`, which reports whether the lifetime lock is held.
+
+`--status` lists readable panels oldest first, by start time then id:
+
+```text
+<id>  <status>  <answered>/<n> answered  <dir>  <subject>
+```
+
+The subject is `Panel <id>: <first non-empty question line>`, cut to 60
+characters. If the question file cannot be read, the listing names that
+file on standard error and uses `(question unavailable)` as the question.
+An unreadable panel record is skipped with `emb panel: skipped <error>`.
+No panels prints no text, or `[]` with `--json`. The JSON list contains
+objects with `id`, `status`, `live`, `dir`, `answered`, `members` (the count),
+`exit` and `started_at`. Status prints no next action on success.
+
+The result's next action is printed on standard error, including exit zero:
+
+| Case | Line |
+|---|---|
+| Exit 0 | `next: read <summary>, then compare the answers` |
+| Exit 83, no unfinished member | `next: read <summary>; report each member that is not answered or changed paths to the owner` |
+| Exit 83 or 74, an unfinished member has a run id | `next: emb panel --recover <id> (collects <k> unfinished members), or read <summary> now and close each open run with emb run --close <run> --force` |
+| Exit 74 without a known unfinished run, or exit 83 with unfinished members but no run ids | `next: emb panel --status <id> and emb run --status; panel recovery cannot collect a member without a saved run id` |
+
+`k` counts unfinished members with saved run ids. A persistence failure
+exits 1 naming the panel id and `next: emb panel --status <id>`; existing
+artifacts remain available.
+
+### Exit codes
+
+| Code | Meaning | Line |
+|---|---|---|
+| 0 | Every member answered and changed nothing, or a dry run or status printed | The result's next action; none for dry run or status |
+| 1 | Unexpected error, broken panel record, persistence failure, or unreadable settings database | `next: emb panel --status [<id>]`; for the database, `owner: repair or remove the settings database the message names` |
+| 64 | Usage error, empty question, invalid or repeated or ninth member, no member to run, explicit engine off or effort refused, invalid or gone or unknown claim, or unknown panel | `next: emb panel --help`, the member or engine owner action, the claim action, or `next: emb panel --status` |
+| 65 | `--dir` is outside a git checkout | `next: emb panel --question-file <file> --dir <a folder in the checkout>` |
+| 66 | Unreadable question, missing or non-directory `--dir`, or nonexistent `--read` path | `next: ls -l <path>` |
+| 69 | Explicit engine disconnected or without a driver, git or tmux missing, unusable runtime folder, or panel creation fails with an operating-system error | `owner:` naming the fix; runtime and creation errors name `XDG_RUNTIME_DIR` |
+| 74 | Ctrl+C, SIGTERM or SIGHUP while members ran; member turns keep running | The recovery action, or panel and run status when no run id is known |
+| 75 | Recovery while the panel lock is held, or no unfinished member to collect | `next: emb panel --status <id>` |
+| 83 | A member did not answer or changed paths | The result's next action above |
 
 ## `emb ground`
 
@@ -2397,7 +2533,7 @@ skill into Claude Code; `emb skill install` does.
 ## Exit codes
 
 These are the exit codes of `emb choices` and `emb engines`; `emb run`,
-`emb gapcheck`, `emb flow`, `emb ground`, `emb merge`, `emb cleanup`, `emb deps`, `emb skill` and
+`emb gapcheck`, `emb flow`, `emb panel`, `emb ground`, `emb merge`, `emb cleanup`, `emb deps`, `emb skill` and
 `emb app` have their own tables above.
 
 | Code | Meaning |
