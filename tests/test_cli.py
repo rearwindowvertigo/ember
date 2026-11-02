@@ -1,7 +1,11 @@
+import importlib
 import json
 import os
 import sqlite3
+import sys
 import time
+import types
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -456,3 +460,123 @@ def test_engines_models_invalid_engine_exits_64(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "--models" in captured.err
+
+
+# emb run
+
+
+@pytest.fixture
+def run_env(tmp_path: Path) -> Iterator[dict[str, str]]:
+    environment = _stub_engine().make_env(tmp_path)
+    yield environment
+    _stub_engine().kill_sessions(tmp_path)
+
+
+def _stub_engine() -> types.ModuleType:
+    """Return the run tests' stub helpers, from `tests/runs/stub_engine.py`."""
+    return importlib.import_module("runs.stub_engine")
+
+
+def test_run_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["run", "--help"])
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+    for option in ("--engine", "--task-file", "--recover", "--stall", "--trailer"):
+        assert option in out
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["--dir", "."], "a new run needs --engine, --task-file"),
+        (["--screen", "r", "--status"], "--screen and --status cannot be combined"),
+        (["--screen", "r", "--model", "m"], "--model cannot be used with --screen"),
+        (["--send", "r"], "--send and --message-file go together"),
+        (["--status", "--message-file", "f"], "--send and --message-file go together"),
+        (["--status", "--force"], "--force needs --close"),
+        (["--close", "r", "--json"], "--json needs --status"),
+    ],
+)
+def test_run_usage_errors_exit_64(
+    argv: list[str], message: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["run", *argv], env={}) == 64
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"emb run: {message}\nnext: emb run --help\n"
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "x", "inf"])
+def test_run_stall_must_be_positive(
+    value: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["run", "--status", "--stall", value])
+    assert exit_info.value.code == 64
+    assert "--stall" in capsys.readouterr().err
+
+
+def test_run_status_with_no_runs(
+    run_env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["run", "--status", "--json"], env=run_env) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_run_start_status_and_close(
+    tmp_path: Path,
+    run_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ember import engines
+    from ember.runs import core
+
+    stub = _stub_engine()
+
+    monkeypatch.setattr(core, "POLL_SECONDS", 0.02)
+    monkeypatch.setattr(
+        engines,
+        "load_driver",
+        lambda name: stub.StubDriver(name, stub.script_path(run_env)),
+    )
+    repo = stub.make_repo(tmp_path, run_env)
+    brief = tmp_path / "brief.md"
+    brief.write_text("Write a file\n@write out.txt hello\n")
+    argv = [
+        "run", "--engine", "claude", "--dir", str(repo), "--task-file", str(brief),
+        "--trailer", "Co-Authored-By: X <x@y>", "--no-window", "--quiet",
+    ]  # fmt: skip
+    assert main(argv, env=run_env) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 2
+    run_id = out[0].removeprefix("run ")
+    assert out[1].endswith(" · exit 0 · 1 files · turn 1")
+    assert main(["run", "--status", run_id, "--json"], env=run_env) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["trailers"] == ["Co-Authored-By: X <x@y>"]
+    assert data["session_state"] == "live"
+    assert main(["run", "--close", run_id], env=run_env) == 0
+    assert capsys.readouterr().out == f"closed {run_id}\n"
+
+
+def test_run_without_driver_exits_69(
+    tmp_path: Path,
+    run_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setitem(sys.modules, "ember.engines.codex", None)
+    repo = _stub_engine().make_repo(tmp_path, run_env)
+    brief = tmp_path / "brief.md"
+    brief.write_text("Task\n")
+    argv = ["run", "--engine", "codex", "--model", "gpt-5", "--dir", str(repo)]
+    code = main([*argv, "--task-file", str(brief), "--no-window"], env=run_env)
+    captured = capsys.readouterr()
+    assert code == 69
+    assert captured.out == ""
+    assert "emb run: Ember has no driver for codex\n" in captured.err
+    assert captured.err.splitlines()[-1] == (
+        "owner: this Ember build has no driver for codex; update Ember"
+    )
