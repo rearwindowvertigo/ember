@@ -435,9 +435,10 @@ def test_finished_rows_survive_a_live_run_saving(
     row.expand_button.setFocus()
 
     run = record.load(LIVE_A, env)
-    with qtbot.waitSignal(context.runs.changed, timeout=5000):
-        write_run(replace(run, status=record.RUNNING, updated_at=run.updated_at + 5))
-    assert screen.live_rows[LIVE_A].badge.text() == "Running"
+    write_run(replace(run, status=record.RUNNING, updated_at=run.updated_at + 5))
+    qtbot.waitUntil(
+        lambda: screen.live_rows[LIVE_A].badge.text() == "Running", timeout=5000
+    )
     assert screen.finished_rows[DONE_A] is row
     assert row.details is details
     assert value.hasSelectedText()
@@ -452,8 +453,10 @@ def test_finished_row_redraws_when_its_values_change(
     row = screen.finished_rows[DONE_A]
     screen.toggle_finished(DONE_A)
     run = record.load(DONE_A, env)
-    with qtbot.waitSignal(context.runs.changed, timeout=5000):
-        write_run(replace(run, subject="Fix it", updated_at=run.updated_at + 5))
+    write_run(replace(run, subject="Fix it", updated_at=run.updated_at + 5))
+    # The watcher can report the folder change before the new record is in
+    # place, so wait for the record the test wrote rather than one signal.
+    qtbot.waitUntil(lambda: row.run.subject == "Fix it", timeout=5000)
     assert screen.finished_rows[DONE_A] is row
     assert row.detail_label.text().startswith("Fix it · ")
     assert row.details is not None
@@ -467,8 +470,8 @@ def test_finished_row_redraws_when_its_values_change(
         status=record.CLOSED,
         ended_at=1_800_000_950.0,
     )
-    with qtbot.waitSignal(context.runs.changed, timeout=5000):
-        write_run(new)
+    write_run(new)
+    qtbot.waitUntil(lambda: new.id in screen.finished_rows, timeout=5000)
     assert list(screen.finished_rows) == [new.id, DONE_B, DONE_A]
     assert screen.finished_rows[DONE_A] is row
     layout = screen.finished_rows_layout

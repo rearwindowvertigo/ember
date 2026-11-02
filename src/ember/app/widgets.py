@@ -27,6 +27,7 @@ from PySide6.QtGui import (
     QFontMetrics,
     QGuiApplication,
     QHideEvent,
+    QIcon,
     QKeyEvent,
     QPainter,
     QPaintEvent,
@@ -111,6 +112,27 @@ def button(
     result.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
     result.setCursor(Qt.CursorShape.PointingHandCursor)
     return result
+
+
+ICON_GAP = "  "
+"""Spaces put before an icon button's text; the style sheet draws no gap."""
+
+
+def set_icon(target: QPushButton, icon: QIcon) -> None:
+    """Give a button an icon with a gap before its text.
+
+    The accessible name stays the text without the gap.
+
+    Args:
+        target: The button.
+        icon: The icon.
+    """
+    target.setIcon(icon)
+    text = target.text().lstrip(" ")
+    if text:
+        target.setText(ICON_GAP + text)
+        if not target.accessibleName():
+            target.setAccessibleName(text)
 
 
 class Switch(QAbstractButton):
@@ -686,7 +708,7 @@ class CommandLine(QFrame):
     def set_command(self, command: str) -> None:
         """Show a command; Copy reads "Copy" again when it changed."""
         if command != self._command:
-            self.copy_button.setText("Copy")
+            self.copy_button.setText(ICON_GAP + "Copy")
         self._command = command
         self.text.setText(command)
         self.text.setAccessibleName(command)
@@ -696,10 +718,10 @@ class CommandLine(QFrame):
     def copy(self) -> None:
         """Put the command on the clipboard."""
         QGuiApplication.clipboard().setText(self._command)
-        self.copy_button.setText("Copied")
+        self.copy_button.setText(ICON_GAP + "Copied")
 
     def _draw_icons(self) -> None:
-        self.copy_button.setIcon(icons.icon("copy", theme.color("text-primary"), 16))
+        set_icon(self.copy_button, icons.icon("copy", theme.color("text-primary"), 16))
 
 
 class RunCommandDialog(QDialog):

@@ -33,7 +33,7 @@ from ember.app.screens.common import (
     titled_card,
     when,
 )
-from ember.app.widgets import Alert, Badge, Card, StateView, button
+from ember.app.widgets import Alert, Badge, Card, StateView, button, set_icon
 from ember.runs import record
 from ember.runs.record import Run
 
@@ -199,8 +199,8 @@ class _LiveRow(_Row):
         super().__init__(run, "screen")
         self.mirror: MirrorView | None = None
         self.open_button = button("Open terminal", "secondary", size="sm")
-        self.open_button.setIcon(
-            icons.icon("terminal", theme.color("text-primary"), 16)
+        set_icon(
+            self.open_button, icons.icon("terminal", theme.color("text-primary"), 16)
         )
         self.open_button.clicked.connect(lambda: open_terminal(self.run.id))
         self.action_box.addWidget(self.open_button)

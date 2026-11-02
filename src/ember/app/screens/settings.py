@@ -194,8 +194,8 @@ class SettingsScreen(QWidget):
             0,
         )
         self.add_folder = widgets.button("Add folder", "secondary", size="sm")
-        self.add_folder.setIcon(
-            icons.icon("folder-plus", theme.color("text-primary"), 16)
+        widgets.set_icon(
+            self.add_folder, icons.icon("folder-plus", theme.color("text-primary"), 16)
         )
         self.add_folder.clicked.connect(self._add_folder)
         grid.addWidget(self.add_folder, 4, 1, Qt.AlignmentFlag.AlignRight)
@@ -212,7 +212,7 @@ class SettingsScreen(QWidget):
 
     def _draw_icons(self, *_args: object) -> None:
         color = theme.color("text-primary")
-        self.add_folder.setIcon(icons.icon("folder-plus", color, 16))
+        widgets.set_icon(self.add_folder, icons.icon("folder-plus", color, 16))
         for remove in self.path_rows.values():
             remove.setIcon(icons.icon("x", color, 16))
 

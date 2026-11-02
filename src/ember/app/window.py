@@ -40,6 +40,9 @@ MINIMUM_HEIGHT = 600
 ICON_SIZE = 18
 """The size of a sidebar row's icon."""
 
+BADGE_HEIGHT = 20
+"""The height of a sidebar row's count, in pixels."""
+
 _NAV_STYLE = """
 QPushButton[role="nav"] {{
     text-align: left;
@@ -97,12 +100,13 @@ class NavButton(QPushButton):
         self.count_label = QLabel()
         self.count_label.setProperty("role", "badge")
         self.count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.count_label.setFixedHeight(BADGE_HEIGHT)
         self.count_label.hide()
         for part in (self.icon_label, self.text_label, self.count_label):
             part.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         layout.addWidget(self.icon_label)
         layout.addWidget(self.text_label, 1)
-        layout.addWidget(self.count_label)
+        layout.addWidget(self.count_label, 0, Qt.AlignmentFlag.AlignVCenter)
         self.draw_icon()
 
     def draw_icon(self) -> None:
@@ -253,6 +257,8 @@ class MainWindow(QMainWindow):
     def _select(self, key: str) -> None:
         self._current = key
         self.nav[key].setChecked(True)
+        if isinstance(QApplication.focusWidget(), NavButton):
+            self.nav[key].setFocus(Qt.FocusReason.OtherFocusReason)
 
     def show_screen(self, key: str) -> None:
         """Make a screen current, creating it on first show.

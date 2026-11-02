@@ -250,8 +250,8 @@ class DependenciesScreen(QWidget):
         self._draw_icons()
 
     def _draw_icons(self, *_args: object) -> None:
-        self.check_button.setIcon(
-            icons.icon("refresh-cw", theme.color("text-primary"), 16)
+        widgets.set_icon(
+            self.check_button, icons.icon("refresh-cw", theme.color("text-primary"), 16)
         )
 
     # Reading

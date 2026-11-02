@@ -1,6 +1,6 @@
 import pytest
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication, QDialog, QLineEdit
 from pytestqt.qtbot import QtBot
 
@@ -236,11 +236,11 @@ def test_command_line_copy_and_run(qtbot: QtBot) -> None:
     line.show()
     qtbot.mouseClick(line.copy_button, Qt.MouseButton.LeftButton)
     assert QGuiApplication.clipboard().text() == "sudo apt install tmux"
-    assert line.copy_button.text() == "Copied"
+    assert line.copy_button.text().strip() == "Copied"
     line.set_command("sudo apt install tmux")
-    assert line.copy_button.text() == "Copied"
+    assert line.copy_button.text().strip() == "Copied"
     line.set_command("sudo apt install git")
-    assert line.copy_button.text() == "Copy"
+    assert line.copy_button.text().strip() == "Copy"
     with qtbot.waitSignal(line.run_requested) as blocker:
         qtbot.mouseClick(line.run_button, Qt.MouseButton.LeftButton)
     assert blocker.args == ["sudo apt install git"]
@@ -336,3 +336,12 @@ def test_small_field_height(qapp: QApplication, qtbot: QtBot) -> None:
     finally:
         theme.apply(qapp, previous)
         qapp.setStyleSheet("")
+
+
+def test_set_icon_keeps_a_gap_and_the_accessible_name(qtbot: QtBot) -> None:
+    target = widgets.button("Check now", "secondary")
+    qtbot.addWidget(target)
+    widgets.set_icon(target, QIcon())
+    widgets.set_icon(target, QIcon())
+    assert target.text() == widgets.ICON_GAP + "Check now"
+    assert target.accessibleName() == "Check now"
