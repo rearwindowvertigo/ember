@@ -49,6 +49,7 @@ empty list.
 | `shortlist.opencode` | List of `<provider>/<model>`, with optional `@<effort>`; each part `[A-Za-z0-9][A-Za-z0-9._-]*`, the provider part may start with `~` and the model part may also contain `:` | `[]` | standing |
 | `single.writer`, `single.reviewer` | `ask`, or `<engine>:<model>` with the model on that engine's shortlist when saved | `ask` | request, one-time, standing |
 | `multi.runs_as` | `ask`, `flow`, `workflow` | `ask` | request, one-time, standing |
+| `panel.members` | List of `<engine>:<model>` with each model on its engine's shortlist when saved, at most 8, no duplicates | `[]` | request, one-time, standing |
 | `single.writer_as`, `single.reviewer_as` | `cli`, `subagent` | `cli` | request, one-time, standing |
 | `sandbox.codex` | `on`, `off` | `on` when `bwrap` is on `PATH` or the `codex` on `PATH` has a bundled `bwrap`, else `off` | standing |
 | `sandbox.opencode`, `sandbox.claude` | `on`, `off` | `on` when `bwrap` is on `PATH`, else `off` | standing |
@@ -116,7 +117,8 @@ changes nothing leaves it.
       "effort": "...", "run_as": "...", "reason": "..."
     },
     "single.reviewer": {},
-    "multi.runs_as": {"value": "ask", "state": "ask", "reason": "asks at each run"}
+    "multi.runs_as": {"value": "ask", "state": "ask", "reason": "asks at each run"},
+    "panel.members": {"value": [], "state": "empty", "members": []}
   }
 }
 ```
@@ -126,6 +128,21 @@ changes nothing leaves it.
 `multi.runs_as` has only `value`, `state` (`set` or `ask`) and `reason`;
 it names no worker. `ask` has reason `asks at each run`; `flow` and
 `workflow` have state `set` and reason `null`.
+
+`panel.members` has `value` (the list), `state` (`empty` or `set`) and
+`members`, one row per entry with `value`, `state`, `engine`, `model`,
+`effort` and `reason`, in the worker row states except `ask`; it has no
+`run_as`. A non-empty list stays `set` even when none of its member rows
+is `set`. Entries contain no `@effort`; the shortlist supplies the effort.
+Its allowed values are every shortlisted `<engine>:<model>` in engine
+order: Claude, Codex, OpenCode.
+
+The exception to the default-on-error rule in Layers is `panel.members`:
+when it is the only invalid key, `source_error` is `true`, `errors` names
+the invalid values and `menu` is `null`. The other validated
+settings and claimed values still resolve through their layers. Explicit
+panel members can therefore use the saved engine and sandbox switches.
+An invalid value for another key still makes every answer use its default.
 
 Worker menu `state` is `set`, `ask`, `invalid`, `engine off`, `not connected` or
 `not shortlisted`, checked in that order. `not connected` means the engine is
@@ -1425,6 +1442,43 @@ every top-level field except `tasks`, then each task's state and reason.
 Every nonzero exit prints an `emb flow:` diagnostic or watch report and
 one `next:` or `owner:` line. Flow folders, queued answers and unmerged
 work remain after a startup failure.
+
+### Members
+
+Panel members use repeatable `--member <engine>:<model>[@<effort>]`
+options. Engines are `codex`, `opencode` and `claude`; models contain no
+whitespace or `@`, and efforts contain lowercase letters. Model names
+may contain slashes and colons. A panel has one to eight members. The
+same `<engine>:<model>` twice is refused, even with different efforts.
+Malformed, repeated or ninth members exit 64 with `next: emb panel --help`.
+
+When any `--member` is given, those members are used in option order.
+They do not require shortlist entries, and the saved `panel.members`
+value is not used. Otherwise members come from `panel.members`, resolved
+with `--claim` when supplied: request, claimed one-time choice, standing
+setting, then the empty default. A saved row must be `set`. Each other
+row is left out with its reason, as is a saved member that fails an
+engine or effort check. Each exclusion is recorded in `left_out` and
+reported on standard error as `emb panel: left out <value>: <reason>`.
+
+Every explicit member is checked before any run starts: engine on (64),
+connected (69), driver present (69), effort accepted (64). The first
+failure stops selection. The connection uses the engine status cache,
+or checks the engine when no usable cache exists. No member left exits
+64; when every saved member was excluded, the diagnostic says
+`no panel member to run: every saved member was left out`. Exclusions
+are printed before the action line:
+`owner: name the members with --member <engine>:<model>[@<effort>], or set Panel on the Menu screen`.
+
+Effort comes from an explicit `@effort`, then a saved member's shortlist
+entry, then the driver's default for the model. A null default leaves
+the choice to the engine; only non-null efforts are validated. The
+resolved effort and source (`option`, `request`, `one-time` or `setting`)
+are recorded for each member. The single-worker reviewer row does not
+supply a panel member's effort.
+
+Claude members run through the Claude CLI. `single.writer_as` and
+`single.reviewer_as` are not read; panels have no subagent members.
 
 ## `emb ground`
 
