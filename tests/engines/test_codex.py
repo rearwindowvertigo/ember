@@ -574,6 +574,45 @@ def test_foreign_input_counts_messages_the_owner_typed(
     )
 
 
+def test_a_failed_paste_is_not_recorded_as_sent(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    driver, run = _started(setup)
+    with _tmux_calls(monkeypatch):
+        driver.send(run, BRIEF)
+    path = _rollout(setup, _user(BRIEF), _line("task_started"))
+    _append(path, _line("task_complete", last_agent_message="ok"))
+    run = dataclasses.replace(run, turn=2)
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise codex.tmux.TmuxError("no session")
+
+    monkeypatch.setattr(codex.tmux, "send_text", fail)
+    with pytest.raises(codex.tmux.TmuxError):
+        driver.send(run, "Lost.")
+    with _tmux_calls(monkeypatch):
+        driver.send(run, "Next.")
+    _append(path, _user("Next."))
+    assert driver.foreign_input(run) is None
+
+
+def test_accept_input_accepts_the_messages_in_the_rollout(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    driver, run = _started(setup)
+    with _tmux_calls(monkeypatch):
+        driver.send(run, BRIEF)
+    path = _rollout(setup, _user(BRIEF), _user("also fix the README"))
+    assert driver.foreign_input(run) is not None
+    driver.accept_input(run)
+    assert driver.foreign_input(run) is None
+    run = dataclasses.replace(run, turn=2)
+    with _tmux_calls(monkeypatch):
+        driver.send(run, "Next.")
+    _append(path, _user("Next."))
+    assert driver.foreign_input(run) is None
+
+
 @pytest.mark.parametrize("damage", ["no rollout", "no sent list", "bad event"])
 def test_foreign_input_reports_a_history_it_cannot_check(
     setup: Setup, monkeypatch: pytest.MonkeyPatch, damage: str

@@ -441,7 +441,8 @@ exits 75 with `emb run: the session of <run> holds messages Ember did not
 send (<what the driver found>); Claude asks the owner before going on` and
 `next: ask the owner about the messages in the session of <run>; with their
 go-ahead, repeat the command with --force`. `--force` skips only this
-check. `--send` then commits a turn that was collected but not committed.
+check, and records the messages then in the session as accepted, so they do
+not refuse later commands. `--send` then commits a turn that was collected but not committed.
 It sends only when the driver reports the session idle; a busy or unknown
 session exits 75. The message is sent as
 written. When the driver fails (71) or Ctrl+C (74) stops the command before

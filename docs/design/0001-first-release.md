@@ -163,7 +163,8 @@ turn of the run uses the stored values.
 E6. The owner can type into a worker's session through a terminal window.
 When a session holds messages Ember did not send, or its history cannot be
 checked, `--send` and `--close` refuse with exit 75 and a line saying that
-Claude asks the owner; `--force` goes on. Codex's driver compares the
+Claude asks the owner; `--force` goes on, and `--send --force` records the
+messages then in the session as accepted. Codex's driver compares the
 session's user messages with the messages Ember pasted, OpenCode's driver
 the ids of the session's user messages with the ids Ember sent, and a Claude
 session takes no typed messages.

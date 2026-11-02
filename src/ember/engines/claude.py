@@ -317,7 +317,8 @@ class ClaudeDriver(engines.Driver):
     def read_folders(self, run: Run) -> list[tuple[str, str]]:
         """Return the folders a run's read paths add to Claude's file tools.
 
-        A folder is added as it is, and a file through its folder. A path
+        A folder is added as it is, and a file through its folder, whose
+        files the tools then cannot edit either. A path
         that is the worktree, holds it or is inside it adds nothing, because
         the worktree is already the working folder.
 
@@ -338,7 +339,7 @@ class ClaudeDriver(engines.Driver):
             if path.is_dir():
                 result.append((str(path), f"Edit(/{path}/**)"))
             else:
-                result.append((str(path.parent), f"Edit(/{path})"))
+                result.append((str(path.parent), f"Edit(/{path.parent}/**)"))
         return result
 
     def turn_argv(self, run: Run, session: str | None) -> list[str]:

@@ -329,6 +329,9 @@ class StubDriver(Driver):
         self.foreign_checks += 1
         return self.foreign
 
+    def accept_input(self, run: Run) -> None:
+        self.foreign = None
+
     def close(self, run: Run) -> None:
         self.closed.append(run.id)
 

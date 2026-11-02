@@ -620,6 +620,19 @@ def test_foreign_input_counts_messages_the_owner_typed(
     )
 
 
+def test_accept_input_accepts_the_messages_in_the_session(
+    driver: OpenCodeDriver, run: Run, server: Server
+) -> None:
+    run = started(driver, run, server)
+    first = prompt_id(server)
+    server.write(
+        "messages.json",
+        [user(first), assistant(first, [text("ok")]), user("msg_owner")],
+    )
+    driver.accept_input(run)
+    assert driver.foreign_input(run) is None
+
+
 def test_foreign_input_skips_the_messages_of_a_compaction(
     driver: OpenCodeDriver, run: Run, server: Server
 ) -> None:

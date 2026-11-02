@@ -805,6 +805,31 @@ class OpenCodeDriver(Driver):
             )
         return None
 
+    def accept_input(self, run: Run) -> None:
+        """Record every user message now in the session as one Ember accepts.
+
+        Args:
+            run: The run.
+
+        Raises:
+            DriverError: The run has no session, or its messages cannot be
+                read.
+        """
+        state = self._state(run)
+        messages = self._messages(run, self._session(state))
+        if messages is None:
+            raise DriverError("cannot read the OpenCode session's messages")
+        sent = state.get("sent") if isinstance(state.get("sent"), list) else []
+        ids = [
+            info["id"]
+            for message in messages
+            if isinstance(message, dict)
+            and isinstance(info := message.get("info"), dict)
+            and info.get("role") == "user"
+            and isinstance(info.get("id"), str)
+        ]
+        self._save(run, sent=[*sent, *(i for i in ids if i not in sent)])
+
     def interrupt(self, run: Run) -> None:
         """Abort the session's current turn through the server.
 

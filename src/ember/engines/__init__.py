@@ -216,6 +216,17 @@ class Driver(ABC):
         """
         return None
 
+    def accept_input(self, run: Run) -> None:
+        """Accept the messages `foreign_input` reports.
+
+        `--send --force` calls this, so the same messages do not refuse later
+        commands. The default does nothing.
+
+        Args:
+            run: The run.
+        """
+        return None
+
     def interrupt(self, run: Run) -> None:
         """Interrupt the current turn.
 

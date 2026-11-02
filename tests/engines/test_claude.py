@@ -290,7 +290,7 @@ def test_read_paths_are_added_and_kept_from_edits(
     assert added == [str(shared), str(notes.parent)]
     disallowed = option(argv, "--disallowedTools").split(",")
     assert f"Edit(/{shared}/**)" in disallowed
-    assert f"Edit(/{notes})" in disallowed
+    assert f"Edit(/{notes.parent}/**)" in disallowed
     assert not any(str(inside) in rule for rule in disallowed)
 
 

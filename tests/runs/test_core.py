@@ -1308,6 +1308,7 @@ def test_send_refuses_a_session_holding_foreign_messages_before_committing(
     after = record.load(run_id, env)
     assert after.turn == 2
     assert len(after.commits) == 2
+    assert driver.foreign is None
 
 
 def test_send_with_force_keeps_the_busy_check(

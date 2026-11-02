@@ -1285,7 +1285,10 @@ class Core:
                     "busy",
                     run=run_id,
                 )
-            if not force:
+            if force:
+                with contextlib.suppress(engines.DriverError, tmux.TmuxError):
+                    driver.accept_input(run)
+            else:
                 self._check_foreign(run, driver, "send")
             if run.turn_state == record.COLLECTED and not run.read_only:
                 run, _, _, code, message = self._commit(run)

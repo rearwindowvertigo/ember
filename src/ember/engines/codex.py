@@ -833,18 +833,44 @@ class CodexDriver(Driver):
         if rollout is None:
             if run.turn > 1:
                 raise DriverError(f"cannot find the Codex session of {run.id}")
-            self._record_sent(state, text)
-            self._save_state(run, state)
-            tmux.send_text(run.id, text, env=run.env)
+            self._paste(run, state, text)
             return
         turns = read_turns(rollout)
         state["turns"][str(run.turn)] = {
             "ended": len(turns.ended),
             "errors": len(turns.errors),
         }
+        self._paste(run, state, text)
+
+    def _paste(self, run: Run, state: dict[str, Any], text: str) -> None:
+        """Record the message as sent, paste it, and drop it if the paste fails."""
         self._record_sent(state, text)
         self._save_state(run, state)
-        tmux.send_text(run.id, text, env=run.env)
+        try:
+            tmux.send_text(run.id, text, env=run.env)
+        except BaseException:
+            state["sent"] = state["sent"][:-1]
+            self._save_state(run, state)
+            raise
+
+    def accept_input(self, run: Run) -> None:
+        """Record every message now in the rollout as one Ember accepts.
+
+        Args:
+            run: The run.
+
+        Raises:
+            DriverError: The rollout cannot be found or read.
+        """
+        state = self._load_state(run)
+        rollout = self._rollout(run, state)
+        if rollout is None:
+            raise DriverError(f"cannot find the Codex session of {run.id}")
+        messages = user_messages(rollout)
+        if messages is None:
+            raise DriverError(f"cannot read the Codex rollout {rollout}")
+        state["sent"] = list(messages)
+        self._save_state(run, state)
 
     def foreign_input(self, run: Run) -> str | None:
         """Compare the rollout's messages with the messages Ember pasted.
