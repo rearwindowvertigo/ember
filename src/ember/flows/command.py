@@ -28,6 +28,7 @@ from ember.runs.core import STALL_MINUTES, Core
 NOT_MERGED = 82
 POLL_SECONDS = 1.0
 START_SECONDS = 30.0
+SESSION_EXIT_SECONDS = 10.0
 GIT_LOCATION = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -208,6 +209,27 @@ def _starting(flow: Mapping[str, Any], env: Mapping[str, str]) -> bool:
     return bool(at and time.time() < at + START_SECONDS)
 
 
+def _wait_session_exit(flow_id: str, env: Mapping[str, str], follow: str) -> None:
+    """Wait for an unlocked runner's pane to end, then remove its dead session."""
+    deadline = time.monotonic() + SESSION_EXIT_SECONDS
+    while tmux.exists(flow_id, env=env):
+        try:
+            if tmux.pane_dead(flow_id, env=env):
+                tmux.kill(flow_id, env=env)
+                return
+        except tmux.TmuxError:
+            # The runner may remove its session between these observations.
+            if not tmux.exists(flow_id, env=env):
+                return
+            raise
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CommandError(
+                75, f"the session for {flow_id} is still running", follow
+            )
+        time.sleep(min(POLL_SECONDS, remaining))
+
+
 def _session(
     flow: dict[str, Any],
     env: Mapping[str, str],
@@ -224,12 +246,7 @@ def _session(
         )
     _require_tool("tmux", env)
     try:
-        if tmux.exists(flow_id, env=env):
-            if not tmux.pane_dead(flow_id, env=env):
-                raise CommandError(
-                    75, f"the session for {flow_id} is still running", follow
-                )
-            tmux.kill(flow_id, env=env)
+        _wait_session_exit(flow_id, env, follow)
         events = record.read_events(flow_id, env)
         reservation = {"at": time.time(), "after": events[-1]["seq"] if events else 0}
         run_record.write_private(
@@ -607,14 +624,26 @@ def _watch_result(
         (event for event in reversed(events) if event.get("kind") == "end"), None
     )
     starting = not live and _starting(flow, env)
+    reservation_at = _startup(flow, env).get("at", 0)
+    current_record = (
+        not reservation_at
+        or (flow.get("runner") or {}).get("started_at", 0) >= reservation_at
+    )
     code = None
-    if terminal is not None and flow["status"] in record.ENDED and not starting:
+    if (
+        terminal is not None
+        and current_record
+        and flow["status"] in record.ENDED
+        and not starting
+    ):
         event = "end"
         code = terminal["exit"]
     elif stops:
         event = "lead_stop"
     elif not live and not starting:
-        if flow["status"] in record.ENDED:
+        if not current_record:
+            event, code = "runner_lost", exits.SESSION_GONE
+        elif flow["status"] in record.ENDED:
             event = "end"
             code = (
                 0

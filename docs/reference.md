@@ -884,8 +884,11 @@ attempt. A reservation allows 30 seconds for the runner to take its lifetime
 lock. Concurrent starts of the same flow are refused during that interval.
 A resume refuses a live runner or a completed flow, removes an existing
 dead session, and starts a new session. A live session without a runner
-lock is kept and reported with exit 75. Module loading uses Python's `-I`
-mode and the absolute package root of the invoking Ember installation.
+lock gets up to 10 seconds to end. Once its pane dies or the session ends,
+startup removes any dead session and launches the replacement. A session
+still running after the wait is kept and reported with exit 75. Module
+loading uses Python's `-I` mode and the absolute package root of the
+invoking Ember installation.
 
 ### Plan
 
@@ -1235,6 +1238,10 @@ without a runner returns immediately, including when its stop events were
 already read. A completed flow returns its current terminal outcome even
 when its end event was already read. Events before the latest startup or
 `flow running` event remain history and do not end a resumed watch.
+After a startup reservation, the stored status applies only when
+`runner.started_at` is at or after the reservation timestamp. If the new
+runner never writes its record and the reservation expires, watch reports
+`runner_lost` with exit 72, even if the previous attempt failed or stopped.
 
 Watchers share `watch.json`. A separate `watch.lock` serializes event
 selection, reporting and cursor advancement; the cursor advances only

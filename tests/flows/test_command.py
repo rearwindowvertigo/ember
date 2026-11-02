@@ -731,3 +731,103 @@ def test_resume_reservation_hides_old_end(
     monkeypatch.setattr(command.time, "sleep", interrupt)
     code, out, _ = invoke(env, "--watch", flow["id"], "--json")
     assert code == 74 and not out
+
+
+@pytest.mark.parametrize("outcome", ["dead", "gone", "gone during probe", "timeout"])
+def test_lead_waits_for_exiting_runner_session(
+    tmp_path: Path,
+    env: dict[str, str],
+    flow: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    stopped(flow, env)
+    elapsed = 0.0
+    session_state = "live"
+    killed: list[str] = []
+
+    def exists(name: str, *, env: Mapping[str, str]) -> bool:
+        return session_state != "gone"
+
+    def pane_dead(name: str, *, env: Mapping[str, str]) -> bool:
+        nonlocal session_state
+        if outcome == "gone during probe" and elapsed:
+            session_state = "gone"
+            raise tmux.TmuxError("session ended")
+        return session_state == "dead"
+
+    def kill(name: str, *, env: Mapping[str, str]) -> None:
+        nonlocal session_state
+        assert session_state == "dead"
+        killed.append(name)
+        session_state = "gone"
+
+    def sleep(seconds: float) -> None:
+        nonlocal elapsed, session_state
+        # The answer must stay queued while the old runner's pane is closing.
+        answers = record.read_answers(flow["id"], env)
+        assert len(answers) == 1 and answers[0] is not None
+        assert answers[0]["kind"] == "drop"
+        elapsed += seconds
+        if outcome in ("dead", "gone"):
+            session_state = outcome
+
+    monkeypatch.setattr(tmux, "exists", exists)
+    monkeypatch.setattr(tmux, "pane_dead", pane_dead)
+    monkeypatch.setattr(tmux, "kill", kill)
+    monkeypatch.setattr(command.time, "monotonic", lambda: elapsed)
+    monkeypatch.setattr(command.time, "sleep", sleep)
+    code, out, err = invoke(env, "--lead", flow["id"], "a", "--drop")
+    assert "queued answer 1: drop for a" in out
+    assert err.endswith(f"next: emb flow --watch {flow['id']} --json\n")
+    launches = sum("new-session" in call for call in tmux_log(tmp_path))
+    if outcome == "timeout":
+        assert code == 75 and elapsed == 10.0
+        assert launches == 0 and "is still running" in err
+        assert not killed
+    else:
+        assert code == 0 and 0 < elapsed <= 10.0, err
+        assert launches == 1 and f"flow {flow['id']}\n" in out
+        assert killed == ([flow["id"]] if outcome == "dead" else [])
+
+
+@pytest.mark.parametrize("status", ["failed", "stopped"])
+@pytest.mark.parametrize("current_attempt", [False, True])
+def test_expired_resume_reservation_requires_current_record(
+    env: dict[str, str],
+    flow: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    current_attempt: bool,
+) -> None:
+    flow["runner"] = {"pid": 1, "started_at": time.time() - 60}
+    if status == "failed":
+        end(flow, env, 82)
+    else:
+        stopped(flow, env)
+        record.append_event(
+            flow["id"], {"kind": "lead_stop", "task": "a", "reason": "old stop"}, env
+        )
+    code, _, err = invoke(env, "--resume", flow["id"])
+    assert code == 0, err
+    reservation = json.loads(
+        (record.folder(flow["id"], env) / "startup.json").read_text()
+    )
+    if current_attempt:
+        # Equality is sufficient: this is the new attempt's stored outcome.
+        flow["runner"]["started_at"] = reservation["at"]
+        record.save(flow, env)
+    monkeypatch.setattr(
+        command.time, "time", lambda: reservation["at"] + command.START_SECONDS + 1
+    )
+    code, out, err = invoke(env, "--watch", flow["id"], "--json")
+    result = json.loads(out)
+    assert result["stops"] == []
+    if current_attempt:
+        assert code == (82 if status == "failed" else 0)
+        assert result["event"] == ("end" if status == "failed" else "lead_stop")
+    else:
+        assert code == 72 and result["exit"] == 72
+        assert result["event"] == "runner_lost"
+        assert result["next"] == f"next: emb flow --resume {flow['id']}"
+        assert err == result["next"] + "\n"
