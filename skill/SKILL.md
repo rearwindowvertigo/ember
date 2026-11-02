@@ -112,8 +112,8 @@ the owner's consent. Do not offer a Claude Workflow without opt-in.
 
 Use `single.writer` for edits and `single.reviewer` for read-only work.
 For a `claude` row, `run_as` picks `cli` (`emb run --engine claude`) or
-`subagent`. Take engine, model and effort from a `set` row, and say the
-row, model and effort in one line, for example:
+`subagent`. Take engine, model and effort from a `set` row, and write the
+row, model and effort as one visible line right before the start, for example:
 `Menu, Single runs Writer: Codex gpt-6.1-sol, high.`
 
 An explicit worker or model in the owner's request wins over the menu,
@@ -307,8 +307,8 @@ owner's work. Report runs parked and runs left open, with reasons.
 
 ### 9. Merge, clean up and finish
 
-Write the verdict as visible text in its own message before running
-`emb merge`, and again when a branch under correction comes back. Merge only Keep or Keep-with-fix work into
+Write the verdict line, such as `Verdict: Keep.`, as visible text right
+before the `emb merge` call, and again when a correction comes back. Merge only Keep or Keep-with-fix work into
 the session branch:
 
 ```bash
