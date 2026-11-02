@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ember/review-reply/1",
+  "title": "Flow review reply",
+  "description": "A read-only review of an Ember task. A review with no findings has an empty findings list.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "findings"],
+  "properties": {
+    "verdict": {"type": "string", "enum": ["pass", "fix"]},
+    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}}
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "file", "line", "problem", "fix", "scenario", "earlier"],
+      "properties": {
+        "severity": {"type": "string", "enum": ["must", "should", "lead"]},
+        "file": {"type": ["string", "null"], "minLength": 1},
+        "line": {"type": ["integer", "null"]},
+        "problem": {"type": "string"},
+        "fix": {"type": "string"},
+        "scenario": {"type": "string"},
+        "earlier": {"type": ["integer", "null"], "minimum": 1},
+        "note": {"type": "string", "description": "Normalization note; the reader sets this field."}
+      }
+    }
+  }
+}

@@ -809,6 +809,93 @@ existing reply exits 66. A successful turn with no reply file exits 81.
 | 81 | Invalid reply, missing or unknown steps, or a successful run without a reply file | `next: emb gapcheck --plan <plan> --reply <reply>` after fixing the reply, or a new check |
 | Other | The run's exit from the `emb run` table | The run's line, then a gap check action |
 
+### Reviews
+
+Each flow review is a fresh read-only run in the writer's worktree. The
+review run is closed without `--force` after its reply is read. A refused
+close leaves the run open and is reported by the runner.
+
+The writer brief starts with the task's commit subject and preserves the
+task text as written. It lists the task's files, the other tasks' files in
+the wave, context and failure model when present, limits, the rule against
+running git, checks and closing report headings. Lead corrections also
+preserve their text as written.
+
+The review brief starts with `Review of task <id>, round <n>, in flow
+<flow id>: a read-only review; change no file.` It includes the task and
+subject, declared files and the other tasks' files, review focus, context,
+failure model, the base and head for `git diff` and `git log`, changed and
+outside files, and up to 20,000 characters of the writer's last report.
+It includes the review bar from `skill/SKILL.md` and the whole reply schema
+from `ember/data/review-reply.schema.json` (`ember/review-reply/1`). Pasted
+text in review briefs and generated fix messages is indented so it starts
+no line with `@`.
+
+The reviewer replies with one JSON object, no prose or code fence:
+
+```json
+{
+  "verdict": "fix",
+  "findings": [
+    {
+      "severity": "must",
+      "file": "src/parser.py",
+      "line": 12,
+      "problem": "An empty input raises an exception.",
+      "fix": "Return the empty result.",
+      "scenario": "An empty input file crashes the command.",
+      "earlier": null
+    }
+  ]
+}
+```
+
+The schema requires `verdict` (`pass` or `fix`) and a `findings` array,
+which may be empty. Each finding requires `severity` (`must`, `should` or
+`lead`), `file` (a non-empty string or null), `line` (an integer or null),
+`problem`, `fix` and `scenario` (strings), and `earlier` (an integer at least
+1 or null). `note` is an optional string set by normalization. The schema
+allows no other keys. The verdict is `fix` when a finding is `must` or
+`lead`.
+
+The reader tries the whole reply as JSON, the last backtick code block
+(unlabelled or labelled `json`), then the span from the first `{` to the
+last `}`. It uses the first candidate that parses as an object. A missing
+object, a verdict other than `pass` or `fix`, or findings other than an
+array makes the review unreadable. Extra keys are ignored by the reader.
+Findings are normalized individually:
+
+- A non-object becomes a finding whose problem is its JSON text.
+- An unknown severity becomes `must`.
+- `file` is kept only when it is a non-empty string. `line` is kept only
+  when it is an integer, excluding booleans; otherwise each is null.
+- `problem`, `fix` and `scenario` keep strings, use empty text for null,
+  and use JSON text for other values.
+- `earlier` is kept only when it is an integer from 1 through the number
+  of earlier must findings; otherwise it is null. Booleans do not count.
+- A `must` with no nonblank scenario becomes `should`, with
+  `note: "demoted: no scenario"`. A `lead` with no nonblank problem becomes
+  `should`, with `note: "demoted: no decision named"`. Other notes are empty.
+
+The decision uses normalized findings in this order: an unreadable review
+stops the task; any `must` with rounds left sends a fix turn to the same
+writer; any `must` without rounds left stops with `unresolved after <n> fix
+rounds`; any `lead` stops with `needs the lead`; verdict `pass` accepts;
+otherwise the task stops with `the review says fix but names no must or
+lead finding`. The round budget is the plan's `rounds`, including zero.
+
+A fix message starts with `Fix round <n> of task <id> in flow <flow id>.`
+It numbers only must findings, with location, problem, scenario and fix,
+and asks the writer to fix each or explain it under `Disputed`. It repeats
+the Git rule and closing report. Review rounds after the first include
+that earlier numbered must list and the fix diff; they check those
+findings and the fix only. A new must or lead must be caused by the fix.
+
+After a writer or fix turn, a changed file declared by another task in the
+same wave stops the task before review. Other changed files outside the
+task's declarations are recorded in `outside_files` and included in the
+review brief for the reviewer to judge.
+
 ## `emb ground`
 
 Prints, in one call, what Claude reads before choosing a worker: the machine,
@@ -905,6 +992,13 @@ the git checkout; the default is the current folder.
 The cleanup's lines follow the first line. A branch that is not an Ember run
 branch is kept with `not an Ember run branch; next: git branch -d BRANCH`.
 
+A flow branch `ember/flow/<flow id>` follows the run-branch cleanup path
+without a run record, with its worktree at `.ember/worktrees/<flow id>` in
+the main checkout. Cleanup keeps it while the flow's runner is live, with
+`the flow <id> is running` and `next: emb flow --status <id>`. A task branch
+merged into a flow branch is merged in the flow worktree and cleaned up by
+the same rules.
+
 `--json` prints one object:
 
 | Field | Value |
@@ -931,6 +1025,13 @@ of `git worktree list`), also when `DIR` is in a linked worktree. No other
 branch is ever removed, and a read-only run, which has no branch, is never
 touched. Without `--branch` every run branch is handled; with it, only
 `BRANCH`.
+
+A flow branch `ember/flow/<flow id>` is a run branch with no run record;
+its worktree is `.ember/worktrees/<flow id>` in the main checkout. Before
+reading a run record, cleanup checks the flow's runner lock and keeps the
+branch when it is held or cannot be checked. With no live runner, the
+ordinary containment and worktree checks apply; `--dry-run` reports
+`would remove` when they pass. Flow records are kept.
 
 A branch is contained in `TARGET` when it is an ancestor of `TARGET`, or when
 merging it into `TARGET` gives no conflict and `TARGET`'s own tree, as after a
@@ -970,6 +1071,8 @@ Everything else is kept, with a reason and what resolves it:
 | `TARGET` itself | `the merge target` | `next: emb cleanup --merged-into <the branch it was merged into>` |
 | A branch that is not a run branch (with `--branch`) | `not an Ember run branch` | `next: git branch -d BRANCH` |
 | A branch not contained | `not contained in TARGET` | `next: emb merge BRANCH --into TARGET --verdict keep (after a Keep verdict)` |
+| A flow branch whose runner is live | `the flow <id> is running` | `next: emb flow --status <id>` |
+| A flow branch whose runner lock cannot be checked | The lock error | `next: emb flow --status <id>` |
 | A run record that is not this branch's | `the run record <run> is not this branch's: ...` | `next: emb run --status <run>` |
 | A run record that cannot be read | `cannot read the run record: ...` | `owner: repair or remove <the run.json file>` |
 | A branch checked out in another worktree | `checked out in <path>` | `next: git -C <path> switch --detach, then <the cleanup>` |

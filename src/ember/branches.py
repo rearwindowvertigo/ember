@@ -2,6 +2,8 @@
 
 A worker branch is a run branch, `ember/<engine>/<run id>`, whose worktree is
 `.ember/worktrees/<run id>` at the top of the repository's main checkout.
+Flow branches use `ember/flow/<flow id>` and the same worktree layout.
+Cleanup keeps a flow branch while its runner holds the lifetime lock.
 Cleanup removes only worker branches, their worktrees and their sessions; a
 session is closed through the run core, never through tmux directly.
 
@@ -24,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
 
+from ember.flows import lock as flow_lock
 from ember.runs import exits, record
 from ember.runs.core import Core, RunError
 from ember.runs.record import Run
@@ -48,6 +51,9 @@ WORKER_BRANCH = re.compile(
 )
 """The name of a worker branch."""
 
+FLOW_BRANCH = re.compile(r"ember/flow/(?P<run>flow-\d{8}-\d{6}-[0-9a-f]{6})")
+"""The name of a flow branch."""
+
 REMOVED = "removed"
 KEPT = "kept"
 WOULD_REMOVE = "would remove"
@@ -59,7 +65,7 @@ NOT_WORKER = "not an Ember run branch"
 
 
 class BranchError(Exception):
-    """An exit of `emb merge` or `emb cleanup`, with its message and line."""
+    """A branch operation's exit, with its message and follow-up line."""
 
     def __init__(self, code: int, message: str, line: str) -> None:
         """Keep the exit code and the `next:` or `owner:` line.
@@ -437,7 +443,7 @@ def open_repository(
     Args:
         directory: A folder in the git checkout.
         env: The environment of the git commands.
-        command: `merge` or `cleanup`, for the lines printed.
+        command: `merge`, `cleanup` or `flow`, for the lines printed.
 
     Returns:
         The repository.
@@ -465,6 +471,98 @@ def open_repository(
             f"next: git -C {top_path} worktree list",
         )
     return Repository(top=top_path, common=common, main=entries[0].path, env=env)
+
+
+@dataclass(frozen=True)
+class FlowBranch:
+    """A flow branch and its worktree, base commit and checkout locations."""
+
+    branch: str
+    worktree: Path
+    base: str
+    top: Path
+    main: Path
+
+
+def resolve_base(
+    directory: str | Path, base: str, env: Mapping[str, str]
+) -> tuple[Path, Path, str]:
+    """Resolve a flow's checkout, main checkout and base commit.
+
+    Raises:
+        BranchError: No checkout (65), no main checkout (70), or a base
+            that does not resolve to a commit (64).
+    """
+    repo = open_repository(directory, env, "flow")
+    result = repo.git("rev-parse", "--verify", "--end-of-options", f"{base}^{{commit}}")
+    if result.returncode or not result.stdout.strip():
+        raise BranchError(
+            exits.USAGE,
+            f"base {base} is not a commit",
+            "next: emb flow --plan <plan> --dry-run (with base naming a commit)",
+        )
+    return repo.top, repo.main, result.stdout.strip()
+
+
+def create_flow_branch(
+    directory: str | Path, flow_id: str, base: str, env: Mapping[str, str]
+) -> FlowBranch:
+    """Create a flow branch at its base in the main checkout's worktree folder.
+
+    Raises:
+        BranchError: An invalid flow id (64), an unresolved base or checkout,
+            or a failure to create the branch or worktree (70).
+    """
+    branch = f"ember/flow/{flow_id}"
+    if FLOW_BRANCH.fullmatch(branch) is None:
+        raise BranchError(
+            exits.USAGE, f"invalid flow id: {flow_id!r}", "next: emb flow --help"
+        )
+    top, main, commit = resolve_base(directory, base, env)
+    worktree = main / ".ember" / "worktrees" / flow_id
+    line = f"next: git -C {main} worktree prune, then emb flow --plan <plan> --start"
+    common = _common(top, env)
+    if common is None:
+        raise BranchError(
+            exits.WORKTREE_FAILED, "cannot find the common git folder", line
+        )
+    exclude = common / "info" / "exclude"
+    try:
+        try:
+            text = exclude.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            text = ""
+        if not any(
+            item.strip() in (".ember/", "/.ember/", ".ember", "/.ember")
+            for item in text.splitlines()
+        ):
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            if text and not text.endswith("\n"):
+                text += "\n"
+            exclude.write_text(text + ".ember/\n", encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise BranchError(
+            exits.WORKTREE_FAILED, f"cannot add .ember/ to {exclude}: {error}", line
+        ) from error
+    result = _git(
+        main,
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        branch,
+        str(worktree),
+        commit,
+        env=env,
+        timeout=None,
+    )
+    if result.returncode:
+        raise BranchError(
+            exits.WORKTREE_FAILED,
+            f"git worktree add failed for {worktree}: {_git_message(result)}",
+            line,
+        )
+    return FlowBranch(branch, worktree, commit, top, main)
 
 
 CoreFactory = Callable[[TextIO], Core]
@@ -604,6 +702,14 @@ class Cleanup:
         if match is None:
             raise _KeepError(NOT_WORKER, f"next: git branch -d {branch}")
         engine, run_id = match["engine"], match["run"]
+        if FLOW_BRANCH.fullmatch(branch):
+            line = f"next: emb flow --status {run_id}"
+            try:
+                live = flow_lock.live(run_id, self.repo.env)
+            except flow_lock.LockError as error:
+                raise _KeepError(str(error), line) from error
+            if live:
+                raise _KeepError(f"the flow {run_id} is running", line)
         tip, target_tip = self._tips(branch)
         run = self._record(run_id, engine, branch)
         folder = self.repo.run_worktree(run_id)
