@@ -311,3 +311,88 @@ def test_flow_id(env: dict[str, str]) -> None:
         assert not record.is_flow_id(bad)
     with pytest.raises(record.FlowError):
         record.folder("../outside", env)
+
+
+def test_interrupted_answer_keeps_correction(
+    flow: dict[str, Any],
+    created: Path,
+    env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "correction.md"
+    source.write_text("correction A")
+    answer = {"kind": "send", "task": "a", "file": str(source)}
+    write = record.os.write
+
+    def interrupted_write(fd: int, data: bytes) -> int:
+        return write(fd, data[:-1])
+
+    with monkeypatch.context() as patch:
+        patch.setattr(record.os, "write", interrupted_write)
+        with pytest.raises(OSError, match="short write"):
+            record.append_answer(flow["id"], answer, env)
+    original = created / "answers" / "1.md"
+    assert original.read_text() == "correction A"
+    assert record.read_answers(flow["id"], env) == []
+
+    source.write_text("correction B")
+    appended = record.append_answer(flow["id"], answer, env)
+    assert appended["n"] == 2
+    assert Path(appended["file"]) == created / "answers" / "2.md"
+    assert Path(appended["file"]).read_text() == "correction B"
+    assert original.read_text() == "correction A"
+    (backup,) = created.glob(record.ANSWERS_NAME + ".incomplete-*")
+    assert Path(json.loads(backup.read_text())["file"]) == original
+    assert record.read_answers(flow["id"], env) == [appended]
+
+
+@pytest.mark.parametrize(
+    ("line_count", "stored_number", "file_number", "expected"),
+    [(5, 2, 3, 6), (2, 8, 3, 9), (2, 3, 11, 12)],
+)
+def test_answer_number_exceeds_logs_and_files(
+    flow: dict[str, Any],
+    created: Path,
+    env: dict[str, str],
+    line_count: int,
+    stored_number: int,
+    file_number: int,
+    expected: int,
+) -> None:
+    answers = created / "answers"
+    answers.mkdir()
+    original = answers / f"{file_number}.md"
+    original.write_text("retained correction")
+    (created / record.ANSWERS_NAME).write_text(
+        "unreadable\n" * (line_count - 1) + json.dumps({"n": stored_number}) + "\n"
+    )
+    appended = record.append_answer(flow["id"], {"kind": "drop", "task": "a"}, env)
+    assert appended["n"] == expected
+    assert original.read_text() == "retained correction"
+
+
+def test_correction_creation_refuses_existing_file(
+    flow: dict[str, Any],
+    created: Path,
+    env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "correction.md"
+    source.write_text("new correction")
+    target = created / "answers" / "1.md"
+    open_private_file = paths.open_private_file
+
+    def collide(path: Path, flags: int = record.os.O_RDWR) -> int:
+        if path == target:
+            path.write_text("existing correction")
+        return open_private_file(path, flags)
+
+    monkeypatch.setattr(paths, "open_private_file", collide)
+    with pytest.raises(FileExistsError):
+        record.append_answer(
+            flow["id"], {"kind": "send", "task": "a", "file": str(source)}, env
+        )
+    assert target.read_text() == "existing correction"
+    assert record.read_answers(flow["id"], env) == []

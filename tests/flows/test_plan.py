@@ -214,9 +214,11 @@ def test_default_subject_cut(raw: dict[str, Any], tmp_path: Path) -> None:
     assert parsed(raw, tmp_path).task("a").subject == "a: " + "x" * 69
 
 
-def test_empty_tasks(raw: dict[str, Any], tmp_path: Path) -> None:
+def test_empty_tasks_refused(raw: dict[str, Any], tmp_path: Path) -> None:
     raw["tasks"] = []
-    assert plan.waves(parsed(raw, tmp_path)) == []
+    with pytest.raises(plan.PlanError, match="tasks: expected at least 1") as caught:
+        parsed(raw, tmp_path)
+    assert caught.value.code == 64
 
 
 @pytest.mark.parametrize(

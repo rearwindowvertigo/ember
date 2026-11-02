@@ -366,6 +366,12 @@ def _append(
             for item in lines
             if item is not None and type(item.get(field)) is int
         ]
+        if name == ANSWERS_NAME:
+            numbers.extend(
+                int(entry.stem)
+                for entry in (directory / "answers").glob("*.md")
+                if re.fullmatch(r"[0-9]+", entry.stem)
+            )
         number = max([len(lines), *numbers], default=0) + 1
         item = {**value, field: number, "at": time.time()}
         if name == ANSWERS_NAME:
@@ -390,7 +396,11 @@ def _append(
                     directory / "answers", root=directory
                 )
                 target = answers / f"{number}.md"
-                record.write_private(target, text)
+                correction_fd = paths.open_private_file(target, os.O_WRONLY | os.O_EXCL)
+                with os.fdopen(correction_fd, "w", encoding="utf-8") as stream:
+                    stream.write(text)
+                    stream.flush()
+                    os.fsync(stream.fileno())
                 item["file"] = str(target)
         encoded = (json.dumps(item) + "\n").encode("utf-8")
         _repair_tail(path, fd, data)
@@ -433,7 +443,9 @@ def append_answer(
     """Allocate and append an answer; copy its send file while holding the lock.
 
     For a send answer, `file` is the source filename on input and the private
-    numbered copy on output. Callers must not allocate the copy's number.
+    numbered copy on output. Numbers exceed complete log lines, stored
+    numbers and existing correction filenames. Existing corrections are never
+    replaced. Callers must not allocate the copy's number.
     """
     return _append(flow_id, ANSWERS_NAME, "n", answer, env)
 

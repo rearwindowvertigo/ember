@@ -826,7 +826,7 @@ A flow plan is a UTF-8 JSON object. The packaged schema is
 Unknown keys are refused at every object level. Validation collects every
 problem before returning code 64. A missing, unreadable or non-UTF-8 plan
 file gives code 66; an empty or blank file gives 64. An empty `tasks` list
-is valid and has no waves.
+is refused with code 64.
 
 | Field | Default | Rule |
 |---|---|---|
@@ -841,7 +841,7 @@ is valid and has no waves.
 | `check_timeout` | `1800` | Integer seconds, at least 1 |
 | `context`, `failure_model` | `""` | Strings |
 | `read` | `[]` | List of strings starting with `/`, without duplicates |
-| `tasks` | Required | List of task objects, in execution and merge order |
+| `tasks` | Required | Non-empty list of task objects, in execution and merge order |
 
 Integers exclude booleans and JSON numbers written with a decimal point.
 Worker `engine` is `codex`, `opencode` or `claude`. The model is non-blank,
@@ -1002,7 +1002,10 @@ Readers ignore incomplete last lines. Before appending, a writer preserves
 any incomplete bytes in a private timestamped file and removes them from
 the log while holding its lock. An unreadable complete answer line returns
 `None` and still occupies a line number. Number allocation is greater than
-both the complete line count and every stored valid number. Cursor writes
+the complete line count and every stored valid number. Answer numbers also
+exceed every existing `answers/<n>.md` number, including copies left by an
+interrupted append. Correction copies are created exclusively and never
+replace an existing file. Cursor writes
 cannot decrease `seq`; a missing cursor reads as 0, a malformed cursor is
 an error.
 

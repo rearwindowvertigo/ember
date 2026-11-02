@@ -1033,6 +1033,7 @@ def test_flow_plan_schema_agreement(env: dict[str, str]) -> None:
     schema = json.loads(plan.schema_text())
     assert schema["$id"] == "ember/flow-plan/1"
     assert schema["required"] == ["dir", "tasks"]
+    assert schema["properties"]["tasks"]["minItems"] == 1
     assert schema["additionalProperties"] is False
     definitions = schema["$defs"]
     assert definitions["task"]["required"] == ["id", "task", "files"]

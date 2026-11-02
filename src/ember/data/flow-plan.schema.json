@@ -89,6 +89,7 @@
     },
     "tasks": {
       "type": "array",
+      "minItems": 1,
       "items": {
         "$ref": "#/$defs/task"
       }
