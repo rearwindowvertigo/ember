@@ -140,6 +140,7 @@ def test_editing_run_commits_its_turn(
     assert run.repo == str(repo)
     assert run.worktree == str(worktree)
     assert run.base == git(repo, "rev-parse", "HEAD", env=env)
+    assert run.base_branch == git(repo, "branch", "--show-current", env=env)
     assert run.expected_head == run.commits[0]
     assert run.sandbox == "none"
     assert run.network is False

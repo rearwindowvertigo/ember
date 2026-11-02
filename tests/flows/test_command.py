@@ -296,6 +296,7 @@ def test_start(
         f"worktree {current['worktree']}",
     ]
     assert current["status"] == "starting"
+    assert current["base_branch"] == git(repo, "branch", "--show-current", env=env)
     assert current["writer"]["effort_frozen"] is True
     assert git(repo, "rev-parse", current["branch"], env=env) == current["base"]
     assert Path(current["worktree"]).is_dir()

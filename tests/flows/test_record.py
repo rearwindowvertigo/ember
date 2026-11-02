@@ -455,3 +455,11 @@ def test_correction_creation_refuses_existing_file(
         )
     assert target.read_text() == "existing correction"
     assert record.read_answers(flow["id"], env) == []
+
+
+def test_record_without_base_branch_loads(
+    flow: dict[str, Any], created: Path, env: dict[str, str]
+) -> None:
+    del flow["base_branch"]
+    (created / record.FLOW_NAME).write_text(json.dumps(flow))
+    assert record.load(flow["id"], env)["base_branch"] is None

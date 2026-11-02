@@ -1029,3 +1029,42 @@ def test_panel_retry_close_usage(
 ) -> None:
     assert main(["panel", *options], env=env) == 64
     assert capsys.readouterr().err.endswith("next: emb panel --help\n")
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        [],
+        ["--older-than"],
+        ["--older-than", "-1"],
+        ["--older-than", "1.5"],
+        ["--older-than", "word"],
+        ["--older-than", "+1"],
+    ],
+)
+def test_prune_invalid_age_exits_64(
+    arguments: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as raised:
+        main(["prune", *arguments])
+    assert raised.value.code == 64
+    assert "--older-than" in capsys.readouterr().err
+
+
+def test_prune_help(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as raised:
+        main(["prune", "--help"])
+    assert raised.value.code == 0
+    output = capsys.readouterr().out
+    assert all(option in output for option in ("--older-than", "--dry-run", "--json"))
+
+
+def test_prune_empty_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    env = {
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+    }
+    assert main(["prune", "--older-than", "0", "--dry-run", "--json"], env=env) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"removed": [], "skipped": [], "branches": []}
+    assert captured.err == ""

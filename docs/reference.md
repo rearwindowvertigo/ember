@@ -547,6 +547,7 @@ UTC. It is also the tmux session's name.
 | `worktree` | string | The worker's working folder: its worktree, or the checkout for a read-only run |
 | `branch` | string or null | `ember/<engine>/<id>`; null for a read-only run |
 | `base` | string or null | The commit the run started from |
+| `base_branch` | string or null | The source branch at start; null for a detached checkout or a record without this field |
 | `sandbox` | string | Who provides the sandbox: `codex`, `bubblewrap` or `none` |
 | `network` | boolean | Whether `worker.network` was `on` at the start |
 | `read` | list of strings | The `--read` paths |
@@ -1332,6 +1333,7 @@ refused. `save` updates `updated_at` and atomically replaces `flow.json`.
 | `id`, `plan` | Flow id and absolute source plan path |
 | `dir`, `main` | Checkout top and main checkout |
 | `base`, `tip` | Resolved base commit and current flow branch tip |
+| `base_branch` | The local base branch at start, or null for a commit base or a record without this field |
 | `branch`, `worktree` | `ember/flow/<id>` and `<main>/.ember/worktrees/<id>` |
 | `writer`, `reviewer` | Stored worker objects: `engine`, `model`, `effort`, `source` |
 | `rounds`, `parallel`, `check_timeout` | Plan limits |
@@ -2041,6 +2043,100 @@ the same rules.
 | `merge_commit` | The merge commit; null when the branch was already contained |
 | `contained_before` | Whether the branch was already contained |
 | `cleanup` | The cleanup's list, as `emb cleanup --json` prints it |
+
+## `emb prune`
+
+```
+emb prune --older-than DAYS [--dry-run] [--json]
+```
+
+Removes ended run, flow and panel folders under `runs_dir()`, including
+logs inside those folders. `--older-than` is required and accepts a whole
+number of days, zero or greater. Age is measured from `ended_at`, or
+`updated_at` when there is no end time. A record qualifies at an age of at
+least `DAYS × 86400` seconds; zero includes every ended record.
+
+Ended runs are `closed` or `failed`. Ended flows are `done`, `failed` or
+`cancelled`. Panels must be `done` or `incomplete`. A flow or panel is kept
+when any current or former task or member run is open (`starting`,
+`running` or `waiting`), busy or unreadable. The parent is reported as
+skipped with the run id and reason. Missing child records do not count as
+open. This guard includes cancelled flows with running writers or reviewers.
+
+A flow or panel includes its ended task or member run records, regardless
+of those runs' ages. Flow run ids are collected from the record and every
+event with a `run` field, including check, fix and previous review runs.
+Panel retry history is included. A run named by any parent record is
+removed only together with all its parents, and only when those parents
+qualify. For a parent that does not load, prune scans the files inside its
+folder for run ids, including malformed records, events and logs. Those
+runs are kept with the broken parent; unrelated runs are still pruned.
+Symlinks are not followed when scanning these files.
+
+Before removal, prune takes each record's lock without waiting and reloads
+it. Flows use both `lifecycle.lock` and the lifetime lock; panels use their
+panel lock; runs use their record lock. Busy records and records that no
+longer qualify are skipped. Parent and child locks stay held through child
+removal, including child records shared with a parent that is being kept.
+Unreadable records are kept and reported on standard error. Folder names
+outside the timestamped record id format are ignored. Record-folder
+symlinks are refused. Files named by a record outside its folder are kept.
+
+`--dry-run` lists the records that would be removed and removes nothing.
+Text output has `removed <kind> <id>` lines (`would remove` for a dry run),
+`skipped <id>: <reason>` lines, and kept branch and worktree lines with
+removal commands. Text output lists every remaining worktree of a removed
+record unless an open run uses it. Each worktree appears under its branch
+line with its removal command, including when the branch is merged or
+already deleted. When an open run uses the worktree, an unmerged branch's
+deletion command is still listed, without a worktree-removal step.
+Prune deletes no branch, worktree or tmux session.
+
+Prune lists branch-deletion commands only for branches that exist and are
+unmerged. A branch is unmerged
+when it is not an ancestor of its target. Task branches are checked against
+their flow branch. Run and flow records save
+`base_branch` at creation and use it even if the source checkout switches
+branches. If the target branch has been deleted, prune checks against the
+owning flow's `base_branch`. If that branch is also absent, or the record
+has no base branch, the branch is listed as unmerged. Missing target refs
+are not errors and do not change the exit code. Saved commits are not used
+as targets. This check does not treat a squash merge as ancestry.
+
+Every listed unmerged run, task and flow branch gets
+`git -C <dir> branch -D <branch>`. Records with a null or missing
+`base_branch` list their existing branches as unmerged using this command.
+When the worktree exists and no open run uses it,
+`git -C <dir> worktree remove <path>` precedes branch deletion with `&&`.
+Paths and branch names are shell-quoted. Merged and absent branches have
+no branch-deletion command; their remaining worktrees still have worktree
+removal commands in text output. Prune never prints `emb cleanup`.
+
+`--json` prints an object with three arrays:
+
+| Field | Entries |
+|---|---|
+| `removed` | `{id, kind}`, where kind is `run`, `flow` or `panel`; dry runs list candidates here |
+| `skipped` | `{id, reason}` |
+| `branches` | `{branch, command}`, including worktree removal commands when a worktree exists |
+
+Read, lock, repository-query and removal failures are reported as
+`emb prune: <message>` on standard error. Processing continues after each
+failure. Exit 0 means processing completed without failures, including an
+empty runs folder, no matches or busy skips. Exit 1 means one or more
+operations failed; the output includes completed removals. Missing,
+negative or non-whole `--older-than` values exit 64.
+
+`ember.prune.select(older_than, record_ids=None, *, env=None, now=None)`
+selects records without changing files.
+`ember.prune.remove(older_than, record_ids=None, *, dry_run=False, env=None, now=None)`
+selects and removes them with the lock checks above. Explicit ids ignore
+age but still require ended records and qualifying selected parents.
+Missing, unreadable and unfinished explicit ids are returned in `skipped`
+with reasons. Supplying an empty id list selects nothing.
+
+No pruning happens automatically. Settings and the app's state file are
+not pruned.
 
 ## `emb cleanup`
 
@@ -2755,7 +2851,7 @@ skill into Claude Code; `emb skill install` does.
 ## Exit codes
 
 These are the exit codes of `emb choices` and `emb engines`; `emb run`,
-`emb gapcheck`, `emb flow`, `emb panel`, `emb ground`, `emb merge`, `emb cleanup`, `emb deps`, `emb skill` and
+`emb gapcheck`, `emb flow`, `emb panel`, `emb ground`, `emb merge`, `emb cleanup`, `emb prune`, `emb deps`, `emb skill` and
 `emb app` have their own tables above.
 
 | Code | Meaning |
