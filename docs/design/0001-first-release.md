@@ -213,8 +213,13 @@ Codex and Claude models) and collects each answer and a summary file.
 H1. `emb ground --json`: the machine, the Claude surface, the repository,
 branch, dirty state and remote, read before a worker is chosen.
 
-H2. `emb gapcheck`: a read-only worker reads a flow plan against its failure
-model before the flow starts and reports gaps. Target release: 0.2.0.
+H2. `emb gapcheck --plan <file>`: a read-only run of the `single.reviewer`
+row, or of the worker given with `--engine`, `--model` and `--effort`, reads
+a plan against its failure model before the plan's work starts and reports,
+for each step, the behaviours the plan leaves undefined or contradictory,
+each with a harm and a proposed default. `--brief` prints its brief and
+`--reply` reads a reply from another worker, such as a Claude subagent.
+Target release: 0.2.0.
 
 H3. `emb merge <branch> --into <branch> --verdict keep`: merges a reviewed
 worker branch, then removes its worktree and branch.
