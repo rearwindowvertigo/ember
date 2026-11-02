@@ -464,7 +464,9 @@ Workflow of two or more tasks, the skill runs `emb gapcheck`. In 0.2.0 the
 skill adds references for flows, panels and the gap check.
 
 L2. Eval cases in `skill/evals/` run in a real Claude session against a stub
-`emb` command and check the skill's rules.
+`emb` command and check the skill's rules. The cases include flows, panels
+and the gap check, with stub replies for `emb gapcheck`, `emb flow` and
+`emb panel`.
 
 L3. `emb skill install` links the skill into Claude Code's skills folder:
 `$CLAUDE_CONFIG_DIR/skills/ember` when `CLAUDE_CONFIG_DIR` is set and not

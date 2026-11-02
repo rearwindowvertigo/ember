@@ -1,0 +1,9 @@
+step 1: task before
+  no gaps
+step 2: task decimals
+  low: What prints when the cutoff excludes every order?
+    why: The empty selection still needs formatted totals.
+    default: Print zero quantity and revenue formatted as 0.00.
+counts: high 0, medium 0, low 1
+uncovered steps: none
+unknown steps: none

@@ -16,5 +16,15 @@
     "effort": "medium",
     "run_as": null,
     "reason": null
+  },
+  "multi.runs_as": {
+    "value": "ask",
+    "state": "ask",
+    "reason": "asks at each run"
+  },
+  "panel.members": {
+    "value": [],
+    "state": "empty",
+    "members": []
   }
 }

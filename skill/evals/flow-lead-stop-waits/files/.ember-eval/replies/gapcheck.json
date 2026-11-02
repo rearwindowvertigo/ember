@@ -1,0 +1,39 @@
+{
+  "plan": "{{PLAN}}",
+  "plan_steps": "tasks",
+  "failure_model": true,
+  "reviewer": {
+    "engine": "codex",
+    "model": "gpt-6.1-sol-mini",
+    "effort": "medium",
+    "source": "option"
+  },
+  "run": {
+    "id": "codex-20261102-120000-aaaaaa",
+    "reply": "{{EVAL}}/runs/codex-20261102-120000-aaaaaa/turn-1.md",
+    "exit": 0,
+    "closed": true,
+    "close_error": null
+  },
+  "steps": [
+    {
+      "step": 1,
+      "title": "task parse",
+      "gaps": []
+    },
+    {
+      "step": 2,
+      "title": "task strict",
+      "gaps": []
+    }
+  ],
+  "ranked": [],
+  "counts": {
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "uncovered_steps": [],
+  "unknown_steps": [],
+  "parse_error": null
+}

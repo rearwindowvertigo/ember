@@ -1,0 +1,35 @@
+{
+  "plan": "{{PLAN}}",
+  "dir": "{{DIR}}",
+  "base": "0000000000000000000000000000000000000000",
+  "writer": {
+    "engine": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "source": "menu"
+  },
+  "reviewer": {
+    "engine": "codex",
+    "model": "gpt-6.1-sol-mini",
+    "effort": "medium",
+    "source": "menu"
+  },
+  "check": [
+    "python3",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "tests"
+  ],
+  "waves": [
+    [
+      "parse"
+    ],
+    [
+      "strict"
+    ]
+  ],
+  "warnings": [],
+  "gapcheck": "emb gapcheck --plan {{PLAN}} --dir {{DIR}} --engine codex --model gpt-6.1-sol-mini --effort medium"
+}

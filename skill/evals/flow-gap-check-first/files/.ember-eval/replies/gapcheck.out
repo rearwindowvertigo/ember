@@ -1,0 +1,14 @@
+step 1: task item
+  high: Does --item match exactly or ignoring case?
+    why: An item name differing only in case could include unintended orders.
+    default: Match the item name exactly.
+  medium: What happens when the item has no matching orders?
+    why: An unmatched name needs a defined result.
+    default: Print zero totals.
+step 2: task json
+  high: Is JSON revenue a rounded number or a string?
+    why: Consumers need a defined JSON type for revenue.
+    default: Use a number rounded to two places.
+counts: high 2, medium 1, low 0
+uncovered steps: none
+unknown steps: none
