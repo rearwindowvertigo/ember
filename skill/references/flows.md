@@ -136,6 +136,6 @@ emb merge ember/flow/<id> --into <session branch> --verdict keep --dir <dir>
 
 Report `flow <id> · <writer> / <reviewer> · exit <n> · <merged> of
 <tasks> merged · ember/flow/<id>`, one line per task with id, status,
-rounds and reason, then the verdict. Include the verified tip and cleanup
-keeps. Finish with `emb choices --finish <id>` after the merge or the
+rounds and reason, then the verdict already written before the merge.
+Include the verified tip and cleanup keeps. Finish with `emb choices --finish <id>` after the merge or the
 owner's decision on unmerged work, using the claim id, not the flow id.
