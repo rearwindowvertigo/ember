@@ -52,6 +52,13 @@ The owner sees and configures all of this in the desktop app.
 | E16 | Continuous integration | GitHub Actions on pull requests only. Docs-only pull requests skip the check. A newer push cancels the older run. Release Please runs on `main`. |
 | E17 | Python | 3.14 or later. |
 | E18 | Unit tests | Stub tools only (N1). |
+| E19 | App look and layout | A sidebar with five screens, flat cards, pill controls, the desktop's fonts and Lucide icons (J1, J2, J8). |
+| E20 | Closing the window | Hides Ember to the tray (J1). |
+| E21 | Run view | A read-only mirror of a live worker's screen and Open terminal; no interrupt or close from the app (J2). |
+| E22 | Tray | Idle and live states, no attention state; a menu with the live runs (J3). |
+| E23 | One-time choices | Not shown in the app (J2). |
+| E24 | Engine logos | Each engine card shows its maker's logo (J2). |
+| E25 | Mark | Three coals (J11). |
 
 ## A. Repository and tooling
 
@@ -281,9 +288,15 @@ and when the switch changes.
 ## J. Desktop app
 
 J1. Started by `emb app` or the app menu entry. One instance at a time; a
-second start brings the window forward.
+second start brings the window forward. The window opens at 1100 by 720
+pixels, is never smaller than 900 by 600, and keeps its size between starts.
+Closing the window hides Ember to the tray; Quit Ember is in the tray menu.
+When no tray is available, closing the window quits.
 
-J2. Screens:
+J2. Screens, chosen from a sidebar on the left. The sidebar shows the Ember
+mark and name, the five screens with an icon each, and the version. Overview
+shows the number of live runs and Dependencies the number of updates and
+missing items, each only when above zero.
 
 | Screen | Holds |
 |---|---|
@@ -293,25 +306,85 @@ J2. Screens:
 | Dependencies | One tile per component, grouped (engines and apps, system tools, Ember's libraries): installed and newest version, status, and the update or install command |
 | Settings | Start at login, notifications, worker network, sandbox read paths, terminal, theme |
 
-J3. Tray icon: shows whether any run is live; its menu opens the window and
-quits. The tray uses Qt's `QSystemTrayIcon`. GNOME shows tray icons
-through an extension; the owner's Ubuntu 26.04 has
-`ubuntu-appindicators@ubuntu.com` installed.
+- Overview lists as live each run whose status is `starting`, `running` or
+  `waiting`, with the badge Starting, Running or Waiting for Claude, and as
+  finished each run whose status is `closed` or `failed`, with the badge
+  Closed or Failed. A row shows the engine, model, effort, repository,
+  branch, and the turn or the subject, with times.
+- A live row has Open terminal, which does what `emb run --attach <id>`
+  does. Expanded, a live row shows a read-only mirror of the worker's
+  screen, updated when the worker writes output and never on a timer. The
+  mirror follows the session through tmux control mode on Ember's tmux
+  server and draws it with a terminal emulator in the app. Expanded, a
+  finished row shows its run record; no screen is kept.
+- The app does not interrupt, close or send to a run.
+- While an engine's sandbox method is `none`, Overview and Engines show a
+  warning naming the engine (I3).
+- Menu holds the Writer and Reviewer pickers and, for a Claude model, how it
+  runs (CLI or subagent). Each picker lists Ask each time, then the
+  shortlisted models under their engine. Engines that are off are left out.
+  One-time choices (C2) are not shown in the app.
+- Engines shows three cards side by side, each with the engine maker's logo.
+  Models opens that engine's model list below the cards, with a switch per
+  model for the shortlist and an effort picker.
+- Settings has three groups: General (start at login, theme), Notifications
+  (a run finishes, a run fails) and Workers (worker network, terminal,
+  sandbox read paths). Each change saves at once. Terminal is picked from
+  the terminals Ember finds, with System default first and Other command
+  last. Read paths are added with the desktop's folder chooser.
 
-J4. Notifications: a run finishes, a run fails. In 0.2.0 also: a flow
-finishes, a flow reaches a lead stop. Each has a Settings switch.
+J3. Tray icon: shows whether any run is live, in two states, idle and a run
+live. The tray uses Qt's `QSystemTrayIcon`. GNOME shows tray icons through
+an extension; the owner's Ubuntu 26.04 has `ubuntu-appindicators@ubuntu.com`
+installed. The tray menu holds a status line ("2 runs live" or "No runs
+live"), one line per live run ("<Engine> · <repository> · <time>", which
+opens a terminal on that run), Open Ember and Quit Ember.
+
+J4. Notifications: a run finishes (its status becomes `closed`, once per
+run), a run fails (its status becomes `failed`). In 0.2.0 also: a flow
+finishes, a flow reaches a lead stop. Each has a Settings switch. The title
+is "Run finished" or "Run failed"; the text is "<Engine> · <model> in
+<repository>." followed by the subject or the last reason. A click opens the
+window on the screen it last showed.
 
 J5. Commands: an update, install or sign-in command shows a Run button. Run
-opens a dialog naming the exact command; on confirm, the app runs it in a
-window of the owner's terminal so its output and any password prompt stay
-with the owner.
+opens a dialog titled "Run this command?" naming the exact command, with
+Cancel and Run in terminal. Cancel is the default button. On confirm, the
+app runs the command in a window of the owner's terminal so its output and
+any password prompt stay with the owner.
 
 J6. Run records are watched with Qt's `QFileSystemWatcher` (inotify), with a
 check every sixty seconds as a backstop. While the window is hidden, the app
 reads only what the tray and notifications need.
 
 J7. Theme follows the desktop's light or dark setting, with an override in
-Settings.
+Settings (System, Light, Dark).
+
+J8. Look: gray surfaces, black or white primary buttons, pill-shaped
+controls 36 pixels tall with 14-pixel text, and blue only for what is on,
+selected or focused. Cards are flat with a hairline border; nothing has a
+shadow. The app draws this with a Qt style sheet; the switch, spinner and
+screen mirror are painted by the app. Text uses the desktop's interface and
+monospace fonts. Icons are Lucide icons (ISC licence). Settings use
+switches, segmented controls and pickers; the only text fields are the
+OpenRouter model search and Other command.
+
+J9. Screen mirror colors: the mirror follows the app's theme. Sixteen
+terminal colors are set per theme, each at least 5.8:1 against the mirror
+background. Other colors a worker sets are lightened or darkened to 4.5:1;
+background colors a worker sets are dropped, except reverse video.
+
+J10. Empty, loading and error states: an empty list shows a title and one
+line, with no button. A read in progress shows a spinner and what is being
+read, after 300 milliseconds. An error says what happened and what to do,
+with Try again where a retry can help. A save refused as stale (C4) reloads
+the screen and says so.
+
+J11. The Ember mark is three coals on a dark rounded tile: an orange coal
+(`#f76707`) above two dark ones. The source files are in
+`docs/design/assets/0001/`: the scalable app icon, a simpler drawing for 32
+pixels and below, and the tray icons for idle and a run live, each for a
+dark and a light top bar.
 
 ## K. Dependencies
 
