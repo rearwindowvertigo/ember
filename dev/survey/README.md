@@ -44,3 +44,4 @@ Do not put credentials, tokens or the owner's personal data in an entry.
 
 | Date | Entry | Ember | Setup | Planning | Running | Review | Panels | Owner | App | Speed | Overall |
 |---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-11-02 | [0.2.1 build](entries/2026-11-02-0-2-1-build.md) | 0.2.0 | 4 | 4 | 3 | 4 | n/u | 3 | 2 | 4 | 3 |
