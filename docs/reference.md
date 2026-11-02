@@ -485,7 +485,7 @@ prints one `<field>: <value>` line per field, and `--status` one line per run:
 | 75 | Close refused while a turn runs, a busy session, or another command on the run | `next: emb run --recover <run>` or `--status` |
 | 76 | Branch or `HEAD` moved; nothing committed | `next: git -C <worktree> log --oneline -3` |
 | 77 | A hook refused the commit | `next: git -C <worktree> status` |
-| 80 | The turn ended with no reply | `next: emb run --recover <run>` |
+| 80 | The turn ended with no reply | `next: emb run --screen <run>, then emb run --send <run> ...` |
 | 124 | Stall; the turn may still be running | `next: emb run --recover <run>` |
 
 ## Exit codes

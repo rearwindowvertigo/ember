@@ -82,10 +82,7 @@ LINES: dict[int, str | Mapping[str, str]] = {
     "(the branch or HEAD moved; nothing was committed)",
     HOOK_REFUSED: "next: git -C {worktree} status "
     "(a hook refused the commit; the work is uncommitted)",
-    NO_REPLY: {
-        "*": RECOVER + " (reads the ended turn again)",
-        "recover": "next: emb run --screen {run}, then " + SEND,
-    },
+    NO_REPLY: "next: emb run --screen {run}, then " + SEND,
     STALLED: RECOVER + " (waits for the turn still running in its session, "
     "then collects it)",
 }

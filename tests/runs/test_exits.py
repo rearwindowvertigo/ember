@@ -50,3 +50,9 @@ def test_emit_prints_the_line() -> None:
     assert text is not None
     assert stream.getvalue() == text + "\n"
     assert "emb run --close r1 --force" in text
+
+
+def test_no_reply_points_at_screen_then_send() -> None:
+    assert exits.line(80, run="r1") == (
+        "next: emb run --screen r1, then emb run --send r1 --message-file <file>"
+    )
