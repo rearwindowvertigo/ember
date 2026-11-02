@@ -51,9 +51,45 @@ def test_brief_contains_steps_schema_and_numbered_plan(
     assert "Do not redesign the plan" in rendered
 
 
-def test_metadata_cannot_start_command_lines(tmp_path: Path) -> None:
-    path = tmp_path / "plan\n@command.md"
+@pytest.mark.parametrize(
+    ("line_break", "escaped"),
+    [
+        ("\n", r"\n"),
+        ("\r", r"\r"),
+        ("\r\n", r"\r\n"),
+        ("\v", r"\v"),
+        ("\f", r"\f"),
+        ("\x1c", r"\x1c"),
+        ("\x1d", r"\x1d"),
+        ("\x1e", r"\x1e"),
+        ("\x85", r"\x85"),
+        ("\u2028", r"\u2028"),
+        ("\u2029", r"\u2029"),
+    ],
+)
+def test_metadata_escapes_line_breaks(
+    tmp_path: Path, line_break: str, escaped: str
+) -> None:
+    path = tmp_path / f"plan{line_break}@command.md"
     path.write_text("@command\n", encoding="utf-8")
-    rendered = brief.text(plan.load(path), str(tmp_path / "repo\n@command"))
-    assert len(rendered.splitlines()[0]) > 0
+    rendered = brief.text(plan.load(path), str(tmp_path / f"repo{line_break}@command"))
+    assert rendered.splitlines()[0] == brief.FIRST_LINE.format(
+        name=f"plan{escaped}@command.md"
+    )
+    assert f"repository at {tmp_path}/repo{escaped}@command." in rendered
+    assert (
+        f"The plan ({tmp_path}/plan{escaped}@command.md), with line numbers:"
+        in rendered
+    )
     assert not any(line.startswith("@") for line in rendered.splitlines())
+
+
+def test_paths_preserve_spaces_tabs_and_backslashes(tmp_path: Path) -> None:
+    checkout = tmp_path / "project  copy\twith\\slashes "
+    checkout.mkdir()
+    path = checkout / " plan  copy\twith\\slashes.md "
+    path.write_text("Read files.\n", encoding="utf-8")
+    rendered = brief.text(plan.load(path), str(checkout))
+    assert rendered.splitlines()[0] == brief.FIRST_LINE.format(name=path.name)
+    assert f"repository at {checkout}." in rendered
+    assert f"The plan ({path}), with line numbers:" in rendered

@@ -42,7 +42,22 @@ def test_valid_reply_forms(form: str) -> None:
 
 def test_last_fenced_object_wins() -> None:
     assert reply.extract_json('```\n{"a": 1}\n```\n```json\n{"b": 2}\n```') == {"b": 2}
+
+
+def test_invalid_last_fence_falls_through_to_brace_span() -> None:
     assert reply.extract_json('```\n{"a": 1}\n```\n```json\ninvalid\n```') == {"a": 1}
+
+
+@pytest.mark.parametrize("malformed", [True, False])
+def test_invalid_last_fence_does_not_recover_earlier_draft(malformed: bool) -> None:
+    draft = json.dumps({"steps": [{"step": 1, "gaps": []}]})
+    correction = json.dumps({"steps": [{"step": 1, "gaps": [gap("Data loss")]}]})
+    final_block = correction[:-1] if malformed else f"[{correction}]"
+    text = f"Draft:\n```json\n{draft}\n```\nCorrection:\n```json\n{final_block}\n```"
+    result = reply.read(text, STEPS[:1])
+    assert result["parse_error"] == "the reply is not a JSON object"
+    assert result["uncovered_steps"] == [1]
+    assert result["steps"] == []
 
 
 @pytest.mark.parametrize("text", ["No gaps", "[]", "null", "{broken}"])

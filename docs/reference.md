@@ -664,8 +664,8 @@ whitespace counts as a character. Step numbers must be integers at least
 1; JSON numbers such as `1.0` count as integers, and booleans do not.
 No object may have keys beyond those in the schema.
 
-The reader tries the whole reply as JSON, then backtick code blocks
-(unlabelled or labelled `json`) from last to first, then the span from the
+The reader tries the whole reply as JSON, then the last backtick code block
+(unlabelled or labelled `json`), then the span from the
 first `{` to the last `}`. The first candidate that parses as an object is
 used. If it fails the schema, each independently valid step entry is kept;
 an entry with an invalid gap is discarded in full.

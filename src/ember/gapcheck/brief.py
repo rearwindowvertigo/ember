@@ -4,6 +4,25 @@ from ember.gapcheck.plan import Plan
 from ember.gapcheck.reply import schema_text
 
 FIRST_LINE = "Gap check of the plan {name}: a read-only review; change no file."
+_LINE_BREAK_ESCAPES = str.maketrans(
+    {
+        "\n": r"\n",
+        "\r": r"\r",
+        "\v": r"\v",
+        "\f": r"\f",
+        "\x1c": r"\x1c",
+        "\x1d": r"\x1d",
+        "\x1e": r"\x1e",
+        "\x85": r"\x85",
+        "\u2028": r"\u2028",
+        "\u2029": r"\u2029",
+    }
+)
+
+
+def _path_text(value: str) -> str:
+    """Escape line breaks in a path, preserving every other character."""
+    return value.translate(_LINE_BREAK_ESCAPES)
 
 
 def text(plan: Plan, checkout: str) -> str:
@@ -21,9 +40,9 @@ def text(plan: Plan, checkout: str) -> str:
     )
     brief = "\n".join(
         [
-            FIRST_LINE.format(name=" ".join(plan.path.name.split())),
+            FIRST_LINE.format(name=_path_text(plan.path.name)),
             "",
-            f"Read the plan below and the repository at {' '.join(checkout.split())}. "
+            f"Read the plan below and the repository at {_path_text(checkout)}. "
             "For every step, list the behaviours the plan leaves undefined or "
             "contradictory: what a writer following the plan would have to invent, "
             "where two parts disagree, files shared by tasks that can run at the "
@@ -53,7 +72,7 @@ def text(plan: Plan, checkout: str) -> str:
             "with no other text and no code fence:",
             schema_text(),
             "",
-            f"The plan ({' '.join(str(plan.path).split())}), with line numbers:",
+            f"The plan ({_path_text(str(plan.path))}), with line numbers:",
             numbered,
         ]
     )

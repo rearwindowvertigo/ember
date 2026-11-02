@@ -24,11 +24,11 @@ def schema_text() -> str:
 
 
 def extract_json(text: str) -> dict[str, Any] | None:
-    """Try the whole reply, fenced JSON from last to first, then its brace span."""
+    """Try the whole reply, the last fenced block, then its brace span."""
     candidates = [text.strip()]
-    candidates.extend(
-        reversed(re.findall(r"```(?:json)?\s*\n(.*?)\n\s*```", text, re.DOTALL))
-    )
+    blocks = re.findall(r"```(?:json)?\s*\n(.*?)\n\s*```", text, re.DOTALL)
+    if blocks:
+        candidates.append(blocks[-1])
     if "{" in text and "}" in text:
         candidates.append(text[text.index("{") : text.rindex("}") + 1])
     for candidate in candidates:
