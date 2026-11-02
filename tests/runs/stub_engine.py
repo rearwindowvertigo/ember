@@ -196,6 +196,11 @@ def handle(message, turn):
     first = next((line for line in lines if line.strip()), "")
     reply_file = os.environ.get("STUB_REPLY_FILE")
     reply = Path(reply_file).read_text() if reply_file else f"done: {first}"
+    scripts = os.environ.get("STUB_SCRIPTS")
+    if scripts:
+        for match, script in json.loads(Path(scripts).read_text()).items():
+            if match in message:
+                lines.extend(script.splitlines())
     for line in lines:
         word, _, rest = line.partition(" ")
         if word == "@write":
@@ -275,6 +280,7 @@ class StubDriver(Driver):
         idle: str | None = None,
         foreign: str | None = None,
         reply_file: Path | None = None,
+        scripts: Path | None = None,
     ) -> None:
         self.name = name
         self.script = script
@@ -283,6 +289,7 @@ class StubDriver(Driver):
         self.idle = idle
         self.foreign = foreign
         self.reply_file = reply_file
+        self.scripts = scripts
         self.foreign_checks = 0
         self.commands: list[tuple[Run, str]] = []
         self.closed: list[str] = []
@@ -297,6 +304,8 @@ class StubDriver(Driver):
         if not self.paste:
             argv += (first_message,)
         environment = {"STUB_ENGINE": self.name}
+        if self.scripts is not None:
+            environment["STUB_SCRIPTS"] = str(self.scripts)
         if self.reply_file is not None:
             environment["STUB_REPLY_FILE"] = str(self.reply_file)
         return LaunchSpec(
