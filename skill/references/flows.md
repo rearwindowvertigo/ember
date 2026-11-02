@@ -120,8 +120,10 @@ python3 scripts/verify_branch.py --repo <repo> --base <session branch> --branch 
 Omit `--expect-files`. Run your own checks and apply the skill's exact
 review bar to the whole flow diff. Inspect each task's `outside_files`,
 every retained `should` and `lead` finding, and every retained branch.
-Give one verdict for the flow branch, written as visible text such as
-`Verdict: Keep.` right before the `emb merge` call.
+Give one verdict for the flow branch, written as reply text such as
+`Verdict: Keep.` in the same message as the `emb merge` call and before
+it; a verdict only in thinking does not count. Run that call on its
+own, with no other command chained before or after it.
 
 If verification rejects the result, keep the flow branch and claim open,
 name the failed check, and make a separately reviewed correction on the
