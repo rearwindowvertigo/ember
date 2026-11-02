@@ -450,12 +450,11 @@ them at once.
 ## L. Skill
 
 L1. An `ember` skill for Claude Code in `skill/`: `SKILL.md` and references
-for claims, runs and Claude agents; references for flows, panels and gap
-checks are added in 0.2.0. It covers grounding, claiming, choosing a worker,
-the editing boundary, briefs, following a run, verification against the
-review bar, reporting, merging and cleanup. Until `emb gapcheck` (H2), the
-plan check before a Claude Workflow runs `assets/plan-check-brief.md` with
-the `single.reviewer` row.
+for claims, runs and Claude agents. It covers grounding, claiming, choosing
+a worker, the editing boundary, briefs, following a run, verification against the
+review bar, reporting, merging and cleanup. Before a flow or a Claude
+Workflow of two or more tasks, the skill runs `emb gapcheck`. In 0.2.0 the
+skill adds references for flows, panels and the gap check.
 
 L2. Eval cases in `skill/evals/` run in a real Claude session against a stub
 `emb` command and check the skill's rules.
@@ -520,6 +519,7 @@ Claude session against a stub `emb` command.
 3. Supporting commands (H, without H2).
 4. Dependencies (K) and the desktop app (J).
 5. Skill (L), packaging (M). 0.1.0 is released.
-6. For 0.2.0: gap check (H2), flows (F), panels (G).
+6. For 0.2.0: gap check (H2), flows (F), panels (G), then flows and panels
+   in the app and the skill (J2, L).
 
 Each step passes `make check` on its own and lands as its own pull request.

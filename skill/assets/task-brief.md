@@ -1,4 +1,4 @@
-<One coherent objective. For an `emb run` worker this first line becomes the commit subject, so write it as one and start it with no #>
+<One coherent objective. For an `emb run` worker this first line is the commit subject: at most 72 characters, with no #.>
 
 ## Objective
 
