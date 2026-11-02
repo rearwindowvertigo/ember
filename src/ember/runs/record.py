@@ -160,6 +160,9 @@ class Run:
     subject: str
     """The brief's first non-empty line."""
 
+    base_branch: str | None = None
+    """The source checkout's branch when the run started, or None if detached."""
+
     folder: Path = field(default=Path(), compare=False)
     """The run's folder."""
 
@@ -192,6 +195,7 @@ _TYPES: dict[str, tuple[tuple[type, ...], bool]] = {
     "worktree": (_STR, False),
     "branch": (_STR, True),
     "base": (_STR, True),
+    "base_branch": (_STR, True),
     "sandbox": (_STR, False),
     "network": ((bool,), False),
     "read": ((list,), False),
@@ -299,6 +303,7 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
     name = folder.name
     if not isinstance(value, dict):
         raise RecordError(name, "run.json is not an object")
+    value = {"base_branch": None, **value}
     values: dict[str, Any] = {}
     for key, (types, nullable) in _TYPES.items():
         if key not in value:

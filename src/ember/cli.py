@@ -15,6 +15,7 @@ after Quit Ember or when the running app takes over, 64 for a usage error and
 `emb gapcheck` uses the codes in `ember.gapcheck.command`.
 `emb flow` uses the codes in `ember.flows.command`.
 `emb panel` uses the codes in `ember.panels.command`.
+`emb prune` exits 0 on success, 1 on a failure and 64 for invalid arguments.
 """
 
 import argparse
@@ -358,6 +359,26 @@ def _add_merge(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="print JSON")
 
 
+def _whole_days(text: str) -> int:
+    if not text.isascii() or not text.isdecimal():
+        raise argparse.ArgumentTypeError(f"{text!r} is not a non-negative whole number")
+    return int(text)
+
+
+def _add_prune(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--older-than",
+        required=True,
+        type=_whole_days,
+        metavar="DAYS",
+        help="remove records ended at least DAYS days ago (0 includes all ended)",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="list without removing records"
+    )
+    parser.add_argument("--json", action="store_true", help="print JSON")
+
+
 def _add_cleanup(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--merged-into",
@@ -534,6 +555,14 @@ def build_parser() -> argparse.ArgumentParser:
                 "and the command that resolves it. Each non-zero exit prints a "
                 "next: or owner: line."
             ),
+        )
+    )
+    _add_prune(
+        subparsers.add_parser(
+            "prune",
+            help="remove old ended run, flow and panel records",
+            description="Remove ended records and their logs, and list kept branches "
+            "and worktrees with removal commands.",
         )
     )
     _add_deps(
@@ -931,6 +960,12 @@ def main(
             directory=args.dir,
             as_json=args.json,
             env=env,
+        )
+    if args.command == "prune":
+        from ember import prune
+
+        return prune.main(
+            args.older_than, dry_run=args.dry_run, as_json=args.json, env=env
         )
     if args.command == "cleanup":
         return branches.cleanup(

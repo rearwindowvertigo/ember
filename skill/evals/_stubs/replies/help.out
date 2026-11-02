@@ -14,6 +14,7 @@ positional arguments:
     ground    print what to read before choosing a worker
     merge     merge a reviewed worker branch, then clean it up
     cleanup   remove merged worker branches, their worktrees and sessions
+    prune     remove old ended run, flow and panel records
     deps      show the installed and newest version of each dependency
     app       start the desktop app, or bring it forward
     skill     install or remove the ember skill for Claude Code

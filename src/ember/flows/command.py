@@ -399,6 +399,19 @@ def _start(
         tmux.socket_path(env)
     except OSError as error:
         raise CommandError(69, str(error), exits.line(69, "runtime") or "") from error
+    base_ref = branches.open_repository(top, env, "flow").git(
+        "rev-parse",
+        "--symbolic-full-name",
+        "--verify",
+        "--end-of-options",
+        document.base,
+    )
+    base_name = base_ref.stdout.strip() if base_ref.returncode == 0 else ""
+    base_branch = (
+        base_name.removeprefix("refs/heads/")
+        if base_name.startswith("refs/heads/")
+        else None
+    )
     flow_id = record.new_id()
     flow = record.new_flow(
         flow_id,
@@ -406,6 +419,7 @@ def _start(
         top=str(top),
         main=str(main),
         base=base,
+        base_branch=base_branch,
         writer=writer,
         reviewer=reviewer,
         stall_minutes=args.stall if args.stall is not None else STALL_MINUTES,
