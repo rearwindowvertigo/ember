@@ -228,7 +228,7 @@ def test_load_driver_returns_the_codex_driver(setup: Setup) -> None:
 # Starting
 
 
-def test_command_puts_the_brief_on_the_codex_command_line(setup: Setup) -> None:
+def test_command_leaves_the_brief_to_paste(setup: Setup) -> None:
     driver = CodexDriver(setup.env)
     run = _run(setup)
     spec = driver.command(run, BRIEF)
@@ -243,10 +243,9 @@ def test_command_puts_the_brief_on_the_codex_command_line(setup: Setup) -> None:
         "-a",
         "never",
         "--search",
-        BRIEF,
     )
     assert spec.cwd == setup.repo
-    assert spec.first_message is None
+    assert spec.first_message == BRIEF
     assert dict(spec.env) == {}
     state = json.loads((run.folder / codex.STATE_NAME).read_text())
     assert state["rollout"] == "" and state["turns"] == {}
@@ -277,10 +276,12 @@ def test_command_fails_without_codex(setup: Setup) -> None:
         CodexDriver(setup.env).command(_run(setup), BRIEF)
 
 
-def test_command_refuses_a_brief_too_long_for_the_command_line(setup: Setup) -> None:
-    brief = BRIEF + "x" * codex.LONG_BYTES
-    with pytest.raises(DriverError, match="bytes on its command line"):
-        CodexDriver(setup.env).command(_run(setup), brief)
+def test_command_keeps_a_long_brief_off_the_command_line(setup: Setup) -> None:
+    # tmux refuses a session command of more than about 16 KB.
+    brief = BRIEF + "x" * 200_000
+    spec = CodexDriver(setup.env).command(_run(setup), brief)
+    assert spec.first_message == brief
+    assert sum(len(arg) for arg in spec.argv) < 1000
 
 
 def test_command_refuses_an_untrusted_repository(setup: Setup) -> None:
@@ -308,18 +309,51 @@ def test_command_fails_outside_a_repository(setup: Setup) -> None:
         CodexDriver(setup.env).command(_run(setup, worktree=str(folder)), BRIEF)
 
 
-def test_ready_once_the_rollout_names_the_run(setup: Setup) -> None:
+def _saved(run: Run) -> tuple[str, str]:
+    state = json.loads((run.folder / codex.STATE_NAME).read_text())
+    return state["rollout"], state["thread"]
+
+
+def test_ready_once_the_composer_waits(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
     driver, run = _started(setup)
-    assert not driver.ready(run)
+    screens = iter(
+        [
+            "  Update available\n› 1. Update now\n  2. Skip\n",
+            "› Ask Codex to do anything\n  model · folder\n",
+            "› Ask Codex to do anything\n  model · folder\n  ? for shortcuts\n",
+        ]
+    )
+    monkeypatch.setattr(codex.tmux, "capture", lambda *a, **k: next(screens))
+    assert [driver.ready(run) for _ in range(3)] == [False, False, True]
+
+
+def test_the_first_message_is_pasted_before_the_rollout_exists(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    driver, run = _started(setup)
+    with _tmux_calls(monkeypatch) as calls:
+        driver.send(run, BRIEF)
+    assert calls == [("send_text", (RUN_ID, BRIEF))]
+    assert driver.wait(run) == engines.TurnOutcome(engines.RUNNING)
+    _rollout(
+        setup, _line("task_started"), _line("task_complete", last_agent_message="ok")
+    )
+    assert driver.wait(run) == engines.TurnOutcome(engines.DONE, reply="ok")
+
+
+def test_discovery_finds_the_rollout_that_names_the_run(setup: Setup) -> None:
+    driver, run = _started(setup)
     _rollout(setup, run_id="codex-20261101-120000-ffffff", name="rollout-0.jsonl")
     _rollout(setup, cwd=setup.tmp, name="rollout-2.jsonl")
     old = _rollout(setup, name="rollout-3.jsonl")
     os.utime(old, (1, 1))
-    assert not driver.ready(run)
+    assert driver.wait(run).state == engines.RUNNING
+    assert _saved(run) == ("", "")
     path = _rollout(setup)
-    assert driver.ready(run)
-    state = json.loads((run.folder / codex.STATE_NAME).read_text())
-    assert (state["rollout"], state["thread"]) == (str(path), THREAD)
+    assert driver.wait(run).state == engines.RUNNING
+    assert _saved(run) == (str(path), THREAD)
 
 
 def test_discovery_waits_for_the_first_message(setup: Setup) -> None:
@@ -641,4 +675,5 @@ def test_discovery_skips_rollouts_older_than_the_launch(setup: Setup) -> None:
     path = _rollout(setup, _line("task_started"))
     past = time.time() - 3600
     os.utime(path, (past, past))
-    assert not driver.ready(run)
+    assert driver.wait(run).state == engines.RUNNING
+    assert _saved(run) == ("", "")

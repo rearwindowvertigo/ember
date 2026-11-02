@@ -1,8 +1,11 @@
 """The Codex driver.
 
-Codex runs its interactive session in the run's pane, started with the
-attributed brief as its prompt. The driver reads every turn from Codex's own
-files in its home folder (`$CODEX_HOME`, or `~/.codex`):
+Codex runs its interactive session in the run's pane. The command line
+carries no prompt: tmux takes the whole session command in one message of at
+most about 16 KB, which also holds the session's environment and the sandbox
+options. The core pastes the attributed brief once Codex's composer waits for
+input. The driver reads every turn from Codex's own files in its home folder
+(`$CODEX_HOME`, or `~/.codex`):
 
 - The rollout, `sessions/**/rollout-*.jsonl`, one JSON event per line. The
   driver finds the run's rollout by its working folder and the run id in its
@@ -56,8 +59,8 @@ STATE_NAME = "codex.json"
 QUEUE_NAME = "queue_1.sqlite"
 """Codex's queue database in its home folder."""
 
-LONG_BYTES = 100_000
-"""The largest first message, in UTF-8 bytes, that goes on the command line."""
+READY_HINT = "? for shortcuts"
+"""The footer Codex shows under its empty composer once it waits for input."""
 
 MAX_QUEUE_BYTES = 64 * 1024 * 1024
 """The largest queue database the driver copies into memory."""
@@ -602,7 +605,7 @@ class CodexDriver(Driver):
             return False
 
     def command(self, run: Run, first_message: str) -> LaunchSpec:
-        """Return the Codex command with the first message as its prompt.
+        """Return the Codex command, with the first message to paste.
 
         Args:
             run: The run, with status `starting`.
@@ -610,23 +613,17 @@ class CodexDriver(Driver):
 
         Returns:
             `codex -C <worktree> -m <model> [-c model_reasoning_effort=...]
-            -a never [--sandbox danger-full-access] --search <message>`, in
-            the worktree, with no message to paste. The sandbox option is
+            -a never [--sandbox danger-full-access] --search`, in the
+            worktree, with the first message to paste. The sandbox option is
             added only for the sandbox method `none`.
 
         Raises:
-            DriverError: Codex is not on PATH, the first message is too long
-                for the command line, or Codex does not trust the repository.
+            DriverError: Codex is not on PATH, or Codex does not trust the
+                repository.
         """
         binary = shutil.which("codex", path=run.env.get("PATH", os.defpath))
         if binary is None:
             raise DriverError("the codex CLI is not on PATH")
-        size = len(first_message.encode("utf-8"))
-        if size > LONG_BYTES:
-            raise DriverError(
-                f"the brief is {size} bytes; Codex takes at most {LONG_BYTES} "
-                "bytes on its command line"
-            )
         root = self._repository_root(run)
         if not (
             self.trusted(root, run.env) or self.trusted(Path(run.worktree), run.env)
@@ -641,39 +638,51 @@ class CodexDriver(Driver):
         argv += ["-a", "never"]
         if run.sandbox in (None, "none"):
             argv += ["--sandbox", "danger-full-access"]
-        argv += ["--search", first_message]
+        argv.append("--search")
         self._save_state(
             run, {"launched": time.time(), "rollout": "", "thread": "", "turns": {}}
         )
-        return LaunchSpec(argv=tuple(argv), cwd=Path(run.worktree))
+        return LaunchSpec(
+            argv=tuple(argv), cwd=Path(run.worktree), first_message=first_message
+        )
 
     def ready(self, run: Run) -> bool:
-        """Return whether Codex has started the run's session.
+        """Return whether Codex's composer waits for the first message.
+
+        Codex writes the rollout only after the first message, so the pane is
+        the signal.
 
         Args:
             run: The run.
 
         Returns:
-            `True` once the run's rollout exists.
+            `True` once a line of the pane shows `READY_HINT`.
         """
-        return self._rollout(run, self._load_state(run)) is not None
+        return any(READY_HINT in line for line in self.screen(run).splitlines())
 
     # Turns
 
     def send(self, run: Run, text: str) -> None:
         """Record where the rollout stands, then paste the message.
 
+        The first message is pasted before the rollout exists; its turn
+        counts from an empty rollout.
+
         Args:
             run: The run, with `turn` set to the message's turn.
             text: The message.
 
         Raises:
-            DriverError: The run's rollout cannot be found or read.
+            DriverError: The run's rollout cannot be found or read after the
+                first turn.
         """
         state = self._load_state(run)
         rollout = self._rollout(run, state)
         if rollout is None:
-            raise DriverError(f"cannot find the Codex session of {run.id}")
+            if run.turn > 1:
+                raise DriverError(f"cannot find the Codex session of {run.id}")
+            tmux.send_text(run.id, text, env=run.env)
+            return
         turns = read_turns(rollout)
         state["turns"][str(run.turn)] = {
             "ended": len(turns.ended),
