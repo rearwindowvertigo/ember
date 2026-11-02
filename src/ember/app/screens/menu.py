@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ember import choices
+from ember import choices, db
 from ember.app import icons, theme, widgets
 from ember.app.screens.common import (
     ToneLine,
@@ -307,6 +307,7 @@ class MenuScreen(QWidget):
         self._panel_pending = False
         self._panel_refresh = False
         self._panel_refresh_failed = False
+        self._settings_read_failed = False
         self._remove_blocker: str | None = None
         self.remove_warning = ToneLine("warning")
         panel_layout.addWidget(self.remove_warning)
@@ -327,8 +328,6 @@ class MenuScreen(QWidget):
 
         context.settings_changed.connect(self._settings_changed)
         context.engines_changed.connect(self._redraw)
-        context.error.connect(self._save_failed)
-        context.stale.connect(self._panel_done)
         context.settings_failed.connect(self._settings_failed)
         theme.signals.changed.connect(self._draw_icons)
         self._redraw()
@@ -443,9 +442,10 @@ class MenuScreen(QWidget):
 
     def _settings_changed(self, *_args: object) -> None:
         """Redraw settings, allowing a retry after the Panel refresh failed."""
+        self._settings_read_failed = False
         if self._panel_refresh_failed:
             self._panel_refresh_failed = False
-            self.context.reload_settings(self._panel_done)
+            self._refresh_panel()
         self._redraw()
 
     def _panel_done(self, *_args: object) -> None:
@@ -453,33 +453,32 @@ class MenuScreen(QWidget):
         self._panel_pending = self._panel_refresh = self._panel_refresh_failed = False
         self._redraw()
 
-    def _save_failed(self, message: str) -> None:
-        """Refresh after a failed Panel save before enabling another edit."""
-        # The context emits errors for other actions and earlier queued saves.
-        # Its save callback leaves the queue only when that save starts; success
-        # calls _panel_done, while a stale save drops the queue and emits stale.
-        if (
-            self._panel_pending
-            and not self._panel_queued()
-            and not self._panel_refresh
-            and message.startswith("The setting was not saved:")
-        ):
-            self._panel_refresh = True
-            self.context.reload_settings(self._panel_done)
-        self._redraw()
+    def _panel_result(self, result: dict[str, Any] | Exception) -> None:
+        """Unlock after this Panel save succeeds or its error is refreshed."""
+        if isinstance(result, db.StaleGenerationError):
+            if self._settings_read_failed:
+                self._panel_refresh_failed = True
+            else:
+                self._panel_done()
+        elif isinstance(result, Exception):
+            self._refresh_panel()
+        else:
+            self._panel_done()
+
+    def _refresh_panel(self) -> None:
+        """Track the Panel's settings refresh until it succeeds or fails."""
+        self._panel_refresh = True
+        self.context.reload_settings(self._panel_done)
 
     def _settings_failed(self, *_args: object) -> None:
         """Keep Panel disabled until a failed settings refresh succeeds.
 
-        This covers the refresh after a failed Panel save and the reload after
-        a Panel save refused as stale, which emits `stale` only when it reads.
+        The Panel's result callback checks the read outcome for a stale save.
         """
-        if self._panel_pending and not self._panel_queued():
+        self._settings_read_failed = True
+        if self._panel_refresh:
+            self._panel_refresh = False
             self._panel_refresh_failed = True
-
-    def _panel_queued(self) -> bool:
-        """Return whether the pending Panel save still waits in the save queue."""
-        return any(done == self._panel_done for _, done in self.context._save_queue)
 
     def _fill(
         self,
@@ -573,7 +572,9 @@ class MenuScreen(QWidget):
         self._panel_pending = True
         self._remove_blocker = None
         self._redraw()
-        self.context.save_settings({"panel.members": members}, self._panel_done)
+        self.context.save_settings(
+            {"panel.members": members}, result=self._panel_result
+        )
 
     def _picked(self, controls: _Role) -> None:
         self._show_run_as(controls)

@@ -120,6 +120,58 @@ def lock_line(path: Path) -> str:
     )
 
 
+@pytest.mark.parametrize("status", flow_record.TASK_STATUSES)
+def test_plan_wave_active_statuses(status: str) -> None:
+    """Only active task statuses contribute a plan wave."""
+    flow = {
+        "plan_waves": [["a"], ["b", "c"], ["d"]],
+        "wave": 27,
+        "tasks": [{"id": "b", "status": status, "wave": 25}],
+    }
+    active = {
+        "writing",
+        "reviewing",
+        "fixing",
+        "accepted",
+        "merging",
+        "stopped",
+        "conflict",
+        "blocked",
+    }
+    assert flows.plan_wave(flow) == ((2, 3) if status in active else None)
+
+
+def test_plan_wave_uses_highest_stored_position() -> None:
+    """Task order, pass counts and dropped tasks retain stored wave positions."""
+    flow = {
+        "plan_waves": [["a"], ["b"], ["c"], ["d"]],
+        "wave": 99,
+        "tasks": [
+            {"id": "d", "status": "dropped", "wave": 98},
+            {"id": "c", "status": "blocked", "wave": None},
+            {"id": "a", "status": "writing", "wave": 99},
+            {"id": "b", "status": "merged", "wave": 2},
+        ],
+    }
+    assert flows.plan_wave(flow) == (3, 4)
+    flow["tasks"][1]["status"] = "merged"
+    assert flows.plan_wave(flow) == (1, 4)
+
+
+@pytest.mark.parametrize("waves", [None, [], [["other"]]])
+def test_plan_wave_without_matching_wave(waves: list[list[str]] | None) -> None:
+    """A task absent from stored waves has no plan wave."""
+    flow: dict[str, Any] = {"tasks": [{"id": "a", "status": "writing"}]}
+    if waves is not None:
+        flow["plan_waves"] = waves
+    assert flows.plan_wave(flow) is None
+
+
+def test_plan_wave_without_tasks() -> None:
+    """A flow without tasks has no plan wave."""
+    assert flows.plan_wave({"plan_waves": [["a"]], "tasks": []}) is None
+
+
 def test_lock_parser_and_identity(tmp_path: Path) -> None:
     path = tmp_path / "lock"
     path.touch()

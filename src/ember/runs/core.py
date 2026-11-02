@@ -46,6 +46,12 @@ INCOMPLETE_REASONS = ("sign-in failure", "engine failure", "provider error", "no
 GIT_TIMEOUT = 120
 """Seconds each git command may take."""
 
+HOOK_REFUSAL_NAME = "hook-refusal.txt"
+"""The full stdout and stderr of the run's refused commit."""
+
+HOOK_OUTPUT_LINES = 200
+HOOK_OUTPUT_BYTES = 64 * 1024
+
 BRIEF_LINE = "Brief from Claude, the lead, for Ember run {id}."
 """The first line of the first message, above the brief."""
 
@@ -281,6 +287,8 @@ class Core:
                 ["git", "-C", str(cwd), *args],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 stdin=subprocess.DEVNULL,
                 env=dict(self.env),
                 timeout=GIT_TIMEOUT,
@@ -1088,11 +1096,14 @@ class Core:
             if changed and not message:
                 message = "changed " + ", ".join(changed)
         else:
-            run, commit, files, commit_code, commit_message = self._commit(run)
+            run, commit, files, commit_code, commit_message, commit_variant = (
+                self._commit(run)
+            )
             if commit_code and code:
                 self._warn(f"emb run: also exit {commit_code}: {commit_message}")
             elif commit_code:
                 code, message = commit_code, commit_message
+                variant = commit_variant
         run = self._record_exit(run, code, message)
         self._print_turn(
             run, code, files, commit, reply, time.monotonic() - started, window
@@ -1150,15 +1161,17 @@ class Core:
         names = self._git_out(run.worktree, "diff", "--name-only", f"{commit}^", commit)
         return len(names.splitlines()) if names else 0
 
-    def _commit(self, run: Run) -> tuple[Run, str | None, int, int, str | None]:
+    def _commit(
+        self, run: Run
+    ) -> tuple[Run, str | None, int, int, str | None, str | None]:
         """Commit the turn's changes in the run's worktree.
 
         Returns:
             The run, the commit or `None`, the number of files, the exit code
-            and its message.
+            and its message and exit-line variant.
         """
         if run.turn_state == record.COMMITTED:
-            return run, None, 0, exits.OK, None
+            return run, None, 0, exits.OK, None, None
         worktree = run.worktree
         branch = self._git_out(worktree, "symbolic-ref", "-q", "--short", "HEAD")
         head = self._git_out(worktree, "rev-parse", "-q", "--verify", "HEAD")
@@ -1170,30 +1183,35 @@ class Core:
                     expected_head=head,
                     turn_state=record.COMMITTED,
                 )
-                return run, head, self._files(run, head), exits.OK, None
+                (run.folder / HOOK_REFUSAL_NAME).unlink(missing_ok=True)
+                return run, head, self._files(run, head), exits.OK, None, None
             message = (
                 f"the branch or HEAD moved in {worktree}: {branch or 'detached'} at "
                 f"{head}, expected {run.branch} at {run.expected_head}; "
                 "nothing committed"
             )
-            return run, None, 0, exits.MOVED, message
+            return run, None, 0, exits.MOVED, message, None
         added = self._git(worktree, "add", "-A")
         if added.returncode:
             message = f"git add failed in {worktree}: {_first_line(added.stderr)}"
-            return run, None, 0, exits.HOOK_REFUSED, message
+            return run, None, 0, exits.HOOK_REFUSED, message, "add"
         staged = self._git(worktree, "diff", "--cached", "--name-only", "-z")
         names = [name for name in staged.stdout.split("\0") if name]
         if not names:
             run = self._update(run, turn_state=record.COMMITTED)
-            return run, None, 0, exits.OK, None
+            (run.folder / HOOK_REFUSAL_NAME).unlink(missing_ok=True)
+            return run, None, 0, exits.OK, None, None
         args = ["commit", "-q", "-m", self._subject(run)]
         if run.trailers:
             args += ["-m", "\n".join(run.trailers)]
         result = self._git(worktree, *args)
         if result.returncode:
+            record.write_private(
+                run.folder / HOOK_REFUSAL_NAME, result.stdout + result.stderr
+            )
             reason = _first_line(result.stderr or result.stdout) or "no reason given"
             message = f"git commit was refused in {worktree}: {reason}"
-            return run, None, 0, exits.HOOK_REFUSED, message
+            return run, None, 0, exits.HOOK_REFUSED, message, None
         commit = self._git_out(worktree, "rev-parse", "HEAD")
         if commit is None:
             raise RunError(exits.UNEXPECTED, f"cannot read HEAD in {worktree}")
@@ -1203,7 +1221,32 @@ class Core:
             expected_head=commit,
             turn_state=record.COMMITTED,
         )
-        return run, commit, len(names), exits.OK, None
+        (run.folder / HOOK_REFUSAL_NAME).unlink(missing_ok=True)
+        return run, commit, len(names), exits.OK, None, None
+
+    def _hook_message(self, run: Run, text: str) -> str:
+        """Prepend the saved refusal, capped by lines and UTF-8 bytes."""
+        try:
+            output = (run.folder / HOOK_REFUSAL_NAME).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return text
+        tail = "".join(output.splitlines(keepends=True)[-HOOK_OUTPUT_LINES:])
+        tail = tail.encode("utf-8")[-HOOK_OUTPUT_BYTES:].decode(
+            "utf-8", errors="ignore"
+        )
+        note = (
+            "\n[Hook output cut to its last 200 lines and 64 KiB.]"
+            if tail != output
+            else ""
+        )
+        fence = "```"
+        while fence in tail:
+            fence += "`"
+        end = "" if tail.endswith("\n") else "\n"
+        return (
+            "The commit hook refused your last turn's commit:\n\n"
+            f"{fence}\n{tail}{end}{fence}{note}\n\n{text}"
+        )
 
     def _print_turn(
         self,
@@ -1291,12 +1334,14 @@ class Core:
             else:
                 self._check_foreign(run, driver, "send")
             if run.turn_state == record.COLLECTED and not run.read_only:
-                run, _, _, code, message = self._commit(run)
-                if code:
+                run, _, _, code, message, variant = self._commit(run)
+                if code and not (code == exits.HOOK_REFUSED and variant != "add"):
                     self._record_exit(run, code, message)
                     raise RunError(
-                        code, message or "", run=run_id, worktree=run.worktree
+                        code, message or "", variant, run=run_id, worktree=run.worktree
                     )
+                if code == exits.HOOK_REFUSED:
+                    text = self._hook_message(run, text)
             with self._engine_calls(run):
                 idle = driver.idle_state(run)
             if idle.state != engines.IDLE:
@@ -1333,6 +1378,7 @@ class Core:
                 raise RunError(
                     exits.INTERRUPTED, message, "send", run=run_id
                 ) from error
+            (run.folder / HOOK_REFUSAL_NAME).unlink(missing_ok=True)
             return self._turn(run, driver, started, None)
 
     def recover(self, run_id: str) -> int:

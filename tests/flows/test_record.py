@@ -63,6 +63,7 @@ def test_creation(flow: dict[str, Any], created: Path, env: dict[str, str]) -> N
         event["seq"] == 1 and event["kind"] == "flow" and event["status"] == "starting"
     )
     assert flow["wave"] == flow["answers_seen"] == 0
+    assert flow["plan_waves"] == [["a", "b"]]
     assert flow["status"] == "starting" and flow["tip"] == flow["base"]
     assert record.task_entry(flow, "a")["status"] == "pending"
     record.task_entry(flow, "a")["findings"].append({"problem": "a"})
@@ -98,6 +99,30 @@ def test_missing(flow: dict[str, Any], env: dict[str, str]) -> None:
         record.load(flow["id"], env)
 
 
+def test_load_without_plan_waves(
+    flow: dict[str, Any], created: Path, env: dict[str, str]
+) -> None:
+    """A record without plan waves loads with an empty list and can be saved."""
+    del flow["plan_waves"]
+    path = created / record.FLOW_NAME
+    text = json.dumps(flow)
+    path.write_text(text)
+    loaded = record.load(flow["id"], env)
+    assert loaded["plan_waves"] == []
+    assert path.read_text() == text
+    record.save(loaded, env)
+    assert record.load(flow["id"], env)["plan_waves"] == []
+
+
+def test_save_requires_plan_waves(
+    flow: dict[str, Any], created: Path, env: dict[str, str]
+) -> None:
+    """Saving requires the plan waves field."""
+    del flow["plan_waves"]
+    with pytest.raises(record.FlowError, match="has no plan_waves"):
+        record.save(flow, env)
+
+
 @pytest.mark.parametrize("bad", [b"invalid", b"\xff", b"[]", b"{}"])
 def test_broken_json(
     flow: dict[str, Any], created: Path, env: dict[str, str], bad: bytes
@@ -112,6 +137,9 @@ def test_broken_json(
     [
         ("status", "unknown"),
         ("wave", True),
+        ("plan_waves", None),
+        ("plan_waves", ["a"]),
+        ("plan_waves", [[1]]),
         ("rounds", -1),
         ("parallel", 0),
         ("check_timeout", 0),

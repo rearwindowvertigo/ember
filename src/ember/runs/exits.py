@@ -90,8 +90,11 @@ LINES: dict[int, str | Mapping[str, str]] = {
     },
     MOVED: "next: git -C {worktree} log --oneline -3 "
     "(the branch or HEAD moved; nothing was committed)",
-    HOOK_REFUSED: "next: git -C {worktree} status "
-    "(a hook refused the commit; the work is uncommitted)",
+    HOOK_REFUSED: {
+        "*": "next: " + SEND + " (git commit was refused; sends the hook output "
+        "with the correction; the work is uncommitted)",
+        "add": RECOVER + " (git add failed; repair it before recovery)",
+    },
     NO_REPLY: "next: emb run --screen {run}, then " + SEND,
     STALLED: RECOVER + " (waits for the turn still running in its session, "
     "then collects it)",
