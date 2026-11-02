@@ -98,7 +98,8 @@ def button(
     Args:
         text: The button's label.
         kind: The style rule the button selects.
-        size: `sm` for a small button, or `None`.
+        size: `sm` for a small button, or `None`. It sets the `scale`
+            property; `size` is QWidget's own geometry property.
 
     Returns:
         A button that takes focus with Tab.
@@ -106,7 +107,7 @@ def button(
     result = QPushButton(text)
     result.setProperty("kind", kind)
     if size is not None:
-        result.setProperty("size", size)
+        result.setProperty("scale", size)
     result.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
     result.setCursor(Qt.CursorShape.PointingHandCursor)
     return result

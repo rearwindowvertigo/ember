@@ -4,7 +4,7 @@ from typing import cast
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QGuiApplication
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 from pytestqt.qtbot import QtBot
 
 from ember.app import theme
@@ -164,3 +164,26 @@ def test_font_steps(qapp: QApplication) -> None:  # noqa: ARG001
     assert display.pixelSize() == 28
     assert display.weight() == 500
     assert theme.font("term").pixelSize() == 12
+
+
+@pytest.mark.parametrize(
+    ("step", "size"), [("title", 20), ("term", 12), ("display", 28)]
+)
+def test_font_step_survives_apply(
+    qapp: QApplication, qtbot: QtBot, step: str, size: int
+) -> None:
+    previous = theme.current_mode()
+    try:
+        theme.apply(qapp, "light")
+        label = QLabel("text")
+        label.setFont(theme.font(step))
+        qtbot.addWidget(label)
+        label.show()
+        assert label.fontInfo().pixelSize() == size
+        plain = QLabel("text")
+        qtbot.addWidget(plain)
+        plain.show()
+        assert plain.fontInfo().pixelSize() == theme.TYPE["body"].size
+    finally:
+        theme.apply(qapp, previous)
+        qapp.setStyleSheet("")

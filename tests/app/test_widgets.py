@@ -1,7 +1,7 @@
 import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QLineEdit
 from pytestqt.qtbot import QtBot
 
 from ember.app import theme, widgets
@@ -301,3 +301,35 @@ def test_switch_hit_area_is_the_whole_widget(qtbot: QtBot) -> None:
     switch.show()
     qtbot.mouseClick(switch, Qt.MouseButton.LeftButton, pos=QPoint(1, 1))
     assert switch.isChecked()
+
+
+@pytest.mark.parametrize(
+    ("size", "height"), [(None, theme.CONTROL_MD), ("sm", theme.CONTROL_SM)]
+)
+def test_button_height_follows_scale(
+    qapp: QApplication, qtbot: QtBot, size: str | None, height: int
+) -> None:
+    previous = theme.current_mode()
+    try:
+        theme.apply(qapp, "light")
+        result = widgets.button("Go", "secondary", size=size)
+        qtbot.addWidget(result)
+        result.show()
+        assert result.height() == height
+    finally:
+        theme.apply(qapp, previous)
+        qapp.setStyleSheet("")
+
+
+def test_small_field_height(qapp: QApplication, qtbot: QtBot) -> None:
+    previous = theme.current_mode()
+    try:
+        theme.apply(qapp, "light")
+        field = QLineEdit()
+        field.setProperty("scale", "sm")
+        qtbot.addWidget(field)
+        field.show()
+        assert field.height() == theme.CONTROL_SM
+    finally:
+        theme.apply(qapp, previous)
+        qapp.setStyleSheet("")

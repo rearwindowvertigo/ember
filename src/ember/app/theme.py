@@ -3,7 +3,7 @@
 Colours are tokens with a light and a dark value. `apply` sets the Fusion
 style, a palette and one style sheet built from the tokens of a mode, and
 emits `signals.changed` so painted widgets repaint. Widgets choose style
-rules through dynamic properties (`kind`, `role`, `size`, `tone`), never
+rules through dynamic properties (`kind`, `role`, `scale`, `tone`), never
 through object names.
 """
 
@@ -78,7 +78,7 @@ CONTROL_MD = 36
 """The height of a control, in pixels."""
 
 CONTROL_SM = 32
-"""The height of a small control (`size="sm"`), in pixels."""
+"""The height of a small control (`scale="sm"`), in pixels."""
 
 SIDEBAR_WIDTH = 220
 """The width of the sidebar, in pixels."""
@@ -202,7 +202,6 @@ def resolve_mode(setting: str, app: QGuiApplication) -> str:
 _STYLE = """
 QWidget {
     color: @text-primary;
-    font-size: 14px;
 }
 QMainWindow, QDialog {
     background: @bg-page;
@@ -345,13 +344,13 @@ QPushButton[kind="danger"]:hover {
 QPushButton[kind="danger"]:focus {
     border: 2px solid @focus-ring;
 }
-QPushButton[size="sm"] {
+QPushButton[scale="sm"] {
     min-height: 30px;
     max-height: 30px;
     padding: 0 12px;
     border-radius: 16px;
 }
-QPushButton[size="sm"]:focus {
+QPushButton[scale="sm"]:focus {
     min-height: 28px;
     max-height: 28px;
     padding: 0 11px;
@@ -397,12 +396,12 @@ QLineEdit:focus, QComboBox:focus {
 QLineEdit:disabled, QComboBox:disabled {
     color: @text-disabled;
 }
-QComboBox[size="sm"], QLineEdit[size="sm"] {
+QComboBox[scale="sm"], QLineEdit[scale="sm"] {
     min-height: 30px;
     max-height: 30px;
     border-radius: 16px;
 }
-QComboBox[size="sm"]:focus, QLineEdit[size="sm"]:focus {
+QComboBox[scale="sm"]:focus, QLineEdit[scale="sm"]:focus {
     min-height: 28px;
     max-height: 28px;
 }
@@ -515,6 +514,9 @@ def palette(mode: str) -> QPalette:
 def apply(app: QApplication, mode: str) -> None:
     """Apply a mode to the application and emit `signals.changed`.
 
+    The application font takes the `body` size, so a widget without its own
+    font shows body text and a widget given `font(step)` keeps that step.
+
     Args:
         app: The running application.
         mode: `light` or `dark`.
@@ -523,6 +525,9 @@ def apply(app: QApplication, mode: str) -> None:
     _current["mode"] = mode
     app.setStyle("Fusion")
     app.setPalette(palette(mode))
+    body = QFont(app.font())
+    body.setPixelSize(TYPE["body"].size)
+    app.setFont(body)
     app.setStyleSheet(style_sheet(mode))
     signals.changed.emit(mode)
 
