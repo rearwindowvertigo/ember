@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Eval stub for emb (skill/evals/README.md): logs the call to the case's
+# .ember-eval/calls.log and prints a canned or built reply. The runner may
+# mount this file over another emb, so stub.py is found through
+# EMBER_EVAL_DIR first.
+here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+eval_dir=${EMBER_EVAL_DIR:-$(dirname "$here")}
+exec python3 -I "$eval_dir/bin/stub.py" "$@"

@@ -1,0 +1,207 @@
+==> emb --help <==
+usage: emb [-h] [--version] <command> ...
+
+Let Claude lead AI coding workers on this machine.
+
+positional arguments:
+  <command>
+    choices   read settings and choices, claim or set them
+    engines   show whether each engine is connected, or its models
+    run       start a worker run, or work with one
+    ground    print what to read before choosing a worker
+    merge     merge a reviewed worker branch, then clean it up
+    cleanup   remove merged worker branches, their worktrees and sessions
+    deps      show the installed and newest version of each dependency
+    app       start the desktop app, or bring it forward
+    skill     install or remove the ember skill for Claude Code
+
+options:
+  -h, --help  show this help message and exit
+  --version   show program's version number and exit
+==> emb choices --help <==
+usage: emb choices [-h] [--json] [--id ID] [--claim] [--finish ID]
+                   [--request KEY=VALUE] [--set KEY=VALUE] [--clear KEY]
+                   [--once KEY=VALUE] [--clear-once] [--expect-generation N]
+
+Read settings and choices, claim or release a one-time choice, or set settings
+and one-time choices at a terminal.
+
+options:
+  -h, --help            show this help message and exit
+  --json                print JSON (every reply is JSON)
+  --id ID               the run's claim id
+  --claim               claim the pending one-time choice
+  --finish ID           release the claim for ID
+  --request KEY=VALUE   a request-layer value, with a read or --claim
+  --set KEY=VALUE       save a standing setting
+  --clear KEY           remove a standing setting
+  --once KEY=VALUE      set the one-time choice for the next run
+  --clear-once          remove the pending one-time choice
+  --expect-generation N
+                        refuse the write unless the generation is N
+==> emb engines --help <==
+usage: emb engines [-h] [--refresh] [--json] [--models ENGINE]
+
+Show whether Codex, OpenCode and Claude Code are installed, signed in and
+connected, or list one engine's models.
+
+options:
+  -h, --help       show this help message and exit
+  --refresh        check the engines, or read the model list, instead of the
+                   cache
+  --json           print JSON
+  --models ENGINE  print ENGINE's model list (codex, opencode or claude)
+==> emb run --help <==
+usage: emb run [-h] [--engine ENGINE] [--dir DIR] [--task-file FILE]
+               [--model MODEL] [--effort EFFORT] [--read-only] [--read PATH]
+               [--trailer LINE] [--claim ID] [--window] [--send RUN]
+               [--message-file FILE] [--screen RUN] [--interrupt RUN]
+               [--attach RUN] [--close RUN] [--force] [--recover RUN]
+               [--status [RUN]] [--json] [--quiet] [--stall MINUTES]
+
+Start one worker in its own worktree and tmux session and wait for its turn,
+or send to, read, interrupt, close or recover a run. Each non-zero exit prints
+a next: or owner: line.
+
+options:
+  -h, --help           show this help message and exit
+
+start a run:
+  --engine ENGINE      codex, opencode or claude
+  --dir DIR            a folder in the git checkout
+  --task-file FILE     the brief
+  --model MODEL        the model (default: menu)
+  --effort EFFORT      the effort (default: menu or engine)
+  --read-only          work in the checkout, edit nothing
+  --read PATH          a path the run may read; repeatable
+  --trailer LINE       a trailer line for each commit; repeatable
+  --claim ID           read the menu with this claim id
+  --window             also open a terminal window on the session
+
+work with a run:
+  --send RUN           send a message and wait for its turn
+  --message-file FILE  the message
+  --screen RUN         print the session's screen
+  --interrupt RUN      interrupt the current turn
+  --attach RUN         open a new window on the session
+  --close RUN          end the session; keep worktree and branch
+  --force              with --close: close even while busy or holding messages
+                       Ember did not send; with --send: send even to a session
+                       holding such messages
+  --recover RUN        collect a turn that ended unwatched
+  --status [RUN]       print a run's record, or every run's
+  --json               with --status: JSON
+
+waiting and output:
+  --quiet              print only the first line and summary
+  --stall MINUTES      minutes without a screen change before exit 124
+                       (default 10)
+==> emb ground --help <==
+usage: emb ground [-h] [--dir DIR] [--json]
+
+Print the machine, the Claude Code surface, Claude Code's worktree.baseRef
+setting and the folder's checkout, branch, dirty state, remote and instruction
+files.
+
+options:
+  -h, --help  show this help message and exit
+  --dir DIR   the folder to read (default: the current one)
+  --json      print JSON
+==> emb merge --help <==
+usage: emb merge [-h] --into TARGET [--verdict VERDICT] [--dir DIR] [--json]
+                 BRANCH
+
+Merge a reviewed branch into a local branch with a merge commit, in the
+worktree that has the target checked out, then remove the branch, its run's
+worktree and session as emb cleanup does. Never pushes. Each non-zero exit
+prints a next: or owner: line.
+
+positional arguments:
+  BRANCH             the reviewed branch
+
+options:
+  -h, --help         show this help message and exit
+  --into TARGET      the branch to merge into
+  --verdict VERDICT  the lead's verdict; only keep merges
+  --dir DIR          a folder in the git checkout
+  --json             print JSON
+==> emb cleanup --help <==
+usage: emb cleanup [-h] --merged-into TARGET [--branch BRANCH] [--dir DIR]
+                   [--dry-run] [--json]
+
+Remove each Ember run branch the target contains, its run's worktree and
+session, and keep everything else with a reason and the command that resolves
+it. Each non-zero exit prints a next: or owner: line.
+
+options:
+  -h, --help            show this help message and exit
+  --merged-into TARGET  the branch the worker branches were merged into
+  --branch BRANCH       only this branch
+  --dir DIR             a folder in the git checkout
+  --dry-run             report what would be done; change nothing
+  --json                print JSON
+==> emb deps --help <==
+usage: emb deps [-h] [--refresh] [--json]
+
+Show each component Ember depends on: its installed version, the newest
+version its source offers, its status and the command that updates or installs
+it. Newest versions are read when the cached ones are six hours old or more,
+or with --refresh.
+
+options:
+  -h, --help  show this help message and exit
+  --refresh   read newest versions now, even when the cached ones are recent
+  --json      print JSON
+==> emb app --help <==
+usage: emb app [-h] [--hidden]
+
+Start Ember's desktop app, or bring the running one forward. With --hidden it
+starts in the tray; without a tray the window shows.
+
+options:
+  -h, --help  show this help message and exit
+  --hidden    start in the tray, with the window hidden
+==> emb skill --help <==
+usage: emb skill [-h] <action> ...
+
+Install, remove or show the ember skill for Claude Code. The skill is a link
+at $CLAUDE_CONFIG_DIR/skills/ember, or ~/.claude/skills/ember when
+CLAUDE_CONFIG_DIR is unset or empty, to the skill source: the source
+checkout's skill/ folder when emb runs from a checkout, else
+/usr/share/ember/skill. Each non-zero exit prints a next: or owner: line.
+
+positional arguments:
+  <action>
+    install    link the skill into Claude Code's skills folder
+    uninstall  remove the skill's link
+    status     print the link, its state, its target and the skill source
+
+options:
+  -h, --help   show this help message and exit
+==> emb skill install --help <==
+usage: emb skill install [-h] [--force] [--json]
+
+Create the link to the skill source. A broken link is replaced; a link to
+another folder only with --force; a folder or file is never touched.
+
+options:
+  -h, --help  show this help message and exit
+  --force     replace a link to another folder
+  --json      print JSON
+==> emb skill uninstall --help <==
+usage: emb skill uninstall [-h] [--json]
+
+Remove the link when it points to an Ember skill or to nothing. A folder or
+file is never touched.
+
+options:
+  -h, --help  show this help message and exit
+  --json      print JSON
+==> emb skill status --help <==
+usage: emb skill status [-h] [--json]
+
+Print the link, its state, its target and the skill source.
+
+options:
+  -h, --help  show this help message and exit
+  --json      print JSON

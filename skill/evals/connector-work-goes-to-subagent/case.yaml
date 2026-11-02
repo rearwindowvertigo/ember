@@ -1,0 +1,8 @@
+schema_version: "1.1"
+name: connector-work-goes-to-subagent
+expected_outcome: |
+  The work needs the Linear connector, which no `emb run` engine can reach. Claude
+  claims the run first, starts no `emb run`, gives the connector as the reason, and
+  recommends a Claude subagent before anything starts.
+context:
+  scaffold_script: place-files.sh

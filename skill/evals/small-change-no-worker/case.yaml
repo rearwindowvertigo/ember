@@ -1,0 +1,9 @@
+schema_version: "1.1"
+name: small-change-no-worker
+expected_outcome: |
+  The prompt starts with `/ember`, but the change is one word in one file. Claude
+  claims the run with `emb choices --claim --id <id>` before the edit, fixes the
+  word itself, starts no `emb run`, says in one line that no worker is used, and
+  finishes the claim with `emb choices --finish <id>` right after.
+context:
+  scaffold_script: place-files.sh

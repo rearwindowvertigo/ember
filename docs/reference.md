@@ -940,6 +940,87 @@ is a command.
 | `newest_read_oldest` | The oldest `newest_read_at` among components that are not missing; null when there is none |
 | `newest_read_complete` | Whether every component that is not missing has a newest version read |
 
+## `emb skill`
+
+```
+emb skill install [--force] [--json]
+emb skill uninstall [--json]
+emb skill status [--json]
+```
+
+Installs, removes or shows the `ember` skill for Claude Code. The skill is a
+symbolic link:
+
+- The link is `$CLAUDE_CONFIG_DIR/skills/ember` when `CLAUDE_CONFIG_DIR` is
+  set and not empty, otherwise `~/.claude/skills/ember`.
+- The source is the first of the source checkout's `skill/` folder (two
+  folders above the `ember` package), used when `emb` runs from a checkout,
+  and `/usr/share/ember/skill`. A folder is a source when its `SKILL.md` has
+  `name: ember` in its front matter.
+
+Ember creates, replaces and removes only links; it never removes a folder or
+a file at the link path.
+
+| Option | Does |
+|---|---|
+| `install` | Create the link to the source |
+| `--force` | With `install`: replace a link to another folder |
+| `uninstall` | Remove the link |
+| `status` | Print the link, its state, its target and the source |
+| `--json` | Print JSON |
+
+`state` is one of:
+
+| State | When |
+|---|---|
+| `installed` | A link whose resolved target is the source |
+| `missing` | Nothing at the link path |
+| `other link` | A link to another path that exists |
+| `broken link` | A link whose target does not exist |
+| `folder` | A folder |
+| `file` | Any other file |
+
+`target` is the absolute resolved destination of a link, and null for
+anything that is not a link. `status` prints one `<field>: <value>` line each
+for `link`, `state`, `target` (`null` when there is none) and `source`
+(`null (<reason>)` when none is found); with `--json` it prints
+`{"link", "state", "target", "source", "source_reason"}`, where
+`source_reason` is null when a source is found.
+
+`install` needs a source. It creates the missing parent folders at mode 755,
+then the link with the source's absolute path as its target, through a
+temporary link in the same folder renamed over the link path.
+
+| State | `install` | `uninstall` |
+|---|---|---|
+| `installed` | Changes nothing; `already installed: <link> -> <source>` | Removes the link; `removed: <link>` |
+| `missing` | Creates the link; `installed: <link> -> <source>` | Changes nothing; `not installed: <link>` |
+| `broken link` | Replaces the link | Removes the link |
+| `other link` | Refused (75); with `--force`, replaces the link | Removes the link when its target holds a `SKILL.md` with `name: ember`; otherwise refused (75) |
+| `folder`, `file` | Refused (75) | Refused (75) |
+
+`uninstall` needs no source. With `--json`, `install` and `uninstall` print
+`{"link", "action", "target"}`: `action` is `installed`, `already installed`,
+`removed` or `not installed`; `target` is the source for an install, the
+link's resolved destination read before removal for an uninstall, and null
+for `not installed`.
+
+The package does not create the link; the owner runs `emb skill install`
+once.
+
+### Exit codes
+
+Messages go to standard error as `emb skill: <message>`; each non-zero exit
+then prints one `next:` or `owner:` line.
+
+| Code | Meaning | Line |
+|---|---|---|
+| 0 | Done, or nothing to do | |
+| 64 | Usage error | |
+| 66 | `install` found no skill source | `owner: reinstall Ember; the skill is missing from <paths tried>` |
+| 73 | The link cannot be created or removed | `owner: check <folder>: <error>` |
+| 75 | Refused: a link to another folder without `--force`, a folder or file at the link path, or, for `uninstall`, a link to a folder that is not an Ember skill | `next: emb skill install --force` for another link; otherwise `owner: move or remove <path>, then emb skill install` |
+
 ## `emb app`
 
 ```
@@ -1189,8 +1270,8 @@ is not added again.
 ## Exit codes
 
 These are the exit codes of `emb choices` and `emb engines`; `emb run`,
-`emb ground`, `emb merge`, `emb cleanup`, `emb deps` and `emb app` have their
-own tables above.
+`emb ground`, `emb merge`, `emb cleanup`, `emb deps`, `emb skill` and
+`emb app` have their own tables above.
 
 | Code | Meaning |
 |---|---|

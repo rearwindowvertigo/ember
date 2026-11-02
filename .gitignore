@@ -10,3 +10,4 @@ dist/
 .coverage
 htmlcov/
 *.deb
+skill/evals/results/
