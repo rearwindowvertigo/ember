@@ -90,7 +90,7 @@ install = "sudo apt install xdg-terminal-exec"
 id = "pyside6"
 label = "PySide6"
 group = "libraries"
-installed = { kind = "python", package = "PySide6" }
-newest = { kind = "pypi", package = "PySide6" }
+installed = { kind = "python", package = "PySide6-Essentials" }
+newest = { kind = "pypi", package = "PySide6-Essentials" }
 update_note = "Updates with the next Ember release."
 install_note = "Reinstall Ember."

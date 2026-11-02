@@ -1,7 +1,7 @@
 # The full check. It needs no network once `uv sync` has built the environment.
 UV_RUN := uv run --frozen
 
-.PHONY: check lint format-check typecheck test format
+.PHONY: check lint format-check typecheck test format deb
 
 check: lint format-check typecheck test
 
@@ -20,3 +20,7 @@ test:
 format:
 	$(UV_RUN) ruff check --fix
 	$(UV_RUN) ruff format
+
+# The .deb package in dist/ (docs/releasing.md).
+deb:
+	python3 packaging/deb/build_deb.py

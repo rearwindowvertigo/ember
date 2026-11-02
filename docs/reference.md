@@ -828,7 +828,7 @@ The list is `ember/data/components.toml` in the package:
 | `git` | git | `system` | apt `git` | apt | `sudo apt install --only-upgrade git` | `sudo apt install git` |
 | `python3` | Python | `system` | apt `python3` | apt | `sudo apt install --only-upgrade python3` | `sudo apt install python3` |
 | `xdg-terminal-exec` | xdg-terminal-exec | `system` | apt `xdg-terminal-exec` | apt | `sudo apt install --only-upgrade xdg-terminal-exec` | `sudo apt install xdg-terminal-exec` |
-| `pyside6` | PySide6 | `libraries` | Python package `PySide6` | PyPI `PySide6` | none; note "Updates with the next Ember release." | none; note "Reinstall Ember." |
+| `pyside6` | PySide6 | `libraries` | Python package `PySide6-Essentials` | PyPI `PySide6-Essentials` | none; note "Updates with the next Ember release." | none; note "Reinstall Ember." |
 
 The groups are `apps` (engines and apps), `system` (system tools) and
 `libraries` (Ember's libraries).
@@ -1266,6 +1266,34 @@ is not added again.
 | `$XDG_STATE_HOME/ember/app.json` | The window's `width`, `height` and last `screen`, mode 600; content that cannot be read gives the defaults |
 | `$XDG_RUNTIME_DIR/ember/app.sock` | The single-instance socket |
 | `$XDG_CONFIG_HOME/autostart/io.github.rearwindowvertigo.Ember.desktop` | The autostart entry while `app.autostart` is on, mode 600: `Exec=<absolute path of emb> app --hidden`. When `emb` is not on `PATH` nothing is written, and the app prints the reason to standard error and shows it in Settings |
+
+## Installed files
+
+The `.deb` package (`ember_<version>_amd64.deb`) installs these files and
+has no maintainer scripts:
+
+| Path | Holds |
+|---|---|
+| `/usr/bin/emb` | The `emb` command, mode 755 |
+| `/usr/lib/ember/` | A virtual environment on `/usr/bin/python3.14` with Ember and PySide6-Essentials |
+| `/usr/lib/ember/lib/python3.14/site-packages/ember/` | Ember |
+| `/usr/share/ember/skill/` | The `ember` skill, without its eval cases |
+| `/usr/share/applications/io.github.rearwindowvertigo.Ember.desktop` | The desktop entry: `Exec=emb app` |
+| `/usr/share/icons/hicolor/scalable/apps/io.github.rearwindowvertigo.Ember.svg` | The icon |
+| `/usr/share/doc/ember/copyright` | The copyright file |
+| `/usr/share/doc/ember/changelog.gz` | The changelog, when the build had `CHANGELOG.md` |
+
+`/usr/bin/emb`:
+
+```sh
+#!/bin/sh
+exec /usr/lib/ember/bin/python -I -m ember.cli "$@"
+```
+
+`-I` keeps the caller's `PYTHONPATH` and user site folder out of Ember's
+interpreter. The package installs no autostart entry; the app writes the
+user's own (see Files under Desktop app). The package does not link the
+skill into Claude Code; `emb skill install` does.
 
 ## Exit codes
 
