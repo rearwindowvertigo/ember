@@ -435,3 +435,38 @@ def open_window(
     except OSError as error:
         raise TmuxError(f"cannot start the terminal {command[0]}: {error}") from error
     return process.pid
+
+
+def control_argv(name: str, *, env: Mapping[str, str] | None = None) -> list[str]:
+    """Return the command line of a read-only control-mode client of a session.
+
+    The client attaches with the `read-only` and `ignore-size` flags, so it
+    cannot type into the pane and its size never changes the session's. The
+    caller runs it with an empty environment, as every other tmux command
+    here runs.
+
+    Args:
+        name: The session name.
+        env: The environment; `None` reads `os.environ`.
+
+    Returns:
+        `[<tmux>, "-S", <socket>, "-C", "attach-session", "-f",
+        "read-only,ignore-size", "-t", "=<name>"]`.
+
+    Raises:
+        TmuxError: The name is not valid, or tmux is not on `PATH`.
+        RuntimeDirError: No runtime base directory is available.
+    """
+    target = _session(name)
+    env = _env(env)
+    return [
+        _tmux_binary(env),
+        "-S",
+        str(socket_path(env)),
+        "-C",
+        "attach-session",
+        "-f",
+        "read-only,ignore-size",
+        "-t",
+        target,
+    ]

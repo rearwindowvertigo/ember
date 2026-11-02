@@ -378,3 +378,25 @@ def test_open_window_bad_terminal_raises(env: dict[str, str], terminal: str) -> 
 def test_open_window_missing_terminal_raises(env: dict[str, str]) -> None:
     with pytest.raises(tmux.TmuxError, match="cannot start"):
         tmux.open_window("s", terminal="no-such-terminal", env=env)
+
+
+def test_control_argv(env: dict[str, str]) -> None:
+    argv = tmux.control_argv("run-000001", env=env)
+    assert argv == [
+        str(Path(env["PATH"]) / "tmux"), "-S", _socket(env),
+        "-C", "attach-session", "-f", "read-only,ignore-size", "-t", "=run-000001",
+    ]  # fmt: skip
+    assert _calls(env) == []
+
+
+@pytest.mark.parametrize("name", ["", "Run", "a b", "=x", "a" * 65])
+def test_control_argv_rejects_bad_names(env: dict[str, str], name: str) -> None:
+    with pytest.raises(tmux.TmuxError, match="invalid session name"):
+        tmux.control_argv(name, env=env)
+
+
+def test_control_argv_without_tmux_raises(env: dict[str, str], tmp_path: Path) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(tmux.TmuxError, match="not installed"):
+        tmux.control_argv("s", env={**env, "PATH": str(empty)})

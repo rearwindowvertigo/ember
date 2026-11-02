@@ -19,15 +19,15 @@ current and change settings. The owner decided the shape of Ember on
 2. The owner's screen is a desktop application written in Python with
    PySide6 (Qt). The terminal command is `emb`. The Python package is
    `ember-app`.
-3. The app has a tray icon and desktop notifications. It starts at login
-   into the tray by default; a Settings switch turns that off.
+3. The app has a tray icon. It sends no desktop notifications. It starts at
+   login into the tray by default; a Settings switch turns that off.
 4. The app may run update, install and sign-in commands after the owner
    confirms each one. It reads the state and settings of Claude Code, Codex
    and OpenCode, and whether Claude Desktop is installed and its version. It
    does not write their configuration. It does not start worker runs.
-5. The app learns of run changes by watching run files with inotify, with a
-   slow periodic check as a backstop. It does no timed polling while nothing
-   changes.
+5. The app learns of run changes by watching run files with inotify. A
+   reload every sixty seconds reconciles what the watch missed, also while
+   nothing changes.
 6. Settings, one-time choices and run claims live in one local SQLite
    database. Claude reaches them through `emb choices`; there is no MCP
    server.
