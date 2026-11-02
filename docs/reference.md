@@ -491,7 +491,8 @@ lock. Changes to `run.json` are made under the run's record lock,
 Each run has a folder `$XDG_STATE_HOME/ember/runs/<id>/` (default
 `~/.local/state/ember/runs/<id>/`), mode 700.
 The runs folder also holds flow folders, `runs/<flow id>/` (see
-`emb flow`); `--status` lists runs only.
+`emb flow`), and panel folders, `runs/<panel id>/` (see `emb panel`);
+`--status` lists runs only.
 
 Each run folder holds:
 
@@ -1425,6 +1426,182 @@ every top-level field except `tasks`, then each task's state and reason.
 Every nonzero exit prints an `emb flow:` diagnostic or watch report and
 one `next:` or `owner:` line. Flow folders, queued answers and unmerged
 work remain after a startup failure.
+
+### Brief
+
+Every panel member receives the same `brief.md`. Its first line is
+`Panel <panel id>: <first non-empty question line, stripped>`. The run's
+subject is that line, cut to 72 characters. A blank line separates it from
+these rules:
+
+```text
+You are one of several models answering the same question on your own.
+Someone else will compare the answers, so answer fully, in your own words.
+
+Rules for this answer:
+- Put your whole answer in your final message, in Markdown. Nothing you write to a file is read.
+- Create, edit or delete no file, and change nothing in git.
+- You may read the files in this checkout. Use the web only if your tools offer it.
+- Name your sources: a file path, or a URL you opened.
+- Say plainly where you are unsure or where the evidence is thin.
+```
+
+A blank line, `The question:`, another blank line and the question follow.
+The brief ends with one newline. Members are not told the other members'
+models.
+
+### Running
+
+Each member runs through its own Core instance in a daemon thread, with
+its own output buffers. Threads start in member order, one second apart
+(`START_SPACING`). Every run is read-only on the checkout top, with the
+panel's `read` paths, no claim, no trailers and no terminal window. The
+member's model and resolved effort are passed explicitly; single-run menu
+rows do not supply the effort.
+
+The coordinator observes stop requests and the deadline at intervals of at
+most one second. `--stall` defaults to 10 minutes per member attempt. A
+start that exits 124 is collected once with `Core.recover`; another 124
+leaves the member `stalled` and its run open. No recovery sends another
+question. `--timeout` defaults to 30 minutes from the first start. At the
+deadline active jobs become `timed out`; member turns keep running.
+
+SIGINT, SIGTERM and SIGHUP request a stop. Active members become
+`interrupted`, pending members become `not started`, and the panel exits
+74. A stop or deadline writes the record and summary, flushes captured
+member diagnostics, then accepts no further panel-file or output writes
+from member threads. Member runs are not interrupted or force-closed.
+
+Member statuses:
+
+| Status | Meaning |
+|---|---|
+| `pending` | The member thread has not begun |
+| `starting` | The thread began; no run id has been saved |
+| `running` | The run id has been saved |
+| `answered` | Exit 0 with a nonblank reply |
+| `failed` | Another exit, an unreadable run record or reply, a missing or blank successful reply, or an unexpected exception |
+| `stalled` | The collection attempt exited 124 |
+| `timed out` | The panel deadline ended the wait for this job |
+| `interrupted` | A stop request or exit 74 ended the wait |
+| `not started` | The panel stopped before the member began |
+
+Every readable reply is retained and displayed, including replies from
+failed members. A failed member's reason comes from its failed attempt;
+recovery progress messages are excluded. An empty string from Core exits
+80 with its no-reply diagnostic. A successful whitespace-only reply has
+reason `empty answer`.
+
+An answered or failed member's run is closed without `--force`. A refused
+close sets `close_error` and emits a warning naming `emb run --close <run>`;
+it does not change the member outcome. Closes admitted before the cutoff
+may finish afterward. Such a member remains unfinished in the panel until
+recovery reads its run's final state. No close is admitted after the cutoff.
+
+Changed paths remain warnings: the member stays `answered`, its `changed`
+list holds the paths, and the panel exits 83. Every member warning is
+prefixed `WARNING: member <n> (<engine>:<model>): `. Core standard output
+and standard error are appended to `members/<n>.log`; member action lines
+stay in those logs. A persistence failure stops scheduling, preserves
+existing artifacts and raises a panel error naming the panel; the command
+reports exit 1 with the panel status action.
+
+### Panel records
+
+Panel folders share `$XDG_STATE_HOME/ember/runs/` with runs and flows. Their
+ids are `panel-<yyyymmdd>-<hhmmss>-<6 hex digits>`, with a UTC timestamp.
+Each panel folder and its `members/` folder are mode 700; files are mode
+600. Creating an existing panel folder is refused.
+
+| File | Holds |
+|---|---|
+| `panel.json` | The panel record, replaced atomically |
+| `question.md` | The original question text |
+| `brief.md` | The shared member brief |
+| `summary.md` | The question, outcomes and full available replies, in member order |
+| `members/<n>.log` | Member `n`'s captured Core output and diagnostics across attempts |
+
+The caller holds an exclusive nonblocking `flock` on
+`$XDG_RUNTIME_DIR/ember/locks/<panel id>.lock` before creating the panel
+and throughout execution and finalization. A second holder is refused.
+`live` probes this lock on a new open file description; the kernel drops
+the lock when the process ends. Within the process, one mutex serializes
+record, summary, log and warning writes. `save` validates the record,
+updates `updated_at` and atomically replaces `panel.json`.
+
+| Panel field | Value |
+|---|---|
+| `schema_version` | Integer 1 |
+| `id` | Panel id |
+| `status` | `running`, `done` when no member is unfinished, or `incomplete` |
+| `dir` | Absolute checkout top |
+| `question_file` | Absolute source question path |
+| `read` | Absolute additional read paths |
+| `claim` | Claim used to select members, or null; not passed to runs |
+| `stall_minutes`, `timeout_minutes` | Limits of the latest start or recovery |
+| `started_at`, `updated_at`, `ended_at` | Epoch seconds; `ended_at` is null until finalization |
+| `exit` | Null while running, then 0, 83 or 74 |
+| `members` | Member records in start order |
+| `left_out` | Saved members excluded from selection, each with `value` and `reason` |
+
+| Member field | Value |
+|---|---|
+| `n` | One-based position |
+| `engine`, `model`, `effort`, `source` | Selected member; effort may be null for the engine default |
+| `status` | One of the member statuses above |
+| `run` | Run id, saved when Core prints it, or null |
+| `exit`, `reason` | Last attempt's exit and failure reason, or null |
+| `reply`, `bytes` | Reply path or null, and its UTF-8 byte count, initially 0 |
+| `changed` | Changed paths without duplicates, initially empty |
+| `seconds` | Elapsed time across member jobs, including collection and closing; null before a job begins |
+| `closed`, `close_error` | Whether the run was closed, and any close refusal reason |
+| `attempts` | Attempts with `kind` (`start`, `stall`, `recover`), epoch `at` and `exit` |
+
+Loading rejects missing or unknown fields, wrong types and unknown status
+values. Panel listing returns panels oldest first by `started_at`, then
+id, with unreadable panel folders reported separately. `emb run --status`
+and Overview skip panel folders and list member runs as ordinary runs.
+`emb flow --status` lists flows only.
+
+Ember writes the summary; it does not ask another model to summarize. The
+header contains the panel id, checkout, local ISO 8601 start time to the
+second, member count, answered count and panel status. The question comes
+next. Each member section contains its number, engine, model and effort
+(`default` for null), then status, exit, elapsed seconds rounded to the
+nearest integer, run id and byte count. Null exit, elapsed time and run id
+are shown as `-`. Changed paths and a reason appear when present, followed
+by the whole reply or `(no answer)`. An unreadable reply is shown as
+`(the reply file cannot be read: <error>)`. A final `Left out` section
+lists exclusions when present. The summary is replaced atomically after
+every completed member, at finalization and after recovery.
+
+### Recovery
+
+Recovery requires the panel's lifetime lock. It collects members in
+`starting`, `running`, `stalled`, `timed out` or `interrupted`, in parallel
+without start spacing. Pending members left by a crash and unfinished
+members without a saved run id become `failed` with reason
+`the panel ended before this member's run started`; recovery starts no new
+run. Failed and not-started members are not asked again.
+
+An already closed run is read without calling `Core.recover`. Its stored
+terminal exit classifies the outcome: a successful nonblank reply is
+answered; a stored failure or missing answer remains a failure. Other runs
+receive one `Core.recover` call. A previously collected turn retains its
+stored exit even when Core reports that nothing needs collecting. Readable
+replies and change evidence are retained from the member record, run
+record and original diagnostics. Missing new warnings do not erase earlier
+changed paths.
+
+Each attempt is saved with `exit: null` before it runs and filled afterward.
+A start's exit 124 is saved before the `stall` attempt begins. Recovery
+updates the stall and deadline limits and adds a `recover` attempt. An
+active recovery job becomes `interrupted` or `timed out` when the current
+stop condition ends its wait, regardless of its earlier status.
+
+When there is nothing to collect, recovery still saves no-run failures,
+reconciles the panel's terminal status and exit, and rebuilds the summary
+before reporting that nothing remains to recover (75).
 
 ## `emb ground`
 
