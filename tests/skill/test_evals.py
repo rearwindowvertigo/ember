@@ -615,11 +615,13 @@ def test_runner_reply_loop(tmp_path: Path, env: dict[str, str]) -> None:
         assert (out / name).exists()
     bwrap = (logs / "bwrap.log").read_text().splitlines()[0]
     eval_dir = out / "work" / ".ember-eval"
-    assert "--ro-bind / / --dev /dev --proc /proc --tmpfs /tmp" in bwrap
+    assert f"--ro-bind / / --dev /dev --proc /proc --bind {out}/tmp /tmp" in bwrap
     assert (
         f"--tmpfs {home}/.claude/skills --ro-bind {SKILL} {home}/.claude/skills/ember"
         in bwrap
     )
+    assert f"--tmpfs {home}/.claude/skills/ember/evals" in bwrap
+    assert "--unsetenv CLAUDE_CONFIG_DIR" in bwrap
     assert f"--setenv EMBER_EVAL_DIR {eval_dir}" in bwrap
     assert f"--setenv PATH {eval_dir}/bin:" in bwrap
     assert not (home / ".claude" / "skills" / "ember").exists()
