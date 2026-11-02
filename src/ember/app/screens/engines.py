@@ -8,30 +8,33 @@ one engine's model list below the cards, where models are put on the
 shortlist with an effort.
 
 Opening the screen reads the engine status again. Check now reads it and
-runs the sandbox check of every engine that is on. Every read, check and
-save runs in a task.
+runs the sandbox check of every engine whose Use and Sandbox switches are
+on; a card whose sandbox is off shows "Sandbox off" in place of a check
+result. Every read, check and save runs in a task.
 """
 
-import time
 from collections.abc import Sequence
-from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (
-    QFrame,
-    QHBoxLayout,
-    QLabel,
-    QLayout,
-    QLineEdit,
-    QScrollArea,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
 
 from ember import choices, sandbox
 from ember.app import icons, theme
+from ember.app.screens.common import (
+    CARD_MARGIN,
+    chain_tab_order,
+    clear_layout,
+    discard,
+    engine_name,
+    inline,
+    label,
+    screen_header,
+    scrolled,
+    sentence,
+    when,
+)
 from ember.app.widgets import (
     Alert,
     Badge,
@@ -47,7 +50,7 @@ from ember.engines import models, status
 if TYPE_CHECKING:
     from ember.app.context import AppContext
 
-NAMES = {"codex": "Codex", "opencode": "OpenCode", "claude": "Claude"}
+NAMES = {engine: engine_name(engine) for engine in status.ENGINES}
 """Each engine's shown name."""
 
 PROVIDER_TEXT = {
@@ -80,54 +83,11 @@ CONTEXT_CHOICES: tuple[tuple[str, int | None], ...] = (
 NO_EFFORT_NOTE = "This model reports no effort, so it cannot be shortlisted."
 """Shown on a Codex or Claude model row that has no effort to save."""
 
+SANDBOX_OFF = "Sandbox off"
+"""Shown in place of the last check while an engine's sandbox switch is off."""
+
 CHECK_AGAIN = "Check again after the command finishes."
 """Shown on a card after the owner ran one of its setup commands."""
-
-_MONTHS = (
-    "Jan",
-    "Feb",
-    "Mar",
-    "Apr",
-    "May",
-    "Jun",
-    "Jul",
-    "Aug",
-    "Sep",
-    "Oct",
-    "Nov",
-    "Dec",
-)
-
-
-def when(timestamp: float, now: float | None = None) -> str:
-    """Return a local time as the app shows it.
-
-    Args:
-        timestamp: Seconds since the epoch.
-        now: The current time; `None` reads the clock.
-
-    Returns:
-        "Today 10:42", "Yesterday 17:03" or "30 Oct 14:05".
-    """
-    moment = datetime.fromtimestamp(timestamp)
-    today = datetime.fromtimestamp(time.time() if now is None else now).date()
-    clock = f"{moment.hour:02d}:{moment.minute:02d}"
-    if moment.date() == today:
-        return f"Today {clock}"
-    if moment.date() == today - timedelta(days=1):
-        return f"Yesterday {clock}"
-    return f"{moment.day} {_MONTHS[moment.month - 1]} {clock}"
-
-
-def _inline(text: str) -> str:
-    """Return `when` text for use inside a sentence."""
-    if text.startswith(("Today", "Yesterday")):
-        return text[0].lower() + text[1:]
-    return text
-
-
-def _sentence(text: str) -> str:
-    return text[:1].upper() + text[1:]
 
 
 def badge_for(
@@ -273,28 +233,6 @@ def price_text(per_token_price: float | None) -> str:
     return f"${per_token_price * 1_000_000:.2f}"
 
 
-def _clear(layout: QLayout) -> None:
-    while layout.count():
-        item = layout.takeAt(0)
-        if item is None:
-            break
-        widget = item.widget()
-        if widget is not None:
-            widget.hide()
-            widget.deleteLater()
-        child = item.layout()
-        if child is not None:
-            _clear(child)
-
-
-def _label(text: str = "", role: str | None = None) -> QLabel:
-    result = QLabel(text)
-    result.setWordWrap(True)
-    if role is not None:
-        result.setProperty("role", role)
-    return result
-
-
 class _EngineCard(Card):
     """One engine's card."""
 
@@ -304,7 +242,7 @@ class _EngineCard(Card):
         self.engine = engine
         name = NAMES[engine]
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setContentsMargins(CARD_MARGIN, CARD_MARGIN, CARD_MARGIN, CARD_MARGIN)
         layout.setSpacing(12)
 
         head = QHBoxLayout()
@@ -318,14 +256,14 @@ class _EngineCard(Card):
         self.name_label = QLabel(name)
         self.name_label.setFont(theme.font("heading"))
         names.addWidget(self.name_label)
-        self.version_label = _label(role="secondary")
+        self.version_label = label(role="secondary")
         names.addWidget(self.version_label)
         head.addLayout(names, 1)
         self.badge = Badge("Not checked")
         head.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(head)
 
-        self.reason_label = _label(role="secondary")
+        self.reason_label = label(role="secondary")
         layout.addWidget(self.reason_label)
 
         use = QHBoxLayout()
@@ -347,17 +285,17 @@ class _EngineCard(Card):
         self.sandbox_switch.clicked.connect(self._sandbox_clicked)
         box.addWidget(self.sandbox_switch)
         layout.addLayout(box)
-        self.provider_label = _label(role="secondary")
+        self.provider_label = label(role="secondary")
         layout.addWidget(self.provider_label)
-        self.none_label = _label(
+        self.none_label = label(
             f"{name} runs without a sandbox. Its workers can read every file "
             "you can, including logins and keys.",
             "secondary",
         )
         layout.addWidget(self.none_label)
-        self.bwrap_label = _label(role="secondary")
+        self.bwrap_label = label(role="secondary")
         layout.addWidget(self.bwrap_label)
-        self.check_label = _label(role="secondary")
+        self.check_label = label(role="secondary")
         self.check_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
@@ -377,7 +315,7 @@ class _EngineCard(Card):
         self.again_widget = QWidget()
         again = QHBoxLayout(self.again_widget)
         again.setContentsMargins(0, 0, 0, 0)
-        self.again_label = _label(CHECK_AGAIN, "secondary")
+        self.again_label = label(CHECK_AGAIN, "secondary")
         again.addWidget(self.again_label, 1)
         self.again_button = button("Check now", "secondary", size="sm")
         self.again_button.setAccessibleName(f"Check {name} now")
@@ -393,7 +331,7 @@ class _EngineCard(Card):
         self.models_button.setAccessibleName(f"{name} models")
         self.models_button.clicked.connect(lambda: screen.toggle_models(engine))
         models_row.addWidget(self.models_button)
-        self.shortlisted_label = _label(role="secondary")
+        self.shortlisted_label = label(role="secondary")
         models_row.addWidget(self.shortlisted_label, 1)
         layout.addLayout(models_row)
 
@@ -438,13 +376,15 @@ class _EngineCard(Card):
         )
         self.reason_label.setVisible(failed)
         if failed and engine_status is not None:
-            self.reason_label.setText(_sentence(engine_status.reason or ""))
+            self.reason_label.setText(sentence(engine_status.reason or ""))
 
         self.use_switch.setChecked(enabled)
         self.sandbox_switch.setChecked(switch == "on")
         self.provider_label.setText(f"Provider: {PROVIDER_TEXT[provider]}")
         self.none_label.setVisible(provider == sandbox.NONE)
-        self._draw_check(screen.checks.get(engine), engine in screen.checking)
+        self._draw_check(
+            screen.checks.get(engine), engine in screen.checking, switch == "on"
+        )
 
         saved = screen.setting(f"shortlist.{engine}", [])
         count = len(saved) if isinstance(saved, list) else 0
@@ -452,7 +392,17 @@ class _EngineCard(Card):
         self.models_button.setChecked(screen.open_engine == engine)
         self._draw_setup(engine_status)
 
-    def _draw_check(self, check: sandbox.SandboxCheck | None, checking: bool) -> None:
+    def _draw_check(
+        self, check: sandbox.SandboxCheck | None, checking: bool, switched_on: bool
+    ) -> None:
+        """Draw the bwrap line, the last sandbox check and its blocking causes.
+
+        With the sandbox switch off the card shows "Sandbox off" in place of
+        a check result; a check that ran without a sandbox is never shown as
+        passed.
+        """
+        if check is not None and check.provider == sandbox.NONE:
+            check = None
         if check is None:
             self.bwrap_label.setText("bwrap: not checked yet")
         elif check.bwrap_path is None:
@@ -460,25 +410,32 @@ class _EngineCard(Card):
         else:
             version = check.bwrap_version or "version unknown"
             self.bwrap_label.setText(f"bwrap: {check.bwrap_path}, {version}")
-        if checking:
+        if not switched_on:
+            self.check_label.setText(SANDBOX_OFF)
+            check = None
+        elif checking:
             self.check_label.setText("Last check: checking the sandbox now")
         elif check is None:
             self.check_label.setText("Last check: Not run")
         else:
-            at = _inline(when(check.checked_at))
+            at = inline(when(check.checked_at))
             if check.ok:
                 self.check_label.setText(f"Last check: Passed, {at}")
             else:
                 self.check_label.setText(f"Last check: Failed, {at}: {check.detail}")
-        if self.cause_alert is not None:
-            self.cause_area.removeWidget(self.cause_alert)
-            self.cause_alert.hide()
-            self.cause_alert.deleteLater()
-            self.cause_alert = None
+        text = ""
         if check is not None and check.causes:
             text = "\n".join(
-                f"{_sentence(cause)}. {cause_advice(cause)}" for cause in check.causes
+                f"{sentence(cause)}. {cause_advice(cause)}" for cause in check.causes
             )
+        if (
+            self.cause_alert is not None
+            and self.cause_alert.accessibleDescription() == text
+        ):
+            return
+        discard(self.cause_alert, self.cause_area)
+        self.cause_alert = None
+        if text:
             self.cause_alert = Alert("danger", "The sandbox is blocked", text)
             self.cause_area.addWidget(self.cause_alert)
 
@@ -487,21 +444,26 @@ class _EngineCard(Card):
         if key == self._setup_key:
             return
         self._setup_key = key
-        _clear(self.setup_area)
+        clear_layout(self.setup_area)
         self.commands = []
-        if engine_status is None or engine_status.connected:
+        unmet = (
+            []
+            if engine_status is None or engine_status.connected
+            else [item for item in engine_status.requirements if not item.met]
+        )
+        if engine_status is None or not unmet:
+            # A failed check whose requirements are all met (only the
+            # version could not be read) shows its reason above, not here.
             self.setup_widget.hide()
             return
         heading = QLabel("Setup")
         heading.setFont(theme.font("label"))
         self.setup_area.addWidget(heading)
-        for requirement in engine_status.requirements:
-            if requirement.met:
-                continue
-            self.setup_area.addWidget(_label(_sentence(requirement.label)))
+        for requirement in unmet:
+            self.setup_area.addWidget(label(sentence(requirement.label)))
             if requirement.fix is None:
                 reason = engine_status.reason or "Ember found no command that fixes it."
-                self.setup_area.addWidget(_label(_sentence(reason), "secondary"))
+                self.setup_area.addWidget(label(sentence(reason), "secondary"))
                 continue
             line = CommandLine(requirement.fix)
             line.run_requested.connect(self._run)
@@ -580,7 +542,7 @@ class _ModelRow(QWidget):
         self.switch.setAccessibleName(f"Shortlist {model.id}")
         self.switch.clicked.connect(lambda on: panel.use_changed(self, on))
         layout.addWidget(self.switch)
-        self.note = _label(role="secondary")
+        self.note = label(role="secondary")
         self.note.hide()
         outer.addWidget(self.note)
 
@@ -636,7 +598,7 @@ class _ModelPanel(Card):
         self.engine = engine
         self.columns = engine == "opencode"
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setContentsMargins(CARD_MARGIN, CARD_MARGIN, CARD_MARGIN, CARD_MARGIN)
         layout.setSpacing(12)
 
         head = QHBoxLayout()
@@ -664,7 +626,7 @@ class _ModelPanel(Card):
         header = QHBoxLayout(self.header)
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(12)
-        header.addWidget(_label("Model", "muted"), 1)
+        header.addWidget(label("Model", "muted"), 1)
         if self.columns:
             for text in ("Context", "Input $/M", "Output $/M"):
                 cell = QLabel(text)
@@ -738,7 +700,7 @@ class _ModelPanel(Card):
         self.context_picker.currentIndexChanged.connect(lambda _i: self.apply_filters())
         row.addWidget(self.context_picker)
         row.addStretch(1)
-        self.count_label = _label(role="secondary")
+        self.count_label = label(role="secondary")
         row.addWidget(self.count_label)
         layout.addLayout(row)
 
@@ -774,7 +736,7 @@ class _ModelPanel(Card):
     def show_list(self, result: models.ModelList) -> None:
         """Show a model list that was read."""
         self.state.clear()
-        _clear(self.rows_area)
+        clear_layout(self.rows_area)
         self.rows = []
         self.models = result.models
         self.delivered = bool(result.models) or result.reason is None
@@ -791,13 +753,13 @@ class _ModelPanel(Card):
             at = (
                 ""
                 if result.fetched_at is None
-                else f" It shows the list read {_inline(when(result.fetched_at))}."
+                else f" It shows the list read {inline(when(result.fetched_at))}."
             )
             self._set_notice(
                 Alert(
                     "warning",
                     f"The {NAMES[self.engine]} model list could not be read again.",
-                    f"{_sentence(result.reason)}.{at}",
+                    f"{sentence(result.reason)}.{at}",
                     actions=[("Try again", lambda: self.load(refresh=True))],
                 )
             )
@@ -819,10 +781,7 @@ class _ModelPanel(Card):
         )
 
     def _set_notice(self, alert: Alert | None) -> None:
-        if self.notice is not None:
-            self.notice_area.removeWidget(self.notice)
-            self.notice.hide()
-            self.notice.deleteLater()
+        discard(self.notice, self.notice_area)
         self.notice = alert
         if alert is not None:
             self.notice_area.addWidget(alert)
@@ -842,7 +801,7 @@ class _ModelPanel(Card):
         return [(m, e) for m, e in saved.items() if m not in known]
 
     def _draw_missing(self, saved: dict[str, str | None]) -> None:
-        _clear(self.missing_area)
+        clear_layout(self.missing_area)
         self.missing = []
         absent = self._absent(saved)
         if absent:
@@ -968,31 +927,10 @@ class EnginesScreen(QWidget):
         self._check_tokens: dict[str, int] = {}
         self._reading_engines = False
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        outer.addWidget(scroll)
-        content = QWidget()
-        scroll.setWidget(content)
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
-
-        head = QHBoxLayout()
-        titles = QVBoxLayout()
-        titles.setSpacing(4)
-        title = QLabel(self.TITLE)
-        title.setFont(theme.font("display"))
-        titles.addWidget(title)
-        self.subtitle = _label(role="secondary")
-        titles.addWidget(self.subtitle)
-        head.addLayout(titles, 1)
+        layout = scrolled(self)
         self.check_button = button("Check now", "secondary")
         self.check_button.clicked.connect(self.check_now)
-        head.addWidget(self.check_button, 0, Qt.AlignmentFlag.AlignBottom)
-        layout.addLayout(head)
+        self.subtitle = screen_header(layout, self.TITLE, trailing=(self.check_button,))
 
         self.failure_area = QVBoxLayout()
         layout.addLayout(self.failure_area)
@@ -1040,9 +978,18 @@ class EnginesScreen(QWidget):
         def read() -> dict[str, sandbox.SandboxCheck]:
             return sandbox.last_checks(env)
 
+        tokens = dict(self._check_tokens)
+
         def loaded(result: dict[str, sandbox.SandboxCheck]) -> None:
             for engine, check in result.items():
-                if engine not in self.checking:
+                # A check started since this read began, still running or
+                # finished, is newer than the cached one.
+                if engine in self.checking or self._check_tokens.get(
+                    engine
+                ) != tokens.get(engine):
+                    continue
+                held = self.checks.get(engine)
+                if held is None or held.checked_at < check.checked_at:
                     self.checks[engine] = check
             self._redraw()
 
@@ -1070,10 +1017,7 @@ class EnginesScreen(QWidget):
             card.draw_logo()
 
     def _set_failure(self, alert: Alert | None) -> None:
-        if self.failure is not None:
-            self.failure_area.removeWidget(self.failure)
-            self.failure.hide()
-            self.failure.deleteLater()
+        discard(self.failure, self.failure_area)
         self.failure = alert
         if alert is not None:
             self.failure_area.addWidget(alert)
@@ -1085,7 +1029,7 @@ class EnginesScreen(QWidget):
         engines = self.context.engines()
         if engines:
             at = max(item.checked_at for item in engines.values())
-            self.subtitle.setText(f"Checked {_inline(when(at))}")
+            self.subtitle.setText(f"Checked {inline(when(at))}")
         elif self._reading_engines:
             self.subtitle.setText("Checking the engines")
         else:
@@ -1106,20 +1050,25 @@ class EnginesScreen(QWidget):
             order += card.focus_order()
         if self.panel is not None:
             order += self.panel.focus_order()
-        for first, second in zip(order, order[1:], strict=False):
-            QWidget.setTabOrder(first, second)
+        chain_tab_order(order)
 
     # Actions
 
     def check_now(self) -> None:
-        """Read the engine status and check the sandbox of every engine on."""
+        """Read the engine status and run the sandbox checks.
+
+        Only engines whose Use and Sandbox switches are both on are checked.
+        """
         for card in self.cards.values():
             card.show_check_again(False)
         self._reading_engines = True
         self._draw_subtitle()
         self.context.refresh_engines()
         for engine in status.ENGINES:
-            if self.setting(f"engine.{engine}", "on") == "on":
+            if (
+                self.setting(f"engine.{engine}", "on") == "on"
+                and self.setting(f"sandbox.{engine}", "off") == "on"
+            ):
                 self.run_sandbox_check(engine)
 
     def run_sandbox_check(self, engine: str) -> None:
@@ -1168,16 +1117,25 @@ class EnginesScreen(QWidget):
         self.context.save_settings({key: "on" if on else "off"})
 
     def save_sandbox(self, engine: str, on: bool) -> None:
-        """Save an engine's sandbox switch, then run its sandbox check.
+        """Save an engine's sandbox switch; after turning it on, run its check.
 
         Args:
             engine: `codex`, `opencode` or `claude`.
             on: The new value.
         """
+        if not on:
+            self._drop_check(engine)
+            self.context.save_settings({f"sandbox.{engine}": "off"})
+            return
         self.context.save_settings(
-            {f"sandbox.{engine}": "on" if on else "off"},
+            {f"sandbox.{engine}": "on"},
             lambda _snapshot: self.run_sandbox_check(engine),
         )
+
+    def _drop_check(self, engine: str) -> None:
+        """Forget the result of an engine's check in flight."""
+        self._check_tokens[engine] = self._check_tokens.get(engine, 0) + 1
+        self.checking.discard(engine)
 
     def save_shortlist(self, engine: str, entries: list[str]) -> None:
         """Save an engine's shortlist.
@@ -1206,9 +1164,7 @@ class EnginesScreen(QWidget):
         """
         closing = self.open_engine == engine
         if self.panel is not None:
-            self.panel_area.removeWidget(self.panel)
-            self.panel.hide()
-            self.panel.deleteLater()
+            discard(self.panel, self.panel_area)
             self.panel = None
             self.open_engine = None
         if not closing:

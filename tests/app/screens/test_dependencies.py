@@ -1,4 +1,5 @@
 import datetime
+import threading
 import time
 
 import pytest
@@ -8,7 +9,7 @@ from pytestqt.qtbot import QtBot
 from ember import deps
 from ember.app.context import AppContext
 from ember.app.screens import dependencies as screen_module
-from ember.app.screens.dependencies import DependenciesScreen, subtitle, when
+from ember.app.screens.dependencies import DependenciesScreen, subtitle
 from ember.app.window import MainWindow
 
 
@@ -349,18 +350,6 @@ def test_subtitle_newest_coverage() -> None:
     assert subtitle(partial, now).endswith(expected)
 
 
-def test_when_formats() -> None:
-    now = datetime.datetime(2026, 10, 31, 12, 0).timestamp()
-    assert when(datetime.datetime(2026, 10, 31, 10, 42).timestamp(), now) == (
-        "Today 10:42"
-    )
-    assert when(datetime.datetime(2026, 10, 30, 17, 3).timestamp(), now) == (
-        "Yesterday 17:03"
-    )
-    stamp = datetime.datetime(2026, 10, 3, 14, 5)
-    assert when(stamp.timestamp(), now) == f"3 {stamp:%b} 14:05"
-
-
 def test_keyboard_reach(
     env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -399,3 +388,48 @@ def test_sidebar_count_follows_deps_changed(
         "2 updates available, 2 items missing and 1 check failed."
     )
     assert screen_module.ordered(report)[0][0] == "apps"
+
+
+def test_check_now_without_a_report_shows_one_spinner(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    widget, _context, calls = _screen(env, qtbot, monkeypatch, None)
+    widget.check_button.click()
+    assert calls.refresh == [False, True]
+    assert widget.spinner.isHidden()
+    assert widget.checking_label.isHidden()
+    qtbot.waitUntil(lambda: widget.state_view.loading.isVisible(), timeout=2000)
+
+
+def test_an_earlier_read_keeps_the_check_spinner(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gates = {False: threading.Event(), True: threading.Event()}
+    asked: list[bool] = []
+
+    def read(_env: object, *, installed: bool, newest: str) -> deps.DepsReport:
+        asked.append(installed)
+        gates[installed].wait(5)
+        if installed:
+            return _report(_component("tmux", deps.CURRENT))
+        return _report(*SAMPLE)
+
+    monkeypatch.setattr(deps, "read", read)
+    context = AppContext(env)
+    widget = DependenciesScreen(context)
+    qtbot.addWidget(widget)
+    widget.show()
+    widget.shown()
+    widget.check_button.click()
+    assert widget.spinner.isHidden()
+    with qtbot.waitSignal(context.deps_changed, timeout=5000):
+        gates[False].set()
+    assert "claude-desktop" in widget.tiles
+    assert not widget.spinner.isHidden()
+    assert not widget.checking_label.isHidden()
+    with qtbot.waitSignal(context.deps_changed, timeout=5000):
+        gates[True].set()
+    assert asked == [False, True]
+    assert widget.spinner.isHidden()
+    assert widget.checking_label.isHidden()
+    assert widget.order() == [("system", ["tmux"])]

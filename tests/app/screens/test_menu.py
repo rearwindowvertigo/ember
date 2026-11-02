@@ -8,6 +8,7 @@ from ember import choices
 from ember.app.context import AppContext
 from ember.app.screens.menu import MenuScreen
 from ember.app.widgets import Picker
+from ember.engines import status
 
 
 def _ready(env: dict[str, str], qtbot: QtBot) -> AppContext:
@@ -246,3 +247,51 @@ def test_every_control_is_reached_with_tab(env: dict[str, str], qtbot: QtBot) ->
     ]
     # Tab reaches a segmented control's chosen option; arrows move within it.
     assert [w for w in chain if w in expected] == expected
+
+
+def _engine_status(engine: str, connected: bool) -> status.EngineStatus:
+    return status.EngineStatus(
+        engine=engine,
+        state=status.CONNECTED if connected else status.NOT_SIGNED_IN,
+        reason=None if connected else "not signed in",
+        installed=True,
+        binary=f"/usr/bin/{engine}",
+        version="1.0",
+        signed_in=connected,
+        connected=connected,
+        requirements=(),
+        checked_at=0.0,
+    )
+
+
+def test_not_connected_note_follows_the_engine_status_read(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    choices.set_settings(SHORTLISTS, env=env)
+    choices.set_settings({"single.writer": "codex:gpt-5"}, env=env)
+    context, screen = _screen(env, qtbot)
+    writer = screen.roles["writer"]
+    assert not writer.warning.isVisibleTo(screen)
+    engines = {
+        engine: _engine_status(engine, engine != "codex") for engine in status.ENGINES
+    }
+    context._engines = engines
+    context.engines_changed.emit(engines)
+    assert writer.warning.isVisibleTo(screen)
+    assert writer.warning.text().startswith("Codex was not connected")
+    engines = {engine: _engine_status(engine, True) for engine in status.ENGINES}
+    context._engines = engines
+    context.engines_changed.emit(engines)
+    assert not writer.warning.isVisibleTo(screen)
+
+
+def test_choosing_the_saved_run_as_saves_nothing(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    choices.set_settings(SHORTLISTS, env=env)
+    choices.set_settings({"single.writer": "claude:opus"}, env=env)
+    context, screen = _screen(env, qtbot)
+    writer = screen.roles["writer"]
+    with qtbot.assertNotEmitted(context.settings_changed, wait=200):
+        writer.run_as.changed.emit(context.setting("single.writer_as"))
+    assert context.tasks.pending() == 0

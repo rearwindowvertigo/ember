@@ -27,7 +27,15 @@ from PySide6.QtWidgets import (
 
 from ember import choices, terminals
 from ember.app import icons, theme, widgets
-from ember.app.screens.menu import ToneLine, name_and_help, screen_header, scrolled
+from ember.app.screens.common import (
+    ToneLine,
+    clear_layout,
+    label,
+    name_and_help,
+    screen_header,
+    scrolled,
+    titled_card,
+)
 
 if TYPE_CHECKING:
     from ember.app.context import AppContext
@@ -104,13 +112,7 @@ class SettingsScreen(QWidget):
 
     @staticmethod
     def _card(title: str) -> tuple[widgets.Card, QGridLayout]:
-        card = widgets.Card()
-        column = QVBoxLayout(card)
-        column.setContentsMargins(20, 20, 20, 20)
-        column.setSpacing(16)
-        heading = QLabel(title)
-        heading.setFont(theme.font("heading"))
-        column.addWidget(heading)
+        card, column = titled_card(title)
         grid = QGridLayout()
         grid.setHorizontalSpacing(24)
         grid.setVerticalSpacing(16)
@@ -260,16 +262,10 @@ class SettingsScreen(QWidget):
             self.terminal_line.show_text(None)
 
     def _draw_paths(self, paths: list[str]) -> None:
-        while self.paths_layout.count():
-            item = self.paths_layout.takeAt(0)
-            widget = item.widget() if item is not None else None
-            if widget is not None:
-                widget.deleteLater()
+        clear_layout(self.paths_layout)
         self.path_rows = {}
         if not paths:
-            empty = QLabel(NO_PATHS)
-            empty.setProperty("role", "secondary")
-            self.paths_layout.addWidget(empty)
+            self.paths_layout.addWidget(label(NO_PATHS, "secondary"))
             return
         color = theme.color("text-primary")
         for path in paths:
@@ -277,11 +273,11 @@ class SettingsScreen(QWidget):
             line = QHBoxLayout(row)
             line.setContentsMargins(0, 0, 0, 0)
             line.setSpacing(8)
-            label = QLabel(path)
-            label.setFont(theme.font("code"))
-            label.setTextFormat(Qt.TextFormat.PlainText)
-            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            line.addWidget(label, 1)
+            text = QLabel(path)
+            text.setFont(theme.font("code"))
+            text.setTextFormat(Qt.TextFormat.PlainText)
+            text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            line.addWidget(text, 1)
             remove = widgets.button("", "ghost", size="sm")
             remove.setIcon(icons.icon("x", color, 16))
             remove.setAccessibleName(f"Remove {path}")
@@ -304,6 +300,9 @@ class SettingsScreen(QWidget):
         self.context.save_settings(values, done)
 
     def _theme_picked(self, value: str) -> None:
+        if value == self.context.setting("app.theme"):
+            return
+
         def applied(_snapshot: dict[str, Any]) -> None:
             app = QApplication.instance()
             if isinstance(app, QApplication):
@@ -327,18 +326,29 @@ class SettingsScreen(QWidget):
             self._save({"terminal": value})
 
     def _other_entered(self) -> None:
+        """Save Other command's text on Enter or when the field loses focus.
+
+        Text that cannot be saved keeps the field open on Enter; leaving the
+        field with it returns the picker to the saved value. Either way the
+        line under the field says why.
+        """
         if self.terminal.value() != OTHER:
             return
         text = self.other.text().strip()
+        problem = None
         if not text:
-            self.terminal_line.show_text(
-                "Enter a command line, such as gnome-terminal --."
-            )
-            return
-        try:
-            choices.validate_value("terminal", text)
-        except choices.InvalidChoiceError as error:
-            self.terminal_line.show_text(f"Not saved: {error}.")
+            problem = "Enter a command line, such as gnome-terminal --."
+        else:
+            try:
+                choices.validate_value("terminal", text)
+            except choices.InvalidChoiceError as error:
+                problem = f"Not saved: {error}."
+        if problem is not None:
+            if not self.other.hasFocus():
+                self._other_open = False
+                self.other.clear()
+                self._redraw()
+            self.terminal_line.show_text(problem)
             return
         self.terminal_line.show_text(None)
         self._other_open = False

@@ -4,7 +4,9 @@
 the runs folder, each run's folder and each run's `run.json`; a record
 replaced atomically is a new file, so the paths are added again after every
 read. A sixty-second timer reloads as a backstop, also while the window is
-hidden, because the tray shows the live runs.
+hidden, because the tray shows the live runs. A read that cannot list the
+runs folder emits `failed` with the reason and keeps the last records; a
+record that cannot be read is only counted.
 """
 
 import contextlib
@@ -65,10 +67,14 @@ class RunsModel(QObject):
 
     changed = Signal()
     """A record's status, turn, turn state or update time changed, a run
-    appeared or went away, or the number of unreadable records changed."""
+    appeared or went away, the number of unreadable records changed, or a
+    read succeeded after a failed one."""
 
     turn_failed = Signal(str)
     """A run's turn failed since the last read, with the run's engine."""
+
+    failed = Signal(str)
+    """The runs folder could not be read, with the reason."""
 
     def __init__(
         self,
@@ -93,6 +99,7 @@ class RunsModel(QObject):
         self._keys: dict[str, _Key] = {}
         self._unreadable = 0
         self._loaded = False
+        self._error: str | None = None
         self._failed_turns: set[tuple[str, int]] = set()
         self._in_flight = False
         self._queued = False
@@ -118,6 +125,10 @@ class RunsModel(QObject):
     def loaded(self) -> bool:
         """Return whether the records were read at least once."""
         return self._loaded
+
+    def error(self) -> str | None:
+        """Return why the last read could not list the runs folder, or `None`."""
+        return self._error
 
     def runs(self) -> list[Run]:
         """Return every readable run, oldest first."""
@@ -167,8 +178,10 @@ class RunsModel(QObject):
             self._watcher.removePath(path)
         self.reload()
 
-    def _read_failed(self, _error: Exception) -> None:
+    def _read_failed(self, error: Exception) -> None:
+        self._error = str(error) or type(error).__name__
         self._finish_read()
+        self.failed.emit(self._error)
 
     def _finish_read(self) -> None:
         self._in_flight = False
@@ -181,7 +194,10 @@ class RunsModel(QObject):
         self._watch(watch)
         keys = {run.id: _key(run) for run in runs}
         differs = (
-            not self._loaded or keys != self._keys or unreadable != self._unreadable
+            not self._loaded
+            or self._error is not None
+            or keys != self._keys
+            or unreadable != self._unreadable
         )
         failed = [
             run
@@ -195,6 +211,7 @@ class RunsModel(QObject):
         self._keys = keys
         self._unreadable = unreadable
         self._loaded = True
+        self._error = None
         self._finish_read()
         if differs:
             self.changed.emit()

@@ -8,23 +8,24 @@ command? dialog. Opening the screen shows the last report; Check now reads
 installed versions, and newest versions when due.
 """
 
-import datetime
-import time
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (
-    QFrame,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QScrollArea,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from ember import deps
 from ember.app import icons, theme, widgets
+from ember.app.screens.common import (
+    SCREEN_MARGIN,
+    SCREEN_SPACING,
+    discard,
+    inline,
+    label,
+    plural,
+    screen_header,
+    scroll_area,
+    when,
+)
 
 if TYPE_CHECKING:
     from ember.app.context import AppContext
@@ -54,30 +55,6 @@ NOT_READ = "Not read"
 """Shown in place of a version that was not read."""
 
 
-def when(stamp: float, now: float | None = None) -> str:
-    """Return a local time as the app writes it.
-
-    Args:
-        stamp: Seconds since the epoch.
-        now: The current time in seconds since the epoch; `None` reads it.
-
-    Returns:
-        "Today 10:42", "Yesterday 17:03" or "30 Oct 14:05".
-    """
-    moment = datetime.datetime.fromtimestamp(stamp)
-    today = datetime.datetime.fromtimestamp(time.time() if now is None else now).date()
-    clock = f"{moment:%H:%M}"
-    if moment.date() == today:
-        return f"Today {clock}"
-    if moment.date() == today - datetime.timedelta(days=1):
-        return f"Yesterday {clock}"
-    return f"{moment.day} {moment:%b} {clock}"
-
-
-def _plural(count: int, one: str, many: str) -> str:
-    return f"{count} {one if count == 1 else many}"
-
-
 def subtitle(report: deps.DepsReport, now: float | None = None) -> str:
     """Return the screen's subtitle for a report.
 
@@ -91,7 +68,7 @@ def subtitle(report: deps.DepsReport, now: float | None = None) -> str:
     """
     statuses = [item.status for item in report.components]
     parts = [
-        _plural(count, one, many)
+        plural(count, one, many)
         for count, one, many in (
             (
                 statuses.count(deps.UPDATE_AVAILABLE),
@@ -113,9 +90,7 @@ def subtitle(report: deps.DepsReport, now: float | None = None) -> str:
     if oldest is None:
         read = "Newest versions not read yet."
     else:
-        stamp = when(oldest, now)
-        if stamp.startswith(("Today", "Yesterday")):
-            stamp = stamp[0].lower() + stamp[1:]
+        stamp = inline(when(oldest, now))
         if report.newest_read_complete():
             read = f"Newest versions read {stamp}."
         else:
@@ -195,17 +170,13 @@ class DependencyTile(widgets.Card):
         head.addWidget(self.label, 1)
         head.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(head)
-        self.versions = QLabel(versions_line(item))
-        self.versions.setProperty("role", "secondary")
-        self.versions.setWordWrap(True)
-        self.versions.setVisible(bool(self.versions.text()))
+        self.versions = label(versions_line(item), "secondary")
         layout.addWidget(self.versions)
-        self.error = QLabel(item.error or "")
-        self.error.setProperty("role", "muted")
-        self.error.setWordWrap(True)
+        self.versions.setVisible(bool(self.versions.text()))
+        self.error = label(item.error or "", "muted")
         self.error.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.error.setVisible(bool(item.error))
         layout.addWidget(self.error)
+        self.error.setVisible(bool(item.error))
         self.command: widgets.CommandLine | None = None
         self.note: QLabel | None = None
         if item.command is not None:
@@ -213,9 +184,7 @@ class DependencyTile(widgets.Card):
             self.command.run_requested.connect(self._run)
             layout.addWidget(self.command)
         elif item.note:
-            self.note = QLabel(item.note)
-            self.note.setProperty("role", "secondary")
-            self.note.setWordWrap(True)
+            self.note = label(item.note, "secondary")
             layout.addWidget(self.note)
         layout.addStretch(1)
 
@@ -240,34 +209,24 @@ class DependenciesScreen(QWidget):
         self._checking = False
         self._dirty = True
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(
+            SCREEN_MARGIN, SCREEN_MARGIN, SCREEN_MARGIN, SCREEN_MARGIN
+        )
+        layout.setSpacing(SCREEN_SPACING)
 
-        header = QHBoxLayout()
-        header.setSpacing(12)
-        titles = QVBoxLayout()
-        titles.setSpacing(4)
-        title = QLabel(self.TITLE)
-        title.setFont(theme.font("display"))
-        self.subtitle = QLabel()
-        self.subtitle.setProperty("role", "secondary")
-        self.subtitle.setWordWrap(True)
-        titles.addWidget(title)
-        titles.addWidget(self.subtitle)
-        header.addLayout(titles, 1)
         self.spinner = widgets.Spinner(16)
-        self.checking_label = QLabel("Checking versions")
-        self.checking_label.setProperty("role", "secondary")
+        self.checking_label = label("Checking versions", "secondary", wrap=False)
         self.spinner.setAccessibleName(self.checking_label.text())
         self.spinner.hide()
         self.checking_label.hide()
-        header.addWidget(self.spinner, 0, Qt.AlignmentFlag.AlignVCenter)
-        header.addWidget(self.checking_label, 0, Qt.AlignmentFlag.AlignVCenter)
         self.check_button = widgets.button("Check now", "secondary")
         self.check_button.setAccessibleName("Check now")
         self.check_button.clicked.connect(self.check_now)
-        header.addWidget(self.check_button, 0, Qt.AlignmentFlag.AlignTop)
-        layout.addLayout(header)
+        self.subtitle = screen_header(
+            layout,
+            self.TITLE,
+            trailing=(self.spinner, self.checking_label, self.check_button),
+        )
 
         self.alert_area = QVBoxLayout()
         self.alert_area.setContentsMargins(0, 0, 0, 0)
@@ -276,9 +235,7 @@ class DependenciesScreen(QWidget):
 
         self.state_view = widgets.StateView()
         layout.addWidget(self.state_view, 1)
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area = scroll_area()
         self.scroll_area.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.scroll_area.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
@@ -316,19 +273,29 @@ class DependenciesScreen(QWidget):
 
     def check_now(self) -> None:
         """Read installed versions, and newest versions when due."""
-        self._set_checking(True)
         if self.context.deps() is None:
             self._show_state()
             self.state_view.show_loading("Reading dependencies")
+        self._set_checking(True)
         self.context.refresh_deps(check_now=True)
 
     def _set_checking(self, checking: bool) -> None:
+        """Show the header spinner while checking and a report is shown.
+
+        Without a report the state view's spinner shows the read instead.
+        """
         self._checking = checking
-        self.spinner.setVisible(checking)
-        self.checking_label.setVisible(checking)
+        shown = checking and self.context.deps() is not None
+        self.spinner.setVisible(shown)
+        self.checking_label.setVisible(shown)
+
+    def _read_ended(self) -> None:
+        # A read that ended may be an earlier one; the check goes on while
+        # the context still has a read in flight or waiting.
+        self._set_checking(self._checking and self.context.deps_refreshing())
 
     def _changed(self, report: object) -> None:
-        self._set_checking(False)
+        self._read_ended()
         self._clear_alert()
         if not isinstance(report, deps.DepsReport):
             return
@@ -338,7 +305,7 @@ class DependenciesScreen(QWidget):
             self._dirty = True
 
     def _failed(self, text: str) -> None:
-        self._set_checking(False)
+        self._read_ended()
         if self.context.deps() is None:
             self._show_state()
             self.subtitle.setText("")
@@ -352,10 +319,8 @@ class DependenciesScreen(QWidget):
         QWidget.setTabOrder(self.check_button, self.alert.buttons[0])
 
     def _clear_alert(self) -> None:
-        if self.alert is not None:
-            self.alert_area.removeWidget(self.alert)
-            self.alert.deleteLater()
-            self.alert = None
+        discard(self.alert, self.alert_area)
+        self.alert = None
 
     # Drawing
 
@@ -403,9 +368,7 @@ class DependenciesScreen(QWidget):
                 grid.addWidget(tile, index // COLUMNS, index % COLUMNS)
             column.addLayout(grid)
         column.addStretch(1)
-        old = self.scroll_area.takeWidget()
-        if old is not None:
-            old.deleteLater()
+        discard(self.scroll_area.takeWidget())
         self.scroll_area.setWidget(content)
         self.scroll_area.show()
 

@@ -445,6 +445,13 @@ QScrollArea {
     background: transparent;
     border: none;
 }
+QScrollArea[role="mirror"] {
+    border: 2px solid transparent;
+    border-radius: 8px;
+}
+QScrollArea[role="mirror"]:focus {
+    border: 2px solid @focus-ring;
+}
 QScrollBar:vertical, QScrollBar:horizontal {
     background: transparent;
     border: none;

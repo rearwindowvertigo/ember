@@ -170,19 +170,68 @@ def test_other_command_saves_on_enter(stub_env: dict[str, str], qtbot: QtBot) ->
     assert screen.other.text() == "myterm --execute"
 
 
-def test_other_command_refuses_empty_and_unparsable_text(
+def _focused(screen: SettingsScreen, qtbot: QtBot) -> None:
+    screen.show()
+    with qtbot.waitActive(screen):
+        screen.activateWindow()
+    screen.other.setFocus()
+    qtbot.waitUntil(screen.other.hasFocus)
+
+
+def test_other_command_refuses_empty_and_unparsable_text_on_enter(
     stub_env: dict[str, str], qtbot: QtBot
 ) -> None:
     _context, screen = _screen(stub_env, qtbot)
     _pick_terminal(screen, OTHER)
+    _focused(screen, qtbot)
     screen.other.setText("  ")
-    screen.other.editingFinished.emit()
+    qtbot.keyClick(screen.other, Qt.Key.Key_Return)
     assert screen.terminal_line.isVisibleTo(screen)
     assert screen.terminal_line.text().startswith("Enter a command line")
+    assert screen.terminal.value() == OTHER
     screen.other.setText("myterm 'open")
-    screen.other.editingFinished.emit()
+    qtbot.keyClick(screen.other, Qt.Key.Key_Return)
+    assert screen.terminal_line.text().startswith("Not saved: terminal:")
+    assert screen.terminal.value() == OTHER
+    assert screen.other.isVisibleTo(screen)
+    assert _stored(stub_env, "terminal") == "xdg-terminal-exec"
+
+
+def test_leaving_other_command_without_valid_text_returns_to_the_saved_value(
+    stub_env: dict[str, str], qtbot: QtBot
+) -> None:
+    _context, screen = _screen(stub_env, qtbot)
+    _pick_terminal(screen, OTHER)
+    _focused(screen, qtbot)
+    screen.other.setText("myterm 'open")
+    screen.add_folder.setFocus()
+    qtbot.waitUntil(lambda: screen.terminal.value() == "xdg-terminal-exec")
+    assert not screen.other.isVisibleTo(screen)
     assert screen.terminal_line.text().startswith("Not saved: terminal:")
     assert _stored(stub_env, "terminal") == "xdg-terminal-exec"
+
+
+def test_leaving_other_command_keeps_a_saved_command(
+    stub_env: dict[str, str], qtbot: QtBot
+) -> None:
+    choices.set_settings({"terminal": "myterm -x"}, env=stub_env)
+    _context, screen = _screen(stub_env, qtbot)
+    _focused(screen, qtbot)
+    screen.other.setText("")
+    screen.add_folder.setFocus()
+    qtbot.waitUntil(lambda: screen.other.text() == "myterm -x")
+    assert screen.terminal.value() == OTHER
+    assert _stored(stub_env, "terminal") == "myterm -x"
+
+
+def test_choosing_the_saved_theme_saves_nothing(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    context, screen = _screen(env, qtbot)
+    saved = context.setting("app.theme")
+    with qtbot.assertNotEmitted(context.settings_changed, wait=200):
+        screen.theme.changed.emit(saved)
+    assert context.tasks.pending() == 0
 
 
 def test_a_stored_unknown_command_shows_as_other(

@@ -3,30 +3,36 @@
 A live row expands to show the run's screen mirror; one row is expanded at a
 time, and the mirror closes when the row collapses, the run leaves the live
 list, the screen is left or the window hides. A finished row expands to the
-run's record. While the screen is hidden it does not redraw; it redraws the
-next time it is shown.
+run's record. Rows are kept per run id; a finished row is redrawn only when
+a value it shows changed. The sandbox alerts come from the last settings
+snapshot. While the screen is hidden it does not redraw; it redraws the
+next time it is shown. When the runs folder cannot be read, the screen shows
+the reason with Try again, which reads it again at once.
 """
 
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QHideEvent
-from PySide6.QtWidgets import (
-    QFrame,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QScrollArea,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from ember import sandbox
 from ember.app import icons, theme, tray
 from ember.app.mirror import MirrorView
+from ember.app.screens.common import (
+    chain_tab_order,
+    discard,
+    duration,
+    engine_name,
+    plural,
+    screen_header,
+    scrolled,
+    titled_card,
+    when,
+)
 from ember.app.widgets import Alert, Badge, Card, StateView, button
 from ember.runs import record
 from ember.runs.record import Run
@@ -36,21 +42,6 @@ if TYPE_CHECKING:
 
 ELAPSED_MS = 30_000
 """How often the elapsed times of live runs are redrawn while shown."""
-
-MONTHS = (
-    "Jan",
-    "Feb",
-    "Mar",
-    "Apr",
-    "May",
-    "Jun",
-    "Jul",
-    "Aug",
-    "Sep",
-    "Oct",
-    "Nov",
-    "Dec",
-)
 
 BADGES = {
     record.STARTING: ("Starting", "neutral"),
@@ -64,53 +55,9 @@ BADGES = {
 MIRROR_DESCRIPTION = "Screen of run {id}, read-only. Updates when the worker writes."
 
 
-def when(stamp: float, now: float | None = None) -> str:
-    """Return a local time as "Today 10:42", "Yesterday 17:03" or "30 Oct 14:05".
-
-    Args:
-        stamp: Seconds since the epoch.
-        now: The current time; `None` reads the clock.
-
-    Returns:
-        The time in the screens' format.
-    """
-    moment = time.localtime(stamp)
-    today = time.localtime(time.time() if now is None else now)
-    clock = f"{moment.tm_hour:02d}:{moment.tm_min:02d}"
-    day = (moment.tm_year, moment.tm_yday)
-    if day == (today.tm_year, today.tm_yday):
-        return f"Today {clock}"
-    noon = time.mktime((*today[:3], 12, 0, 0, 0, 0, -1))
-    yesterday = time.localtime(noon - 86_400)
-    if day == (yesterday.tm_year, yesterday.tm_yday):
-        return f"Yesterday {clock}"
-    return f"{moment.tm_mday} {MONTHS[moment.tm_mon - 1]} {clock}"
-
-
-def duration(seconds: float) -> str:
-    """Return a duration in whole minutes: "18 min", "1 h 5 min", "2 h".
-
-    Args:
-        seconds: The duration; anything under two minutes counts as one.
-
-    Returns:
-        At least "1 min".
-    """
-    minutes = max(1, int(seconds // 60))
-    if minutes < 60:
-        return f"{minutes} min"
-    hours, rest = divmod(minutes, 60)
-    return f"{hours} h {rest} min" if rest else f"{hours} h"
-
-
-def engine_label(engine: str) -> str:
-    """Return an engine's shown name."""
-    return tray.ENGINE_LABELS.get(engine, engine)
-
-
 def worker_line(run: Run) -> str:
     """Return "<Engine> · <model> · <effort>", leaving out a missing effort."""
-    parts = [engine_label(run.engine), run.model]
+    parts = [engine_name(run.engine), run.model]
     if run.effort:
         parts.append(run.effort)
     return " · ".join(parts)
@@ -142,10 +89,6 @@ def finished_time(run: Run, now: float | None = None) -> str:
     return f"{when(end, now)} · {duration(end - run.started_at)}"
 
 
-def _plural(count: int, word: str) -> str:
-    return f"{count} {word}" if count == 1 else f"{count} {word}s"
-
-
 def record_rows(run: Run, now: float | None = None) -> list[tuple[str, str]]:
     """Return a finished run's record as label and value rows."""
     return [
@@ -157,7 +100,7 @@ def record_rows(run: Run, now: float | None = None) -> list[tuple[str, str]]:
         ("Sandbox", run.sandbox),
         (
             "Turns and commits",
-            f"{_plural(run.turn, 'turn')}, {_plural(len(run.commits), 'commit')}",
+            f"{plural(run.turn, 'turn')}, {plural(len(run.commits), 'commit')}",
         ),
         ("Started", when(run.started_at, now)),
         ("Ended", "Not recorded" if run.ended_at is None else when(run.ended_at, now)),
@@ -173,10 +116,18 @@ def unreadable_line(count: int) -> str:
     return f"{count} run records could not be read."
 
 
+def read_failure(reason: str) -> str:
+    """Return the error text for a runs folder that could not be read."""
+    return (
+        f"Ember could not read the run records: {reason}. Try again; if this "
+        "keeps happening, check the runs folder's permissions."
+    )
+
+
 def sandbox_warning(engine: str) -> str:
     """Return the alert text for an engine that runs without a sandbox."""
     return (
-        f"{engine_label(engine)} runs without a sandbox. Its workers can read "
+        f"{engine_name(engine)} runs without a sandbox. Its workers can read "
         "every file you can, including logins and keys. Turn its sandbox on "
         "in Engines."
     )
@@ -280,9 +231,7 @@ class _LiveRow(_Row):
         mirror, self.mirror = self.mirror, None
         if mirror is not None:
             mirror.stop()
-            self.body.removeWidget(mirror)
-            mirror.hide()
-            mirror.deleteLater()
+            discard(mirror, self.body)
         self.set_expanded(False)
 
 
@@ -292,46 +241,78 @@ class _FinishedRow(_Row):
     def __init__(self, run: Run) -> None:
         super().__init__(run, "details")
         self.details: QWidget | None = None
+        self.shown_values: tuple[object, ...] = ()
         self.set_run(run)
+
+    @staticmethod
+    def values(run: Run) -> tuple[object, ...]:
+        """Return everything the row shows of a run, expanded or not."""
+        return (
+            run.status,
+            worker_line(run),
+            finished_detail(run),
+            finished_time(run),
+            tuple(record_rows(run)),
+        )
+
+    def set_run(self, run: Run) -> None:
+        """Show a run's record; nothing is redrawn when no shown value changed."""
+        values = self.values(run)
+        self.run = run
+        if values == self.shown_values:
+            return
+        self.shown_values = values
+        super().set_run(run)
         self.title_label.setText(worker_line(run))
         self.detail_label.setText(finished_detail(run))
         self.time_label.setText(finished_time(run))
+        if self.details is not None:
+            self._drop_details()
+            self._add_details()
 
     def show_details(self, shown: bool) -> None:
         if shown and self.details is None:
-            details = QWidget()
-            grid = QGridLayout(details)
-            grid.setContentsMargins(0, 0, 0, 0)
-            grid.setHorizontalSpacing(16)
-            grid.setVerticalSpacing(4)
-            for row, (label, value) in enumerate(record_rows(self.run)):
-                name = QLabel(label)
-                name.setProperty("role", "secondary")
-                text = QLabel(value)
-                text.setWordWrap(True)
-                text.setTextInteractionFlags(
-                    Qt.TextInteractionFlag.TextSelectableByMouse
-                )
-                grid.addWidget(name, row, 0, Qt.AlignmentFlag.AlignTop)
-                grid.addWidget(text, row, 1)
-            grid.setColumnStretch(1, 1)
-            self.body.addWidget(details)
-            self.details = details
+            self._add_details()
         elif not shown and self.details is not None:
-            self.body.removeWidget(self.details)
-            self.details.deleteLater()
-            self.details = None
+            self._drop_details()
         self.set_expanded(shown)
+
+    def _add_details(self) -> None:
+        details = QWidget()
+        grid = QGridLayout(details)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(4)
+        for row, (label, value) in enumerate(record_rows(self.run)):
+            name = QLabel(label)
+            name.setProperty("role", "secondary")
+            text = QLabel(value)
+            text.setWordWrap(True)
+            text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            grid.addWidget(name, row, 0, Qt.AlignmentFlag.AlignTop)
+            grid.addWidget(text, row, 1)
+        grid.setColumnStretch(1, 1)
+        self.body.addWidget(details)
+        self.details = details
+
+    def _drop_details(self) -> None:
+        discard(self.details, self.body)
+        self.details = None
+
+
+def _place(layout: QVBoxLayout, rows: Sequence[QWidget]) -> None:
+    """Put rows in a layout in order, moving them only when the order differs."""
+    if [layout.indexOf(row) for row in rows] == list(range(len(rows))):
+        return
+    for row in rows:
+        layout.removeWidget(row)
+    for row in rows:
+        layout.addWidget(row)
+        row.show()
 
 
 def _card(title: str) -> tuple[Card, QVBoxLayout, QLabel]:
-    card = Card()
-    layout = QVBoxLayout(card)
-    layout.setContentsMargins(20, 20, 20, 20)
-    layout.setSpacing(16)
-    heading = QLabel(title)
-    heading.setFont(theme.font("heading"))
-    layout.addWidget(heading)
+    card, layout = titled_card(title)
     empty = QLabel()
     empty.setProperty("role", "muted")
     layout.addWidget(empty)
@@ -354,27 +335,8 @@ class OverviewScreen(QWidget):
         """
         super().__init__()
         self.context = context
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        outer.addWidget(scroll)
-        content = QWidget()
-        scroll.setWidget(content)
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
-
-        heading = QVBoxLayout()
-        heading.setSpacing(4)
-        title = QLabel(self.TITLE)
-        title.setFont(theme.font("display"))
-        heading.addWidget(title)
-        self.subtitle = QLabel()
-        self.subtitle.setProperty("role", "secondary")
-        heading.addWidget(self.subtitle)
-        layout.addLayout(heading)
+        layout = scrolled(self)
+        self.subtitle = screen_header(layout, self.TITLE)
 
         self.alerts = QVBoxLayout()
         self.alerts.setSpacing(8)
@@ -403,14 +365,13 @@ class OverviewScreen(QWidget):
         self.expanded_live: str | None = None
         self.expanded_finished: str | None = None
         self._stale = True
-        self._sandbox_busy = False
-        self._sandbox_queued = False
 
         self._elapsed = QTimer(self)
         self._elapsed.setInterval(ELAPSED_MS)
         self._elapsed.timeout.connect(self._update_elapsed)
 
         context.runs.changed.connect(self._runs_changed)
+        context.runs.failed.connect(self._runs_changed)
         context.settings_changed.connect(self._settings_changed)
         context.visible_changed.connect(self._visible_changed)
         self.refresh()
@@ -418,7 +379,7 @@ class OverviewScreen(QWidget):
     # Showing
 
     def shown(self) -> None:
-        """Redraw what changed while hidden and check the sandbox settings."""
+        """Redraw what changed while hidden and the sandbox alerts."""
         self._elapsed.start()
         if self._stale:
             self.refresh()
@@ -434,7 +395,7 @@ class OverviewScreen(QWidget):
             self._elapsed.stop()
             self.collapse_live()
 
-    def _runs_changed(self) -> None:
+    def _runs_changed(self, *_args: object) -> None:
         if self.isVisible():
             self.refresh()
         else:
@@ -462,17 +423,21 @@ class OverviewScreen(QWidget):
         unreadable = runs.unreadable()
         self.unreadable_alert.title_label.setText(unreadable_line(unreadable))
         self.unreadable_alert.setAccessibleName(unreadable_line(unreadable))
-        self.unreadable_alert.setVisible(unreadable > 0)
+        error = runs.error()
+        self.unreadable_alert.setVisible(unreadable > 0 and error is None)
+        if error is not None:
+            self.collapse_live()
+            self._show_state()
+            self.state_view.show_error(read_failure(error), self.retry_runs)
+            return
         if not runs.loaded():
-            self.live_card.hide()
-            self.finished_card.hide()
+            self._show_state()
             self.state_view.show_loading("Reading runs")
             return
         if not live and not finished:
             self._draw_live([])
             self._draw_finished([])
-            self.live_card.hide()
-            self.finished_card.hide()
+            self._show_state()
             self.state_view.show_empty(
                 "inbox",
                 "No runs yet",
@@ -486,6 +451,17 @@ class OverviewScreen(QWidget):
         self._draw_live(live)
         self._draw_finished(finished)
 
+    def _show_state(self) -> None:
+        """Hide the run cards and give the state view their place."""
+        self.live_card.hide()
+        self.finished_card.hide()
+        self.state_view.show()
+
+    def retry_runs(self) -> None:
+        """Read the runs folder again now, showing that it is being read."""
+        self.state_view.show_loading("Reading runs")
+        self.context.runs.reload()
+
     def _draw_live(self, live: list[Run]) -> None:
         wanted = {run.id for run in live}
         if self.expanded_live is not None and self.expanded_live not in wanted:
@@ -493,9 +469,7 @@ class OverviewScreen(QWidget):
         for run_id in [key for key in self.live_rows if key not in wanted]:
             row = self.live_rows.pop(run_id)
             row.close_mirror()
-            self.live_rows_layout.removeWidget(row)
-            row.hide()
-            row.deleteLater()
+            discard(row, self.live_rows_layout)
         for run in live:
             row = self.live_rows.get(run.id)
             if row is None:
@@ -506,32 +480,36 @@ class OverviewScreen(QWidget):
                 self.live_rows[run.id] = row
             else:
                 row.set_run(run)
-            self.live_rows_layout.removeWidget(row)
-        for run in live:
-            row = self.live_rows[run.id]
-            self.live_rows_layout.addWidget(row)
-            row.show()
+        _place(self.live_rows_layout, [self.live_rows[run.id] for run in live])
         self.live_empty.setVisible(not live)
         self._chain_focus()
 
     def _draw_finished(self, finished: list[Run]) -> None:
-        for row in self.finished_rows.values():
-            self.finished_rows_layout.removeWidget(row)
-            row.hide()
-            row.deleteLater()
-        self.finished_rows = {}
-        ids = {run.id for run in finished}
-        if self.expanded_finished not in ids:
+        """Draw the finished rows, reusing each run's row.
+
+        A row is redrawn only when a value it shows changed, so focus, an
+        expanded record and selected text survive a reload.
+        """
+        wanted = {run.id for run in finished}
+        if self.expanded_finished not in wanted:
             self.expanded_finished = None
+        for run_id in [key for key in self.finished_rows if key not in wanted]:
+            discard(self.finished_rows.pop(run_id), self.finished_rows_layout)
         for run in finished:
-            row = _FinishedRow(run)
-            row.expand_button.clicked.connect(
-                lambda _checked=False, key=run.id: self.toggle_finished(key)
-            )
-            self.finished_rows[run.id] = row
-            self.finished_rows_layout.addWidget(row)
-            if run.id == self.expanded_finished:
-                row.show_details(True)
+            row = self.finished_rows.get(run.id)
+            if row is None:
+                row = _FinishedRow(run)
+                row.expand_button.clicked.connect(
+                    lambda _checked=False, key=run.id: self.toggle_finished(key)
+                )
+                self.finished_rows[run.id] = row
+            else:
+                row.set_run(run)
+        self.finished_rows = {run.id: self.finished_rows[run.id] for run in finished}
+        _place(self.finished_rows_layout, list(self.finished_rows.values()))
+        expanded = self.finished_rows.get(self.expanded_finished or "")
+        if expanded is not None and expanded.details is None:
+            expanded.show_details(True)
         self.finished_empty.setVisible(not finished)
         self._chain_focus()
 
@@ -543,8 +521,7 @@ class OverviewScreen(QWidget):
         for row in self.live_rows.values():
             chain.extend((row.expand_button, row.open_button))
         chain.extend(row.expand_button for row in self.finished_rows.values())
-        for first, second in zip(chain, chain[1:], strict=False):
-            QWidget.setTabOrder(first, second)
+        chain_tab_order(chain)
 
     def _update_elapsed(self) -> None:
         now = time.time()
@@ -595,37 +572,24 @@ class OverviewScreen(QWidget):
     # Sandbox alerts
 
     def check_sandboxes(self) -> None:
-        """Read each engine's sandbox method in a task and redraw the alerts.
+        """Redraw the alerts from the last settings snapshot.
 
-        Only engines that are on are checked. A check asked for while one
-        runs follows it once.
+        An engine that is on and whose `sandbox.<engine>` setting gives no
+        sandbox has an alert. Nothing is shown before the first snapshot.
         """
-        if self._sandbox_busy:
-            self._sandbox_queued = True
-            return
-        engines = [
-            engine
-            for engine in sandbox.ENGINES
-            if self.context.setting(f"engine.{engine}") == "on"
-        ]
-        self._sandbox_busy = True
-        env = self.context.env
-
-        def read() -> list[str]:
-            return [
+        engines = []
+        if self.context.settings_ready():
+            engines = [
                 engine
-                for engine in engines
-                if sandbox.method(engine, env=env) == sandbox.NONE
+                for engine in sandbox.ENGINES
+                if self.context.setting(f"engine.{engine}") == "on"
+                and sandbox.provider_of(
+                    engine, str(self.context.setting(f"sandbox.{engine}"))
+                )
+                == sandbox.NONE
             ]
-
-        self.context.tasks.run(read, self._sandboxes_read, self._sandboxes_failed)
-
-    def _sandboxes_read(self, engines: list[str]) -> None:
         for engine in [key for key in self.sandbox_alerts if key not in engines]:
-            alert = self.sandbox_alerts.pop(engine)
-            self.alerts.removeWidget(alert)
-            alert.hide()
-            alert.deleteLater()
+            discard(self.sandbox_alerts.pop(engine), self.alerts)
         for engine in engines:
             if engine in self.sandbox_alerts:
                 continue
@@ -635,19 +599,5 @@ class OverviewScreen(QWidget):
                 actions=[("Open Engines", lambda: self.context.show_screen("engines"))],
             )
             self.sandbox_alerts[engine] = alert
-        for engine in sandbox.ENGINES:
-            if engine in self.sandbox_alerts:
-                self.alerts.removeWidget(self.sandbox_alerts[engine])
-                self.alerts.addWidget(self.sandbox_alerts[engine])
+        _place(self.alerts, [self.sandbox_alerts[engine] for engine in engines])
         self._chain_focus()
-        self._sandbox_done()
-
-    def _sandboxes_failed(self, _error: Exception) -> None:
-        # The window shows settings read failures; the alerts stay as they were.
-        self._sandbox_done()
-
-    def _sandbox_done(self) -> None:
-        self._sandbox_busy = False
-        if self._sandbox_queued:
-            self._sandbox_queued = False
-            self.check_sandboxes()

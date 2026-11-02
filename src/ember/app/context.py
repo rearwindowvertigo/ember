@@ -7,6 +7,7 @@ and listen to the signals; every read and save runs in a task.
 
 import io
 import subprocess
+from collections import deque
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -114,6 +115,10 @@ class AppContext(QObject):
         self._deps_queued: bool | None = None
         self._visible = False
         self._autostart_reason: str | None = None
+        self._save_queue: deque[
+            tuple[dict[str, object], Callable[[dict[str, Any]], None] | None]
+        ] = deque()
+        self._saving = False
 
     # Settings
 
@@ -143,6 +148,14 @@ class AppContext(QObject):
         Args:
             done: Called after `settings_changed` when the read succeeds.
         """
+        self._read_settings(done, None)
+
+    def _read_settings(
+        self,
+        done: Callable[[], None] | None,
+        after: Callable[[], None] | None,
+    ) -> None:
+        """Read the settings; `after` runs once the read ends either way."""
         env = self.env
 
         def loaded(snapshot: dict[str, Any]) -> None:
@@ -150,6 +163,8 @@ class AppContext(QObject):
             self.settings_changed.emit(snapshot)
             if done is not None:
                 done()
+            if after is not None:
+                after()
 
         def failed(error: Exception) -> None:
             self.settings_failed.emit(
@@ -157,6 +172,8 @@ class AppContext(QObject):
                 "Try again; if this keeps happening, check the settings "
                 "database's folder."
             )
+            if after is not None:
+                after()
 
         self.tasks.run(lambda: choices.snapshot(env=env), loaded, failed)
 
@@ -165,16 +182,29 @@ class AppContext(QObject):
         values: dict[str, object],
         done: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
-        """Save standing settings in a task.
+        """Save standing settings in a task, one save at a time.
 
-        On success the new snapshot is read, `settings_changed` is emitted
-        and `done` is called with it. A save refused as stale reloads the
-        settings, then emits `stale`. Any other failure emits `error`.
+        A save asked for while another is in flight waits for it, then is
+        sent with the generation of the snapshot read after it. On success
+        the new snapshot is read, `settings_changed` is emitted and `done`
+        is called with it. A save refused as stale drops the saves waiting
+        behind it, reloads the settings, then emits `stale`. Any other
+        failure emits `error`, and the next waiting save is sent.
 
         Args:
             values: Key to typed value.
             done: Called with the new snapshot after this save succeeds.
         """
+        self._save_queue.append((values, done))
+        if not self._saving:
+            self._next_save()
+
+    def _next_save(self) -> None:
+        if not self._save_queue:
+            self._saving = False
+            return
+        self._saving = True
+        values, done = self._save_queue.popleft()
         env = self.env
         expect = self.settings().get("generation")
 
@@ -187,11 +217,14 @@ class AppContext(QObject):
             self.settings_changed.emit(snapshot)
             if done is not None:
                 done(snapshot)
+            self._next_save()
 
         def failed(error: Exception) -> None:
             if isinstance(error, db.StaleGenerationError):
-                self.reload_settings(self.stale.emit)
-            elif isinstance(error, choices.InvalidChoiceError):
+                self._save_queue.clear()
+                self._read_settings(self.stale.emit, self._next_save)
+                return
+            if isinstance(error, choices.InvalidChoiceError):
                 self.error.emit(f"The setting was not saved: {error}")
             elif isinstance(error, db.DatabaseBusyError):
                 self.error.emit(
@@ -203,6 +236,7 @@ class AppContext(QObject):
                     f"The setting was not saved: {error}. Try again; if this "
                     "keeps happening, check the settings database's folder."
                 )
+            self._next_save()
 
         self.tasks.run(save, saved, failed)
 
@@ -248,6 +282,10 @@ class AppContext(QObject):
     def deps(self) -> dependencies.DepsReport | None:
         """Return the last dependency report, or `None` before the first."""
         return self._deps
+
+    def deps_refreshing(self) -> bool:
+        """Return whether a dependency read is in flight or waiting."""
+        return self._deps_busy
 
     def refresh_deps(self, check_now: bool) -> None:
         """Read the dependency report in a task and emit `deps_changed`.

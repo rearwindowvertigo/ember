@@ -999,13 +999,21 @@ number of live runs and Dependencies' row the number of components with an
 update available or missing, each only above zero. A screen is created the
 first time it is shown.
 
-A save refused because the settings changed elsewhere reloads them and shows
-"Settings changed elsewhere. This screen now shows the new values. Make your
-change again." above the screen. Other failures of a save or command show
-what happened and what to do there, with Dismiss.
+Saves run one at a time: a change made while a save is in flight is sent
+after it, with the settings generation that save produced. Choosing the
+value already saved saves nothing. A save refused because the settings
+changed elsewhere drops the changes waiting behind it, reloads the settings
+and shows "Settings changed elsewhere. This screen now shows the new values.
+Make your change again." above the screen. Other failures of a save or
+command show what happened and what to do there, with Dismiss, and the next
+waiting change is sent.
 
 With `app.theme` set to `system`, the app follows the desktop when it
 switches between light and dark.
+
+Screens show times in local time as `Today 10:42`, `Yesterday 17:03` or
+`30 Oct 14:05`, with English month abbreviations in every locale, and
+durations as `18 min`, `1 h 5 min` or `2 h`.
 
 ### Keyboard
 
@@ -1014,6 +1022,11 @@ switches between light and dark.
 | Ctrl+1 to Ctrl+5 | Open Overview, Menu, Engines, Dependencies, Settings |
 | Ctrl+W | Hide the window to the tray; quit when there is no tray |
 | Ctrl+Q | Quit |
+| Left, Right, Home, End | In a screen mirror that has focus: scroll it sideways |
+| Up, Down, Page Up, Page Down | In a screen mirror that has focus: scroll it, or the screen around it when it shows every line |
+
+A screen mirror takes focus with Tab and then shows the focus ring. Keys
+pressed in it never reach the run's session.
 
 ### Tray
 
@@ -1045,8 +1058,10 @@ seconds, while the window is hidden too. At most one read runs at a time and
 one more follows it when a change came in meanwhile. Live runs are those
 `starting`, `running` or `waiting`, oldest first; finished runs are the last
 twenty `closed` or `failed`, newest `ended_at` first. A record that cannot be
-read is skipped and counted. A run whose turn failed since the last read
-makes the app check the engines again.
+read is skipped and counted. When the runs folder itself cannot be read, the
+app keeps the records it read last and Overview shows the reason with Try
+again, which reads the folder again at once. A run whose turn failed since
+the last read makes the app check the engines again.
 
 ### Commands
 
@@ -1080,6 +1095,40 @@ command line:
 | Xfce Terminal | `xfce4-terminal -x` |
 | XTerm | `xterm -e` |
 
+### Overview
+
+Overview's subtitle is the tray's status line. Above the lists, an alert
+names each engine that is on and whose `sandbox.<engine>` setting gives it
+no sandbox, read from the last settings snapshot, with Open Engines; an
+alert counts run records that could not be read.
+
+The Live card holds one row per live run, oldest first: an expand arrow,
+the status badge (Starting, Running, Waiting for Claude),
+`<Engine> · <model> · <effort>`, `<repository folder> · <branch or
+read-only> · turn <n>`, the time since the start, redrawn every 30 seconds
+while the screen shows, and Open terminal, which opens a terminal window on
+the run as `emb run --attach` does. The Finished card holds the last twenty
+finished runs, newest first: the badge (Closed, Failed), the same first
+line, `<subject> · <branch or read-only>`, and the end time with the
+duration. Expanding a finished row shows its record: run, subject, engine,
+repository, branch, sandbox, turns and commits, start, end, last exit and
+last reason. One row of each card is expanded at a time.
+
+Rows are kept per run id across reloads. A finished row is redrawn only
+when a value it shows changes, so focus, an expanded record and selected
+text stay when another run saves its record.
+
+Expanding a live row shows the run's screen mirror. The mirror is a tmux
+control-mode client attached to the run's session with the `read-only` and
+`ignore-size` flags, so it cannot type into the pane or change its size.
+After the pane writes output it captures the pane with its colours and
+cursor and redraws; nothing runs on a timer. It closes
+when the row collapses, the run leaves the live list, the screen is left or
+the window hides, and shows "Session ended" when the session ends.
+
+When the runs folder cannot be read, the screen shows the reason and Try
+again in place of the cards.
+
 ### Menu
 
 Menu shows the standing worker menu: the Writer and Reviewer pickers
@@ -1094,7 +1143,9 @@ holds a Claude model, a row under it picks how it runs, CLI or Subagent
 A saved value that the picker no longer offers stays chosen and shows as
 `<engine>:<model> (not on the shortlist)` or `<engine>:<model> (<Engine> is
 off)`, with a warning line giving that reason. A saved model whose engine was
-not connected at its last check shows a warning line too. When no engine
+not connected at its last check shows a warning line too; the check is the
+app's last engine status read, or before the first read the status cache the
+settings snapshot reports. When no engine
 offers a model, the pickers hold Ask each time only and the screen shows
 "Shortlist models in Engines to offer them here." with Open Engines.
 One-time choices are not shown. Each change saves at once.
@@ -1121,7 +1172,8 @@ shows as an unavailable entry, marked "(not installed)", until another value
 is chosen. A saved value that matches no known terminal shows as Other
 command with that value. Other command's text is saved on Enter or when the
 field loses focus; empty text or text that is not a valid command line is not
-saved, and the line under the field says why.
+saved, and the line under the field says why. Leaving the field with such
+text returns the picker to the saved value.
 
 Add folder opens the desktop's folder chooser. A folder already in the list
 is not added again.

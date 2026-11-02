@@ -502,7 +502,8 @@ def test_command_past_deadline_is_killed_with_its_group(
     for _ in range(100):
         try:
             state = Path(f"/proc/{pid}/stat").read_text().split()[2]
-        except FileNotFoundError:
+        except FileNotFoundError, ProcessLookupError:
+            # The process ended before or while its stat file was read.
             break
         if state == "Z":
             break

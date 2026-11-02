@@ -5,7 +5,9 @@ import sys
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QPushButton, QScrollArea, QVBoxLayout, QWidget
 from pytestqt.qtbot import QtBot
 
 from ember.app import mirror, sgr, theme
@@ -330,3 +332,58 @@ def test_view_wider_than_its_pane_list(env: dict[str, str], qtbot: QtBot) -> Non
     assert view.canvas.width() > view.scroller.viewport().width()
     qtbot.waitUntil(lambda: view.scroller.horizontalScrollBar().maximum() > 0)
     finish(view.client, qtbot)
+
+
+def test_keys_scroll_the_view_and_never_reach_tmux(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    log = stub_tmux(env, screen=["x" * 200], size="200 1 0 0 0 0")
+    outer = QScrollArea()
+    qtbot.addWidget(outer)
+    outer.setWidgetResizable(True)
+    outer.resize(400, 300)
+    content = QWidget()
+    column = QVBoxLayout(content)
+    before = QPushButton("Before")
+    column.addWidget(before)
+    view = MirrorView(RUN_ID, env)
+    column.addWidget(view)
+    spacer = QWidget()
+    spacer.setFixedHeight(2000)
+    column.addWidget(spacer)
+    outer.setWidget(content)
+    outer.show()
+    qtbot.waitExposed(outer)
+    with qtbot.waitActive(outer):
+        outer.activateWindow()
+    view.start()
+    qtbot.waitUntil(lambda: view.last_screen() is not None and idle(view.client))
+    bar = view.scroller.horizontalScrollBar()
+    qtbot.waitUntil(lambda: bar.maximum() > 0)
+    sent = len(log_lines(log, "IN"))
+
+    before.setFocus()
+    qtbot.keyClick(before, Qt.Key.Key_Tab)
+    assert view.scroller.hasFocus()
+    qtbot.keyClick(view.scroller, Qt.Key.Key_Right)
+    assert bar.value() > 0
+    qtbot.keyClick(view.scroller, Qt.Key.Key_End)
+    assert bar.value() == bar.maximum()
+    qtbot.keyClick(view.scroller, Qt.Key.Key_Home)
+    assert bar.value() == 0
+    page = outer.verticalScrollBar()
+    qtbot.keyClick(view.scroller, Qt.Key.Key_PageDown)
+    assert page.value() > 0
+    qtbot.keyClick(view.scroller, Qt.Key.Key_Up)
+    qtbot.keyClick(view.scroller, Qt.Key.Key_PageUp)
+    assert page.value() == 0
+    qtbot.keyClicks(view.scroller, "ls\r")
+    assert len(log_lines(log, "IN")) == sent
+    finish(view.client, qtbot)
+
+
+def test_focus_ring_style() -> None:
+    sheet = theme.style_sheet("light")
+    rule = sheet.split('QScrollArea[role="mirror"]:focus')[1].split("}")[0]
+    assert theme.color("focus-ring", "light").name() in rule.lower()
+    assert 'QScrollArea[role="mirror"] {' in sheet

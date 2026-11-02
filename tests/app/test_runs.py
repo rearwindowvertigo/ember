@@ -2,6 +2,7 @@ import json
 import os
 from dataclasses import replace
 
+import pytest
 from pytestqt.qtbot import QtBot
 
 from ember import paths
@@ -213,3 +214,43 @@ def test_reloads_are_coalesced(env: dict[str, str], qtbot: QtBot) -> None:
     qtbot.waitUntil(model.loaded)
     qtbot.waitUntil(lambda: model._tasks.pending() == 0)
     assert not model._queued
+
+
+def test_folder_read_failure_is_reported_and_cleared(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_run(make_run(env))
+    model = _model(env, qtbot)
+    assert model.error() is None
+
+    def refuse(_env: object) -> object:
+        raise PermissionError(13, "Permission denied", str(paths.runs_dir(env)))
+
+    monkeypatch.setattr(record, "list_runs", refuse)
+    with (
+        qtbot.waitSignal(model.failed, timeout=5000) as blocker,
+        qtbot.assertNotEmitted(model.changed),
+    ):
+        model.reload()
+    assert blocker.args is not None
+    assert "Permission denied" in blocker.args[0]
+    assert model.error() == blocker.args[0]
+    assert len(model.live()) == 1
+    monkeypatch.undo()
+    with qtbot.waitSignal(model.changed, timeout=5000):
+        model.reload()
+    assert model.error() is None
+    assert len(model.live()) == 1
+    model.stop()
+
+
+def test_unreadable_record_is_not_a_folder_failure(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    folder = paths.runs_dir(env) / "codex-20260101-120000-badbad"
+    folder.mkdir(parents=True)
+    (folder / "run.json").write_text("not json")
+    model = _model(env, qtbot)
+    assert model.unreadable() == 1
+    assert model.error() is None
+    model.stop()
