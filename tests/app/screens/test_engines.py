@@ -1,5 +1,7 @@
+import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -317,49 +319,151 @@ def test_run_goes_through_the_context(
     assert card.again_widget.isHidden() is not accepted
 
 
-def test_check_now_reads_status_and_checks_engines_that_are_on(
+def test_check_now_checks_engines_with_use_and_sandbox_on(
     env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
 ) -> None:
-    choices.set_settings({"engine.opencode": "off"}, env=env)
+    choices.set_settings(
+        {
+            "engine.opencode": "off",
+            "sandbox.opencode": "on",
+            "sandbox.codex": "on",
+            "sandbox.claude": "off",
+        },
+        env=env,
+    )
     screen, context = _screen(env, qtbot)
     _shown(screen, context, qtbot)
     assert stubs["checks"] == []
     with qtbot.waitSignal(context.engines_changed, timeout=5000):
         qtbot.mouseClick(screen.check_button, Qt.MouseButton.LeftButton)
     qtbot.waitUntil(lambda: not screen.checking, timeout=5000)
-    assert sorted(stubs["checks"]) == ["claude", "codex"]
+    assert stubs["checks"] == ["codex"]
     assert (
         screen.cards["codex"]
         .check_label.text()
         .startswith("Last check: Passed, today ")
     )
     assert screen.cards["opencode"].check_label.text() == "Last check: Not run"
-    assert set(sandbox.last_checks(env)) == {"claude", "codex"}
+    assert screen.cards["claude"].check_label.text() == "Sandbox off"
+    assert set(sandbox.last_checks(env)) == {"codex"}
 
 
-def test_sandbox_switch_saves_then_runs_the_check(
+def test_sandbox_switch_on_saves_then_runs_the_check(
     env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
 ) -> None:
-    choices.set_settings({"sandbox.opencode": "on"}, env=env)
+    choices.set_settings({"sandbox.opencode": "off"}, env=env)
     stubs["check_result"] = {
         "opencode": _check("opencode", ok=False, detail="the sandbox test failed")
     }
     screen, context = _screen(env, qtbot)
     _shown(screen, context, qtbot)
     card = screen.cards["opencode"]
-    assert card.sandbox_switch.isChecked()
+    assert not card.sandbox_switch.isChecked()
+    assert card.check_label.text() == "Sandbox off"
     _save(
         context,
         qtbot,
         lambda: qtbot.mouseClick(card.sandbox_switch, Qt.MouseButton.LeftButton),
     )
-    assert context.setting("sandbox.opencode") == "off"
+    assert context.setting("sandbox.opencode") == "on"
     qtbot.waitUntil(lambda: stubs["checks"] == ["opencode"], timeout=5000)
     qtbot.waitUntil(lambda: not screen.checking, timeout=5000)
     assert "Failed, today" in card.check_label.text()
     assert card.check_label.text().endswith(": the sandbox test failed")
     assert card.bwrap_label.text() == "bwrap: /usr/bin/bwrap, 0.11.1"
     assert sandbox.last_checks(env)["opencode"].ok is False
+
+
+def test_sandbox_switch_off_shows_sandbox_off_and_runs_nothing(
+    env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
+) -> None:
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    sandbox.save_check(_check("claude"), env)
+    screen, context = _screen(env, qtbot)
+    _shown(screen, context, qtbot)
+    card = screen.cards["claude"]
+    assert card.check_label.text().startswith("Last check: Passed, today ")
+    _save(
+        context,
+        qtbot,
+        lambda: qtbot.mouseClick(card.sandbox_switch, Qt.MouseButton.LeftButton),
+    )
+    context.tasks.wait(5000)
+    QApplication.processEvents()
+    assert context.setting("sandbox.claude") == "off"
+    assert stubs["checks"] == []
+    assert card.check_label.text() == "Sandbox off"
+    assert "Passed" not in card.check_label.text()
+
+
+def test_a_check_without_a_sandbox_never_shows_passed(
+    env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
+) -> None:
+    choices.set_settings({"sandbox.codex": "on"}, env=env)
+    unsandboxed = replace(_check("codex"), provider=sandbox.NONE, detail="no sandbox")
+    sandbox.save_check(unsandboxed, env)
+    screen, context = _screen(env, qtbot)
+    _shown(screen, context, qtbot)
+    assert screen.cards["codex"].check_label.text() == "Last check: Not run"
+
+
+def test_cached_checks_never_overwrite_a_newer_check(
+    env: dict[str, str],
+    qtbot: QtBot,
+    stubs: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    choices.set_settings({"sandbox.codex": "on"}, env=env)
+    screen, context = _screen(env, qtbot)
+    _shown(screen, context, qtbot)
+    old = replace(_check("codex", ok=False, detail="old"), checked_at=NOW - 600)
+    release = threading.Event()
+
+    def last_checks(_env: object = None) -> dict[str, sandbox.SandboxCheck]:
+        release.wait(5)
+        return {"codex": old}
+
+    monkeypatch.setattr(sandbox, "last_checks", last_checks)
+    stubs["check_result"] = {"codex": replace(_check("codex"), checked_at=NOW + 1)}
+    screen.shown()
+    screen.run_sandbox_check("codex")
+    qtbot.waitUntil(lambda: not screen.checking, timeout=5000)
+    release.set()
+    context.tasks.wait(5000)
+    QApplication.processEvents()
+    assert screen.checks["codex"].ok
+    assert screen.cards["codex"].check_label.text().startswith("Last check: Passed")
+
+    held = screen.checks["codex"]
+    release.clear()
+    screen.shown()
+    screen.run_sandbox_check("codex")
+    release.set()
+    qtbot.waitUntil(lambda: not screen.checking, timeout=5000)
+    context.tasks.wait(5000)
+    QApplication.processEvents()
+    assert screen.checks["codex"].checked_at >= held.checked_at
+    assert screen.checks["codex"].ok
+
+
+def test_failed_version_probe_shows_the_reason_without_setup(
+    env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
+) -> None:
+    met = replace(
+        _status("codex", status.CONNECTED),
+        state=status.CHECK_FAILED,
+        connected=False,
+        version=None,
+        reason="codex --version exited 1",
+    )
+    stubs["engines"] = {**_all(), "codex": met}
+    screen, context = _screen(env, qtbot)
+    _shown(screen, context, qtbot)
+    card = screen.cards["codex"]
+    assert card.setup_widget.isHidden()
+    assert not card.reason_label.isHidden()
+    assert card.reason_label.text() == "Codex --version exited 1"
+    assert card.badge.text() == "Check failed"
 
 
 def test_use_switch_saves(
@@ -788,7 +892,8 @@ def test_every_control_is_reached_with_tab(
     for row in panel.rows:
         if not row.isHidden():
             expected += row.focus_order()
-    screen.activateWindow()
+    with qtbot.waitActive(screen):
+        screen.activateWindow()
     screen.check_button.setFocus(Qt.FocusReason.TabFocusReason)
     reached: list[QWidget] = []
     for _ in range(len(expected) + 5):

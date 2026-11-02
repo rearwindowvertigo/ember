@@ -8,8 +8,9 @@ one engine's model list below the cards, where models are put on the
 shortlist with an effort.
 
 Opening the screen reads the engine status again. Check now reads it and
-runs the sandbox check of every engine that is on. Every read, check and
-save runs in a task.
+runs the sandbox check of every engine whose Use and Sandbox switches are
+on; a card whose sandbox is off shows "Sandbox off" in place of a check
+result. Every read, check and save runs in a task.
 """
 
 from collections.abc import Sequence
@@ -81,6 +82,9 @@ CONTEXT_CHOICES: tuple[tuple[str, int | None], ...] = (
 
 NO_EFFORT_NOTE = "This model reports no effort, so it cannot be shortlisted."
 """Shown on a Codex or Claude model row that has no effort to save."""
+
+SANDBOX_OFF = "Sandbox off"
+"""Shown in place of the last check while an engine's sandbox switch is off."""
 
 CHECK_AGAIN = "Check again after the command finishes."
 """Shown on a card after the owner ran one of its setup commands."""
@@ -378,7 +382,9 @@ class _EngineCard(Card):
         self.sandbox_switch.setChecked(switch == "on")
         self.provider_label.setText(f"Provider: {PROVIDER_TEXT[provider]}")
         self.none_label.setVisible(provider == sandbox.NONE)
-        self._draw_check(screen.checks.get(engine), engine in screen.checking)
+        self._draw_check(
+            screen.checks.get(engine), engine in screen.checking, switch == "on"
+        )
 
         saved = screen.setting(f"shortlist.{engine}", [])
         count = len(saved) if isinstance(saved, list) else 0
@@ -386,7 +392,17 @@ class _EngineCard(Card):
         self.models_button.setChecked(screen.open_engine == engine)
         self._draw_setup(engine_status)
 
-    def _draw_check(self, check: sandbox.SandboxCheck | None, checking: bool) -> None:
+    def _draw_check(
+        self, check: sandbox.SandboxCheck | None, checking: bool, switched_on: bool
+    ) -> None:
+        """Draw the bwrap line, the last sandbox check and its blocking causes.
+
+        With the sandbox switch off the card shows "Sandbox off" in place of
+        a check result; a check that ran without a sandbox is never shown as
+        passed.
+        """
+        if check is not None and check.provider == sandbox.NONE:
+            check = None
         if check is None:
             self.bwrap_label.setText("bwrap: not checked yet")
         elif check.bwrap_path is None:
@@ -394,7 +410,10 @@ class _EngineCard(Card):
         else:
             version = check.bwrap_version or "version unknown"
             self.bwrap_label.setText(f"bwrap: {check.bwrap_path}, {version}")
-        if checking:
+        if not switched_on:
+            self.check_label.setText(SANDBOX_OFF)
+            check = None
+        elif checking:
             self.check_label.setText("Last check: checking the sandbox now")
         elif check is None:
             self.check_label.setText("Last check: Not run")
@@ -404,12 +423,19 @@ class _EngineCard(Card):
                 self.check_label.setText(f"Last check: Passed, {at}")
             else:
                 self.check_label.setText(f"Last check: Failed, {at}: {check.detail}")
-        discard(self.cause_alert, self.cause_area)
-        self.cause_alert = None
+        text = ""
         if check is not None and check.causes:
             text = "\n".join(
                 f"{sentence(cause)}. {cause_advice(cause)}" for cause in check.causes
             )
+        if (
+            self.cause_alert is not None
+            and self.cause_alert.accessibleDescription() == text
+        ):
+            return
+        discard(self.cause_alert, self.cause_area)
+        self.cause_alert = None
+        if text:
             self.cause_alert = Alert("danger", "The sandbox is blocked", text)
             self.cause_area.addWidget(self.cause_alert)
 
@@ -420,15 +446,20 @@ class _EngineCard(Card):
         self._setup_key = key
         clear_layout(self.setup_area)
         self.commands = []
-        if engine_status is None or engine_status.connected:
+        unmet = (
+            []
+            if engine_status is None or engine_status.connected
+            else [item for item in engine_status.requirements if not item.met]
+        )
+        if engine_status is None or not unmet:
+            # A failed check whose requirements are all met (only the
+            # version could not be read) shows its reason above, not here.
             self.setup_widget.hide()
             return
         heading = QLabel("Setup")
         heading.setFont(theme.font("label"))
         self.setup_area.addWidget(heading)
-        for requirement in engine_status.requirements:
-            if requirement.met:
-                continue
+        for requirement in unmet:
             self.setup_area.addWidget(label(sentence(requirement.label)))
             if requirement.fix is None:
                 reason = engine_status.reason or "Ember found no command that fixes it."
@@ -947,9 +978,18 @@ class EnginesScreen(QWidget):
         def read() -> dict[str, sandbox.SandboxCheck]:
             return sandbox.last_checks(env)
 
+        tokens = dict(self._check_tokens)
+
         def loaded(result: dict[str, sandbox.SandboxCheck]) -> None:
             for engine, check in result.items():
-                if engine not in self.checking:
+                # A check started since this read began, still running or
+                # finished, is newer than the cached one.
+                if engine in self.checking or self._check_tokens.get(
+                    engine
+                ) != tokens.get(engine):
+                    continue
+                held = self.checks.get(engine)
+                if held is None or held.checked_at < check.checked_at:
                     self.checks[engine] = check
             self._redraw()
 
@@ -1015,14 +1055,20 @@ class EnginesScreen(QWidget):
     # Actions
 
     def check_now(self) -> None:
-        """Read the engine status and check the sandbox of every engine on."""
+        """Read the engine status and run the sandbox checks.
+
+        Only engines whose Use and Sandbox switches are both on are checked.
+        """
         for card in self.cards.values():
             card.show_check_again(False)
         self._reading_engines = True
         self._draw_subtitle()
         self.context.refresh_engines()
         for engine in status.ENGINES:
-            if self.setting(f"engine.{engine}", "on") == "on":
+            if (
+                self.setting(f"engine.{engine}", "on") == "on"
+                and self.setting(f"sandbox.{engine}", "off") == "on"
+            ):
                 self.run_sandbox_check(engine)
 
     def run_sandbox_check(self, engine: str) -> None:
@@ -1071,16 +1117,25 @@ class EnginesScreen(QWidget):
         self.context.save_settings({key: "on" if on else "off"})
 
     def save_sandbox(self, engine: str, on: bool) -> None:
-        """Save an engine's sandbox switch, then run its sandbox check.
+        """Save an engine's sandbox switch; after turning it on, run its check.
 
         Args:
             engine: `codex`, `opencode` or `claude`.
             on: The new value.
         """
+        if not on:
+            self._drop_check(engine)
+            self.context.save_settings({f"sandbox.{engine}": "off"})
+            return
         self.context.save_settings(
-            {f"sandbox.{engine}": "on" if on else "off"},
+            {f"sandbox.{engine}": "on"},
             lambda _snapshot: self.run_sandbox_check(engine),
         )
+
+    def _drop_check(self, engine: str) -> None:
+        """Forget the result of an engine's check in flight."""
+        self._check_tokens[engine] = self._check_tokens.get(engine, 0) + 1
+        self.checking.discard(engine)
 
     def save_shortlist(self, engine: str, entries: list[str]) -> None:
         """Save an engine's shortlist.
