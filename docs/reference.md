@@ -1007,6 +1007,10 @@ what happened and what to do there, with Dismiss.
 With `app.theme` set to `system`, the app follows the desktop when it
 switches between light and dark.
 
+Screens show times in local time as `Today 10:42`, `Yesterday 17:03` or
+`30 Oct 14:05`, with English month abbreviations in every locale, and
+durations as `18 min`, `1 h 5 min` or `2 h`.
+
 ### Keyboard
 
 | Keys | Do |

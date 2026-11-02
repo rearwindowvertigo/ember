@@ -11,18 +11,18 @@ choices are not shown.
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (
-    QFrame,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QScrollArea,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QWidget
 
 from ember import choices
-from ember.app import theme, widgets
+from ember.app import widgets
+from ember.app.screens.common import (
+    ToneLine,
+    engine_name,
+    label,
+    name_and_help,
+    screen_header,
+    scrolled,
+)
 
 if TYPE_CHECKING:
     from ember.app.context import AppContext
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 ENGINE_ORDER = ("codex", "opencode", "claude")
 """The engines in the order the pickers list them, as the Engines screen does."""
 
-ENGINE_LABELS = {"codex": "Codex", "opencode": "OpenCode", "claude": "Claude"}
+ENGINE_LABELS = {engine: engine_name(engine) for engine in ENGINE_ORDER}
 """Each engine's shown name."""
 
 SUBTITLE = (
@@ -50,91 +50,6 @@ ASK = "ask"
 """The menu value of Ask each time."""
 
 NO_SHORTLIST = "Shortlist models in Engines to offer them here."
-
-
-class ToneLine(QLabel):
-    """One line of text in a tone's colour, following the theme."""
-
-    def __init__(self, tone: str = "warning", parent: QWidget | None = None) -> None:
-        """Create the line, empty and hidden.
-
-        Args:
-            tone: One of `widgets.TONES`.
-            parent: The parent widget.
-        """
-        super().__init__(parent)
-        self._tone = tone
-        self.setWordWrap(True)
-        self.setTextFormat(Qt.TextFormat.PlainText)
-        self.setVisible(False)
-        self._draw()
-        theme.signals.changed.connect(self._draw)
-
-    def _draw(self, *_args: object) -> None:
-        self.setStyleSheet(f"color: {widgets.tone_color(self._tone).name()};")
-
-    def show_text(self, text: str | None) -> None:
-        """Show a line, or hide the line for `None` or empty text."""
-        self.setText(text or "")
-        self.setAccessibleName(text or "")
-        self.setVisible(bool(text))
-
-
-def screen_header(layout: QVBoxLayout, title: str, subtitle: str) -> None:
-    """Add a screen's title, in the display type, and its subtitle.
-
-    Args:
-        layout: The screen's content layout.
-        title: The screen's name.
-        subtitle: One line under it.
-    """
-    heading = QLabel(title)
-    heading.setFont(theme.font("display"))
-    layout.addWidget(heading)
-    line = QLabel(subtitle)
-    line.setProperty("role", "secondary")
-    line.setWordWrap(True)
-    layout.addWidget(line)
-    layout.addSpacing(16)
-
-
-def scrolled(screen: QWidget) -> QVBoxLayout:
-    """Give a screen a scrolling content area with the screen padding.
-
-    Args:
-        screen: The screen widget.
-
-    Returns:
-        The content layout, with 24 px padding and 16 px gaps.
-    """
-    outer = QVBoxLayout(screen)
-    outer.setContentsMargins(0, 0, 0, 0)
-    area = QScrollArea()
-    area.setWidgetResizable(True)
-    area.setFrameShape(QFrame.Shape.NoFrame)
-    content = QWidget()
-    area.setWidget(content)
-    outer.addWidget(area)
-    layout = QVBoxLayout(content)
-    layout.setContentsMargins(24, 24, 24, 24)
-    layout.setSpacing(16)
-    return layout
-
-
-def name_and_help(name: str, help_text: str) -> QWidget:
-    """Return a row's name over its line of help."""
-    box = QWidget()
-    column = QVBoxLayout(box)
-    column.setContentsMargins(0, 0, 0, 0)
-    column.setSpacing(2)
-    label = QLabel(name)
-    label.setFont(theme.font("label"))
-    column.addWidget(label)
-    line = QLabel(help_text)
-    line.setProperty("role", "secondary")
-    line.setWordWrap(True)
-    column.addWidget(line)
-    return box
 
 
 def _split(value: object) -> tuple[str, str] | None:
@@ -280,9 +195,7 @@ class MenuScreen(QWidget):
         empty_layout = QHBoxLayout(self.empty)
         empty_layout.setContentsMargins(0, 0, 0, 0)
         empty_layout.setSpacing(12)
-        self.empty_line = QLabel(NO_SHORTLIST)
-        self.empty_line.setProperty("role", "secondary")
-        self.empty_line.setWordWrap(True)
+        self.empty_line = label(NO_SHORTLIST, "secondary")
         empty_layout.addWidget(self.empty_line, 1)
         self.open_engines = widgets.button("Open Engines", "secondary", size="sm")
         self.open_engines.clicked.connect(lambda: context.show_screen("engines"))

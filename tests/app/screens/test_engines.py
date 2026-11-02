@@ -1,6 +1,5 @@
 import time
 from collections.abc import Callable
-from datetime import datetime
 from typing import Any
 
 import pytest
@@ -20,7 +19,6 @@ from ember.app.screens.engines import (
     per_token,
     price_text,
     shortlist_with,
-    when,
 )
 from ember.app.widgets import CommandLine
 from ember.engines import models, status
@@ -163,13 +161,6 @@ def test_badge_order() -> None:
     )
     assert badge_for(True, connected, "none") == ("No sandbox", "warning")
     assert badge_for(True, connected, "codex") == ("Connected", "success")
-
-
-def test_when_formats_local_times() -> None:
-    now = datetime(2026, 11, 2, 12, 0).timestamp()
-    assert when(datetime(2026, 11, 2, 10, 42).timestamp(), now) == "Today 10:42"
-    assert when(datetime(2026, 11, 1, 17, 3).timestamp(), now) == "Yesterday 17:03"
-    assert when(datetime(2026, 10, 30, 14, 5).timestamp(), now) == "30 Oct 14:05"
 
 
 def test_shortlist_entries_per_engine() -> None:

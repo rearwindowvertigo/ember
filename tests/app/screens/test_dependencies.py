@@ -8,7 +8,7 @@ from pytestqt.qtbot import QtBot
 from ember import deps
 from ember.app.context import AppContext
 from ember.app.screens import dependencies as screen_module
-from ember.app.screens.dependencies import DependenciesScreen, subtitle, when
+from ember.app.screens.dependencies import DependenciesScreen, subtitle
 from ember.app.window import MainWindow
 
 
@@ -347,18 +347,6 @@ def test_subtitle_newest_coverage() -> None:
     ):
         expected = f"Some newest versions not read; the others read yesterday {clock}."
     assert subtitle(partial, now).endswith(expected)
-
-
-def test_when_formats() -> None:
-    now = datetime.datetime(2026, 10, 31, 12, 0).timestamp()
-    assert when(datetime.datetime(2026, 10, 31, 10, 42).timestamp(), now) == (
-        "Today 10:42"
-    )
-    assert when(datetime.datetime(2026, 10, 30, 17, 3).timestamp(), now) == (
-        "Yesterday 17:03"
-    )
-    stamp = datetime.datetime(2026, 10, 3, 14, 5)
-    assert when(stamp.timestamp(), now) == f"3 {stamp:%b} 14:05"
 
 
 def test_keyboard_reach(

@@ -14,19 +14,22 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QHideEvent
-from PySide6.QtWidgets import (
-    QFrame,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QScrollArea,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from ember import sandbox
 from ember.app import icons, theme, tray
 from ember.app.mirror import MirrorView
+from ember.app.screens.common import (
+    chain_tab_order,
+    discard,
+    duration,
+    engine_name,
+    plural,
+    screen_header,
+    scrolled,
+    titled_card,
+    when,
+)
 from ember.app.widgets import Alert, Badge, Card, StateView, button
 from ember.runs import record
 from ember.runs.record import Run
@@ -36,21 +39,6 @@ if TYPE_CHECKING:
 
 ELAPSED_MS = 30_000
 """How often the elapsed times of live runs are redrawn while shown."""
-
-MONTHS = (
-    "Jan",
-    "Feb",
-    "Mar",
-    "Apr",
-    "May",
-    "Jun",
-    "Jul",
-    "Aug",
-    "Sep",
-    "Oct",
-    "Nov",
-    "Dec",
-)
 
 BADGES = {
     record.STARTING: ("Starting", "neutral"),
@@ -64,53 +52,9 @@ BADGES = {
 MIRROR_DESCRIPTION = "Screen of run {id}, read-only. Updates when the worker writes."
 
 
-def when(stamp: float, now: float | None = None) -> str:
-    """Return a local time as "Today 10:42", "Yesterday 17:03" or "30 Oct 14:05".
-
-    Args:
-        stamp: Seconds since the epoch.
-        now: The current time; `None` reads the clock.
-
-    Returns:
-        The time in the screens' format.
-    """
-    moment = time.localtime(stamp)
-    today = time.localtime(time.time() if now is None else now)
-    clock = f"{moment.tm_hour:02d}:{moment.tm_min:02d}"
-    day = (moment.tm_year, moment.tm_yday)
-    if day == (today.tm_year, today.tm_yday):
-        return f"Today {clock}"
-    noon = time.mktime((*today[:3], 12, 0, 0, 0, 0, -1))
-    yesterday = time.localtime(noon - 86_400)
-    if day == (yesterday.tm_year, yesterday.tm_yday):
-        return f"Yesterday {clock}"
-    return f"{moment.tm_mday} {MONTHS[moment.tm_mon - 1]} {clock}"
-
-
-def duration(seconds: float) -> str:
-    """Return a duration in whole minutes: "18 min", "1 h 5 min", "2 h".
-
-    Args:
-        seconds: The duration; anything under two minutes counts as one.
-
-    Returns:
-        At least "1 min".
-    """
-    minutes = max(1, int(seconds // 60))
-    if minutes < 60:
-        return f"{minutes} min"
-    hours, rest = divmod(minutes, 60)
-    return f"{hours} h {rest} min" if rest else f"{hours} h"
-
-
-def engine_label(engine: str) -> str:
-    """Return an engine's shown name."""
-    return tray.ENGINE_LABELS.get(engine, engine)
-
-
 def worker_line(run: Run) -> str:
     """Return "<Engine> · <model> · <effort>", leaving out a missing effort."""
-    parts = [engine_label(run.engine), run.model]
+    parts = [engine_name(run.engine), run.model]
     if run.effort:
         parts.append(run.effort)
     return " · ".join(parts)
@@ -142,10 +86,6 @@ def finished_time(run: Run, now: float | None = None) -> str:
     return f"{when(end, now)} · {duration(end - run.started_at)}"
 
 
-def _plural(count: int, word: str) -> str:
-    return f"{count} {word}" if count == 1 else f"{count} {word}s"
-
-
 def record_rows(run: Run, now: float | None = None) -> list[tuple[str, str]]:
     """Return a finished run's record as label and value rows."""
     return [
@@ -157,7 +97,7 @@ def record_rows(run: Run, now: float | None = None) -> list[tuple[str, str]]:
         ("Sandbox", run.sandbox),
         (
             "Turns and commits",
-            f"{_plural(run.turn, 'turn')}, {_plural(len(run.commits), 'commit')}",
+            f"{plural(run.turn, 'turn')}, {plural(len(run.commits), 'commit')}",
         ),
         ("Started", when(run.started_at, now)),
         ("Ended", "Not recorded" if run.ended_at is None else when(run.ended_at, now)),
@@ -176,7 +116,7 @@ def unreadable_line(count: int) -> str:
 def sandbox_warning(engine: str) -> str:
     """Return the alert text for an engine that runs without a sandbox."""
     return (
-        f"{engine_label(engine)} runs without a sandbox. Its workers can read "
+        f"{engine_name(engine)} runs without a sandbox. Its workers can read "
         "every file you can, including logins and keys. Turn its sandbox on "
         "in Engines."
     )
@@ -280,9 +220,7 @@ class _LiveRow(_Row):
         mirror, self.mirror = self.mirror, None
         if mirror is not None:
             mirror.stop()
-            self.body.removeWidget(mirror)
-            mirror.hide()
-            mirror.deleteLater()
+            discard(mirror, self.body)
         self.set_expanded(False)
 
 
@@ -318,20 +256,13 @@ class _FinishedRow(_Row):
             self.body.addWidget(details)
             self.details = details
         elif not shown and self.details is not None:
-            self.body.removeWidget(self.details)
-            self.details.deleteLater()
+            discard(self.details, self.body)
             self.details = None
         self.set_expanded(shown)
 
 
 def _card(title: str) -> tuple[Card, QVBoxLayout, QLabel]:
-    card = Card()
-    layout = QVBoxLayout(card)
-    layout.setContentsMargins(20, 20, 20, 20)
-    layout.setSpacing(16)
-    heading = QLabel(title)
-    heading.setFont(theme.font("heading"))
-    layout.addWidget(heading)
+    card, layout = titled_card(title)
     empty = QLabel()
     empty.setProperty("role", "muted")
     layout.addWidget(empty)
@@ -354,27 +285,8 @@ class OverviewScreen(QWidget):
         """
         super().__init__()
         self.context = context
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        outer.addWidget(scroll)
-        content = QWidget()
-        scroll.setWidget(content)
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
-
-        heading = QVBoxLayout()
-        heading.setSpacing(4)
-        title = QLabel(self.TITLE)
-        title.setFont(theme.font("display"))
-        heading.addWidget(title)
-        self.subtitle = QLabel()
-        self.subtitle.setProperty("role", "secondary")
-        heading.addWidget(self.subtitle)
-        layout.addLayout(heading)
+        layout = scrolled(self)
+        self.subtitle = screen_header(layout, self.TITLE)
 
         self.alerts = QVBoxLayout()
         self.alerts.setSpacing(8)
@@ -493,9 +405,7 @@ class OverviewScreen(QWidget):
         for run_id in [key for key in self.live_rows if key not in wanted]:
             row = self.live_rows.pop(run_id)
             row.close_mirror()
-            self.live_rows_layout.removeWidget(row)
-            row.hide()
-            row.deleteLater()
+            discard(row, self.live_rows_layout)
         for run in live:
             row = self.live_rows.get(run.id)
             if row is None:
@@ -516,9 +426,7 @@ class OverviewScreen(QWidget):
 
     def _draw_finished(self, finished: list[Run]) -> None:
         for row in self.finished_rows.values():
-            self.finished_rows_layout.removeWidget(row)
-            row.hide()
-            row.deleteLater()
+            discard(row, self.finished_rows_layout)
         self.finished_rows = {}
         ids = {run.id for run in finished}
         if self.expanded_finished not in ids:
@@ -543,8 +451,7 @@ class OverviewScreen(QWidget):
         for row in self.live_rows.values():
             chain.extend((row.expand_button, row.open_button))
         chain.extend(row.expand_button for row in self.finished_rows.values())
-        for first, second in zip(chain, chain[1:], strict=False):
-            QWidget.setTabOrder(first, second)
+        chain_tab_order(chain)
 
     def _update_elapsed(self) -> None:
         now = time.time()
@@ -623,9 +530,7 @@ class OverviewScreen(QWidget):
     def _sandboxes_read(self, engines: list[str]) -> None:
         for engine in [key for key in self.sandbox_alerts if key not in engines]:
             alert = self.sandbox_alerts.pop(engine)
-            self.alerts.removeWidget(alert)
-            alert.hide()
-            alert.deleteLater()
+            discard(alert, self.alerts)
         for engine in engines:
             if engine in self.sandbox_alerts:
                 continue

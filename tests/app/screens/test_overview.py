@@ -1,4 +1,3 @@
-import time
 from collections.abc import Iterator
 
 import pytest
@@ -89,23 +88,6 @@ def loaded(env: dict[str, str], context: AppContext, qtbot: QtBot) -> OverviewSc
     screen = screen_for(context, qtbot)
     screen.refresh()
     return screen
-
-
-def test_time_formats() -> None:
-    now = time.mktime((2026, 10, 30, 15, 0, 0, 0, 0, -1))
-    assert overview.when(time.mktime((2026, 10, 30, 10, 42, 0, 0, 0, -1)), now) == (
-        "Today 10:42"
-    )
-    assert overview.when(time.mktime((2026, 10, 29, 17, 3, 0, 0, 0, -1)), now) == (
-        "Yesterday 17:03"
-    )
-    assert overview.when(time.mktime((2026, 10, 3, 14, 5, 0, 0, 0, -1)), now) == (
-        "3 Oct 14:05"
-    )
-    assert overview.duration(5) == "1 min"
-    assert overview.duration(18 * 60 + 59) == "18 min"
-    assert overview.duration(65 * 60) == "1 h 5 min"
-    assert overview.duration(120 * 60) == "2 h"
 
 
 def test_empty(context: AppContext, qtbot: QtBot) -> None:

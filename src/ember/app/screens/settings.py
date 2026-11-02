@@ -27,7 +27,15 @@ from PySide6.QtWidgets import (
 
 from ember import choices, terminals
 from ember.app import icons, theme, widgets
-from ember.app.screens.menu import ToneLine, name_and_help, screen_header, scrolled
+from ember.app.screens.common import (
+    ToneLine,
+    clear_layout,
+    label,
+    name_and_help,
+    screen_header,
+    scrolled,
+    titled_card,
+)
 
 if TYPE_CHECKING:
     from ember.app.context import AppContext
@@ -104,13 +112,7 @@ class SettingsScreen(QWidget):
 
     @staticmethod
     def _card(title: str) -> tuple[widgets.Card, QGridLayout]:
-        card = widgets.Card()
-        column = QVBoxLayout(card)
-        column.setContentsMargins(20, 20, 20, 20)
-        column.setSpacing(16)
-        heading = QLabel(title)
-        heading.setFont(theme.font("heading"))
-        column.addWidget(heading)
+        card, column = titled_card(title)
         grid = QGridLayout()
         grid.setHorizontalSpacing(24)
         grid.setVerticalSpacing(16)
@@ -260,16 +262,10 @@ class SettingsScreen(QWidget):
             self.terminal_line.show_text(None)
 
     def _draw_paths(self, paths: list[str]) -> None:
-        while self.paths_layout.count():
-            item = self.paths_layout.takeAt(0)
-            widget = item.widget() if item is not None else None
-            if widget is not None:
-                widget.deleteLater()
+        clear_layout(self.paths_layout)
         self.path_rows = {}
         if not paths:
-            empty = QLabel(NO_PATHS)
-            empty.setProperty("role", "secondary")
-            self.paths_layout.addWidget(empty)
+            self.paths_layout.addWidget(label(NO_PATHS, "secondary"))
             return
         color = theme.color("text-primary")
         for path in paths:
@@ -277,11 +273,11 @@ class SettingsScreen(QWidget):
             line = QHBoxLayout(row)
             line.setContentsMargins(0, 0, 0, 0)
             line.setSpacing(8)
-            label = QLabel(path)
-            label.setFont(theme.font("code"))
-            label.setTextFormat(Qt.TextFormat.PlainText)
-            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            line.addWidget(label, 1)
+            text = QLabel(path)
+            text.setFont(theme.font("code"))
+            text.setTextFormat(Qt.TextFormat.PlainText)
+            text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            line.addWidget(text, 1)
             remove = widgets.button("", "ghost", size="sm")
             remove.setIcon(icons.icon("x", color, 16))
             remove.setAccessibleName(f"Remove {path}")
