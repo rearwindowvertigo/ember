@@ -177,9 +177,12 @@ class ElidedLabel(QLabel):
         painter.setPen(self.palette().windowText().color())
         text = QTextLayout(shown, self.font())
         if self.hasSelectedText():
+            # The selection indexes the full text; the ellipsis spans its hidden suffix.
+            start = self.selectionStart()
+            end = min(start + len(self.selectedText()), len(shown))
             selection = QTextLayout.FormatRange()
-            selection.start = self.selectionStart()  # type: ignore[assignment]
-            selection.length = len(self.selectedText())  # type: ignore[assignment]
+            selection.start = min(start, len(shown) - 1)  # type: ignore[assignment]
+            selection.length = end - selection.start  # type: ignore[assignment]
             selected_format = QTextCharFormat()
             selected_format.setBackground(self.palette().highlight())
             selected_format.setForeground(self.palette().highlightedText())
