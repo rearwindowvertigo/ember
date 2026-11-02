@@ -85,12 +85,18 @@ Watch again only when `next:` says a runner is live; otherwise wait for
 the owner's answer, which starts the runner when queued. After the answer,
 follow its printed watch command in the background.
 
-If a commit hook refused the writer's collected turn, `--send` cannot
-work: collection tries the refused commit first. Offer these choices:
-fix the files named by the hook in the task's worktree, commit them with
-`emb run --recover <writer run>`, then answer with `--review`; or use
-`--worker W`; or `--drop`. Perform the chosen repair only after the owner
-answers, and run recovery in the background.
+If the stop says `git commit was refused` (exit 77), offer `--send <file>`
+first. It retries the commit; if the hook refuses again, the writer receives
+the hook's refreshed output ahead of the correction. The output is capped
+at its last 200 lines and last 64 KiB, with a note when cut. The following
+turn commits the writer's files from both turns with its normal subject.
+This send counts as a fix round in the existing budget, even when all
+rounds are used. Alternatives are to fix the files named by the hook in the
+task's worktree, run `emb run --recover <writer run>`, then answer with
+`--review`; or use `--worker W`; or `--drop`. Perform the chosen repair only
+after the owner answers, and run recovery in the background. Exit 77 also
+covers `git add failed`: repair that failure and use `--recover`; the hook
+output send applies only when `git commit was refused`.
 
 ## Exits
 
