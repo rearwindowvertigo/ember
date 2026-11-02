@@ -914,8 +914,13 @@ a crashed session remains available for inspection until resume replaces it.
 
 The runner shares `<flow folder>/lifecycle.lock` with command startup,
 resume and lead-answer enqueueing. It holds that lock from its final answer
-read until after releasing its lifetime lock. An answer queued during this
-handoff either reaches the runner before its final read or sees no live
+read until after releasing its lifetime lock. Every attempt outcome uses
+this handoff: completion, lead stops, provider halts, failed checks or
+merges, signals and unexpected errors. When that read finds unread answers,
+the runner takes them and continues before deciding whether to end. Valid
+answers clear a provider halt; pending checks run before further work.
+An answer queued during this handoff either reaches the runner before its
+final read or sees no live
 runner after acquiring the lifecycle lock. The runner releases the lifecycle
 lock before continuing when that read finds more answers, and never holds
 it during a wave. The command owns the `startup.json` reservation; the
@@ -942,9 +947,10 @@ Each job starts a writer in a new editing run from the flow tip, checks its
 committed changes, and starts a fresh read-only review in the writer's
 worktree. The run id is saved as soon as Core prints it. Must findings
 within the round budget go back to the same writer as a fix message;
-another fresh review follows. Before a correction the runner saves the
-previous reviewed head, message file and target turn. Every review after
-the first receives that previous head as its fix base. Lead corrections
+another fresh review follows. Immediately before sending a correction the
+runner reads and saves the branch's actual tip, message file and target
+turn. It compares the resulting tip against that saved tip, including on
+recovery, and supplies it as the next review's fix base. Lead corrections
 start a fresh round budget. Brief artifact numbers increase per task across
 fresh budgets and replacement writers.
 
@@ -988,7 +994,12 @@ queued writers remain pending. The flow stops with
 `provider error on <engine>; new runs halted`. Resume clears that halt and
 continues pending work; the task that failed still needs a lead answer.
 Exit 124 stops with `stalled; the turn keeps running in <run>`;
-a lead review answer collects that turn before reviewing it.
+a lead review answer collects that turn before reviewing it. An explicit
+review answer reviews the branch's current tip against the task base even
+when the writer's last turn failed or left no reply. The tip must differ
+from the task base, and the usual changed-file checks still apply. The
+explicit request is persisted for recovery; automatic recovery of a failed
+writer turn still stops the task.
 
 SIGHUP and SIGTERM request shutdown without writing from the signal
 handler. The runner terminates an active check group, records `failed`

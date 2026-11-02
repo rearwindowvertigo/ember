@@ -989,3 +989,197 @@ def test_answer_at_final_read_is_taken_without_locking_the_next_wave(
     assert flow["tasks"][0]["status"] == "merged"
     assert flow["answers_seen"] == 1
     assert not (record.folder(h.id, h.env) / "startup.json").exists()
+
+
+@pytest.mark.parametrize("failed_check", [False, True])
+def test_answer_during_check_continues_provider_halted_runner(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, failed_check: bool
+) -> None:
+    started = h.tmp / "check-started"
+    release = h.tmp / "check-release"
+    h.scripts_update(**{"\nALPHA_WRITE_MARKER\n": "@provider limited"})
+    h.create(
+        [task("a", text="ALPHA_WRITE_MARKER"), task("b")],
+        check=[
+            sys.executable,
+            "-c",
+            "import pathlib,time,sys; "
+            f"started=pathlib.Path({str(started)!r}); "
+            f"release=pathlib.Path({str(release)!r}); "
+            "first=not started.exists(); started.touch(); "
+            "deadline=time.monotonic()+15\n"
+            "while not release.exists() and time.monotonic()<deadline: "
+            "time.sleep(.01)\n"
+            f"sys.exit(1 if first and {failed_check!r} else 0)",
+        ],
+    )
+    b_finished = threading.Event()
+    pipeline = runner._Runner.pipeline
+
+    def ordered(instance: runner._Runner, item: dict[str, Any]) -> None:
+        if item["id"] == "a":
+            assert b_finished.wait(10)
+        pipeline(instance, item)
+        if item["id"] == "b":
+            b_finished.set()
+
+    monkeypatch.setattr(runner._Runner, "pipeline", ordered)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(h.run)
+        try:
+            deadline = time.monotonic() + 10
+            while not started.exists():
+                assert not future.done(), future.result()
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+            with runner._lifecycle_guard(record.folder(h.id, h.env)):
+                flow = h.flow()
+                assert lock.live(h.id, h.env) and not flow["runner"]["exiting"]
+                assert flow["halted"] and flow["tasks"][0]["status"] == "stopped"
+                h.scripts_update(**{"\nALPHA_WRITE_MARKER\n": "@write a replacement"})
+                h.answer("worker", worker="codex:gpt-5@low")
+        finally:
+            release.touch()
+        flow = future.result(timeout=15)
+    assert flow["status"] == "done"
+    assert flow["attempt"] == flow["answers_seen"] == 1
+    assert flow["halted"] is None
+    assert all(item["status"] == "merged" for item in flow["tasks"])
+    assert [entry["exit"] for entry in flow["checks"]] == (
+        [1, 0, 0] if failed_check else [0, 0]
+    )
+
+
+@pytest.mark.parametrize(
+    "outcome", ["done", "stopped", "halted", "check", "merge", "unexpected", "signal"]
+)
+def test_every_attempt_outcome_holds_lifecycle_until_lifetime_release(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    tasks = [task("a")]
+    options: dict[str, Any] = {}
+    if outcome == "stopped":
+        tasks = [task("a", text="Do nothing")]
+    elif outcome == "halted":
+        tasks = [task("a", text="@provider limited")]
+    elif outcome == "check":
+        options["check"] = [sys.executable, "-c", "raise SystemExit(1)"]
+    h.create(tasks, **options)
+    if outcome == "merge":
+        monkeypatch.setattr(branches, "merge", lambda *args, **kwargs: 70)
+    elif outcome == "unexpected":
+
+        def broken(instance: runner._Runner) -> None:
+            raise RuntimeError("recovery failed")
+
+        monkeypatch.setattr(runner._Runner, "recover", broken)
+    elif outcome == "signal":
+        begin = runner._Runner.begin
+
+        def interrupted(instance: runner._Runner) -> None:
+            begin(instance)
+            instance.shutdown.set()
+
+        monkeypatch.setattr(runner._Runner, "begin", interrupted)
+    execute = runner._Runner.execute
+    guarded: list[bool] = []
+
+    def verify(instance: runner._Runner, closing: contextlib.ExitStack) -> int:
+        code = execute(instance, closing)
+        assert lock.live(h.id, h.env)
+        fd = paths.open_private_file(instance.folder / "lifecycle.lock")
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            guarded.append(True)
+        finally:
+            os.close(fd)
+        return code
+
+    monkeypatch.setattr(runner._Runner, "execute", verify)
+    code = runner.run(h.id, h.env, core_factory=h.factory, poll_seconds=0.01)
+    assert code == (1 if outcome == "unexpected" else 0)
+    assert guarded == [True]
+    assert not lock.live(h.id, h.env)
+    fd = paths.open_private_file(record.folder(h.id, h.env) / "lifecycle.lock")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("stale_head", [False, True])
+def test_unchanged_lead_correction_compares_actual_tip(
+    h: Harness, stale_head: bool
+) -> None:
+    h.create([task("a", text="Do nothing")])
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["head"] is None
+    if stale_head:
+        extra = h.tmp / "extra.md"
+        extra.write_text("@write a saved work")
+        stream = io.StringIO()
+        core = h.factory(h.env, out=stream, err=stream)
+        assert core.execute(lambda: core.send(item["writer_run"], str(extra))) == 0
+        item["head"] = item["task_base"]
+        record.save(flow, h.env)
+    actual_tip = git(Path(item["worktree"]), "rev-parse", "HEAD", env=h.env)
+    correction = h.tmp / "correction.md"
+    correction.write_text("Do nothing again")
+    h.answer("send", file=str(correction))
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["reason"] == "the fix made no change"
+    assert item["fix_base"] == actual_tip
+    assert item["reviews"] == []
+    assert flow["tip"] == flow["base"]
+    # Recovery uses the same recorded comparison, without sending another turn.
+    item["status"] = "fixing"
+    record.save(flow, h.env)
+    item = h.run()["tasks"][0]
+    assert item["reason"] == "the fix made no change"
+    assert runs.load(item["writer_run"], h.env).turn == (3 if stale_head else 2)
+    assert item["reviews"] == []
+
+
+@pytest.mark.parametrize(
+    ("ending", "exit_code"), [("@empty", 80), ("@fail broken", 71)]
+)
+@pytest.mark.parametrize("explicit", [False, True])
+def test_explicit_review_inspects_committed_work_from_failed_turn(
+    h: Harness, ending: str, exit_code: int, explicit: bool
+) -> None:
+    h.create([task("a", text=f"@write a saved\n{ending}")])
+    flow = h.run()
+    item = flow["tasks"][0]
+    writer = runs.load(item["writer_run"], h.env)
+    assert writer.last_exit == exit_code and writer.commits
+    assert item["head"] is None
+    if explicit:
+        h.answer("review")
+    else:
+        item["status"] = "writing"
+        record.save(flow, h.env)
+    flow = h.run()
+    item = flow["tasks"][0]
+    if explicit:
+        assert item["status"] == "merged"
+        assert item["head"] == writer.commits[-1]
+        assert len(item["reviews"]) == 1
+        brief = next(
+            (record.folder(h.id, h.env) / "briefs").glob("a-review-*.md")
+        ).read_text()
+        assert f"git diff {writer.base} {writer.commits[-1]}" in brief
+    else:
+        assert item["status"] == "stopped" and item["reviews"] == []
+    assert runs.load(writer.id, h.env).last_exit == exit_code
+
+
+def test_explicit_review_still_refuses_an_unchanged_failed_turn(h: Harness) -> None:
+    h.create([task("a", text="@empty")])
+    h.run()
+    h.answer("review")
+    item = h.run()["tasks"][0]
+    assert item["reason"] == "the writer made no change"
+    assert item["reviews"] == []

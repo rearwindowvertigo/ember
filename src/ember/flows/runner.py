@@ -118,6 +118,7 @@ class _Runner:
         self.shutdown = shutdown
         self.mutex = threading.Lock()
         self.finished = False
+        self.failure: str | None = None
 
     def _save(self) -> None:
         """Save while the caller holds the record mutex."""
@@ -288,6 +289,8 @@ class _Runner:
         task: dict[str, Any],
         role: str,
         action: Callable[[Core], int],
+        *,
+        review_failed_turn: bool = False,
     ) -> bool:
         """Run one Core action and preserve its diagnostics on a failure."""
 
@@ -301,6 +304,10 @@ class _Runner:
         if code == 0:
             return not self.shutdown.is_set()
         run_id = task[f"{role}_run"]
+        if review_failed_turn and run_id:
+            recovered = runs.load(run_id, self.env)
+            if recovered.turn_state == runs.COMMITTED:
+                return not self.shutdown.is_set()
         reason = "; ".join(line for line in err.getvalue().splitlines() if line.strip())
         if code == 124:
             reason = f"stalled; the turn keeps running in {run_id}"
@@ -414,7 +421,7 @@ class _Runner:
         return stream.getvalue().strip() if code else None
 
     def send(self, task: dict[str, Any], path: str, *, fresh: bool) -> bool:
-        """Persist the previous head and expected turn before a correction."""
+        """Persist the actual branch tip and expected turn before a correction."""
         if not self.allowed(task):
             return False
         run = self.metadata(task)
@@ -422,7 +429,8 @@ class _Runner:
             task,
             status="fixing",
             entry=None,
-            fix_base=task["head"],
+            fix_base=self.tip(task["branch"]),
+            explicit_review=False,
             round=0 if fresh else task["round"] + 1,
             turn_pending=True,
             turn_target=run.turn + 1,
@@ -586,6 +594,9 @@ class _Runner:
             )
             if not self.send(task, path, fresh=True):
                 return
+        elif task.get("explicit_review"):
+            if not self.review_writer(task):
+                return
         elif not self.reconcile_writer(task):
             return
         recovering = bool(task.get("recover_review"))
@@ -611,6 +622,16 @@ class _Runner:
             self.change(task, review_action=None)
             action = None
 
+    def review_writer(self, task: dict[str, Any]) -> bool:
+        """Review saved work at the lead's request, including failed writer turns."""
+        run = self.metadata(task)
+        if run.turn_state in (runs.SENT, runs.COLLECTED) and not self.call(
+            task, "writer", lambda core: core.recover(run.id), review_failed_turn=True
+        ):
+            return False
+        # A fresh review covers the current branch against the original task base.
+        return self.post_turn(task, True)
+
     def reconcile_writer(self, task: dict[str, Any]) -> bool:
         """Reconcile a captured turn before reviewing or sending another message."""
         run = self.metadata(task)
@@ -625,6 +646,7 @@ class _Runner:
         if pending and run.turn < task["turn_target"]:
             if not self.allowed(task):
                 return False
+            self.change(task, fix_base=self.tip(task["branch"]))
             if not self.call(
                 task, "writer", lambda core: core.send(run.id, task["turn_file"])
             ):
@@ -730,7 +752,7 @@ class _Runner:
         self.change(task, status="conflict" if code == 75 else "stopped", reason=reason)
         if code == 75:
             return True
-        self.finish("failed", f"merge of {task['id']} failed: {reason}")
+        self.failure = f"merge of {task['id']} failed: {reason}"
         return False
 
     def recover(self) -> None:
@@ -881,13 +903,9 @@ class _Runner:
         if self.shutdown.is_set():
             return False
         if code or reason:
-            self.finish(
-                "failed",
-                reason
-                or (
-                    f"the check failed after wave {self.flow['wave']}: "
-                    f"exit {code}, see {log}"
-                ),
+            self.failure = reason or (
+                f"the check failed after wave {self.flow['wave']}: "
+                f"exit {code}, see {log}"
             )
             return False
         return True
@@ -922,7 +940,12 @@ class _Runner:
                 kind = answer["kind"]
                 if kind not in record.allowed_answers(task):
                     raise RunnerError(f"task {task['id']} is {task['status']}")
-                fields = {"answer": answer["n"], "reason": None, "entry": None}
+                fields = {
+                    "answer": answer["n"],
+                    "reason": None,
+                    "entry": None,
+                    "explicit_review": kind == "review",
+                }
                 if kind == "accept":
                     tip = self.tip(task["branch"])
                     if tip != answer["commit"]:
@@ -990,6 +1013,7 @@ class _Runner:
                     ):
                         self.flow["abandoned"].append(task["branch"])
                     task.update(fields)
+                    self.flow["halted"] = None
                 self.flow["answers_seen"] = index + 1
                 self._save()
                 if not problem and task is not None:
@@ -1079,8 +1103,8 @@ class _Runner:
         finally:
             executor.shutdown(wait=not self.shutdown.is_set(), cancel_futures=True)
 
-    def execute(self, closing: contextlib.ExitStack) -> int:
-        """Run waves, transferring the final lifecycle guard to the caller."""
+    def begin(self) -> None:
+        """Initialize one runner attempt before recovery and scheduling."""
         with self.mutex:
             self.flow.update(
                 runner={
@@ -1093,8 +1117,8 @@ class _Runner:
                 ended_at=None,
                 halted=None,
                 attempt=self.flow.get("attempt", 0) + 1,
-                tip=self.tip(self.flow["branch"]),
             )
+            self.flow["tip"] = self.tip(self.flow["branch"])
             for role in ("writer", "reviewer"):
                 self.flow[role] = self.freeze(self.flow[role])
                 for task in self.flow["tasks"]:
@@ -1102,56 +1126,85 @@ class _Runner:
                         task[role] = self.freeze(task[role])
             self._save()
             self._event("flow", status="running", reason=None)
+
+    def drive(self) -> tuple[str, str | None]:
+        """Recover and run waves until an outcome needs the final answer check."""
+        if self.shutdown.is_set():
+            return "failed", None
         self.recover()
         if self.flow["check_pending"] and not self.check():
-            return 0
+            return "failed", self.failure
         while not self.shutdown.is_set():
             self.answers()
             self.dependencies()
             for task in self.flow["tasks"]:
                 if task["status"] == "accepted" and not self.merge(task):
-                    return 0
+                    return "failed", self.failure
             if self.flow["check_pending"] and not self.check():
-                return 0
+                return "failed", self.failure
             self.dependencies()
             if self.flow["halted"]:
-                with self.mutex:
-                    self._lead(None, self.flow["halted"])
-                self.finish("stopped", self.flow["halted"])
-                return 0
+                return "stopped", self.flow["halted"]
             wave = self.wave()
             if wave:
                 self.jobs(wave)
                 continue
+            stopped = [
+                t["id"]
+                for t in self.flow["tasks"]
+                if t["status"] in ("stopped", "conflict")
+            ]
+            if stopped:
+                return "stopped", "waiting for the lead: " + ", ".join(stopped)
+            merged = sum(t["status"] == "merged" for t in self.flow["tasks"])
+            total = len(self.flow["tasks"])
+            return (
+                "done",
+                None if merged == total else f"{merged} of {total} tasks merged",
+            )
+        return "failed", None
+
+    def execute(self, closing: contextlib.ExitStack) -> int:
+        """Guard every attempt outcome and continue when the lead queued an answer."""
+        begun = False
+        continuing = False
+        while True:
+            code = 0
+            try:
+                if not begun:
+                    begun = True
+                    self.begin()
+                if continuing:
+                    self.answers()
+                status, reason = self.drive()
+            except Exception as error:
+                status, reason, code = "failed", f"{type(error).__name__}: {error}", 1
+                print(
+                    f"emb flow: {error}\nnext: emb flow --status {self.id}",
+                    file=sys.stderr,
+                )
+            if self.shutdown.is_set():
+                _kill_check(self.flow.get("active_check"))
+                status = "failed"
+                reason = (
+                    "the runner was stopped by a signal; "
+                    f"emb flow --resume {self.id} goes on"
+                )
             with contextlib.ExitStack() as lifecycle:
                 lifecycle.enter_context(_lifecycle_guard(self.folder))
                 if (
                     len(record.read_answers(self.id, self.env))
                     > self.flow["answers_seen"]
                 ):
+                    continuing = True
                     continue
-                # The caller releases the lifetime lock before closing this guard.
+                # Keep the guard until the caller releases the lifetime lock.
                 closing.enter_context(lifecycle.pop_all())
-                stopped = [
-                    t["id"]
-                    for t in self.flow["tasks"]
-                    if t["status"] in ("stopped", "conflict")
-                ]
-                if stopped:
-                    self.finish(
-                        "stopped", "waiting for the lead: " + ", ".join(stopped)
-                    )
-                else:
-                    merged = sum(t["status"] == "merged" for t in self.flow["tasks"])
-                    total = len(self.flow["tasks"])
-                    self.finish(
-                        "done",
-                        None
-                        if merged == total
-                        else f"{merged} of {total} tasks merged",
-                    )
-                return 0
-        return 0
+                if status == "stopped" and self.flow["halted"]:
+                    with self.mutex:
+                        self._lead(None, self.flow["halted"])
+                self.finish(status, reason)
+                return code
 
 
 def _run(
@@ -1162,28 +1215,18 @@ def _run(
     shutdown: threading.Event,
 ) -> int:
     """Release the lifetime lock before closing the final lifecycle guard."""
-    runner = None
     try:
         with contextlib.ExitStack() as closing, lock.hold(flow_id, env):
             try:
                 runner = _Runner(flow_id, env, core_factory, poll_seconds, shutdown)
-                return runner.execute(closing)
             except Exception as error:
-                if runner is not None:
-                    runner.finish("failed", f"{type(error).__name__}: {error}")
+                # No attempt can start without a readable flow and stored plan.
                 print(
                     f"emb flow: {error}\nnext: emb flow --status {flow_id}",
                     file=sys.stderr,
                 )
                 return 1
-            finally:
-                if runner is not None and shutdown.is_set():
-                    _kill_check(runner.flow.get("active_check"))
-                    runner.finish(
-                        "failed",
-                        "the runner was stopped by a signal; "
-                        f"emb flow --resume {flow_id} goes on",
-                    )
+            return runner.execute(closing)
     except lock.Busy:
         print(
             f"emb flow: another runner works on {flow_id}\n"
