@@ -198,14 +198,14 @@ class DependencyTile(widgets.Card):
         self.versions = QLabel(versions_line(item))
         self.versions.setProperty("role", "secondary")
         self.versions.setWordWrap(True)
-        self.versions.setVisible(bool(self.versions.text()))
         layout.addWidget(self.versions)
+        self.versions.setVisible(bool(self.versions.text()))
         self.error = QLabel(item.error or "")
         self.error.setProperty("role", "muted")
         self.error.setWordWrap(True)
         self.error.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.error.setVisible(bool(item.error))
         layout.addWidget(self.error)
+        self.error.setVisible(bool(item.error))
         self.command: widgets.CommandLine | None = None
         self.note: QLabel | None = None
         if item.command is not None:

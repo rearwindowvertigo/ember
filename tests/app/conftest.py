@@ -4,7 +4,8 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QThreadPool
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QThreadPool
+from PySide6.QtWidgets import QApplication, QWidget
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -43,3 +44,43 @@ def _collect_on_gui_thread() -> Iterator[None]:
     QThreadPool.globalInstance().waitForDone(10_000)
     QCoreApplication.processEvents()
     gc.collect()
+
+
+class _WindowShows(QObject):
+    """Record every widget shown as a window of its own."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.shown: list[tuple[QWidget, str]] = []
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if (
+            event.type() == QEvent.Type.Show
+            and isinstance(watched, QWidget)
+            and watched.isWindow()
+        ):
+            self.shown.append((watched, type(watched).__name__))
+        return False
+
+
+@pytest.fixture(autouse=True)
+def _no_stray_windows() -> Iterator[None]:
+    """Fail a test in which a widget is shown before it has a parent.
+
+    Showing a parentless widget makes it a window, which takes activation
+    from the app's window until the widget joins a layout; the window's
+    shortcuts then stop working.
+    """
+    app = QApplication.instance() or QApplication([])
+    spy = _WindowShows()
+    app.installEventFilter(spy)
+    yield
+    app.removeEventFilter(spy)
+    stray = []
+    for widget, name in spy.shown:
+        try:
+            if not widget.isWindow():
+                stray.append(name)
+        except RuntimeError:
+            continue
+    assert not stray, f"shown as a window before getting a parent: {stray}"

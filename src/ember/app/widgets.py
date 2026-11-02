@@ -521,9 +521,9 @@ class Alert(QFrame):
         body.addWidget(self.title_label)
         self.text_label = QLabel(text)
         self.text_label.setWordWrap(True)
-        self.text_label.setVisible(bool(text))
         body.addWidget(self.text_label)
         layout.addLayout(body, 1)
+        self.text_label.setVisible(bool(text))
         self.buttons: list[QPushButton] = []
         for label, callback in actions:
             action = button(label, "secondary", size="sm")
