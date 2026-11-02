@@ -12,6 +12,7 @@ from ember.cli import main
 TOP = Path(__file__).resolve().parents[2]
 SKILL = TOP / "skill"
 EVALS = SKILL / "evals"
+RESULTS = EVALS / "results"
 STUBS = EVALS / "_stubs"
 RUNNER = EVALS / "_runner" / "run_case.sh"
 
@@ -129,7 +130,11 @@ def test_parse_simple() -> None:
 
 
 def test_the_eight_cases_and_no_others() -> None:
-    found = {p.name for p in EVALS.iterdir() if p.is_dir() and p.name[0] not in "_."}
+    found = {
+        p.name
+        for p in EVALS.iterdir()
+        if p.is_dir() and p.name[0] not in "_." and p != RESULTS
+    }
     assert found == set(CASES)
 
 
@@ -658,6 +663,8 @@ def test_no_file_under_skill_names_an_earlier_system() -> None:
     found = []
     for path in sorted(SKILL.rglob("*")):
         if not path.is_file() or "__pycache__" in path.parts:
+            continue
+        if path.is_relative_to(RESULTS):
             continue
         try:
             text = path.read_text(encoding="utf-8")
