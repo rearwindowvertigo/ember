@@ -1,0 +1,110 @@
+# Claude agents
+
+## Subagents
+
+Use Explore only for search fan-out that returns locations. Use
+general-purpose for other tasks. Explore has no Write or Edit, refuses
+file creation through Bash, and receives neither `CLAUDE.md` nor the git
+status snapshot. Explore and Plan return no agentId, so neither can be
+corrected or resumed.
+
+Do not set a model on spawn unless the owner named one or a `set` Claude
+row with run-as `subagent` supplies it; otherwise use Claude Code's
+default. Keep judgment with the lead: a draft can inform a design choice
+but cannot settle it.
+
+To narrow tools or turns, use an existing agent definition in
+`~/.claude/agents/`; otherwise the agent inherits this session's tools and
+permissions.
+
+Subagents have no AskUserQuestion and no Workflow tool. They receive
+`CLAUDE.md` at every level and a git status snapshot (not Explore or
+Plan), but not the owner's output style or memory. Put in the prompt only
+the repository rules the task needs.
+
+For editing, use `isolation: "worktree"`, tell the agent to commit with
+the supplied trailer, and have it return branch, worktree and tip. Its
+worktree is `.claude/worktrees/agent-<agentId>` on the branch
+`worktree-agent-<agentId>`, based on `worktree.baseRef` (`head` or
+`fresh`; see the skill's editing boundary). Do not isolate a read-only
+agent. Read-only output belongs in the final message, with a length cap
+set in the prompt; other results go to a session-scratchpad file whose
+path the agent returns.
+
+Correct a running or finished agent with SendMessage addressed by its
+agentId. Respawn Explore or Plan, which have no agentId, and respawn when
+the original prompt itself was wrong. After an API error, retry once it
+clears; treat earlier output as partial.
+
+Progress is in
+`~/.claude/projects/<slug>/<session>/subagents/agent-<agentId>.jsonl`.
+For Explore or Plan, read the newest `agent-*.jsonl` made after the spawn.
+
+The runtime allows 20 concurrent subagents and three levels of nesting.
+Do not fan out beyond what you can review.
+
+## Claude Workflow
+
+Opt-in comes only from `/ember` or the owner's own words asking for a
+Workflow; loading the skill is not opt-in. A Workflow is one run and one
+claim, whatever its agent count.
+
+Do not set a model or effort on `agent()`: agents use this session's.
+Give each editing agent `isolation: 'worktree'` and a schema that returns
+branch, worktree and tip; return those from the script too. Do not
+isolate a read-only agent only for reading.
+
+Read results from the Workflow tool's result, or single returns from the
+run's `journal.jsonl`; the background task's output file is not the
+result. For a large task, run a small slice first.
+
+The runtime allows 16 concurrent agents, 4,096 items per call and 1,000
+agents per run. Scripts cannot read files or `import()`; `Date.now()` and
+`Math.random()` throw, so the run can be replayed. A stopped run relaunches
+with cached results up to the first agent that changed or failed; that
+agent and every later one run again.
+
+Verify, review and merge every editing result as the skill says, one
+branch at a time.
+
+## Plan check before a Claude Workflow
+
+A multi-task Claude Workflow starts only after this check.
+
+1. Write the plan with a Failure model: the cases it must handle, and the
+   cases it accepts.
+2. Fill `assets/plan-check-brief.md`: paste the plan where it says.
+3. Run it read-only by the `single.reviewer` row, under the run's claim:
+   - a CLI row:
+     `emb run --engine <engine> --read-only --dir <repo> --task-file <brief> --claim <id>`,
+     as a background command;
+   - a `claude` row with run-as `subagent`: a read-only general-purpose
+     subagent, without isolation, given the brief;
+   - a row that is not `set`, or `ask`: ask the owner live, as for any
+     picker.
+4. Read the reply. Ask each `harm: high` gap as its own question.
+5. Offer the remaining gaps together as one answer that accepts them into
+   the failure model.
+6. Put the answers into the plan before starting.
+
+Never let the reviewer decide missing behaviour: it finds gaps; the owner
+or you settle them.
+
+## Deadlines
+
+These apply to subagents and Claude Workflows; `emb run` has its own stall
+detection.
+
+Use the prompt's implied runtime plus half again, or ten minutes when none
+is implied. Start one background Bash `sleep <seconds>` and keep its task
+id beside the worker.
+
+When it ends, check the subagent's transcript: a growing transcript means
+wait; a stopped one without a result means stalled. For a Workflow, ask
+the owner whether to wait or stop. When the check says wait, start one
+more timer of the same length, and ask the owner when it ends. Stop a
+stalled agent before respawning it narrower or doing the work yourself.
+
+As soon as the worker reports, stop its timer with TaskStop by that id,
+before reading the result. If a timer reports after the worker finished,
+do nothing and say nothing.
