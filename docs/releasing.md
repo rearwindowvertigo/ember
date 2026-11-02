@@ -31,8 +31,9 @@
   `.deb` depends on (`python3 packaging/deb/build_deb.py --depends` lists
   them). Its exit codes: 0 built; 1 a build command failed; 64 usage error;
   65 the version in `pyproject.toml` is not `X.Y.Z`; 66 `skill/SKILL.md` is
-  missing; 69 a tool is missing; 70 a Qt library needs a library that no
-  package in `Depends` provides, or a staged file holds the staging path.
+  missing; 69 a tool is missing; 70 a Qt library or module file is missing or
+  unreadable, a Qt library needs a library that no package in `Depends`
+  provides, or a staged file holds the staging path.
 - When Release Please creates a release, the `deb` job of
   `.github/workflows/release-please.yml` checks out the release tag on
   `ubuntu-26.04`, runs `make deb`, prints the file's SHA-256 and attaches

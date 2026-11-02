@@ -20,7 +20,8 @@ Produce <deliverable> at <relative destination, or final message>.
 
 ## Limits and cases
 
-Work only inside your working folder. Use paths relative to it.
+Work only inside your working folder. Use paths relative to it. Read any
+other path this brief names exactly as given; do not write there.
 You may change <exact files and folders>.
 Do not change <excluded files and folders>.
 <Say whether empty input, zero counts and equal range endpoints are valid

@@ -224,8 +224,9 @@ After every editing worker, run:
 python3 scripts/verify_branch.py --repo <repo> --base <session branch> --branch <worker branch> --worktree <worktree> --expect-files <n>
 ```
 
-Take `<n>` from the run's summary line; leave `--expect-files` out when
-there is none. The script prints the tip, the three-dot numstat, the file
+Take `<n>` from the summary line of a run with one turn; leave
+`--expect-files` out after a correction turn, since each summary line
+counts only its own turn's files, or when there is no summary line. The script prints the tip, the three-dot numstat, the file
 count and the worktree's status. It decides no verdict. Investigate a
 `MISMATCH:` line.
 
@@ -294,7 +295,9 @@ emb merge <branch> --into <session branch> --verdict keep
 A Keep verdict needs no question to the owner. Do not merge while the
 session tree holds edits you did not make in this session: give the owner
 the command and say their edits are there. Do not merge Discard; when the
-brief caused it, repair the brief and normally rerun once, as a new run.
+brief caused it, repair the brief and normally rerun once on the same
+worker. The rerun keeps the task's claim id, which is finished only when the
+task ends; a different worker needs the owner's answer first.
 
 Exit 0 proves the merge, not that cleanup removed everything. Report the
 worker tip and every `kept` line with its reason.
@@ -304,7 +307,7 @@ worker tip and every `kept` line with its reason.
 | 64 | Fix the call; `emb merge` needs `--verdict keep` and two different branches. |
 | 65 | Run it inside the checkout, with branches that exist. |
 | 70 | A git command failed; a merge already made stays. Report the message and the `next:` line. |
-| 75 | Refused: the target is checked out nowhere, is mid-merge or mid-rebase, has changes, or the merge conflicted and was aborted. Report it; do not retry or force it. |
+| 75 | Refused: the target is checked out nowhere, is mid-merge, mid-rebase, mid-cherry-pick or mid-revert, has changes, or the merge conflicted and was aborted. Report it; do not retry or force it. After a conflict, ask the owner: a new run cut from the updated session branch redoes the work, or the owner resolves it. Keep the claim open until then. |
 
 A subagent or Workflow branch (`worktree-agent-*`) merges the same way.
 `emb merge` keeps it as `not an Ember run branch`; then remove its

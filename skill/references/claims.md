@@ -90,10 +90,10 @@ it was not known. A failed finish is retried with the same id.
 |---|---|---|
 | 0 | Success | Read the reply. |
 | 64 | Usage error, unknown key, invalid value or invalid id | Fix the call: check the id pattern `[a-z0-9][a-z0-9-]{5,63}` and the options. |
-| 74 | The settings database cannot be opened or read | Give the owner the `owner:` line; ask the pickers live meanwhile. |
-| 75 | Stale generation, or the database stayed busy for 5 seconds | Retry the same call once with the same id. If it fails again, ask the pickers live and tell the owner. |
+| 74 | The settings database cannot be opened or read | Give the owner the `owner:` line. `emb run` cannot start until it is repaired; meanwhile offer only a Claude subagent or no worker. |
+| 75 | Stale generation, or the database stayed busy for 5 seconds | Retry the same call once with the same id. If it fails again, tell the owner; `emb run` waits, and only a Claude subagent or no worker can be offered meanwhile. |
 | 77 | An owner option without a terminal | An owner option was run; it should not have been. Give the owner the command instead. |
-| 78 | The settings database has an unsupported schema | Give the owner the `owner:` line; ask the pickers live meanwhile. |
+| 78 | The settings database has an unsupported schema | Give the owner the `owner:` line. `emb run` cannot start until it is repaired; meanwhile offer only a Claude subagent or no worker. |
 
 ## Owner options
 

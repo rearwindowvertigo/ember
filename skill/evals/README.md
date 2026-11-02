@@ -162,10 +162,11 @@ stream-json of every turn, appended in order), `stderr.txt`, `owner.log`
 (each reply sent), `calls.log` and `run.json` (`exit` and `seconds`).
 
 Runs of different cases use separate out dirs and can run at the same time.
-Results go to `skill/evals/results/`, which git ignores:
+Out dirs go outside every git checkout, so that the session loads no
+`CLAUDE.md` from the folders above its work folder:
 
 ```
-bash skill/evals/_runner/run_case.sh skill/evals/<case> skill skill/evals/results/<case>
+bash skill/evals/_runner/run_case.sh skill/evals/<case> skill "${XDG_CACHE_HOME:-$HOME/.cache}/ember-evals/<case>"
 ```
 
 ## Grading

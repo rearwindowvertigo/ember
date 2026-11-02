@@ -51,6 +51,7 @@ FORBIDDEN = [
             "machines",
             "kitty",
             "MCP tools",
+            "seat usage",
             "--owner-said",
             "--trust",
             "--retry",
@@ -645,7 +646,8 @@ def skill_text() -> str:
 def test_review_bar_is_exact() -> None:
     blocks = re.findall(r"^```review-bar\n(.*?)\n```$", skill_text(), re.S | re.M)
     assert blocks == [REVIEW_BAR]
-    assert "Copy its exact text into every review brief you write." in skill_text()
+    prose = " ".join(skill_text().split())
+    assert "Copy its exact text into every review brief you write." in prose
 
 
 def test_named_bundled_files_exist() -> None:

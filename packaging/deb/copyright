@@ -7,6 +7,12 @@ Files: *
 Copyright: 2026 rearwindowvertigo
 License: MIT
 
+Files: usr/lib/ember/lib/python3.14/site-packages/PySide6/Qt/lib/libicu*
+Copyright: 1991-2023 Unicode, Inc. and others
+License: Unicode-DFS-2016
+Comment: ICU 73, bundled in the PySide6-Essentials wheel. ICU's licence file,
+ with the notices of the data it includes, is /usr/share/doc/ember/icu-LICENSE.
+
 Files: usr/lib/ember/lib/python3.14/site-packages/PySide6/*
  usr/lib/ember/lib/python3.14/site-packages/shiboken6/*
  usr/lib/ember/lib/python3.14/site-packages/pyside6_essentials-*.dist-info/*
@@ -70,3 +76,7 @@ License: LGPL-3.0-only or GPL-2.0-only or GPL-3.0-only
  Public License version 3 and the GNU General Public License versions 2 and 3
  are in /usr/share/common-licenses/LGPL-3, /usr/share/common-licenses/GPL-2
  and /usr/share/common-licenses/GPL-3.
+
+License: Unicode-DFS-2016
+ The complete text, with the notices of the data ICU includes, is in
+ /usr/share/doc/ember/icu-LICENSE.

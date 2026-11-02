@@ -43,6 +43,9 @@ done < <({ type -ap emb || true; echo /usr/bin/emb; echo "$H/.local/bin/emb"; })
 # Claude Code's skills folder as an empty tmpfs, so the mount point for the
 # skill is made there and not in the owner's folder.
 mkdir -p "$H/.claude/skills"
+# The cases, graders and stubs stay out of the session's view of the skill.
+hide_evals=()
+[ -d "$skill/evals" ] && hide_evals=(--tmpfs "$H/.claude/skills/ember/evals")
 printf '%s\n' "$prompt" > "$out/prompt.txt"
 start=$(date +%s)
 run_claude() {  # run_claude <out file> <claude args...>
@@ -52,6 +55,8 @@ run_claude() {  # run_claude <out file> <claude args...>
         --bind "$H/.claude" "$H/.claude" --bind "$H/.claude.json" "$H/.claude.json" \
         --tmpfs "$H/.claude/skills" \
         --ro-bind "$skill" "$H/.claude/skills/ember" \
+        "${hide_evals[@]}" \
+        --unsetenv CLAUDE_CONFIG_DIR \
         "${extra[@]}" \
         --setenv EMBER_EVAL_DIR "$eval_dir" \
         --setenv PATH "$eval_dir/bin:/usr/local/bin:/usr/bin:/bin" \

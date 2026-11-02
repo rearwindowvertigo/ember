@@ -8,8 +8,9 @@ and Ember, the `/usr/bin/emb` wrapper, the desktop entry, the icon, the
 
 Exit codes: 0 built; 1 a build command failed; 64 usage error; 65 the
 version in `pyproject.toml` is not `X.Y.Z`; 66 `skill/SKILL.md` is missing;
-69 a tool the build needs is missing; 70 a library check or the staging-path
-check failed.
+69 a tool the build needs is missing; 70 a Qt library or module file is
+missing or unreadable, a needed library has no provider, or a staged file
+holds the staging path.
 """
 
 import argparse
@@ -281,9 +282,15 @@ def owners(dpkg_output: str) -> set[str]:
 
 
 def _run(args: Sequence[str | Path], **kwargs: object) -> None:
-    """Run a build command; raise `BuildError` 1 when it fails."""
+    """Run a build command; raise `BuildError` 1 when it fails.
+
+    The command's standard output goes to standard error, so that standard
+    output holds only the built package's line.
+    """
     printable = " ".join(str(arg) for arg in args)
     print(f"build_deb: {printable}", file=sys.stderr)
+    sys.stderr.flush()
+    kwargs.setdefault("stdout", sys.stderr.fileno())
     result = subprocess.run([str(arg) for arg in args], check=False, **kwargs)  # type: ignore[call-overload]
     if result.returncode != 0:
         raise BuildError(1, f"{printable} exited {result.returncode}")
@@ -312,8 +319,9 @@ def _clean_environment(stage: Path) -> None:
         else:
             item.unlink()
     site = stage / SITE
-    for item in site.rglob("direct_url.json"):
-        item.unlink()
+    for pattern in ("direct_url.json", "uv_cache.json"):
+        for item in site.rglob(pattern):
+            item.unlink()
     for item in sorted(site.rglob("__pycache__"), reverse=True):
         shutil.rmtree(item)
 
@@ -333,14 +341,13 @@ def _write_files(stage: Path) -> None:
     icon = REPO / "src/ember/app/assets/ember" / f"{APP_ID}.svg"
     _install(share / "icons/hicolor/scalable/apps" / f"{APP_ID}.svg", icon.read_bytes())
     skill = REPO / "skill"
-    if not (skill / "SKILL.md").is_file():
-        raise BuildError(66, f"{skill / 'SKILL.md'} is missing")
     for relative in skill_files(skill):
         source = skill / relative
         mode = 0o755 if os.access(source, os.X_OK) else 0o644
         _install(share / "ember/skill" / relative, source.read_bytes(), mode)
     doc = share / "doc/ember"
     _install(doc / "copyright", (REPO / "packaging/deb/copyright").read_bytes())
+    _install(doc / "icu-LICENSE", (REPO / "packaging/deb/icu-LICENSE").read_bytes())
     changelog = REPO / "CHANGELOG.md"
     if changelog.is_file():
         data = gzip.compress(changelog.read_bytes(), compresslevel=9, mtime=0)
@@ -501,6 +508,8 @@ def build(out: Path) -> Path:
     """
     _check_tools()
     version = read_version((REPO / "pyproject.toml").read_text(encoding="utf-8"))
+    if not (REPO / "skill/SKILL.md").is_file():
+        raise BuildError(66, f"{REPO / 'skill/SKILL.md'} is missing")
     work = REPO / "build/deb"
     if work.exists():
         shutil.rmtree(work)

@@ -1281,6 +1281,7 @@ has no maintainer scripts:
 | `/usr/share/applications/io.github.rearwindowvertigo.Ember.desktop` | The desktop entry: `Exec=emb app` |
 | `/usr/share/icons/hicolor/scalable/apps/io.github.rearwindowvertigo.Ember.svg` | The icon |
 | `/usr/share/doc/ember/copyright` | The copyright file |
+| `/usr/share/doc/ember/icu-LICENSE` | The licence of the ICU libraries Qt bundles |
 | `/usr/share/doc/ember/changelog.gz` | The changelog, when the build had `CHANGELOG.md` |
 
 `/usr/bin/emb`:
