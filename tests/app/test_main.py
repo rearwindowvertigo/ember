@@ -76,6 +76,7 @@ def test_starts_with_the_window_and_reads(
         assert theme.current_mode() in theme.MODES
         assert parts.autostart_reason is not None
         assert "emb is not on PATH" in parts.autostart_reason
+        assert parts.context.autostart_reason() == parts.autostart_reason
         assert not autostart.path(app_env).exists()
 
 
@@ -168,8 +169,11 @@ def test_autostart_follows_the_setting(app_env: dict[str, str], qtbot: QtBot) ->
     for parts in _start(["--hidden"], app_env, qtbot):
         assert parts.autostart_reason is None
         assert entry.exists()
-        with qtbot.waitSignal(parts.context.settings_changed, timeout=5000):
+        with qtbot.waitSignal(
+            parts.context.autostart_reason_changed, timeout=5000
+        ) as blocker:
             parts.context.save_settings({"app.autostart": "off"})
+        assert blocker.args == [None]
         assert not entry.exists()
         with qtbot.waitSignal(parts.context.settings_changed, timeout=5000):
             parts.context.save_settings({"app.autostart": "on"})

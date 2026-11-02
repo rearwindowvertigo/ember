@@ -80,6 +80,10 @@ class AppContext(QObject):
     visible_changed = Signal(bool)
     """The window was shown or hidden."""
 
+    autostart_reason_changed = Signal(object)
+    """The autostart entry was written or removed: why it could not be, or
+    `None`."""
+
     def __init__(
         self,
         env: Mapping[str, str],
@@ -109,6 +113,7 @@ class AppContext(QObject):
         self._deps_busy = False
         self._deps_queued: bool | None = None
         self._visible = False
+        self._autostart_reason: str | None = None
 
     # Settings
 
@@ -358,3 +363,21 @@ class AppContext(QObject):
         if visible != self._visible:
             self._visible = visible
             self.visible_changed.emit(visible)
+
+    # Start at login
+
+    def autostart_reason(self) -> str | None:
+        """Return why the last autostart change could not be made, or `None`."""
+        return self._autostart_reason
+
+    def set_autostart_reason(self, reason: str | None) -> None:
+        """Record the result of writing or removing the autostart entry.
+
+        Emits `autostart_reason_changed` each time, so a screen can show the
+        result of the change it asked for.
+
+        Args:
+            reason: Why the entry could not be written or removed, or `None`.
+        """
+        self._autostart_reason = reason
+        self.autostart_reason_changed.emit(reason)

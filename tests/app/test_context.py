@@ -240,3 +240,18 @@ def test_show_screen_and_visibility(env: dict[str, str], qtbot: QtBot) -> None:
     assert context.visible()
     with qtbot.assertNotEmitted(context.visible_changed):
         context.set_visible(True)
+
+
+def test_autostart_reason_is_kept_and_signalled(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    context = AppContext(env)
+    assert context.autostart_reason() is None
+    with qtbot.waitSignal(context.autostart_reason_changed) as blocker:
+        context.set_autostart_reason("emb is not on PATH")
+    assert blocker.args == ["emb is not on PATH"]
+    assert context.autostart_reason() == "emb is not on PATH"
+    with qtbot.waitSignal(context.autostart_reason_changed) as blocker:
+        context.set_autostart_reason(None)
+    assert blocker.args == [None]
+    assert context.autostart_reason() is None
