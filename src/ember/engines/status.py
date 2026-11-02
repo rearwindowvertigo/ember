@@ -55,7 +55,7 @@ INSTALL = {
 
 SIGN_IN_ARGS = {
     "codex": ("login",),
-    "opencode": ("auth", "login"),
+    "opencode": ("auth", "login", "--provider", "openrouter"),
     "claude": ("auth", "login"),
 }
 """The arguments to each engine's CLI that sign in."""

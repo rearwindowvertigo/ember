@@ -72,8 +72,6 @@ VALID = [
     ("terminal", "gnome-terminal -- 'a b'"),
     ("app.autostart", "off"),
     ("app.theme", "dark"),
-    ("notify.run_finished", "off"),
-    ("notify.run_failed", "on"),
 ]
 
 INVALID = [
@@ -109,8 +107,6 @@ INVALID = [
     ("terminal", "xterm -e 'open"),
     ("app.autostart", "maybe"),
     ("app.theme", "blue"),
-    ("notify.run_finished", ""),
-    ("notify.run_failed", None),
 ]
 
 
@@ -162,8 +158,6 @@ def test_defaults(env: dict[str, str]) -> None:
         "terminal": "xdg-terminal-exec",
         "app.autostart": "on",
         "app.theme": "system",
-        "notify.run_finished": "on",
-        "notify.run_failed": "on",
     }
 
 
@@ -406,6 +400,28 @@ def test_invalid_stored_setting_fails_closed(env: dict[str, str]) -> None:
     assert any("app.theme" in error for error in reply["errors"])
     assert {a["layer"] for a in reply["answers"].values()} == {"default"}
     assert _answer(reply, "worker.network") == ("off", "default")
+
+
+@pytest.mark.parametrize("key", ["notify.run_finished", "notify.run_failed"])
+def test_removed_notification_keys_are_refused(key: str) -> None:
+    for value in ("on", "off"):
+        with pytest.raises(choices.InvalidChoiceError, match="unknown key"):
+            choices.validate_value(key, value)
+
+
+def test_stored_removed_key_is_reported_like_an_unknown_key(
+    env: dict[str, str],
+) -> None:
+    choices.set_settings({"worker.network": "on"}, env=env)
+    _raw(
+        env,
+        "INSERT INTO settings (key, value) VALUES ('notify.run_failed', ?)",
+        '"on"',
+    )
+    reply = choices.read(env=env)
+    assert reply["source_error"] is True
+    assert any("notify.run_failed" in error for error in reply["errors"])
+    assert any("unknown key" in error for error in reply["errors"])
 
 
 @pytest.mark.parametrize("stored", ["not json", "[1]", '{"terminal": "x"}'])
@@ -732,8 +748,8 @@ def test_two_concurrent_checked_writes(env: dict[str, str]) -> None:
 
 
 def test_concurrent_first_writes_create_one_database(env: dict[str, str]) -> None:
-    keys = ["app.theme", "worker.network", "app.autostart", "notify.run_failed"]
-    values = ["dark", "on", "off", "off"]
+    keys = ["app.theme", "worker.network", "app.autostart", "terminal"]
+    values = ["dark", "on", "off", "kitty"]
     results = _run_together(
         4, lambda i: choices.set_settings({keys[i]: values[i]}, env=env)
     )

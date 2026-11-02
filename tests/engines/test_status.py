@@ -239,7 +239,7 @@ def test_opencode_without_openrouter_is_not_signed_in(env: dict[str, str]) -> No
     )
     result = status.check("opencode", env)
     assert result.state == status.NOT_SIGNED_IN
-    assert result.requirements[1].fix == "opencode auth login"
+    assert result.requirements[1].fix == "opencode auth login --provider openrouter"
 
 
 def test_opencode_found_in_its_install_folder(env: dict[str, str]) -> None:
@@ -248,7 +248,7 @@ def test_opencode_found_in_its_install_folder(env: dict[str, str]) -> None:
     result = status.check("opencode", env)
     assert result.installed is True
     assert result.binary == str(binary)
-    assert result.requirements[1].fix == f"{binary} auth login"
+    assert result.requirements[1].fix == f"{binary} auth login --provider openrouter"
 
 
 def test_unknown_engine_raises(env: dict[str, str]) -> None:

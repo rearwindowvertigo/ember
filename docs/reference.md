@@ -55,7 +55,6 @@ empty list.
 | `terminal` | A non-empty command line in shell syntax | `xdg-terminal-exec` | standing |
 | `app.autostart` | `on`, `off` | `on` | standing |
 | `app.theme` | `system`, `light`, `dark` | `system` | standing |
-| `notify.run_finished`, `notify.run_failed` | `on`, `off` | `on` | standing |
 
 A shortlist lists each model once. A request or one-time value for a
 standing-only key is refused.
@@ -218,7 +217,7 @@ and its sign-in, with its sign-in command as the fix:
 | Engine | Install | Sign in |
 |---|---|---|
 | `codex` | `npm install -g @openai/codex` | `codex login` |
-| `opencode` | `curl -fsSL https://opencode.ai/install \| bash` | `opencode auth login` |
+| `opencode` | `curl -fsSL https://opencode.ai/install \| bash` | `opencode auth login --provider openrouter` |
 | `claude` | `curl -fsSL https://claude.ai/install.sh \| bash` | `claude auth login` |
 
 A sign-in command names the CLI by its path when it is not found on `PATH`.

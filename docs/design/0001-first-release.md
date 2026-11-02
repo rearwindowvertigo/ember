@@ -36,7 +36,7 @@ The owner sees and configures all of this in the desktop app.
 |---|---|---|
 | E1 | Machines | One machine. No remote or phone view. |
 | E2 | App toolkit and language | A native app in Python with PySide6 (Qt). |
-| E3 | What the app does | Shows work, engines, dependencies and settings; runs commands after a confirm step; sends desktop notifications; has a tray icon. It does not start runs. |
+| E3 | What the app does | Shows work, engines, dependencies and settings; runs commands after a confirm step; has a tray icon. It does not start runs. |
 | E4 | Other installed AI tools | Ember reads the state and settings of Claude Code, Codex and OpenCode, and whether Claude Desktop is installed and its version. It does not read Claude Desktop's configuration. It does not drive these tools or write their configuration. |
 | E5 | Name and command | Ember; terminal command `emb`; Python package `ember-app`. |
 | E6 | Repository | `~/Repos/ember`, remote `github.com/rearwindowvertigo/ember`, private. |
@@ -59,6 +59,9 @@ The owner sees and configures all of this in the desktop app.
 | E23 | One-time choices | Not shown in the app (J2). |
 | E24 | Engine logos | Each engine card shows its maker's logo (J2). |
 | E25 | Mark | Three coals (J11). |
+| E26 | Notifications | None. |
+| E27 | Keyboard | Ctrl+1 to Ctrl+5 open the screens, Ctrl+W hides to the tray, Ctrl+Q quits; every control is reachable with Tab. |
+| E28 | Claude Desktop | A tile on the Dependencies screen: installed and its version, or not installed. |
 
 ## A. Repository and tooling
 
@@ -103,8 +106,8 @@ C1. Standing settings: the worker menu (which engine, model and effort writes
 single tasks, which reviews; in 0.2.0 also how multi-task work runs and
 panel members),
 per-engine on or off, model shortlists with efforts, worker network access,
-a sandbox switch per engine, the terminal that shows worker sessions, start
-at login and notification switches.
+a sandbox switch per engine, the terminal that shows worker sessions and
+start at login.
 
 C2. One-time choices: the owner sets an answer for the next run only, at the
 terminal (`emb choices --once`). A run claims it with a unique id
@@ -303,8 +306,8 @@ missing items, each only when above zero.
 | Overview | Live runs; the last twenty finished runs. In 0.2.0 also flows with their tasks and steps |
 | Menu | The worker menu (C1) |
 | Engines | One card per engine: logo, status, Use switch, sandbox switch, provider and checks; open for models, efforts and shortlists; OpenCode's OpenRouter model browser and filters; setup steps with copyable commands when not connected |
-| Dependencies | One tile per component, grouped (engines and apps, system tools, Ember's libraries): installed and newest version, status, and the update or install command |
-| Settings | Start at login, notifications, worker network, sandbox read paths, terminal, theme |
+| Dependencies | One tile per component, grouped (engines and apps, system tools, Ember's libraries): installed and newest version, status, and the update or install command; Claude Desktop installed and its version |
+| Settings | General: start at login, theme. Workers: worker network, terminal, sandbox read paths |
 
 - Overview lists as live each run whose status is `starting`, `running` or
   `waiting`, with the badge Starting, Running or Waiting for Claude, and as
@@ -315,8 +318,13 @@ missing items, each only when above zero.
   does. Expanded, a live row shows a read-only mirror of the worker's
   screen, updated when the worker writes output and never on a timer. The
   mirror follows the session through tmux control mode on Ember's tmux
-  server and draws it with a terminal emulator in the app. Expanded, a
-  finished row shows its run record; no screen is kept.
+  server: a client attaches with `-C attach-session -f
+  read-only,ignore-size` and never sets a size. After each `%output`
+  notification for the pane, it reads the pane with `capture-pane -p -e`
+  through the same client and redraws from that text, with at most one
+  capture in flight. tmux is the terminal emulator; the app parses only the
+  SGR sequences in the captured text. Expanded, a finished row shows its run
+  record; no screen is kept.
 - The app does not interrupt, close or send to a run.
 - While an engine's sandbox method is `none`, Overview and Engines show a
   warning naming the engine (I3).
@@ -327,35 +335,39 @@ missing items, each only when above zero.
 - Engines shows three cards side by side, each with the engine maker's logo.
   Models opens that engine's model list below the cards, with a switch per
   model for the shortlist and an effort picker.
-- Settings has three groups: General (start at login, theme), Notifications
-  (a run finishes, a run fails) and Workers (worker network, terminal,
-  sandbox read paths). Each change saves at once. Terminal is picked from
-  the terminals Ember finds, with System default first and Other command
-  last. Read paths are added with the desktop's folder chooser.
+- Settings has two groups: General (start at login, theme) and Workers
+  (worker network, terminal, sandbox read paths). Each change saves at
+  once. Terminal is picked from the terminals Ember finds, with System
+  default first and Other command last. Read paths are added with the
+  desktop's folder chooser.
+- Keyboard: Ctrl+1 to Ctrl+5 open Overview, Menu, Engines, Dependencies
+  and Settings; Ctrl+W hides the window to the tray, or quits when there is
+  no tray; Ctrl+Q quits. Every control is reachable with Tab, in reading
+  order, with a visible focus ring.
 
 J3. Tray icon: shows whether any run is live, in two states, idle and a run
 live. The tray uses Qt's `QSystemTrayIcon`. GNOME shows tray icons through
 an extension; the owner's Ubuntu 26.04 has `ubuntu-appindicators@ubuntu.com`
 installed. The tray menu holds a status line ("2 runs live" or "No runs
 live"), one line per live run ("<Engine> · <repository> · <time>", which
-opens a terminal on that run), Open Ember and Quit Ember.
+opens a terminal on that run), Open Ember and Quit Ember. The tray always
+uses the icons for a dark top bar (`on-dark`): Ubuntu 26.04's Yaru shell
+themes draw the top bar `#131313` in light and dark mode.
 
-J4. Notifications: a run finishes (its status becomes `closed`, once per
-run), a run fails (its status becomes `failed`). In 0.2.0 also: a flow
-finishes, a flow reaches a lead stop. Each has a Settings switch. The title
-is "Run finished" or "Run failed"; the text is "<Engine> · <model> in
-<repository>." followed by the subject or the last reason. A click opens the
-window on the screen it last showed.
+J4. Ember sends no desktop notifications.
 
 J5. Commands: an update, install or sign-in command shows a Run button. Run
 opens a dialog titled "Run this command?" naming the exact command, with
 Cancel and Run in terminal. Cancel is the default button. On confirm, the
-app runs the command in a window of the owner's terminal so its output and
-any password prompt stay with the owner.
+app runs the command in a window of the owner's terminal, opened with the
+`terminal` setting, so its output and any password prompt stay with the
+owner. After the command ends, the window shows its exit code and stays
+open until Enter is pressed.
 
 J6. Run records are watched with Qt's `QFileSystemWatcher` (inotify), with a
 check every sixty seconds as a backstop. While the window is hidden, the app
-reads only what the tray and notifications need.
+reads only what the tray needs, besides the reads at start and the engine
+status read after a run fails with a sign-in error; screens do not redraw.
 
 J7. Theme follows the desktop's light or dark setting, with an override in
 Settings (System, Light, Dark).
@@ -389,13 +401,34 @@ dark and a light top bar.
 ## K. Dependencies
 
 K1. A component list in `src/ember/data/components.toml`: id, label, group,
-how the installed version is read (apt, npm, a command, Python package),
-where the newest version is read, and its update and install commands.
-The list includes tmux, bubblewrap and git.
+how the installed version is read (an apt package, a command's output, or a
+Python package), where the newest version is read (apt, a JSON or text URL,
+or PyPI), and its update and install commands. The groups are `apps`
+(engines and apps), `system` (system tools) and `libraries` (Ember's
+libraries).
+
+| id | Group | Installed read | Newest read | Update | Install |
+|---|---|---|---|---|---|
+| `codex` | apps | `codex --version` | `https://registry.npmjs.org/@openai/codex/latest`, `version` | `codex update` | `npm install -g @openai/codex` |
+| `opencode` | apps | `opencode --version` | `https://registry.npmjs.org/opencode-ai/latest`, `version` | `opencode upgrade` | `curl -fsSL https://opencode.ai/install \| bash` |
+| `claude` | apps | `claude --version` | `https://downloads.claude.ai/claude-code-releases/latest`, the whole body | `claude update` | `curl -fsSL https://claude.ai/install.sh \| bash` |
+| `claude-desktop` | apps | apt `claude-desktop` | apt `claude-desktop` | `sudo apt install --only-upgrade claude-desktop` | None |
+| `tmux` | system | apt `tmux` | apt `tmux` | `sudo apt install --only-upgrade tmux` | `sudo apt install tmux` |
+| `bubblewrap` | system | apt `bubblewrap` | apt `bubblewrap` | `sudo apt install --only-upgrade bubblewrap` | `sudo apt install bubblewrap` |
+| `git` | system | apt `git` | apt `git` | `sudo apt install --only-upgrade git` | `sudo apt install git` |
+| `python3` | system | apt `python3` | apt `python3` | `sudo apt install --only-upgrade python3` | `sudo apt install python3` |
+| `xdg-terminal-exec` | system | apt `xdg-terminal-exec` | apt `xdg-terminal-exec` | `sudo apt install --only-upgrade xdg-terminal-exec` | `sudo apt install xdg-terminal-exec` |
+| `pyside6` | libraries | Python package `PySide6` | PyPI `PySide6` | None | None |
+
+A component with no command for its state shows a note instead: Claude
+Desktop missing shows "Not installed."; PySide6 with an update shows
+"Updates with the next Ember release." and missing shows "Reinstall Ember."
 
 K2. Status per component: current, update available, missing, check failed.
-Installed versions are read at start and on Check now; newest versions at
-most every six hours, cached.
+Installed versions are read at start and on Check now. Newest versions are
+cached, and an ordinary read reads them again only when the cached read is
+six hours old or more; an explicit refresh (`emb deps --refresh`) reads
+them at once.
 
 ## L. Skill
 
