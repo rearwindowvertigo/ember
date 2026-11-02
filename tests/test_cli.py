@@ -1,6 +1,11 @@
+import importlib
 import json
 import os
 import sqlite3
+import sys
+import time
+import types
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +13,7 @@ import pytest
 
 from ember import __version__, choices, paths
 from ember.cli import main
+from ember.engines import models, status
 
 
 def test_version_prints_to_stdout(capsys: pytest.CaptureFixture[str]) -> None:
@@ -307,3 +313,270 @@ def test_menu_value_not_shortlisted_exits_64(
     assert data is None
     assert "shortlist" in err
     assert choices.read(env=env)["generation"] == 0
+
+
+# emb engines
+
+
+def _engines(
+    argv: list[str], env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> tuple[int, str, str]:
+    code = main(["engines", *argv], env=env)
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def _stub(env: dict[str, str], name: str, body: str) -> None:
+    path = Path(env["PATH"]) / name
+    path.write_text("#!/bin/sh\n" + body)
+    path.chmod(0o755)
+
+
+CODEX_OK = """case "$1" in
+--version) echo "codex-cli 1.2.3";;
+login) echo "Logged in using ChatGPT";;
+esac
+"""
+
+
+def test_engines_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["engines", "--help"])
+    assert exit_info.value.code == 0
+    assert "--models" in capsys.readouterr().out
+
+
+def test_engines_json(env: dict[str, str], capsys: pytest.CaptureFixture[str]) -> None:
+    _stub(env, "codex", CODEX_OK)
+    code, out, err = _engines(["--json"], env, capsys)
+    assert code == 0
+    assert err == ""
+    data = json.loads(out)
+    assert list(data) == ["codex", "opencode", "claude"]
+    assert data["codex"]["connected"] is True
+    assert data["codex"]["state"] == "connected"
+    assert data["opencode"]["state"] == "not installed"
+    assert data["opencode"]["requirements"][0] == {
+        "label": "the opencode CLI",
+        "met": False,
+        "fix": "curl -fsSL https://opencode.ai/install | bash",
+    }
+
+
+def test_engines_text(env: dict[str, str], capsys: pytest.CaptureFixture[str]) -> None:
+    _stub(env, "codex", CODEX_OK)
+    code, out, err = _engines([], env, capsys)
+    assert code == 0
+    assert err == ""
+    lines = out.splitlines()
+    assert lines[0] == "codex: connected, codex-cli 1.2.3"
+    assert lines[1].startswith("opencode: not installed: ")
+    assert (
+        lines[2] == "  the opencode CLI: curl -fsSL https://opencode.ai/install | bash"
+    )
+    assert lines[3] == "  an OpenRouter credential for OpenCode"
+    assert lines[4].startswith("claude: not installed: ")
+
+
+def test_engines_reads_cache_until_refresh(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    _stub(env, "codex", CODEX_OK)
+    _engines(["--json"], env, capsys)
+    (Path(env["PATH"]) / "codex").unlink()
+    _, out, _ = _engines(["--json"], env, capsys)
+    assert json.loads(out)["codex"]["connected"] is True
+    _, out, _ = _engines(["--json", "--refresh"], env, capsys)
+    assert json.loads(out)["codex"]["state"] == "not installed"
+
+
+def test_engines_models_json(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = _engines(["--models", "claude", "--json"], env, capsys)
+    assert code == 0
+    assert err == ""
+    data = json.loads(out)
+    assert data["source"] == "cli"
+    assert data["reason"] is None
+    assert data["models"][1]["id"] == "opus"
+
+
+def test_engines_models_text_from_cache(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    payload = {
+        "fetched_at": time.time() - 120,
+        "models": [
+            models.Model(
+                "openai/gpt-4o",
+                "GPT-4o",
+                ("low", "high"),
+                "low",
+                128000,
+                0.0000025,
+                0.00001,
+                True,
+            ).to_json()
+        ],
+    }
+    status.save_cache_file(models.cache_path("opencode", env), payload, env)
+    code, out, err = _engines(["--models", "opencode"], env, capsys)
+    assert code == 0
+    assert err == ""
+    assert out.splitlines() == [
+        "opencode models from cache, read 2 min ago",
+        "openai/gpt-4o  GPT-4o  efforts low, high (default low)  context 128000  "
+        "$2.50/M in  $10.00/M out  tools",
+    ]
+
+
+def test_engines_models_failure_reason_on_stderr(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, out, err = _engines(["--models", "codex"], env, capsys)
+    assert code == 0
+    assert out == "codex models from cli, never read\n"
+    assert err.startswith("emb engines: ")
+    assert "not installed" in err
+    code, out, err = _engines(["--models", "codex", "--json"], env, capsys)
+    assert code == 0
+    data = json.loads(out)
+    assert data == {
+        "models": [],
+        "source": "cli",
+        "fetched_at": None,
+        "reason": data["reason"],
+    }
+    assert data["reason"] in err
+
+
+def test_engines_models_invalid_engine_exits_64(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["engines", "--models", "gpt"], env=env)
+    assert exit_info.value.code == 64
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--models" in captured.err
+
+
+# emb run
+
+
+@pytest.fixture
+def run_env(tmp_path: Path) -> Iterator[dict[str, str]]:
+    environment = _stub_engine().make_env(tmp_path)
+    yield environment
+    _stub_engine().kill_sessions(tmp_path)
+
+
+def _stub_engine() -> types.ModuleType:
+    """Return the run tests' stub helpers, from `tests/runs/stub_engine.py`."""
+    return importlib.import_module("runs.stub_engine")
+
+
+def test_run_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["run", "--help"])
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+    for option in ("--engine", "--task-file", "--recover", "--stall", "--trailer"):
+        assert option in out
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["--dir", "."], "a new run needs --engine, --task-file"),
+        (["--screen", "r", "--status"], "--screen and --status cannot be combined"),
+        (["--screen", "r", "--model", "m"], "--model cannot be used with --screen"),
+        (["--send", "r"], "--send and --message-file go together"),
+        (["--status", "--message-file", "f"], "--send and --message-file go together"),
+        (["--status", "--force"], "--force needs --close or --send"),
+        (["--close", "r", "--json"], "--json needs --status"),
+    ],
+)
+def test_run_usage_errors_exit_64(
+    argv: list[str], message: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["run", *argv], env={}) == 64
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"emb run: {message}\nnext: emb run --help\n"
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "x", "inf"])
+def test_run_stall_must_be_positive(
+    value: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["run", "--status", "--stall", value])
+    assert exit_info.value.code == 64
+    assert "--stall" in capsys.readouterr().err
+
+
+def test_run_status_with_no_runs(
+    run_env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["run", "--status", "--json"], env=run_env) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
+def test_run_start_status_and_close(
+    tmp_path: Path,
+    run_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ember import engines
+    from ember.runs import core
+
+    stub = _stub_engine()
+
+    monkeypatch.setattr(core, "POLL_SECONDS", 0.02)
+    monkeypatch.setattr(
+        engines,
+        "load_driver",
+        lambda name, env=None: stub.StubDriver(name, stub.script_path(run_env)),
+    )
+    repo = stub.make_repo(tmp_path, run_env)
+    brief = tmp_path / "brief.md"
+    brief.write_text("Write a file\n@write out.txt hello\n")
+    argv = [
+        "run", "--engine", "claude", "--dir", str(repo), "--task-file", str(brief),
+        "--trailer", "Co-Authored-By: X <x@y>", "--quiet",
+    ]  # fmt: skip
+    assert main(argv, env=run_env) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert len(out) == 2
+    run_id = out[0].removeprefix("run ")
+    assert out[1].endswith(" · exit 0 · 1 files · turn 1")
+    assert main(["run", "--status", run_id, "--json"], env=run_env) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["trailers"] == ["Co-Authored-By: X <x@y>"]
+    assert data["session_state"] == "live"
+    assert main(["run", "--close", run_id], env=run_env) == 0
+    assert capsys.readouterr().out == f"closed {run_id}\n"
+
+
+def test_run_without_driver_exits_69(
+    tmp_path: Path,
+    run_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setitem(sys.modules, "ember.engines.codex", None)
+    repo = _stub_engine().make_repo(tmp_path, run_env)
+    brief = tmp_path / "brief.md"
+    brief.write_text("Task\n")
+    argv = ["run", "--engine", "codex", "--model", "gpt-5", "--dir", str(repo)]
+    code = main([*argv, "--task-file", str(brief)], env=run_env)
+    captured = capsys.readouterr()
+    assert code == 69
+    assert captured.out == ""
+    assert "emb run: Ember has no driver for codex\n" in captured.err
+    assert captured.err.splitlines()[-1] == (
+        "owner: this Ember build has no driver for codex; update Ember"
+    )

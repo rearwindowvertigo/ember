@@ -6,6 +6,9 @@ functions are typed: strings, and lists of strings for list keys.
 
 Every function takes an optional `env` mapping, passed to `ember.paths`, and an
 optional `now` in seconds since the epoch, which defaults to the current time.
+
+The worker menu reads each engine's last checked status from the status cache
+of `ember.engines.status`; it never runs an engine.
 """
 
 import json
@@ -17,9 +20,11 @@ import sqlite3
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ember import db
+from ember.engines import status
 
 EX_USAGE = 64
 
@@ -35,23 +40,26 @@ SETTING = "setting"
 DEFAULT = "default"
 
 ENGINES = ("claude", "codex", "opencode")
+SANDBOXED = ("codex", "opencode", "claude")
+"""The engines with a `sandbox.<engine>` switch, in display order."""
 MENU_KEYS = ("single.writer", "single.reviewer")
 
 _ID = re.compile(r"[a-z0-9][a-z0-9-]{5,63}")
 _NAME = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+_OPENCODE_PROVIDER = r"~?[A-Za-z0-9][A-Za-z0-9._-]*"
 _OPENCODE_MODEL = r"[A-Za-z0-9][A-Za-z0-9._:-]*"
 _EFFORT = r"[a-z]+"
 _SHORTLIST_ENTRY = {
     "claude": re.compile(rf"(?P<model>{_NAME})@(?P<effort>{_EFFORT})"),
     "codex": re.compile(rf"(?P<model>{_NAME})@(?P<effort>{_EFFORT})"),
     "opencode": re.compile(
-        rf"(?P<model>{_NAME}/{_OPENCODE_MODEL})(?:@(?P<effort>{_EFFORT}))?"
+        rf"(?P<model>{_OPENCODE_PROVIDER}/{_OPENCODE_MODEL})(?:@(?P<effort>{_EFFORT}))?"
     ),
 }
 _MENU_MODEL = {
     "claude": re.compile(_NAME),
     "codex": re.compile(_NAME),
-    "opencode": re.compile(rf"{_NAME}/{_OPENCODE_MODEL}"),
+    "opencode": re.compile(rf"{_OPENCODE_PROVIDER}/{_OPENCODE_MODEL}"),
 }
 
 
@@ -183,9 +191,30 @@ def _constant(value: object) -> Default:
     return lambda env: value
 
 
-def _sandbox_default(env: Mapping[str, str] | None) -> str:
-    search = (os.environ if env is None else env).get("PATH", os.defpath)
-    return "bubblewrap" if shutil.which("bwrap", path=search) else "none"
+def _sandbox_default(engine: str) -> Default:
+    """Return the default of `sandbox.<engine>`.
+
+    The default is `on` when the engine's sandbox can work: a `bwrap` on
+    `PATH`, or for Codex also the `bwrap` bundled with Codex.
+    """
+
+    def default(env: Mapping[str, str] | None) -> str:
+        search = (os.environ if env is None else env).get("PATH", os.defpath)
+        if shutil.which("bwrap", path=search):
+            return "on"
+        if engine == "codex":
+            codex = shutil.which("codex", path=search)
+            # ember.sandbox reads this module, so it is imported here.
+            from ember import sandbox
+
+            if (
+                codex is not None
+                and sandbox.codex_bundled_bwrap(Path(codex)) is not None
+            ):
+                return "on"
+        return "off"
+
+    return default
 
 
 _STANDING = frozenset({SETTING})
@@ -234,17 +263,14 @@ def _keys() -> dict[str, Key]:
                 allowed=("cli", "subagent"),
             )
         )
-    for engine, methods in (
-        ("codex", ("bubblewrap", "codex-bundled", "none")),
-        ("opencode", ("bubblewrap", "none")),
-    ):
+    for engine in SANDBOXED:
         keys.append(
             Key(
                 f"sandbox.{engine}",
                 _STANDING,
-                _enum(*methods),
-                _sandbox_default,
-                allowed=methods,
+                _enum(*_ON_OFF),
+                _sandbox_default(engine),
+                allowed=_ON_OFF,
             )
         )
     keys.append(
@@ -480,12 +506,19 @@ def _resolve(
     return answers
 
 
-def menu_row(answers: Mapping[str, Mapping[str, Any]], name: str) -> dict[str, Any]:
+def menu_row(
+    answers: Mapping[str, Mapping[str, Any]],
+    name: str,
+    connected: Mapping[str, bool] | None = None,
+) -> dict[str, Any]:
     """Describe one worker menu row from resolved answers.
 
     Args:
         answers: Resolved answers, key to `{"value", "layer"}`.
         name: `single.writer` or `single.reviewer`.
+        connected: Whether each engine was connected when last checked; an
+            engine that is missing, or `None`, is not reported as not
+            connected.
 
     Returns:
         `{"value", "state", "engine", "model", "effort", "run_as", "reason"}`.
@@ -514,6 +547,9 @@ def menu_row(answers: Mapping[str, Mapping[str, Any]], name: str) -> dict[str, A
     if answers[f"engine.{engine}"]["value"] != "on":
         row.update(state="engine off", reason=f"{engine} is off")
         return row
+    if connected is not None and connected.get(engine) is False:
+        row.update(state="not connected", reason=f"{engine} is not connected")
+        return row
     models = shortlist_models(engine, answers[f"shortlist.{engine}"]["value"])
     if model not in models:
         row.update(state="not shortlisted", reason=f"not on the {engine} shortlist")
@@ -530,6 +566,10 @@ def _reply(
 ) -> dict[str, Any]:
     answers = _resolve(state, request, env)
     source_error = bool(state.errors)
+    held = None if source_error else status.cached(env)
+    connected = (
+        None if held is None else {name: item.connected for name, item in held.items()}
+    )
     return {
         "answers": answers,
         "claim": None
@@ -540,7 +580,7 @@ def _reply(
         "source_error": source_error,
         "menu": None
         if source_error
-        else {name: menu_row(answers, name) for name in MENU_KEYS},
+        else {name: menu_row(answers, name, connected) for name in MENU_KEYS},
     }
 
 

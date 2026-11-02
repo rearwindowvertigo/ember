@@ -46,11 +46,11 @@ empty list.
 | `worker.network` | `on`, `off` | `off` | standing |
 | `engine.claude`, `engine.codex`, `engine.opencode` | `on`, `off` | `on` | standing |
 | `shortlist.claude`, `shortlist.codex` | List of `<model>@<effort>`; model `[A-Za-z0-9][A-Za-z0-9._-]*`, effort `[a-z]+` | `[]` | standing |
-| `shortlist.opencode` | List of `<provider>/<model>`, with optional `@<effort>`; each part `[A-Za-z0-9][A-Za-z0-9._-]*`, the model part may also contain `:` | `[]` | standing |
+| `shortlist.opencode` | List of `<provider>/<model>`, with optional `@<effort>`; each part `[A-Za-z0-9][A-Za-z0-9._-]*`, the provider part may start with `~` and the model part may also contain `:` | `[]` | standing |
 | `single.writer`, `single.reviewer` | `ask`, or `<engine>:<model>` with the model on that engine's shortlist when saved | `ask` | request, one-time, standing |
 | `single.writer_as`, `single.reviewer_as` | `cli`, `subagent` | `cli` | request, one-time, standing |
-| `sandbox.codex` | `bubblewrap`, `codex-bundled`, `none` | `bubblewrap` when `bwrap` is on `PATH`, else `none` | standing |
-| `sandbox.opencode` | `bubblewrap`, `none` | `bubblewrap` when `bwrap` is on `PATH`, else `none` | standing |
+| `sandbox.codex` | `on`, `off` | `on` when `bwrap` is on `PATH` or the `codex` on `PATH` has a bundled `bwrap`, else `off` | standing |
+| `sandbox.opencode`, `sandbox.claude` | `on`, `off` | `on` when `bwrap` is on `PATH`, else `off` | standing |
 | `sandbox.read` | List of absolute paths, no duplicates | `[]` | standing |
 | `terminal` | A non-empty command line in shell syntax | `xdg-terminal-exec` | standing |
 | `app.autostart` | `on`, `off` | `on` | standing |
@@ -122,8 +122,12 @@ changes nothing leaves it.
 
 `claim` is `null` without `--id`.
 
-Menu `state` is `set`, `ask`, `engine off`, `not shortlisted` or `invalid`.
-`effort` is the effort in the shortlist entry. `run_as` is the
+Menu `state` is `set`, `ask`, `invalid`, `engine off`, `not connected` or
+`not shortlisted`, checked in that order. `not connected` means the engine is
+on and its status in the cache of `emb engines` says it is not connected; its
+reason is `<engine> is not connected`. A read uses only that cache and never
+runs an engine; with no cache, or a cache that is not valid, no row is
+`not connected`. `effort` is the effort in the shortlist entry. `run_as` is the
 `single.writer_as` or `single.reviewer_as` value for the `claude` engine and
 `null` for the others. `reason` is `null` when `state` is `set`.
 
@@ -138,7 +142,442 @@ Menu `state` is `set`, `ask`, `engine off`, `not shortlisted` or `invalid`.
 | 77 | An owner option without a terminal on standard input |
 | 78 | The settings database has an unsupported schema |
 
+## `emb engines`
+
+Shows whether Codex, OpenCode and Claude Code are installed, signed in and
+connected, or lists one engine's models.
+
+| Option | Does |
+|---|---|
+| (none) | Print each engine's status |
+| `--refresh` | Check the engines, or read the model list from its source, instead of using the cache |
+| `--json` | Print JSON |
+| `--models ENGINE` | Print the model list of `codex`, `opencode` or `claude` |
+
+Exit codes: 0 whether or not the engines are connected and whether or not the
+model list could be read; 64 for a usage error, such as an unknown engine.
+
+### Status
+
+An engine is `connected` when its CLI is found and its sign-in check passes.
+Each check is a local command with a 10-second timeout:
+
+| Engine | CLI | Sign-in check | Signed in when |
+|---|---|---|---|
+| `codex` | `codex` on `PATH` | `codex login status` | it exits 0 and names ChatGPT |
+| `opencode` | `opencode` on `PATH`, else `~/.opencode/bin/opencode` | `opencode auth list` | it exits 0 and names OpenRouter |
+| `claude` | `claude` on `PATH` | `claude auth status --json` | it prints `"loggedIn": true` |
+
+Each CLI is also run with `--version`. `claude` runs without the variables
+whose names start with `CLAUDE_CODE_`, `CLAUDECODE` or `ANTHROPIC_`.
+
+`state` is the first that applies:
+
+| State | When |
+|---|---|
+| `not installed` | The CLI is not found |
+| `check failed` | A check could not run, exited with an unexpected code, printed something unexpected or timed out; `reason` names the command and, when it printed something, its first line of output |
+| `not signed in` | The sign-in check ran and found no sign-in |
+| `connected` | Every requirement is met |
+
+`check failed` sets `signed_in` to `null` when the sign-in check is the one
+that failed.
+
+Results are cached in `$XDG_CACHE_HOME/ember/engines.json` (default
+`~/.cache/ember/engines.json`), mode 600 in a mode 700 folder, replaced whole
+on each write. `emb engines` uses the cache while it is valid, and checks the
+engines when there is no valid cache or with `--refresh`. Nothing refreshes it
+on a timer.
+
+Text output has one line per engine, `<engine>: <state>[, <version>][:
+<reason>]`, followed by one indented line per unmet requirement,
+`<label>[: <fix command>]`. The fix command is left out when it is not known.
+
+`--json` prints an object keyed by engine:
+
+```json
+{
+  "codex": {
+    "engine": "codex",
+    "state": "connected",
+    "reason": null,
+    "installed": true,
+    "binary": "/usr/bin/codex",
+    "version": "codex-cli 1.2.3",
+    "signed_in": true,
+    "connected": true,
+    "requirements": [{"label": "...", "met": true, "fix": null}],
+    "checked_at": 1800000000.0
+  }
+}
+```
+
+The requirements are the engine's CLI, with its install command as the fix,
+and its sign-in, with its sign-in command as the fix:
+
+| Engine | Install | Sign in |
+|---|---|---|
+| `codex` | `npm install -g @openai/codex` | `codex login` |
+| `opencode` | `curl -fsSL https://opencode.ai/install \| bash` | `opencode auth login` |
+| `claude` | `curl -fsSL https://claude.ai/install.sh \| bash` | `claude auth login` |
+
+A sign-in command names the CLI by its path when it is not found on `PATH`.
+
+### Models
+
+| Engine | Source | `source` |
+|---|---|---|
+| `codex` | `codex debug models`, models whose visibility is `list` | `cli` |
+| `opencode` | `https://openrouter.ai/api/v1/models`, ids of the form `<provider>/<model>` as `shortlist.opencode` takes them | `openrouter` |
+| `claude` | The aliases Claude Code's `--model` takes: `fable`, `opus`, `sonnet`, `haiku`, each with efforts `low` to `max` | `cli` |
+
+The `codex` and `opencode` lists are cached in
+`$XDG_CACHE_HOME/ember/models-<engine>.json`, mode 600, and read from their
+source again when the cache is 6 hours old, not valid, or with `--refresh`.
+A list served from the cache has `source` `cache`. When the source cannot be
+read, the cached list is used however old, with `reason` set; with no cache
+the list is empty, `source` names the source that was tried, `fetched_at` is
+`null` and `reason` is set. A failed read leaves the cache as it was.
+
+`--json` prints:
+
+```json
+{
+  "models": [
+    {
+      "id": "openai/gpt-4o", "label": "GPT-4o",
+      "efforts": ["low", "high"], "default_effort": "low",
+      "context_length": 128000,
+      "prompt_price": 0.0000025, "completion_price": 0.00001,
+      "supports_tools": true
+    }
+  ],
+  "source": "openrouter",
+  "fetched_at": 1800000000.0,
+  "reason": null
+}
+```
+
+Prices are US dollars per token. `context_length`, the prices and
+`supports_tools` are `null` for `codex` and `claude` and when OpenRouter does
+not report them.
+
+Text output starts with `<engine> models from <source>, read <age> ago` (or
+`never read`), then one line per model: its id, label, efforts, context
+length, prices in US dollars per million tokens and `tools` when it takes tool
+calls. `reason` goes to standard error as `emb engines: <reason>`.
+
+## `emb run`
+
+Starts one worker in its own worktree and tmux session and waits for its
+turn, or works with an existing run. The engine's driver is the `driver()`
+factory of the module `ember.engines.<engine>`; an engine without one exits 69
+with `owner: this Ember build has no driver for <engine>; update Ember`.
+
+Data goes to standard output. Messages go to standard error as
+`emb run: <message>`; each non-zero exit then prints one `next:` or `owner:`
+line from the exit table below.
+
+### Options
+
+| Option | Does |
+|---|---|
+| `--engine ENGINE --dir DIR --task-file FILE` | Start a run of `codex`, `opencode` or `claude` on the git checkout holding `DIR`, with `FILE` as the brief |
+| `--model MODEL` | With a start: the model |
+| `--effort EFFORT` | With a start: the effort |
+| `--read-only` | With a start: work in the checkout itself and edit nothing |
+| `--read PATH` | With a start: a path the run may read, in addition to `sandbox.read`; repeatable |
+| `--trailer LINE` | With a start: a trailer line for each commit; repeatable; none by default |
+| `--claim ID` | With a start: read the menu with this claim id |
+| `--window` | With a start: also open a terminal window on the session |
+| `--send RUN --message-file FILE` | Send `FILE` as the next message and wait for its turn |
+| `--screen RUN` | Print the text of the session's pane |
+| `--interrupt RUN` | Interrupt the current turn, as the engine's driver does it (see Engine drivers) |
+| `--attach RUN` | Open a new terminal window on the session; prints `window <pid>` |
+| `--close RUN` | End the session and record the run closed |
+| `--force` | With `--close`: close even while a turn runs, another command waits on the run, or the session holds messages Ember did not send. With `--send`: send even when the session holds messages Ember did not send |
+| `--recover RUN` | Collect and commit a turn that ended while no command waited, or wait for it |
+| `--status [RUN]` | Print one run's record, or every run's |
+| `--json` | With `--status`: print JSON |
+| `--quiet` | Print only the first line and each turn's summary |
+| `--stall MINUTES` | Minutes without a change on the session's screen before exit 124; default 10 |
+
+A start needs `--engine`, `--dir` and `--task-file`. The start options cannot
+be used with the other modes, and only one mode is given at a time.
+
+### Start
+
+A start checks, in this order: every file and path exists (66); the brief has
+a non-empty line (64); `git` and `tmux` are on `PATH` (69); `--dir` is in a git
+checkout (65); the claim is `claimed` or `none` (64 for `unknown` or `gone`);
+the engine is on (64, also when named by `--engine`); the engine is connected
+in the status cache of `emb engines`, which is checked once first when there
+is no cache (69, naming the fix command); the driver exists (69); the model
+and effort (64); for an editing run, the repository has a main checkout and
+a commit (70); for a sandboxed Codex run, no `sandbox_mode` key (69); and,
+for a sandboxed run, a `bwrap` that runs `/bin/true` in a minimal sandbox
+within 10 seconds (69, with `owner: install bubblewrap (the bwrap command)
+or make it work, or set sandbox.<engine> to off`). For Codex the `bwrap` is
+the one on `PATH`, else the one bundled with Codex. No run folder, worktree
+or branch is created before these checks pass.
+
+A failure after the run folder exists records `status: failed` with its
+reason in `last_reason` and exits 69 for a sandbox or runtime folder problem,
+70 for a worktree problem, and 1 otherwise. The worktree and branch stay.
+
+Model and effort:
+
+- `--model` wins. Otherwise the model comes from the menu row
+  `single.writer`, or `single.reviewer` for `--read-only`. The row must be
+  `set` and name the same engine; a `claude` row whose run-as is `subagent` is
+  refused (64). With `--model`, a `claude` row whose run-as is `subagent` is
+  not read at all.
+- `--effort` wins. Otherwise the effort is the row's, when the row names the
+  same engine and model, else the driver's default for the model, which may
+  be none.
+
+An editing run gets the branch `ember/<engine>/<id>`, cut from the named
+checkout's `HEAD`, in a worktree at `.ember/worktrees/<id>` at the top of the
+repository's main checkout, as `git worktree list` reports it. `.ember/` is
+added to `info/exclude` in the repository's git folder when it is not there.
+A read-only run works in the checkout itself and has no branch.
+
+Each run's sandbox follows the engine's switch, `sandbox.codex`,
+`sandbox.opencode` or `sandbox.claude`. The run records who provides it in
+`sandbox`: `codex` for Codex switched on (Codex's own sandbox with Ember's
+permission profile), `bubblewrap` for OpenCode or Claude switched on
+(Ember's `bwrap` command line), and `none` for a switch that is `off`. The
+run also records `worker.network` in `network` and its read paths in
+`read_effective`: the `sandbox.read` setting, then the `--read` paths. Every
+turn uses the recorded values, whatever the settings say later.
+
+A sandboxed worker sees the machine read-only. The home folder is hidden
+except `~/.local/bin`, `~/.local/lib`, git's configuration, the worktree,
+the repository's git folder, the read paths and the engine's own folders;
+`$XDG_RUNTIME_DIR` and Ember's configuration and state folders are hidden.
+The worktree is writable, or read-only for a read-only run. The engine's
+own folders are:
+
+| Engine | Writable | Read-only |
+|---|---|---|
+| `codex` | Those of Codex's `:workspace` profile | |
+| `opencode` | `opencode` in `$XDG_DATA_HOME`, `$XDG_CACHE_HOME` and `$XDG_STATE_HOME` | `opencode` in `$XDG_CONFIG_HOME`; the folder of the `opencode` binary in the home folder |
+| `claude` | `$CLAUDE_CONFIG_DIR` or `~/.claude`, `~/.claude.json`, `~/.claude.json.backup`, `claude` and `claude-cli-nodejs` in `$XDG_CACHE_HOME` | The folder the `claude` command resolves to, in the home folder |
+
+Network: Codex has network only when `network` is true; its web search is
+always on. OpenCode keeps network for OpenRouter. Claude keeps network for
+its API, so its `Bash` commands keep network too; `network` controls only
+its `WebSearch` and `WebFetch` tools.
+
+A sandboxed Codex run with a `sandbox_mode` key in a Codex configuration
+file exits 69 naming the files. The check runs again on the new worktree
+once it is created, for a tracked `.codex/config.toml`; a conflict there
+records the run failed and exits 69, and the worktree and branch stay. With
+`none`, a run of any engine prints the `WARNING:` line of the sandbox.
+
+The session is a tmux session named by the run id. Its first message is the
+line `Brief from Claude, the lead, for Ember run <id>.`, a blank line and the
+brief, pasted once the engine is ready; a driver that puts the brief on the
+engine's command line pastes nothing. The session runs with no window. With
+`--window`, a window of the `terminal` setting also opens on the session; a
+window that cannot open prints a `WARNING:` line and the run goes on.
+`--attach` opens a window on a running session at any time.
+
+The first line on standard output is `run <id>`.
+
+### Turns
+
+A command that waits for a turn observes it every second. It stops with exit
+124 when the session's screen has not changed for `--stall` minutes and the
+turn has not ended; the session keeps running. Each command, including each
+`--recover`, starts its own count. Ctrl+C stops the waiting command with exit
+74; the turn keeps running. Ctrl+C while a turn is being collected or
+committed exits 74 with `next: emb run --recover <run> (finishes the saved
+turn)`.
+
+When the turn ends, its reply is written to `turn-<n>.md` and, for an editing
+run, every change in the worktree is committed as one commit (`git add -A`).
+The subject is the brief's first non-empty line, cut to 72 characters, with
+` (turn <n>)` after turn 1, followed by the trailer lines. A turn with no
+changes makes no commit.
+
+A turn that fails (69, 71, 73), including an engine that exits during the
+turn, or that ends with no reply (80) is committed the same way when the
+worker changed files, with the subject
+`<subject> (turn <n>, incomplete: <reason>)`, where `<subject>` is cut to 72
+characters and `<reason>` is `sign-in failure` (69), `engine failure` (71),
+`provider error` (73) or `no reply` (80). The turn's exit is unchanged. Nothing is committed when the worktree's branch or
+`HEAD` is not where the run left it (76); a refused commit exits 77 and
+leaves the work uncommitted.
+
+A read-only run has no commit step. Before and after each turn Ember reads
+`git status --porcelain=v1 -z --untracked-files=all` and a SHA-256 hash of
+each listed file, and prints `WARNING: read-only run <id> changed <path>` for
+each path whose state changed; `last_reason` lists them.
+
+Each turn prints:
+
+```text
+<engine> <model> · <effort> · <secs>s · exit <code> · <n> files · turn <n>
+run <id>
+worktree <path>
+branch <branch>
+commit <commit>
+window <pid>
+reply <path>
+--- reply ---
+<reply text>
+```
+
+A missing value prints as `-`, and an effort that is not set as `default`.
+`window` is the terminal's process id of a start. `--quiet` prints the summary
+line only.
+
+`--send` refuses with 75 a turn that has not been collected. Without
+`--force` it then asks the driver whether the session holds messages Ember
+did not send, before it commits, saves a snapshot or changes the turn's
+state; when it does, or when its history cannot be checked, the command
+exits 75 with `emb run: the session of <run> holds messages Ember did not
+send (<what the driver found>); Claude asks the owner before going on` and
+`next: ask the owner about the messages in the session of <run>; with their
+go-ahead, repeat the command with --force`. `--force` skips only this
+check, and records the messages then in the session as accepted, so they do
+not refuse later commands. `--send` then commits a turn that was collected but not committed.
+It sends only when the driver reports the session idle; a busy or unknown
+session exits 75. The message is sent as
+written. When the driver fails (71) or Ctrl+C (74) stops the command before
+the message is known to be delivered, the run's previous turn state is
+restored and the line is `next: emb run --send <run> --message-file <file>
+(the message was not sent)`.
+
+`--recover` finishes the current turn from its recorded state: it waits for a
+turn that was sent, then collects and commits it, or commits a turn that was
+collected. A commit made for the turn but not recorded is recorded rather than
+made again.
+
+`--close` refuses with 75 while a turn runs or another command waits on the
+run, unless `--force`. Without `--force` it also refuses with 75 an editing
+run whose turn is collected but not committed, with `next: emb run --recover
+<run> (commits the collected turn), then emb run --close <run>`, and a live
+session that holds messages Ember did not send or whose history cannot be
+checked, with the line `--send` prints. It ends the
+session and keeps the worktree and branch. A command waiting on a run that is
+closed stops with 72, also when the driver fails or the session is missing
+after the close.
+
+Ember never pushes, merges, rebases or deletes a branch, and never removes a
+worktree.
+
+### Locks
+
+Start, `--send`, `--recover` and `--close` without `--force` hold the run's
+lock, `$XDG_RUNTIME_DIR/ember/locks/<id>.lock`; a second of them on the same
+run exits 75. `--screen`, `--status`, `--interrupt` and `--attach` take no
+lock. Changes to `run.json` are made under the run's record lock,
+`run.lock` in the run's folder.
+
+### Run records
+
+Each run has a folder `$XDG_STATE_HOME/ember/runs/<id>/` (default
+`~/.local/state/ember/runs/<id>/`), mode 700, holding:
+
+| File | Holds |
+|---|---|
+| `run.json` | The record, mode 600, replaced atomically |
+| `brief.md` | The brief |
+| `turn-<n>.md` | The reply of turn `n` |
+| `turn-<n>.status.json` | For a read-only run: the checkout's state before turn `n` |
+| `turn-<n>.outcome.json` | How turn `n` ended: its state, reason, flags and incomplete reason |
+
+A run id is `<engine>-<yyyymmdd>-<hhmmss>-<6 hex digits>`, with the time in
+UTC. It is also the tmux session's name.
+
+`run.json` fields:
+
+| Field | Type | Value |
+|---|---|---|
+| `id` | string | The run id |
+| `engine` | string | `codex`, `opencode` or `claude` |
+| `model` | string | The model |
+| `effort` | string or null | The effort; null when the engine's default applies |
+| `read_only` | boolean | Whether the run edits nothing |
+| `repo` | string | The top of the checkout `--dir` is in |
+| `worktree` | string | The worker's working folder: its worktree, or the checkout for a read-only run |
+| `branch` | string or null | `ember/<engine>/<id>`; null for a read-only run |
+| `base` | string or null | The commit the run started from |
+| `sandbox` | string | Who provides the sandbox: `codex`, `bubblewrap` or `none` |
+| `network` | boolean | Whether `worker.network` was `on` at the start |
+| `read` | list of strings | The `--read` paths |
+| `read_effective` | list of strings | Every path the run may read: the `sandbox.read` setting at the start, then the `--read` paths |
+| `trailers` | list of strings | The `--trailer` lines |
+| `claim` | string or null | The `--claim` id |
+| `status` | string | `starting`; `running` while a turn is active, also after exit 124 or 74; `waiting` once a turn's reply is collected; `failed` when the launch or a turn failed; `closed` |
+| `turn` | integer | The current turn; 0 before the first message |
+| `turn_state` | string or null | `sent`, `collected` or `committed` for the current turn |
+| `reply` | string or null | The current turn's reply file, once collected |
+| `expected_head` | string or null | The branch tip before the current turn, then its commit; null for a read-only run |
+| `started_at` | number | Seconds since the epoch |
+| `updated_at` | number | Seconds since the epoch |
+| `ended_at` | number or null | When the session ended |
+| `last_exit` | integer or null | The exit code of the last turn or failure |
+| `last_reason` | string or null | Its message, or the paths a read-only turn changed |
+| `commits` | list of strings | The run's commits, oldest first |
+| `subject` | string | The brief's first non-empty line |
+
+Paths are absolute.
+
+### Status
+
+`--status RUN --json` prints the record with `session_state`: `live`, `dead`
+(the pane's command ended) or `missing` (no session). `--status --json`
+prints a list of them, oldest first. A folder whose `run.json` cannot be read
+is skipped with a message on standard error. Without `--json`, `--status RUN`
+prints one `<field>: <value>` line per field, and `--status` one line per run:
+`<id>  <status>  <session_state>  turn <n>  <subject>`.
+
+### Exit codes
+
+| Code | Meaning | Line |
+|---|---|---|
+| 0 | Success | |
+| 1 | Unexpected error, or the settings database cannot be read | `next: emb run --status`; for the database, `owner:` |
+| 64 | Usage error, unanswerable menu row, switched-off engine or invalid claim | `next: emb run --help`, or `owner:` naming the setting |
+| 65 | Not a git checkout | `next:` a start inside a checkout |
+| 66 | Missing file or path | `next:` a start with existing paths |
+| 69 | Engine, driver, `git` or `tmux` missing, engine not signed in, a sandbox conflict, a switched-on sandbox without a working `bwrap`, or no usable runtime folder | `owner:` naming the fix |
+| 70 | Worktree creation failed, or no main checkout or commit | `next: git -C <dir> worktree prune, then ...` |
+| 71 | Engine or session failed | `next: emb run --status <run>`; for a failed send, `next: emb run --send <run> ...` |
+| 72 | Session or window unavailable, or the run was closed | `next: emb run --status <run>`, or a new start |
+| 73 | Provider limit or outage | `next: emb run --send <run> ...` |
+| 74 | Interrupted | `next: emb run --recover <run>`; for an interrupted send, `next: emb run --send <run> ...` |
+| 75 | Close refused while a turn runs or is collected but not committed, a busy session, another command on the run, or a session holding messages Ember did not send | `next: emb run --recover <run>` or `--status`; for messages Ember did not send, `next: ask the owner ...` |
+| 76 | Branch or `HEAD` moved; nothing committed | `next: git -C <worktree> log --oneline -3` |
+| 77 | A hook refused the commit | `next: git -C <worktree> status` |
+| 80 | The turn ended with no reply | `next: emb run --screen <run>, then emb run --send <run> ...` |
+| 124 | Stall; the turn may still be running | `next: emb run --recover <run>` |
+
+### Engine drivers
+
+| | Codex | OpenCode | Claude |
+|---|---|---|---|
+| Starts | Codex's interactive session in the pane: `codex -C <worktree> -m <model> -c check_for_update_on_startup=false [-c model_reasoning_effort=<effort>] -a never --search`, with Ember's permission profile in `-c` options, or `--sandbox danger-full-access` when the sandbox is off | OpenCode's interactive view in the pane, with its built-in server on a free port of `127.0.0.1` protected by a password, OpenRouter as the provider and the agent `ember-worker`, inside `bwrap` when the sandbox is on | A program of Ember's in the pane that runs one `claude -p --output-format stream-json` per turn in the worktree, inside `bwrap` when the sandbox is on, and shows its progress; the program itself runs outside the sandbox |
+| Brief | Pasted once Codex's composer shows `? for shortcuts` | Sent through the server's session API once the server answers and the view has drawn its screen | Written as turn 1's request before the pane starts; given to the CLI on standard input |
+| Turn end and reply | Read from Codex's rollout file: `task_complete` with its last message, or `turn_aborted`; an `error` event during the turn fails it | Read from the session status and messages: the turn's last assistant message, once the session is idle; its text parts are the reply | The CLI's exit; the reply is the assistant text after the turn's last tool result |
+| Later messages | Pasted | Sent through the session API | A new `claude -p` that resumes the previous turn's CLI session |
+| Read-only run | Ember's profile extends Codex's `:read-only` profile | The agent may not edit, write or patch files or reach folders outside the checkout, and the worktree is mounted read-only | The tools are `Read`, `Glob` and `Grep`, and the worktree is mounted read-only |
+| Sandbox provider | `codex` | `bubblewrap` | `bubblewrap` |
+| `--interrupt` | Presses Escape in the session | Aborts the turn through the session API | Sends `SIGINT` to the process group of the turn's CLI, as Ctrl+C in the pane does; the program takes the next turn |
+| Messages Ember did not send | Each `user_message` in the rollout that does not match, in order, a message Ember pasted | Each user message whose id Ember did not send | None; the pane takes no typed messages |
+
+Claude's turns use `--restricted`, `--safe-mode` and `--strict-mcp-config`;
+the run's read paths are added with `--add-dir` and edits to them are
+refused. While a tool call or a model message runs, Claude's pane prints a
+line such as `· running Bash for 3 min` at least once a minute.
+
 ## Exit codes
+
+These are the exit codes of `emb choices` and `emb engines`; `emb run` has its
+own table above.
 
 | Code | Meaning |
 |---|---|

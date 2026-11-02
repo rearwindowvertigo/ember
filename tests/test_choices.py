@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from ember import choices, db, paths
+from ember.engines import status
 
 T0 = 1_800_000_000.0
 DAY = 24 * 60 * 60
@@ -62,9 +63,10 @@ VALID = [
     ("single.reviewer", "ask"),
     ("single.writer_as", "subagent"),
     ("single.reviewer_as", "cli"),
-    ("sandbox.codex", "codex-bundled"),
-    ("sandbox.codex", "none"),
-    ("sandbox.opencode", "bubblewrap"),
+    ("sandbox.codex", "on"),
+    ("sandbox.codex", "off"),
+    ("sandbox.opencode", "on"),
+    ("sandbox.claude", "off"),
     ("sandbox.read", ["/opt/data", "/srv"]),
     ("sandbox.read", []),
     ("terminal", "gnome-terminal -- 'a b'"),
@@ -96,7 +98,9 @@ INVALID = [
     ("single.reviewer", ""),
     ("single.writer_as", "agent"),
     ("sandbox.codex", "landlock"),
-    ("sandbox.opencode", "codex-bundled"),
+    ("sandbox.codex", "bubblewrap"),
+    ("sandbox.opencode", "none"),
+    ("sandbox.claude", "codex-bundled"),
     ("sandbox.read", ["relative/path"]),
     ("sandbox.read", ["/a", "/a"]),
     ("sandbox.read", [""]),
@@ -151,8 +155,9 @@ def test_defaults(env: dict[str, str]) -> None:
         "single.writer_as": "cli",
         "single.reviewer": "ask",
         "single.reviewer_as": "cli",
-        "sandbox.codex": "none",
-        "sandbox.opencode": "none",
+        "sandbox.codex": "off",
+        "sandbox.opencode": "off",
+        "sandbox.claude": "off",
         "sandbox.read": [],
         "terminal": "xdg-terminal-exec",
         "app.autostart": "on",
@@ -162,7 +167,7 @@ def test_defaults(env: dict[str, str]) -> None:
     }
 
 
-def test_sandbox_defaults_to_bubblewrap_when_bwrap_is_on_path(
+def test_sandbox_defaults_to_on_when_bwrap_is_on_path(
     env: dict[str, str], tmp_path: Path
 ) -> None:
     bin_dir = tmp_path / "bin"
@@ -172,11 +177,28 @@ def test_sandbox_defaults_to_bubblewrap_when_bwrap_is_on_path(
     bwrap.chmod(0o755)
     with_bwrap = {**env, "PATH": f"{env['PATH']}:{bin_dir}"}
     answers = choices.read(env=with_bwrap)["answers"]
-    assert answers["sandbox.codex"]["value"] == "bubblewrap"
-    assert answers["sandbox.opencode"]["value"] == "bubblewrap"
+    for engine in ("codex", "opencode", "claude"):
+        assert answers[f"sandbox.{engine}"]["value"] == "on"
     answers = choices.read(env=env)["answers"]
-    assert answers["sandbox.codex"]["value"] == "none"
-    assert answers["sandbox.opencode"]["value"] == "none"
+    for engine in ("codex", "opencode", "claude"):
+        assert answers[f"sandbox.{engine}"]["value"] == "off"
+
+
+def test_codex_sandbox_defaults_to_on_with_a_bundled_bwrap(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    package = tmp_path / "codex-package"
+    (package / "bin").mkdir(parents=True)
+    (package / "codex-resources").mkdir()
+    (package / "codex-resources" / "bwrap").write_text("#!/bin/sh\n")
+    codex = package / "bin" / "codex"
+    codex.write_text("#!/bin/sh\n")
+    codex.chmod(0o755)
+    with_codex = {**env, "PATH": f"{env['PATH']}:{package / 'bin'}"}
+    answers = choices.read(env=with_codex)["answers"]
+    assert answers["sandbox.codex"]["value"] == "on"
+    assert answers["sandbox.opencode"]["value"] == "off"
+    assert answers["sandbox.claude"]["value"] == "off"
 
 
 def test_missing_database_reads_defaults_without_creating_it(
@@ -834,3 +856,113 @@ def test_invalid_pending_once_fails_closed_where_it_is_read(
     assert conn.execute("SELECT count(*) FROM once").fetchone()[0] == 1
     assert conn.execute("SELECT count(*) FROM claims").fetchone()[0] == 0
     conn.close()
+
+
+# Engine status in the menu
+
+
+def _engine_cache(env: dict[str, str], connected: dict[str, bool]) -> None:
+    def entry(engine: str) -> dict[str, Any]:
+        ok = connected.get(engine, True)
+        return status.EngineStatus(
+            engine=engine,
+            state=status.CONNECTED if ok else status.NOT_SIGNED_IN,
+            reason=None if ok else "signed out",
+            installed=True,
+            binary=f"/usr/bin/{engine}",
+            version="1",
+            signed_in=ok,
+            connected=ok,
+            requirements=(),
+            checked_at=T0,
+        ).to_json()
+
+    payload = {"engines": {engine: entry(engine) for engine in status.ENGINES}}
+    status.save_cache_file(status.cache_path(env), payload, env)
+
+
+def _codex_writer(env: dict[str, str], shortlist: list[str]) -> None:
+    choices.set_settings(
+        {"shortlist.codex": shortlist, "single.writer": "codex:gpt-5"}, env=env
+    )
+
+
+def test_menu_row_not_connected(env: dict[str, str]) -> None:
+    _codex_writer(env, ["gpt-5@high"])
+    _engine_cache(env, {"codex": False})
+    row = choices.read(env=env)["menu"]["single.writer"]
+    assert row["state"] == "not connected"
+    assert row["reason"] == "codex is not connected"
+    assert row["engine"] == "codex"
+    assert row["model"] == "gpt-5"
+
+
+def test_not_connected_comes_before_not_shortlisted(env: dict[str, str]) -> None:
+    _codex_writer(env, ["gpt-5@high"])
+    choices.set_settings({"shortlist.codex": ["o3@low"]}, env=env)
+    _engine_cache(env, {"codex": False})
+    row = choices.read(env=env)["menu"]["single.writer"]
+    assert row["state"] == "not connected"
+
+
+def test_engine_off_comes_before_not_connected(env: dict[str, str]) -> None:
+    _codex_writer(env, ["gpt-5@high"])
+    choices.set_settings({"engine.codex": "off"}, env=env)
+    _engine_cache(env, {"codex": False})
+    row = choices.read(env=env)["menu"]["single.writer"]
+    assert row["state"] == "engine off"
+
+
+def test_connected_engine_stays_set(env: dict[str, str]) -> None:
+    _codex_writer(env, ["gpt-5@high"])
+    _engine_cache(env, {"claude": False})
+    row = choices.read(env=env)["menu"]["single.writer"]
+    assert row["state"] == "set"
+    assert row["effort"] == "high"
+
+
+@pytest.mark.parametrize("content", [None, "{broken", '{"engines": {}}'])
+def test_missing_or_invalid_engine_cache_changes_nothing(
+    env: dict[str, str], content: str | None
+) -> None:
+    _codex_writer(env, ["gpt-5@high"])
+    path = status.cache_path(env)
+    if content is not None:
+        path.parent.mkdir(parents=True)
+        path.write_text(content)
+    row = choices.read(env=env)["menu"]["single.writer"]
+    assert row["state"] == "set"
+    if content is None:
+        assert not path.exists()
+
+
+def test_menu_never_runs_engines(env: dict[str, str], tmp_path: Path) -> None:
+    marker = tmp_path / "ran"
+    stub = Path(env["PATH"]) / "codex"
+    stub.write_text(f"#!/bin/sh\necho ran > {marker}\n")
+    stub.chmod(0o755)
+    _codex_writer(env, ["gpt-5@high"])
+    choices.read(env=env)
+    choices.snapshot(env=env)
+    assert not marker.exists()
+    assert not status.cache_path(env).exists()
+
+
+def test_snapshot_menu_reports_not_connected(env: dict[str, str]) -> None:
+    _codex_writer(env, ["gpt-5@high"])
+    _engine_cache(env, {"codex": False})
+    row = choices.snapshot(env=env)["menu"]["single.writer"]
+    assert row["state"] == "not connected"
+
+
+def test_opencode_shortlist_takes_tilde_provider_ids(tmp_path: Path) -> None:
+    env = {"HOME": str(tmp_path), "XDG_CONFIG_HOME": str(tmp_path / "config")}
+    choices.set_settings(
+        {
+            "shortlist.opencode": ["~anthropic/claude-opus-latest@high"],
+            "single.writer": "opencode:~anthropic/claude-opus-latest",
+        },
+        env=env,
+    )
+    answers = choices.read(env=env)["answers"]
+    assert answers["single.writer"]["value"] == "opencode:~anthropic/claude-opus-latest"

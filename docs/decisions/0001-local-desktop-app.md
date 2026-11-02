@@ -31,11 +31,11 @@ current and change settings. The owner decided the shape of Ember on
 6. Settings, one-time choices and run claims live in one local SQLite
    database. Claude reaches them through `emb choices`; there is no MCP
    server.
-7. Sandboxing workers is a setting. Bubblewrap is optional. For Codex the
-   owner chooses system bubblewrap, the bubblewrap bundled with Codex, or
-   none; for OpenCode, bubblewrap or none. The default is bubblewrap when it
-   is installed and none when it is not. The app shows the method in use
-   and its last check per engine.
+7. Sandboxing workers is a setting: one on/off switch per engine.
+   Bubblewrap is optional. Codex runs in its own sandbox, which Ember
+   configures; OpenCode and Claude run inside Ember's bubblewrap. The
+   default is on when the engine's sandbox can work and off when it cannot.
+   The app shows the sandbox in use and its last check per engine.
 8. Ember reads no seat or plan usage.
 9. Ember is packaged as a `.deb` for installers other than the owner.
 
