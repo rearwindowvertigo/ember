@@ -1,5 +1,6 @@
 import json
 import stat
+import subprocess
 import time
 from collections.abc import Iterator
 from dataclasses import replace
@@ -553,6 +554,105 @@ def test_hook_refusal_is_77(
     run = record.load(_run_id(out), env)
     assert run.commits == ()
     assert run.last_exit == 77
+    assert (run.folder / core.HOOK_REFUSAL_NAME).read_text() == "refused by hook\n"
+    assert err.splitlines()[-1].startswith(f"next: emb run --send {run.id}")
+
+
+@pytest.mark.parametrize("retry_succeeds", [False, True])
+def test_send_after_hook_refusal_commits_the_fixed_files(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    retry_succeeds: bool,
+) -> None:
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nprintf 'first stdout\\n'\nexit 1\n")
+    hook.chmod(0o755)
+    driver = _driver(env)
+    core_ = _core(env, driver)
+    assert _start(core_, repo, _brief(tmp_path, "Task\n@write y.txt y\n")) == 77
+    run_id = _run_id(capsys.readouterr().out)
+    run = record.load(run_id, env)
+    refusal = run.folder / core.HOOK_REFUSAL_NAME
+    assert refusal.read_text() == "first stdout\n"
+    assert stat.S_IMODE(refusal.stat().st_mode) == 0o600
+    if retry_succeeds:
+        hook.unlink()
+    else:
+        hook.write_text(
+            "#!/bin/sh\n"
+            'if [ "$(git show :y.txt)" = fixed ]; then exit 0; fi\n'
+            "printf 'refreshed stdout\\n'\n"
+            "printf 'refreshed stderr\\377\\n' >&2\nexit 1\n"
+        )
+
+    def delivered(run: record.Run) -> None:
+        assert run.turn == 2
+        assert not refusal.exists()
+
+    driver.on_wait = delivered
+    correction = "@write y.txt fixed\n@write next.txt next\n"
+    message = _brief(tmp_path, correction, "correction.md")
+    assert core_.execute(lambda: core_.send(run_id, message)) == 0
+    run = record.load(run_id, env)
+    sent = [event["text"] for event in _events(tmp_path, run_id) if "text" in event][-1]
+    if retry_succeeds:
+        assert sent == correction
+        assert len(run.commits) == 2
+    else:
+        assert sent == (
+            "The commit hook refused your last turn's commit:\n\n"
+            "```\nrefreshed stdout\nrefreshed stderr\ufffd\n```\n\n" + correction
+        )
+        assert len(run.commits) == 1
+        assert git(Path(run.worktree), "show", "--format=", "--name-only", env=env) == (
+            "next.txt\ny.txt"
+        )
+    assert run.turn_state == record.COMMITTED
+    assert not refusal.exists()
+    assert (
+        git(Path(run.worktree), "log", "-1", "--format=%s", env=env) == "Task (turn 2)"
+    )
+
+
+@pytest.mark.parametrize("has_refusal", [False, True])
+def test_send_stops_on_git_add_failure(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    has_refusal: bool,
+) -> None:
+    if has_refusal:
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\necho hook refused\nexit 1\n")
+        hook.chmod(0o755)
+    core_ = _core(env)
+    real_git = core_._git
+
+    def fail_add(cwd: str | Path, *args: str) -> subprocess.CompletedProcess[str]:
+        if args[0] == "add":
+            return subprocess.CompletedProcess(args, 1, "", "cannot stage files")
+        return real_git(cwd, *args)
+
+    if not has_refusal:
+        monkeypatch.setattr(core_, "_git", fail_add)
+    assert _start(core_, repo, _brief(tmp_path, "Task\n@write y.txt y\n")) == 77
+    run_id = _run_id(capsys.readouterr().out)
+    monkeypatch.setattr(core_, "_git", fail_add)
+    before = _events(tmp_path, run_id)
+    message = _brief(tmp_path, "Fix the files", "correction.md")
+    assert core_.execute(lambda: core_.send(run_id, message)) == 77
+    err = capsys.readouterr().err
+    assert "git add failed" in err
+    assert err.splitlines()[-1].startswith(f"next: emb run --recover {run_id}")
+    run = record.load(run_id, env)
+    assert run.turn == 1
+    assert run.turn_state == record.COLLECTED
+    assert (run.folder / core.HOOK_REFUSAL_NAME).exists() == has_refusal
+    assert _events(tmp_path, run_id) == before
 
 
 def test_ctrl_c_while_waiting_is_74_and_turn_keeps_running(
@@ -1219,6 +1319,89 @@ class _SendFails(StubDriver):
         if self.failure is not None:
             raise self.failure
         super().send(run, text)
+
+
+@pytest.mark.parametrize(
+    ("failure", "code"),
+    [(engines.DriverError("paste failed"), 71), (KeyboardInterrupt(), 74)],
+)
+def test_failed_send_keeps_hook_output_until_delivery(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    failure: BaseException,
+    code: int,
+) -> None:
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\necho first refusal\nexit 1\n")
+    hook.chmod(0o755)
+    driver = _SendFails("claude", script_path(env))
+    core_ = _core(env, driver)
+    assert _start(core_, repo, _brief(tmp_path, "Task\n@write y.txt y\n")) == 77
+    run_id = _run_id(capsys.readouterr().out)
+    run = record.load(run_id, env)
+    refusal = run.folder / core.HOOK_REFUSAL_NAME
+    hook.write_text("#!/bin/sh\necho refreshed refusal\nexit 1\n")
+    driver.failure = failure
+    message = _brief(tmp_path, "@write y.txt fixed\n", "correction.md")
+    assert core_.execute(lambda: core_.send(run_id, message)) == code
+    assert refusal.read_text() == "refreshed refusal\n"
+    after = record.load(run_id, env)
+    assert after.turn == run.turn
+    assert after.turn_state == record.COLLECTED
+    assert after.expected_head == run.expected_head
+    driver.failure = None
+    assert core_.execute(lambda: core_.send(run_id, message)) == 77
+    sent = [event["text"] for event in _events(tmp_path, run_id) if "text" in event][-1]
+    assert "refreshed refusal\n```\n\n@write y.txt fixed\n" in sent
+    assert record.load(run_id, env).turn == 2
+    hook.unlink()
+    assert core_.execute(lambda: core_.recover(run_id)) == 0
+    assert not refusal.exists()
+
+
+@pytest.mark.parametrize(
+    ("output", "tail", "cut", "fence"),
+    [
+        (
+            "\n".join(map(str, range(205))),
+            "\n".join(map(str, range(5, 205))),
+            True,
+            "```",
+        ),
+        ("a" * 70000, "a" * 65536, True, "```"),
+        ("\u20ac" * 30000, "\u20ac" * (65536 // 3), True, "```"),
+        ("a\n" * 201 + "z" * 70000, "z" * 65536, True, "```"),
+        ("```\nstdout\n```\nstderr  \n", "```\nstdout\n```\nstderr  \n", False, "````"),
+    ],
+    ids=["lines", "bytes", "utf8", "both", "fences"],
+)
+def test_hook_output_message_limits(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    output: str,
+    tail: str,
+    cut: bool,
+    fence: str,
+) -> None:
+    run_id = _started(tmp_path, env, repo, capsys)
+    run = record.load(run_id, env)
+    refusal = run.folder / core.HOOK_REFUSAL_NAME
+    record.write_private(refusal, output)
+    message = _core(env)._hook_message(run, "Correction\n")
+    end = "" if tail.endswith("\n") else "\n"
+    assert message.startswith(
+        "The commit hook refused your last turn's commit:\n\n"
+        f"{fence}\n{tail}{end}{fence}"
+    )
+    assert ("[Hook output cut" in message) == cut
+    assert message.endswith("\n\nCorrection\n")
+    assert len(tail.encode("utf-8")) <= 65536
+    assert len(tail.splitlines()) <= 200
+    assert refusal.read_text() == output
 
 
 @pytest.mark.parametrize(
