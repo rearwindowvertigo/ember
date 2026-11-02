@@ -200,9 +200,8 @@ def test_explicit_ids_ignore_age_and_report_refusals(env: dict[str, str]) -> Non
 
 def test_parent_collects_record_events_check_and_fix_runs(env: dict[str, str]) -> None:
     children = [run(env, ended_at=NOW) for _ in range(5)]
-    opened = run(env, status="running")
     record = flow(env)
-    record["tasks"][0].update(writer_run=children[0].id, reviewer_run=opened.id)
+    record["tasks"][0].update(writer_run=children[0].id)
     record["checks"] = [
         {"wave": 1, "exit": 0, "log": "check.log", "at": 1, "run": children[1].id}
     ]
@@ -215,8 +214,7 @@ def test_parent_collects_record_events_check_and_fix_runs(env: dict[str, str]) -
     assert all(child.folder.exists() for child in children)
     result = prune.remove(1, env=env, now=NOW)
     assert ids(result) == set(selection.records)
-    assert opened.folder.exists()
-    assert {item["id"] for item in result.skipped} == {opened.id}
+    assert not result.skipped
 
 
 @pytest.mark.parametrize("parent_kind", ["flow", "panel"])
@@ -426,10 +424,20 @@ def test_branch_commands_worktrees_and_ancestry(
     monkeypatch.setattr(prune, "_git", git)
     result = prune.remove(0, env=env)
     assert ids(result) == {record.id} and not result.errors
-    assert ("merge-base", "--is-ancestor", f"refs/heads/{branch}", "main") in calls
+    assert (
+        "merge-base",
+        "--is-ancestor",
+        f"refs/heads/{branch}",
+        "refs/heads/main",
+    ) in calls
     command = result.branches[0]["command"]
     assert shlex.quote(str(worktree)) in command
-    assert ("emb cleanup --merged-into main" in command) != merged
+    assert ("emb cleanup --merged-into main" in command) == merged
+    if not merged:
+        assert command.endswith(
+            shlex.join(["git", "-C", str(checkout), "branch", "-D", branch])
+        )
+        assert " && " in command
     assert worktree.is_dir() and checkout.is_dir()
     assert result.worktrees == [
         dict(
@@ -445,7 +453,7 @@ def test_branch_commands_worktrees_and_ancestry(
 def test_flow_and_task_branch_targets(
     env: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    record = flow(env)
+    record = flow(env, base_branch="main")
     record["tasks"][0].update(branch="ember/task/a", worktree="/absent")
     flows.save(record, env)
     calls: list[tuple[str, ...]] = []
@@ -463,13 +471,13 @@ def test_flow_and_task_branch_targets(
         "merge-base",
         "--is-ancestor",
         f"refs/heads/{record['branch']}",
-        "main",
+        "refs/heads/main",
     ) in calls
     assert (
         "merge-base",
         "--is-ancestor",
         "refs/heads/ember/task/a",
-        record["branch"],
+        f"refs/heads/{record['branch']}",
     ) in calls
     assert result.branches == [
         dict(branch=branch, command=f"git -C /checkout branch -D {branch}")
@@ -543,8 +551,15 @@ def test_ancestry_uses_saved_base_after_checkout_switches(
     monkeypatch.setattr(prune, "_git", git)
     result = prune.remove(0, env=env)
     assert ids(result) == {ident} and not result.errors
-    ancestry = next(args for args in queries if args[0] == "merge-base")
-    assert ancestry[-1] == (saved_branch or base)
+    ancestry = [args for args in queries if args[0] == "merge-base"]
+    if saved_branch:
+        assert ancestry[0][-1] == f"refs/heads/{saved_branch}"
+    else:
+        assert not ancestry
+        assert base is not None
+        assert base not in result.branches[0]["command"]
+        assert "--merged-into" not in result.branches[0]["command"]
+        assert "branch -D" in result.branches[0]["command"]
 
 
 def test_busy_member_prevents_panel_removal(env: dict[str, str]) -> None:
@@ -577,10 +592,10 @@ def test_repository_failure_reports_command_and_continues(
     result = json.loads(captured.out)
     assert {item["id"] for item in result["removed"]} == {child.id, other.id}
     assert "git unavailable" in captured.err
-    assert result["branches"][0]["command"].startswith("emb cleanup ")
+    assert result["branches"][0]["command"].startswith("git -C /checkout branch -D ")
 
 
-def test_task_using_run_branch_lists_cleanup_once(
+def test_unmerged_task_using_run_branch_lists_deletion_once(
     env: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -601,4 +616,222 @@ def test_task_using_run_branch_lists_cleanup_once(
     assert ids(result) == {parent["id"], child.id} and not result.errors
     commands = [item["command"] for item in result.branches if item["branch"] == branch]
     assert len(commands) == 1
-    assert commands[0].startswith(f"emb cleanup --merged-into {parent['branch']}")
+    assert commands == [f"git -C /checkout branch -D {branch}"]
+
+
+@pytest.mark.parametrize(
+    "base_exists, contained", [(True, True), (True, False), (False, False)]
+)
+def test_deleted_target_uses_flow_base_without_error(
+    env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    base_exists: bool,
+    contained: bool,
+) -> None:
+    parent = flow(env, base_branch="main")
+    worktree = tmp_path / "kept tree"
+    worktree.mkdir()
+    child = run(env, base_branch=parent["branch"], worktree=str(worktree))
+    branch = f"ember/codex/{child.id}"
+    runs.save(replace(child, branch=branch, read_only=False))
+    parent["tasks"][0].update(
+        branch=branch, writer_run=child.id, worktree=str(worktree)
+    )
+    flows.save(parent, env)
+    queries: list[tuple[str, ...]] = []
+
+    def git(
+        directory: str, *args: str, env: Mapping[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        queries.append(args)
+        if args[0] == "show-ref":
+            present = args[-1] == f"refs/heads/{branch}" or (
+                args[-1] == "refs/heads/main" and base_exists
+            )
+            return subprocess.CompletedProcess(args, int(not present), "", "")
+        assert args[0] == "merge-base" and args[-1] == "refs/heads/main"
+        return subprocess.CompletedProcess(args, int(not contained), "", "")
+
+    monkeypatch.setattr(prune, "_git", git)
+    assert prune.main(0, as_json=True, env=env) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    result = json.loads(captured.out)
+    assert {item["id"] for item in result["removed"]} == {parent["id"], child.id}
+    command = next(
+        item["command"] for item in result["branches"] if item["branch"] == branch
+    )
+    assert ("emb cleanup --merged-into main" in command) == contained
+    assert ("branch -D" in command) != contained
+    assert all(
+        args[-1] == "refs/heads/main" for args in queries if args[0] == "merge-base"
+    )
+    assert any(args[-1] == "refs/heads/main" for args in queries)
+    assert worktree.exists()
+
+
+@pytest.mark.parametrize("kind", ["flow", "panel"])
+@pytest.mark.parametrize("source", ["record", "events.jsonl", "members/old.log"])
+def test_broken_parent_only_protects_ids_in_its_files(
+    env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    kind: str,
+    source: str,
+) -> None:
+    owned, historical, unrelated = run(env), run(env), run(env)
+    parent = flow(env) if kind == "flow" else panel(env)
+    folder = runs.run_dir(parent["id"], env)
+    record_file = folder / f"{kind}.json"
+    record_file.write_text("{")
+    file = record_file if source == "record" else folder / source
+    file.parent.mkdir(exist_ok=True)
+    file.write_bytes(
+        f'broken JSON: "run": "{owned.id}", old run {historical.id}'.encode() + b"\xff"
+    )
+    assert prune.main(0, as_json=True, env=env) == 1
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert result["removed"] == [dict(id=unrelated.id, kind="run")]
+    assert {item["id"] for item in result["skipped"]} == {
+        owned.id,
+        historical.id,
+        parent["id"],
+    }
+    assert parent["id"] in captured.err
+    assert folder.exists() and owned.folder.exists() and historical.folder.exists()
+
+
+@pytest.mark.parametrize("status", ["starting", "running", "waiting"])
+@pytest.mark.parametrize("role", ["writer_run", "reviewer_run"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_cancelled_flow_with_open_task_has_no_worktree_command(
+    env: dict[str, str],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    status: str,
+    role: str,
+    dry_run: bool,
+) -> None:
+    worktree = tmp_path / "live task tree"
+    worktree.mkdir()
+    child = run(env, status=status, worktree=str(worktree))
+    branch = f"ember/codex/{child.id}"
+    runs.save(replace(child, branch=branch, read_only=False))
+    parent = flow(env, status="cancelled", base_branch="main")
+    parent["tasks"][0].update(
+        {role: child.id, "branch": branch, "worktree": str(worktree)}
+    )
+    flows.save(parent, env)
+    independent = run(env)
+    assert prune.main(0, dry_run=dry_run, as_json=True, env=env) == 0
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert result["removed"] == [dict(id=independent.id, kind="run")]
+    reason = next(
+        item["reason"] for item in result["skipped"] if item["id"] == parent["id"]
+    )
+    assert child.id in reason and status in reason
+    assert result["branches"] == [] and str(worktree) not in captured.out
+    assert captured.err == ""
+    assert runs.run_dir(parent["id"], env).exists() and child.folder.exists()
+
+
+@pytest.mark.parametrize("child_state", ["busy", "unreadable"])
+def test_flow_with_unavailable_child_is_kept(
+    env: dict[str, str],
+    tmp_path: Path,
+    child_state: str,
+) -> None:
+    worktree = tmp_path / "task tree"
+    worktree.mkdir()
+    child = run(env, worktree=str(worktree))
+    parent = flow(env, status="cancelled", base_branch="main")
+    parent["tasks"][0].update(
+        writer_run=child.id, branch=f"ember/codex/{child.id}", worktree=str(worktree)
+    )
+    flows.save(parent, env)
+    independent = run(env)
+    if child_state == "unreadable":
+        (child.folder / "run.json").write_text("{")
+    lock = (
+        runs.record_lock(child) if child_state == "busy" else contextlib.nullcontext()
+    )
+    with lock:
+        result = prune.remove(0, env=env)
+    assert ids(result) == {independent.id}
+    reason = next(
+        item["reason"] for item in result.skipped if item["id"] == parent["id"]
+    )
+    assert child.id in reason and child_state in reason
+    assert not result.branches and not result.worktrees
+    assert child.folder.exists() and flows.folder(parent["id"], env).exists()
+    assert bool(result.errors) == (child_state == "unreadable")
+
+
+def test_flow_child_reopens_before_run_lock(
+    env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child = run(env)
+    parent = flow(env, status="cancelled")
+    parent["tasks"][0]["writer_run"] = child.id
+    flows.save(parent, env)
+    original = prune._hold
+
+    def hold(
+        entry: prune.Entry, stack: contextlib.ExitStack, env: Mapping[str, str]
+    ) -> None:
+        if entry.id == child.id:
+            runs.save(replace(child, status="running"))
+        original(entry, stack, env)
+
+    monkeypatch.setattr(prune, "_hold", hold)
+    result = prune.remove(0, env=env)
+    assert not result.removed and not result.branches and not result.worktrees
+    reason = next(
+        item["reason"] for item in result.skipped if item["id"] == parent["id"]
+    )
+    assert child.id in reason and "running" in reason
+
+
+def test_unrelated_live_run_suppresses_shared_worktree_commands(
+    env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "shared tree"
+    worktree.mkdir()
+    live = run(env, status="running", worktree=str(worktree))
+    ended = run(env, worktree=str(worktree))
+    runs.save(replace(ended, branch=f"ember/codex/{ended.id}", read_only=False))
+    result = prune.remove(0, env=env)
+    assert ids(result) == {ended.id}
+    assert not result.branches and not result.worktrees
+    assert live.folder.exists() and worktree.exists()
+
+
+def test_reopened_run_protects_shared_worktree_before_any_removal(
+    env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "shared tree"
+    worktree.mkdir()
+    reopening = run(env, worktree=str(worktree))
+    other = run(env, worktree=str(worktree))
+    runs.save(replace(other, branch=f"ember/codex/{other.id}", read_only=False))
+    original = prune._hold
+
+    def hold(
+        entry: prune.Entry, stack: contextlib.ExitStack, env: Mapping[str, str]
+    ) -> None:
+        if entry.id == reopening.id:
+            runs.save(replace(reopening, status="running"))
+        original(entry, stack, env)
+
+    monkeypatch.setattr(prune, "_hold", hold)
+    result = prune.remove(0, env=env)
+    assert ids(result) == {other.id}
+    assert not result.branches and not result.worktrees
+    assert reopening.folder.exists() and worktree.exists()

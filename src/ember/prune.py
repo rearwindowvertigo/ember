@@ -18,7 +18,6 @@ from typing import Any, TextIO
 
 from ember import paths
 from ember.flows import lock as flow_lock
-from ember.flows import plan
 from ember.flows import record as flows
 from ember.panels import record as panels
 from ember.runs import record as runs
@@ -50,6 +49,8 @@ class Selection:
 
     records: dict[str, Entry] = field(default_factory=dict)
     owners: dict[str, set[str]] = field(default_factory=dict)
+    flow_bases: dict[str, str | None] = field(default_factory=dict)
+    live_worktrees: set[str] = field(default_factory=set)
     skipped: list[dict[str, str]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -99,6 +100,34 @@ def _load(ident: str, env: Mapping[str, str]) -> Entry:
     return Entry(ident, "run", runs.load(ident, env).to_json())
 
 
+def _folder_run_ids(ident: str, env: Mapping[str, str], errors: list[str]) -> set[str]:
+    """Recover run ids from a broken parent's files without following symlinks."""
+    folder = runs.run_dir(ident, env)
+    if folder.is_symlink():
+        return set()
+    found: set[str] = set()
+    pattern = re.compile(
+        rb"(?<![a-z0-9-])([a-z0-9][a-z0-9-]*-\d{8}-\d{6}-[0-9a-f]{6})(?![a-z0-9-])"
+    )
+
+    def report(error: OSError) -> None:
+        errors.append(f"{ident}: cannot read parent files: {error}")
+
+    for directory, _, names in os.walk(folder, followlinks=False, onerror=report):
+        for name in names:
+            path = Path(directory) / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                found.update(
+                    match.decode("ascii")
+                    for match in pattern.findall(path.read_bytes())
+                )
+            except OSError as error:
+                report(error)
+    return {item for item in found if runs.is_run_folder(item)}
+
+
 def _ended(entry: Entry, env: Mapping[str, str]) -> str | None:
     """Return a refusal reason, or None when the record has ended."""
     statuses = {
@@ -108,14 +137,19 @@ def _ended(entry: Entry, env: Mapping[str, str]) -> str | None:
     }
     if entry.data["status"] not in statuses[entry.kind]:
         return "not ended"
-    if entry.kind == "panel":
+    if entry.kind in ("flow", "panel"):
+        role = "task" if entry.kind == "flow" else "member"
         for ident in sorted(entry.children):
             try:
                 member = runs.load(ident, env)
             except runs.RecordMissingError:
                 continue
+            except _RECORD_ERRORS as error:
+                raise ValueError(
+                    f"{entry.id}: {role} run {ident} is unreadable: {error}"
+                ) from error
             if member.status not in (runs.CLOSED, runs.FAILED):
-                return f"member run {ident} is still open"
+                return f"{role} run {ident} is still open ({member.status})"
     return None
 
 
@@ -160,7 +194,6 @@ def select(
         result.errors.append(str(error))
         return result
     loaded: dict[str, Entry] = {}
-    broken_parents = False
     requested = set(record_ids) if record_ids is not None else None
     for ident in sorted(set(names) | (requested or set())):
         try:
@@ -172,12 +205,18 @@ def select(
         try:
             entry = _load(ident, env)
             loaded[ident] = entry
+            if entry.kind == "flow":
+                result.flow_bases[entry.data["branch"]] = entry.data.get("base_branch")
+            if entry.kind == "run" and _ended(entry, env) is not None:
+                result.live_worktrees.add(entry.data["worktree"])
             for child in entry.children:
                 result.owners.setdefault(child, set()).add(ident)
         except _RECORD_ERRORS as error:
             result.errors.append(str(error))
             result.skipped.append(dict(id=ident, reason=str(error)))
-            broken_parents |= flows.is_flow_id(ident) or panels.is_panel_id(ident)
+            if flows.is_flow_id(ident) or panels.is_panel_id(ident):
+                for child in _folder_run_ids(ident, env, result.errors):
+                    result.owners.setdefault(child, set()).add(ident)
     for ident, entry in loaded.items():
         if requested is not None and ident not in requested:
             continue
@@ -187,7 +226,9 @@ def select(
                 reason = "younger than the requested age"
             if reason is None:
                 result.records[ident] = entry
-            elif requested is not None:
+            elif requested is not None or reason.startswith(
+                ("task run ", "member run ")
+            ):
                 result.skipped.append(dict(id=ident, reason=reason))
         except _RECORD_ERRORS as error:
             result.errors.append(str(error))
@@ -211,9 +252,7 @@ def select(
             continue
         parents = result.owners.get(ident, set())
         reason = None
-        if broken_parents:
-            reason = "cannot check ownership while a parent record does not load"
-        elif not parents <= result.records.keys():
+        if not parents <= result.records.keys():
             reason = "parent not selected: " + ", ".join(
                 sorted(parents - result.records.keys())
             )
@@ -262,27 +301,51 @@ def _git(
     )
 
 
-def _artifacts(entry: Entry, env: Mapping[str, str], result: Result) -> None:
-    """List unmerged branches and existing worktrees without changing them."""
+def _branch_exists(directory: str, branch: str, env: Mapping[str, str]) -> bool:
+    """Check a local ref, distinguishing a missing branch from a query failure."""
+    result = _git(
+        directory, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}", env=env
+    )
+    if result.returncode not in (0, 1):
+        raise OSError(result.stderr.strip() or f"cannot inspect branch {branch}")
+    return result.returncode == 0
+
+
+def _target_branch(
+    directory: str,
+    target: str | None,
+    fallbacks: Mapping[str, str | None],
+    env: Mapping[str, str],
+) -> str | None:
+    """Resolve a surviving target branch, following deleted flows to their bases."""
+    seen: set[str] = set()
+    while target and target not in seen:
+        seen.add(target)
+        if _branch_exists(directory, target, env):
+            return target
+        target = fallbacks.get(target)
+    return None
+
+
+def _artifacts(
+    entry: Entry,
+    env: Mapping[str, str],
+    result: Result,
+    fallbacks: Mapping[str, str | None],
+    live_worktrees: set[str],
+) -> None:
+    """List branch and worktree removal commands without changing the repository."""
     data = entry.data
     if entry.kind == "panel":
         return
     directory = data["repo"] if entry.kind == "run" else data["dir"]
-    base = data.get("base_branch") or data.get("base")
-    if entry.kind == "flow" and not data.get("base_branch"):
-        try:
-            planned = plan.load(flows.folder(entry.id, env) / flows.PLAN_NAME).base
-            if planned != "HEAD":
-                base = planned
-        except (plan.PlanError, OSError, ValueError) as error:
-            result.errors.append(f"{entry.id}: cannot read branch base: {error}")
-    candidates = [(data.get("branch"), data.get("worktree"), base)]
+    candidates = [(data.get("branch"), data.get("worktree"), data.get("base_branch"))]
     if entry.kind == "flow":
         candidates += [
             (task["branch"], task["worktree"], data["branch"]) for task in data["tasks"]
         ]
     for branch, worktree, target in candidates:
-        if not branch:
+        if not branch or worktree in live_worktrees:
             continue
         worktree_command = None
         if worktree and Path(worktree).exists():
@@ -292,50 +355,50 @@ def _artifacts(entry: Entry, env: Mapping[str, str], result: Result) -> None:
             item = dict(branch=branch, worktree=worktree, command=worktree_command)
             if item not in result.worktrees:
                 result.worktrees.append(item)
+        contained = False
         try:
-            exists = _git(
-                directory,
-                "show-ref",
-                "--verify",
-                "--quiet",
-                f"refs/heads/{branch}",
-                env=env,
-            )
-            if exists.returncode == 1:
+            if not _branch_exists(directory, branch, env):
                 if worktree_command:
                     result.branches.append(
                         dict(branch=branch, command=worktree_command)
                     )
                 continue
-            if exists.returncode:
-                raise OSError(exists.stderr.strip() or "cannot inspect branch")
-            merged = _git(
-                directory,
-                "merge-base",
-                "--is-ancestor",
-                f"refs/heads/{branch}",
-                target or "HEAD",
-                env=env,
-            )
-            if merged.returncode == 0:
-                if worktree_command:
-                    result.branches.append(
-                        dict(branch=branch, command=worktree_command)
+            target = _target_branch(directory, target, fallbacks, env)
+            while target:
+                merged = _git(
+                    directory,
+                    "merge-base",
+                    "--is-ancestor",
+                    f"refs/heads/{branch}",
+                    f"refs/heads/{target}",
+                    env=env,
+                )
+                if merged.returncode in (0, 1):
+                    contained = merged.returncode == 0
+                    break
+                replacement = _target_branch(directory, target, fallbacks, env)
+                if replacement == target:
+                    raise OSError(
+                        merged.stderr.strip() or "cannot check branch ancestry"
                     )
-                continue
-            if merged.returncode != 1:
-                raise OSError(merged.stderr.strip() or "cannot check branch ancestry")
+                target = replacement
         except (OSError, subprocess.SubprocessError) as error:
             result.errors.append(f"{entry.id}: {branch}: {error}")
-        if re.fullmatch(
-            r"ember/(?:codex|opencode|claude)/[a-z0-9][a-z0-9-]{5,63}", branch
+        if (
+            contained
+            and data.get("base_branch")
+            and target != branch
+            and re.fullmatch(
+                r"ember/(?:codex|opencode|claude)/[a-z0-9][a-z0-9-]{5,63}", branch
+            )
         ):
+            assert target is not None
             command = shlex.join(
                 [
                     "emb",
                     "cleanup",
                     "--merged-into",
-                    target or data.get("base") or "HEAD",
+                    target,
                     "--branch",
                     branch,
                     "--dir",
@@ -396,16 +459,31 @@ def remove(
             if entry.kind != "run" and ident not in selection.records:
                 unavailable.add(ident)
                 result.skipped.append(dict(id=ident, reason="selection changed"))
-        for ident, entry in current.records.items():
-            if entry.kind != "run":
-                continue
+        child_ids = {
+            child for entry in current.records.values() for child in entry.children
+        }
+        lock_ids = child_ids | {
+            ident for ident, entry in current.records.items() if entry.kind == "run"
+        }
+        for ident in sorted(lock_ids):
             try:
+                entry = _load(ident, env)
                 _hold(entry, locks, env)
+                entry = _load(ident, env)
+                if entry.kind == "run" and _ended(entry, env) is not None:
+                    current.live_worktrees.add(entry.data["worktree"])
+            except runs.RecordMissingError:
+                continue
             except _BUSY:
                 unavailable.add(ident)
+                if entry.kind == "run":
+                    current.live_worktrees.add(entry.data["worktree"])
                 result.skipped.append(dict(id=ident, reason="busy"))
             except (*_RECORD_ERRORS, *_LOCK_ERRORS) as error:
                 unavailable.add(ident)
+                prior = current.records.get(ident)
+                if prior is not None and prior.kind == "run":
+                    current.live_worktrees.add(prior.data["worktree"])
                 result.errors.append(str(error))
                 result.skipped.append(dict(id=ident, reason=str(error)))
         removed: set[str] = set()
@@ -419,8 +497,10 @@ def remove(
             try:
                 entry = _load(ident, env)
                 reason = _ended(entry, env)
-                if entry.kind == "panel" and entry.children & unavailable:
-                    reason = "member run is busy or unreadable"
+                if entry.kind != "run" and entry.children & unavailable:
+                    role = "task" if entry.kind == "flow" else "member"
+                    child = min(entry.children & unavailable)
+                    reason = f"{role} run {child} is busy or unreadable"
                 parents = current.owners.get(ident, set())
                 if entry.kind == "run" and not parents <= removed:
                     reason = "parent was not removed"
@@ -435,7 +515,9 @@ def remove(
                     result.skipped.append(dict(id=ident, reason=reason))
                     continue
                 artifacts = Result()
-                _artifacts(entry, env, artifacts)
+                _artifacts(
+                    entry, env, artifacts, current.flow_bases, current.live_worktrees
+                )
                 if not dry_run:
                     shutil.rmtree(runs.run_dir(ident, env))
                 result.removed.append(dict(id=ident, kind=entry.kind))

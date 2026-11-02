@@ -2057,22 +2057,27 @@ number of days, zero or greater. Age is measured from `ended_at`, or
 least `DAYS × 86400` seconds; zero includes every ended record.
 
 Ended runs are `closed` or `failed`. Ended flows are `done`, `failed` or
-`cancelled`. Panels must be `done` or `incomplete`, with no current or former
-member run still open. Missing member records do not count as open;
-unreadable member records prevent the panel from being pruned.
+`cancelled`. Panels must be `done` or `incomplete`. A flow or panel is kept
+when any current or former task or member run is open (`starting`,
+`running` or `waiting`), busy or unreadable. The parent is reported as
+skipped with the run id and reason. Missing child records do not count as
+open. This guard includes cancelled flows with running writers or reviewers.
 
 A flow or panel includes its ended task or member run records, regardless
 of those runs' ages. Flow run ids are collected from the record and every
 event with a `run` field, including check, fix and previous review runs.
 Panel retry history is included. A run named by any parent record is
 removed only together with all its parents, and only when those parents
-qualify. A parent that does not load prevents run ownership from being
-checked; run records are kept until the parent can be read.
+qualify. For a parent that does not load, prune scans the files inside its
+folder for run ids, including malformed records, events and logs. Those
+runs are kept with the broken parent; unrelated runs are still pruned.
+Symlinks are not followed when scanning these files.
 
 Before removal, prune takes each record's lock without waiting and reloads
 it. Flows use both `lifecycle.lock` and the lifetime lock; panels use their
 panel lock; runs use their record lock. Busy records and records that no
-longer qualify are skipped. Parent locks stay held through child removal.
+longer qualify are skipped. Parent and child locks stay held through child
+removal, including child records shared with a parent that is being kept.
 Unreadable records are kept and reported on standard error. Folder names
 outside the timestamped record id format are ignored. Record-folder
 symlinks are refused. Files named by a record outside its folder are kept.
@@ -2081,25 +2086,28 @@ symlinks are refused. Files named by a record outside its folder are kept.
 Text output has `removed <kind> <id>` lines (`would remove` for a dry run),
 `skipped <id>: <reason>` lines, and kept branch and worktree lines with
 removal commands. Existing worktrees are listed next to their branch.
-Prune deletes no branch, worktree or tmux session.
+Prune deletes no branch, worktree or tmux session. It lists no removal
+command for a worktree used by an open run.
 
 A branch is unmerged when it is not an ancestor of its target. Task
 branches are checked against their flow branch. Run and flow records save
 `base_branch` at creation and use it even if the source checkout switches
-branches. A detached base uses its saved commit. Records without
-`base_branch` use the saved plan's explicit base for flows, or the saved
-base commit for runs and plans based on `HEAD`. The original branch name
-cannot be recovered from those records. This check does not treat a squash
-merge as ancestry.
+branches. If the target branch has been deleted, prune checks against the
+owning flow's `base_branch`. If that branch is also absent, or the record
+has no base branch, the branch is listed as unmerged. Missing target refs
+are not errors and do not change the exit code. Saved commits are never
+used as `--merged-into` targets. This check does not treat a squash merge
+as ancestry.
 
-Run branches (`ember/<engine>/<id>`) list
-`emb cleanup --merged-into <target> --branch <branch> --dir <dir>`; cleanup
-retains its merge requirements. Task and flow branches list
-`git -C <dir> branch -D <branch>`. Existing worktrees list
-`git -C <dir> worktree remove <path>`. When both operations are listed, the
-worktree removal precedes the branch command with `&&`. Paths and branch
-names are shell-quoted. A merged or absent branch with an existing worktree
-lists just the worktree removal command.
+Unmerged run, task and flow branches list
+`git -C <dir> branch -D <branch>`. A run branch (`ember/<engine>/<id>`)
+contained in an existing target branch can list
+`emb cleanup --merged-into <target> --branch <branch> --dir <dir>`.
+Records with a null or missing `base_branch` use the direct branch-deletion
+form. Existing worktrees list `git -C <dir> worktree remove <path>`.
+When both operations are listed, worktree removal precedes the branch
+command with `&&`. Paths and branch names are shell-quoted. An absent
+branch with an existing worktree lists just the worktree removal command.
 
 `--json` prints an object with three arrays:
 
