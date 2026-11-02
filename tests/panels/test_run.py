@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from ember import choices
+from ember import choices, engines
 from ember.panels import brief, record, run
 from ember.runs import record as runs
 from ember.runs.core import Core, StartOptions
@@ -551,6 +551,73 @@ def test_closed_stall_is_terminal_failure(h: Harness) -> None:
     assert item["status"] == "failed" and item["exit"] == 124
     assert item["reason"] == "closed after stall"
     assert item["bytes"] > 0 and outcome.panel["status"] == "done"
+
+
+def start_unrecorded_member(h: Harness) -> tuple[runs.Run, int]:
+    core = h.factory(h.env, out=io.StringIO(), err=io.StringIO())
+    code = core.execute(
+        lambda: core.start(
+            StartOptions(
+                "codex",
+                dir=str(h.repo),
+                task_file=str(record.folder(h.id, h.env) / record.BRIEF_NAME),
+                model="model",
+                effort="low",
+                read_only=True,
+            )
+        )
+    )
+    saved, errors = runs.list_runs(h.env)
+    assert len(saved) == 1 and not errors
+    data = h.panel()
+    data["members"][0].update(
+        status="running",
+        run=saved[0].id,
+        attempts=[{"kind": "start", "at": time.time(), "exit": None}],
+    )
+    with record.hold(h.id, h.env):
+        record.save(data, h.env)
+    return saved[0], code
+
+
+def test_recovery_settles_collected_reply_after_stall(h: Harness) -> None:
+    h.create(1)
+    saved, code = start_unrecorded_member(h)
+    assert code == 0 and saved.turn_state == runs.COLLECTED
+    runs.update(saved, {"last_exit": 124, "last_reason": "earlier wait stalled"})
+
+    outcome = h.recover()
+
+    item = outcome.panel["members"][0]
+    assert item["status"] == "answered" and item["exit"] == 0
+    assert item["reason"] is None and item["closed"] and item["bytes"] > 0
+    assert item["attempts"][-1]["exit"] == 0
+    assert runs.load(saved.id, h.env).status == runs.CLOSED
+    assert outcome.panel["status"] == "done" and outcome.panel["exit"] == 0
+    assert (
+        "Answer from codex"
+        in (record.folder(h.id, h.env) / record.SUMMARY_NAME).read_text()
+    )
+
+
+def test_recovery_preserves_failure_before_turn_started(h: Harness) -> None:
+    class FailedLaunch(StubDriver):
+        def command(self, run: runs.Run, first_message: str) -> engines.LaunchSpec:
+            raise engines.DriverError("launch failed before the first turn")
+
+    h.drivers["codex"] = FailedLaunch("codex", script_path(h.env))
+    h.create(1)
+    saved, code = start_unrecorded_member(h)
+    assert code == saved.last_exit == 71 and saved.turn_state is None
+
+    outcome = h.recover()
+
+    item = outcome.panel["members"][0]
+    assert item["status"] == "failed" and item["exit"] == 71
+    assert item["reason"] == saved.last_reason and item["closed"]
+    assert item["attempts"][-1]["exit"] == 71
+    assert runs.load(saved.id, h.env).status == runs.CLOSED
+    assert outcome.panel["status"] == "done" and outcome.panel["exit"] == 83
 
 
 def test_deadline_retains_reply_already_collected(h: Harness) -> None:

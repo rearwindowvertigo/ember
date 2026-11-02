@@ -99,6 +99,16 @@ def _changes(run_id: str, diagnostics: str) -> list[str]:
     )
 
 
+def _no_collection_exit(run: runs.Run) -> int:
+    """Settle a collected answer or retain the failure of a no-op recovery."""
+    if run.turn_state == runs.COLLECTED:
+        candidate = Path(run.reply) if run.reply else run.folder / "turn-1.md"
+        with contextlib.suppress(OSError, UnicodeError):
+            if candidate.read_text(encoding="utf-8").strip():
+                return 0
+    return run.last_exit if run.last_exit is not None else 0
+
+
 def exit_code(panel: Mapping[str, Any], stopped: bool) -> int:
     """Return interrupted, clean completion or partial-result status."""
     if stopped:
@@ -372,11 +382,9 @@ class _Coordinator:
                         )
                 else:
                     code = core.execute(lambda: core.recover(member["run"]))
-                    # Core reports success for an already collected read-only turn.
-                    if code == 0 and existing.turn_state == runs.COLLECTED:
-                        code = (
-                            existing.last_exit if existing.last_exit is not None else 0
-                        )
+                    # A no-op recovery may follow collection or a launch failure.
+                    if code == 0 and existing.turn_state != runs.SENT:
+                        code = _no_collection_exit(existing)
             else:
                 code = core.execute(
                     lambda: core.start(

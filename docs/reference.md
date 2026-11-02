@@ -1587,9 +1587,12 @@ run. Failed and not-started members are not asked again.
 An already closed run is read without calling `Core.recover`. Its stored
 terminal exit classifies the outcome: a successful nonblank reply is
 answered; a stored failure or missing answer remains a failure. Other runs
-receive one `Core.recover` call. A previously collected turn retains its
-stored exit even when Core reports that nothing needs collecting. Readable
-replies and change evidence are retained from the member record, run
+receive one `Core.recover` call. A previously collected turn with a readable,
+nonblank reply is answered even when its stored exit still describes an
+earlier wait. When recovery collects nothing and there is no such answer,
+the run's stored nonzero exit and reason are retained, including a launch
+failure before any turn started. Readable replies and change evidence are
+retained from the member record, run
 record and original diagnostics. Missing new warnings do not erase earlier
 changed paths.
 
