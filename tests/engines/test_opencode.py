@@ -665,6 +665,88 @@ def test_foreign_input_counts_a_typed_message_after_a_compaction(
     )
 
 
+def overflow_compaction(
+    replayed: str, replay_parts: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Return the messages OpenCode adds when a turn overflows the context."""
+    summary = assistant("msg_compaction", [text("summary")])
+    summary["info"].update(mode="compaction", summary=True)
+    return [
+        assistant(replayed, [text("working")], finish=None),
+        {
+            "info": {"id": "msg_compaction", "role": "user"},
+            "parts": [{"type": "compaction", "auto": True, "overflow": True}],
+        },
+        summary,
+        {"info": {"id": "msg_replay", "role": "user"}, "parts": replay_parts},
+    ]
+
+
+def test_foreign_input_skips_the_replay_of_an_overflow_compaction(
+    driver: OpenCodeDriver, run: Run, server: Server
+) -> None:
+    run = started(driver, run, server)
+    first = prompt_id(server)
+    server.write(
+        "messages.json",
+        [
+            user(first),
+            *overflow_compaction(first, [{**text("hi"), "id": "prt_copy"}]),
+            assistant("msg_replay", [text("ok")]),
+        ],
+    )
+    assert driver.foreign_input(run) is None
+
+
+def test_foreign_input_skips_the_replay_of_a_replay(
+    driver: OpenCodeDriver, run: Run, server: Server
+) -> None:
+    run = started(driver, run, server)
+    first = prompt_id(server)
+    second = [
+        {**message, "info": {**message["info"], "id": f"{message['info']['id']}2"}}
+        for message in overflow_compaction("msg_replay", [text("hi")])
+    ]
+    server.write(
+        "messages.json",
+        [user(first), *overflow_compaction(first, [text("hi")]), *second],
+    )
+    assert driver.foreign_input(run) is None
+
+
+def test_foreign_input_counts_the_replay_of_a_typed_message(
+    driver: OpenCodeDriver, run: Run, server: Server
+) -> None:
+    run = started(driver, run, server)
+    first = prompt_id(server)
+    server.write(
+        "messages.json",
+        [
+            user(first),
+            assistant(first, [text("ok")]),
+            {"info": {"id": "msg_owner", "role": "user"}, "parts": [text("typed")]},
+            *overflow_compaction("msg_owner", [text("typed")]),
+        ],
+    )
+    assert driver.foreign_input(run) == (
+        "2 message(s) in the OpenCode session were not sent by Ember"
+    )
+
+
+def test_foreign_input_counts_a_different_message_after_a_summary(
+    driver: OpenCodeDriver, run: Run, server: Server
+) -> None:
+    run = started(driver, run, server)
+    first = prompt_id(server)
+    server.write(
+        "messages.json",
+        [user(first), *overflow_compaction(first, [text("typed")])],
+    )
+    assert driver.foreign_input(run) == (
+        "1 message(s) in the OpenCode session were not sent by Ember"
+    )
+
+
 def test_foreign_input_reports_an_unreadable_session(
     driver: OpenCodeDriver, run: Run, server: Server
 ) -> None:

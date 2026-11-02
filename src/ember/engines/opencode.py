@@ -249,6 +249,34 @@ def _made_by_opencode(message: Mapping[str, Any]) -> bool:
     )
 
 
+def _is_compaction_summary(message: Mapping[str, Any]) -> bool:
+    """Return whether this is the assistant message that summarises a compaction."""
+    info = message.get("info")
+    return (
+        isinstance(info, dict)
+        and info.get("role") == "assistant"
+        and (info.get("summary") is True or info.get("mode") == "compaction")
+    )
+
+
+def _content(message: Mapping[str, Any]) -> tuple[tuple[Any, Any], ...] | None:
+    """Return the type and text of each part of a user message.
+
+    Returns `None` for a message with a `compaction` part or no readable
+    parts. When OpenCode compacts a session that overflowed, it copies the
+    parts of the last such message into a new user message with new ids, so
+    the copy has the same content as the message it replays.
+    """
+    parts = message.get("parts")
+    if not isinstance(parts, list) or not parts:
+        return None
+    if not all(isinstance(part, dict) for part in parts):
+        return None
+    if any(part.get("type") == "compaction" for part in parts):
+        return None
+    return tuple((part.get("type"), part.get("text")) for part in parts)
+
+
 class OpenCodeDriver(Driver):
     """Runs OpenCode's interactive view and its built-in server in a run's pane."""
 
@@ -731,7 +759,10 @@ class OpenCodeDriver(Driver):
             `None` when every user message in the session has an id the
             driver recorded when it sent it or was made by OpenCode when it
             compacted the session; otherwise how many do not, or why the
-            session could not be read.
+            session could not be read. A user message that directly follows
+            a compaction summary and has the content of the last earlier
+            user message without a compaction part is OpenCode's replay of
+            that message, and counts only when that message counts.
         """
         unchecked = "the session history could not be checked"
         try:
@@ -746,16 +777,28 @@ class OpenCodeDriver(Driver):
         if messages is None:
             return f"{unchecked}: cannot read the OpenCode session's messages"
         foreign = 0
+        previous: Mapping[str, Any] | None = None
+        source: tuple[tuple[tuple[Any, Any], ...] | None, bool] = (None, False)
         for message in messages:
             info = message.get("info") if isinstance(message, dict) else None
             if not isinstance(info, dict) or not isinstance(info.get("role"), str):
                 return f"{unchecked}: a message in the session has no role"
-            if (
-                info["role"] == "user"
-                and info.get("id") not in sent
-                and not _made_by_opencode(message)
-            ):
-                foreign += 1
+            if info["role"] == "user":
+                content = _content(message)
+                if (
+                    previous is not None
+                    and _is_compaction_summary(previous)
+                    and (content is not None and content == source[0])
+                ):
+                    counted = source[1]
+                else:
+                    counted = info.get("id") not in sent and not _made_by_opencode(
+                        message
+                    )
+                foreign += counted
+                if content is not None:
+                    source = (content, counted)
+            previous = message
         if foreign:
             return (
                 f"{foreign} message(s) in the OpenCode session were not sent by Ember"
