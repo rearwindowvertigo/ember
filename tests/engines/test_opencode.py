@@ -620,6 +620,51 @@ def test_foreign_input_counts_messages_the_owner_typed(
     )
 
 
+def test_foreign_input_skips_the_messages_of_a_compaction(
+    driver: OpenCodeDriver, run: Run, server: Server
+) -> None:
+    run = started(driver, run, server)
+    first = prompt_id(server)
+    compaction = {
+        "info": {"id": "msg_compaction", "role": "user"},
+        "parts": [{"type": "compaction", "auto": True}],
+    }
+    resume = {
+        "info": {"id": "msg_continue", "role": "user"},
+        "parts": [
+            {
+                "type": "text",
+                "text": "Continue if you have next steps",
+                "synthetic": True,
+                "metadata": {"compaction_continue": True},
+            }
+        ],
+    }
+    server.write(
+        "messages.json",
+        [user(first), assistant(first, [text("ok")]), compaction, resume],
+    )
+    assert driver.foreign_input(run) is None
+
+
+def test_foreign_input_counts_a_typed_message_after_a_compaction(
+    driver: OpenCodeDriver, run: Run, server: Server
+) -> None:
+    run = started(driver, run, server)
+    first = prompt_id(server)
+    compaction = {
+        "info": {"id": "msg_compaction", "role": "user"},
+        "parts": [{"type": "compaction", "auto": True}],
+    }
+    server.write(
+        "messages.json",
+        [user(first), assistant(first, [text("ok")]), compaction, user("msg_owner")],
+    )
+    assert driver.foreign_input(run) == (
+        "1 message(s) in the OpenCode session were not sent by Ember"
+    )
+
+
 def test_foreign_input_reports_an_unreadable_session(
     driver: OpenCodeDriver, run: Run, server: Server
 ) -> None:

@@ -229,6 +229,26 @@ def choose_port(previous: int = 0) -> int:
         raise DriverError(f"cannot choose a port for OpenCode: {error}") from error
 
 
+def _made_by_opencode(message: Mapping[str, Any]) -> bool:
+    """Return whether OpenCode made this user message when it compacted the session.
+
+    OpenCode marks a compaction with a user message holding a `compaction`
+    part, and after an automatic compaction adds a user message holding a
+    synthetic text part.
+    """
+    parts = message.get("parts")
+    if not isinstance(parts, list) or not parts:
+        return False
+    return all(
+        isinstance(part, dict)
+        and (
+            part.get("type") == "compaction"
+            or (part.get("type") == "text" and part.get("synthetic") is True)
+        )
+        for part in parts
+    )
+
+
 class OpenCodeDriver(Driver):
     """Runs OpenCode's interactive view and its built-in server in a run's pane."""
 
@@ -709,8 +729,9 @@ class OpenCodeDriver(Driver):
 
         Returns:
             `None` when every user message in the session has an id the
-            driver recorded when it sent it; otherwise how many do not, or
-            why the session could not be read.
+            driver recorded when it sent it or was made by OpenCode when it
+            compacted the session; otherwise how many do not, or why the
+            session could not be read.
         """
         unchecked = "the session history could not be checked"
         try:
@@ -729,7 +750,11 @@ class OpenCodeDriver(Driver):
             info = message.get("info") if isinstance(message, dict) else None
             if not isinstance(info, dict) or not isinstance(info.get("role"), str):
                 return f"{unchecked}: a message in the session has no role"
-            if info["role"] == "user" and info.get("id") not in sent:
+            if (
+                info["role"] == "user"
+                and info.get("id") not in sent
+                and not _made_by_opencode(message)
+            ):
                 foreign += 1
         if foreign:
             return (
