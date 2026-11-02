@@ -108,6 +108,22 @@ class Harness:
             )
         )
 
+    def retry(self, number: str = "1", **kwargs: Any) -> run.Outcome:  # noqa: ANN401
+        kwargs.setdefault("stall_minutes", 10)
+        kwargs.setdefault("timeout_minutes", 1)
+        with record.hold(self.id, self.env):
+            outcome = run.retry(
+                self.id,
+                number,
+                self.env,
+                core_factory=self.factory,
+                poll_seconds=0.02,
+                err=self.err,
+                **kwargs,
+            )
+        self.threads.extend(outcome.threads)
+        return outcome
+
     def release(self) -> None:
         for folder in record.folder(self.id, self.env).parent.glob("*"):
             if folder.name.startswith(("codex-", "opencode-", "claude-")):
@@ -641,3 +657,169 @@ def test_deadline_retains_reply_already_collected(h: Harness) -> None:
         )
     finally:
         release.set()
+
+
+@pytest.mark.parametrize("status", ["failed", "stalled", "timed out", "interrupted"])
+def test_retry_replaces_answer_and_keeps_old_run(h: Harness, status: str) -> None:
+    h.create(2)
+    h.script(codex="@fail old failure")
+    original = h.start().panel
+    old = original["members"][0]
+    old["status"] = status
+    old["changed"] = ["old-evidence"]
+    record.save(original, h.env)
+    h.script(codex="@reply replacement")
+
+    class CheckedCore(Core):
+        def close(self, run_id: str, *, force: bool = False) -> int:
+            assert not force and record.live(h.id, h.env)
+            return super().close(run_id, force=force)
+
+        def start(self, options: StartOptions) -> int:
+            assert record.live(h.id, h.env)
+            assert runs.load(old["run"], h.env).status == runs.CLOSED
+            panel = h.panel()
+            assert panel["status"] == "running" and panel["ended_at"] is None
+            assert panel["exit"] is None
+            assert options.read_only and options.dir == str(h.repo)
+            assert options.engine == old["engine"] and options.model == old["model"]
+            assert options.effort == old["effort"]
+            assert options.read == (str(h.tmp),)
+            assert Path(options.task_file or "").read_text() == brief.text(
+                h.id, "Question?"
+            )
+            return super().start(options)
+
+    h.core_type = CheckedCore
+    outcome = h.retry()
+    assert outcome.panel == h.panel()
+    assert outcome.panel["status"] == "done" and outcome.panel["exit"] == 0
+    assert outcome.panel["ended_at"] >= original["ended_at"]
+    first, second = outcome.panel["members"]
+    assert second == original["members"][1]
+    assert first["run"] != old["run"] and first["changed"] == []
+    assert first["attempts"][:-1] == old["attempts"]
+    retained = first["attempts"][-1]
+    assert retained["kind"] == "retry" and retained["run"] == old["run"]
+    assert retained["exit"] == 0
+    summary = (record.folder(h.id, h.env) / "summary.md").read_text()
+    assert "replacement" in summary and "old failure" not in summary
+    assert old["run"] not in summary and "Answer from opencode" in summary
+
+
+def test_retry_not_started_and_failed_result(h: Harness) -> None:
+    h.create(2)
+    data = h.panel()
+    for item in data["members"]:
+        item["status"] = "not started"
+    record.save(data, h.env)
+    h.script(codex="@fail another failure")
+    outcome = h.retry()
+    assert outcome.panel["status"] == "incomplete" and outcome.panel["exit"] == 83
+    assert outcome.panel["members"][1] == data["members"][1]
+    assert outcome.panel["members"][0]["attempts"][0]["run"] is None
+    h.script(codex="@reply answered now")
+    outcome = h.retry()
+    assert outcome.panel["status"] == "incomplete" and outcome.panel["exit"] == 83
+    outcome = h.retry("2")
+    assert outcome.panel["status"] == "done" and outcome.panel["exit"] == 0
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_retry_timeout_and_interrupt(h: Harness, interrupt: bool) -> None:
+    h.create(1)
+    data = h.panel()
+    data["members"][0]["status"] = "not started"
+    record.save(data, h.env)
+    h.script(codex="@hang")
+    stop = threading.Event()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            h.retry, stop=stop, timeout_minutes=1 if interrupt else 0.03
+        )
+        wait_for(lambda: h.panel()["members"][0]["run"] is not None)
+        assert record.live(h.id, h.env)
+        assert h.panel()["ended_at"] is None
+        if interrupt:
+            stop.set()
+        outcome = future.result(20)
+    assert outcome.panel["status"] == "incomplete"
+    assert outcome.panel["exit"] == (74 if interrupt else 83)
+    assert outcome.panel["members"][0]["status"] == (
+        "interrupted" if interrupt else "timed out"
+    )
+    assert outcome.panel["ended_at"] is not None
+    h.release()
+    h.join()
+    assert outcome.panel == h.panel()
+
+
+def test_recovery_ignores_run_retained_only_by_retry(h: Harness) -> None:
+    h.create(1)
+    data = h.panel()
+    data["members"][0].update(
+        status="failed",
+        attempts=[{"kind": "retry", "at": 1, "exit": 74, "run": "codex-old"}],
+    )
+    record.save(data, h.env)
+
+    class NoRecovery(Core):
+        def recover(self, run_id: str) -> int:
+            raise AssertionError("retained run must not be recovered")
+
+    h.core_type = NoRecovery
+    with pytest.raises(run.NothingToRecover):
+        h.recover()
+    assert h.panel()["members"] == data["members"]
+
+
+def test_close_current_and_retained_runs_continues_after_refusal(h: Harness) -> None:
+    h.create(3)
+    data = h.start().panel
+    current, retained, failed = [m["run"] for m in data["members"]]
+    for run_id, status in [
+        (current, runs.WAITING),
+        (retained, runs.WAITING),
+        (failed, runs.FAILED),
+    ]:
+        runs.update(runs.load(run_id, h.env), {"status": status}, allow_closed=True)
+    first = data["members"][0]
+    first["closed"] = True
+    first["attempts"].extend(
+        [
+            {"kind": "retry", "at": 1, "exit": 74, "run": retained},
+            {"kind": "retry", "at": 2, "exit": 71, "run": failed},
+            {"kind": "retry", "at": 3, "exit": 74, "run": retained},
+        ]
+    )
+    data["members"] = [first]
+    record.save(data, h.env)
+    closed = []
+
+    class RefuseCurrent(Core):
+        def close(self, run_id: str, *, force: bool = False) -> int:
+            assert not force and record.live(h.id, h.env)
+            closed.append(run_id)
+            if run_id == current:
+                print("emb run: current turn is running", file=self.err)
+                return 75
+            assert h.panel()["members"][0]["close_error"]
+            return super().close(run_id)
+
+    h.core_type = RefuseCurrent
+    with record.hold(h.id, h.env):
+        results = run.close(h.id, h.env, core_factory=h.factory)
+    assert closed == [current, retained]
+    assert [r["closed"] for r in results] == [False, True]
+    assert not h.panel()["members"][0]["closed"]
+    assert "current turn is running" in h.panel()["members"][0]["close_error"]
+    assert runs.load(retained, h.env).status == runs.CLOSED
+    assert runs.load(failed, h.env).status == runs.FAILED
+    h.core_type = Core
+    with record.hold(h.id, h.env):
+        results = run.close(h.id, h.env, core_factory=h.factory)
+    assert len(results) == 1 and results[0]["closed"]
+    assert h.panel()["members"][0]["closed"]
+    assert h.panel()["members"][0]["close_error"] is None
+    with record.hold(h.id, h.env):
+        assert run.close(h.id, h.env, core_factory=h.factory) == []

@@ -898,6 +898,7 @@ def test_flow_help_and_order(capsys: pytest.CaptureFixture[str]) -> None:
     assert result.value.code == 0
     output = capsys.readouterr().out
     assert "--lead FLOW TASK" in output and "--resume FLOW" in output
+    assert "--cancel FLOW" in output and "--reason TEXT" in output
     with pytest.raises(SystemExit) as result:
         main(["--help"])
     assert result.value.code == 0
@@ -933,6 +934,8 @@ def test_panel_help_and_command_order(capsys: pytest.CaptureFixture[str]) -> Non
         "--dry-run",
         "--status",
         "--recover",
+        "--retry",
+        "--close",
         "--json",
     ):
         assert option in help_text
@@ -998,3 +1001,70 @@ def test_parser_errors_end_with_a_next_line(
         main(argv)
     assert exit_info.value.code == 64
     assert capsys.readouterr().err.splitlines()[-1] == f"next: {prog} --help"
+
+
+@pytest.mark.parametrize("options", [["--retry", "bad", "1"], ["--close", "bad"]])
+def test_panel_retry_close_dispatch(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str], options: list[str]
+) -> None:
+    assert main(["panel", *options, "--json"], env=env) == 65
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert "invalid panel id: bad" in captured.err
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--retry", "x", "1", "--close", "x"],
+        ["--retry", "x", "1", "--member", "codex:x"],
+        ["--retry", "x", "1", "--dry-run"],
+        ["--close", "x", "--timeout", "1"],
+        ["--close", "x", "--stall", "1"],
+        ["--close", "x", "--read", "."],
+    ],
+)
+def test_panel_retry_close_usage(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str], options: list[str]
+) -> None:
+    assert main(["panel", *options], env=env) == 64
+    assert capsys.readouterr().err.endswith("next: emb panel --help\n")
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        [],
+        ["--older-than"],
+        ["--older-than", "-1"],
+        ["--older-than", "1.5"],
+        ["--older-than", "word"],
+        ["--older-than", "+1"],
+    ],
+)
+def test_prune_invalid_age_exits_64(
+    arguments: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as raised:
+        main(["prune", *arguments])
+    assert raised.value.code == 64
+    assert "--older-than" in capsys.readouterr().err
+
+
+def test_prune_help(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as raised:
+        main(["prune", "--help"])
+    assert raised.value.code == 0
+    output = capsys.readouterr().out
+    assert all(option in output for option in ("--older-than", "--dry-run", "--json"))
+
+
+def test_prune_empty_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    env = {
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+    }
+    assert main(["prune", "--older-than", "0", "--dry-run", "--json"], env=env) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"removed": [], "skipped": [], "branches": []}
+    assert captured.err == ""

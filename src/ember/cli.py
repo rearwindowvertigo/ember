@@ -15,6 +15,7 @@ after Quit Ember or when the running app takes over, 64 for a usage error and
 `emb gapcheck` uses the codes in `ember.gapcheck.command`.
 `emb flow` uses the codes in `ember.flows.command`.
 `emb panel` uses the codes in `ember.panels.command`.
+`emb prune` exits 0 on success, 1 on a failure and 64 for invalid arguments.
 """
 
 import argparse
@@ -253,6 +254,8 @@ def _add_flow(parser: argparse.ArgumentParser) -> None:
         "--lead", nargs=2, metavar=("FLOW", "TASK"), help="answer a task's lead stop"
     )
     parser.add_argument("--resume", metavar="FLOW", help="restart a flow's runner")
+    parser.add_argument("--cancel", metavar="FLOW", help="cancel a flow's runner")
+    parser.add_argument("--reason", metavar="TEXT", help="the cancellation reason")
     parser.add_argument("--writer", metavar="W", help="writer engine:model[@effort]")
     parser.add_argument(
         "--reviewer", metavar="W", help="reviewer engine:model[@effort]"
@@ -276,7 +279,7 @@ def _add_flow(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_panel(parser: argparse.ArgumentParser) -> None:
-    """Add panel start, validation, status and recovery options."""
+    """Add panel start, validation, status, recovery, retry and close options."""
     parser.add_argument(
         "--question-file", metavar="FILE", help="the question as UTF-8 text"
     )
@@ -323,6 +326,15 @@ def _add_panel(parser: argparse.ArgumentParser) -> None:
         metavar="PANEL",
         help="collect unfinished members without asking again",
     )
+    parser.add_argument(
+        "--retry",
+        nargs=2,
+        metavar=("PANEL", "MEMBER"),
+        help="ask a failed or not-started member again",
+    )
+    parser.add_argument(
+        "--close", metavar="PANEL", help="close every open member run without force"
+    )
     parser.add_argument("--json", action="store_true", help="print JSON")
 
 
@@ -343,6 +355,26 @@ def _add_merge(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--dir", default=".", metavar="DIR", help="a folder in the git checkout"
+    )
+    parser.add_argument("--json", action="store_true", help="print JSON")
+
+
+def _whole_days(text: str) -> int:
+    if not text.isascii() or not text.isdecimal():
+        raise argparse.ArgumentTypeError(f"{text!r} is not a non-negative whole number")
+    return int(text)
+
+
+def _add_prune(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--older-than",
+        required=True,
+        type=_whole_days,
+        metavar="DAYS",
+        help="remove records ended at least DAYS days ago (0 includes all ended)",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="list without removing records"
     )
     parser.add_argument("--json", action="store_true", help="print JSON")
 
@@ -523,6 +555,14 @@ def build_parser() -> argparse.ArgumentParser:
                 "and the command that resolves it. Each non-zero exit prints a "
                 "next: or owner: line."
             ),
+        )
+    )
+    _add_prune(
+        subparsers.add_parser(
+            "prune",
+            help="remove old ended run, flow and panel records",
+            description="Remove ended records and their logs, and list kept branches "
+            "and worktrees with removal commands.",
         )
     )
     _add_deps(
@@ -920,6 +960,12 @@ def main(
             directory=args.dir,
             as_json=args.json,
             env=env,
+        )
+    if args.command == "prune":
+        from ember import prune
+
+        return prune.main(
+            args.older_than, dry_run=args.dry_run, as_json=args.json, env=env
         )
     if args.command == "cleanup":
         return branches.cleanup(

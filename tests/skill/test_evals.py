@@ -58,7 +58,6 @@ FORBIDDEN = [
             "seat usage",
             "--owner-said",
             "--trust",
-            "--retry",
             "--result",
             "--task",
             "--message",
@@ -694,6 +693,7 @@ def test_no_file_under_skill_names_an_earlier_system() -> None:
     ("text", "hits"),
     [
         ("--task-file x --message-file y", 0),
+        ("emb panel --retry panel-20261102-101500-a1b2c3 1", 0),
         ("use --task x", 1),
         ("Delegation and cx-delegate", 2),
         ("one machine", 0),

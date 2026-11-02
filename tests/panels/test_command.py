@@ -557,3 +557,120 @@ def test_lock_precedes_create_and_persistence_failure_reports_id(
     assert panels[0]["id"] in err
     assert actions(err) == [f"next: emb panel --status {panels[0]['id']}"]
     assert not record.live(panels[0]["id"], h.env)
+
+
+@pytest.mark.parametrize("mode", ["--retry", "--close"])
+@pytest.mark.parametrize("panel_id", ["bad", "panel-20260101-000000-abcdef"])
+def test_retry_close_unknown_panel(h: Harness, mode: str, panel_id: str) -> None:
+    options = [mode, panel_id, *(["1"] if mode == "--retry" else [])]
+    code, out, err = h.invoke(*options, "--json")
+    assert code == 65 and not out
+    assert actions(err) == ["next: emb panel --status"]
+
+
+@pytest.mark.parametrize("mode", ["--retry", "--close"])
+def test_retry_close_busy(h: Harness, mode: str) -> None:
+    panel_id = h.create()
+    before = record.load(panel_id, h.env)
+    options = [mode, panel_id, *(["1"] if mode == "--retry" else [])]
+    with record.hold(panel_id, h.env):
+        code, out, err = h.invoke(*options, "--json")
+    assert code == 75 and not out and "still running" in err
+    assert actions(err) == [f"next: emb panel --status {panel_id}"]
+    assert record.load(panel_id, h.env) == before
+
+
+@pytest.mark.parametrize("number", ["0", "-1", "2", "no", "1.5"])
+def test_retry_unknown_member(h: Harness, number: str) -> None:
+    panel_id = h.create()
+    before = record.load(panel_id, h.env)
+    code, out, err = h.invoke("--retry", panel_id, number, "--json")
+    assert code == 65 and not out and f"no member {number}" in err
+    assert record.load(panel_id, h.env) == before
+
+
+@pytest.mark.parametrize("status", ["pending", "starting", "running", "answered"])
+def test_retry_refuses_member_status(h: Harness, status: str) -> None:
+    panel_id = h.create()
+    panel = record.load(panel_id, h.env)
+    panel["members"][0]["status"] = status
+    record.save(panel, h.env)
+    code, out, err = h.invoke("--retry", panel_id, "1", "--json")
+    assert code == 75 and not out and f"member 1 is {status}" in err
+    assert record.load(panel_id, h.env) == panel
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_retry_result_and_empty_close(h: Harness, as_json: bool) -> None:
+    h.script("codex", "@fail first failure")
+    code, out, _ = h.start("--member", "codex:gpt-5", "--json")
+    assert code == 83
+    first = json.loads(out)
+    old_run = first["members"][0]["run"]
+    h.script("codex", "@reply new answer")
+    options = ["--json"] if as_json else []
+    code, out, err = h.invoke("--retry", first["panel"], "1", *options)
+    assert code == 0
+    if as_json:
+        result = json.loads(out)
+        assert result["status"] == "done" and result["exit"] == 0
+        assert result["members"][0]["run"] != old_run
+        assert "attempts" not in result["members"][0]
+    else:
+        assert "member 1 codex:gpt-5" in out and " · answered · " in out
+    assert len(actions(err)) == 1
+    code, out, err = h.invoke("--close", first["panel"], *options)
+    assert code == 0
+    if as_json:
+        assert json.loads(out) == {
+            "panel": first["panel"],
+            "exit": 0,
+            "members": [],
+            "next": f"next: emb panel --status {first['panel']}",
+        }
+    else:
+        assert not out
+
+
+def test_retry_and_close_refuse_live_run(h: Harness) -> None:
+    h.script("codex", "@hang")
+    code, out, _ = h.start("--member", "codex:gpt-5", "--stall", "0.005", "--json")
+    assert code == 83
+    panel = json.loads(out)
+    panel_id, old_run = panel["panel"], panel["members"][0]["run"]
+    code, out, err = h.invoke("--retry", panel_id, "1", "--json")
+    assert code == 75 and not out and old_run in err
+    saved = record.load(panel_id, h.env)
+    assert saved["members"][0]["run"] == old_run
+    assert not any(a["kind"] == "retry" for a in saved["members"][0]["attempts"])
+    assert not saved["members"][0]["closed"]
+    assert saved["members"][0]["close_error"]
+    code, out, _ = h.invoke("--close", panel_id, "--json")
+    assert code == 75
+    result = json.loads(out)
+    assert result["exit"] == 75
+    assert result["members"][0]["run"] == old_run
+    assert not result["members"][0]["closed"]
+    code, out, _ = h.invoke("--close", panel_id)
+    assert code == 75 and f"member 1 · run {old_run} · " in out
+    assert "running" in out
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_close_prints_successful_run(h: Harness, as_json: bool) -> None:
+    _, out, _ = h.start("--member", "codex:gpt-5", "--json")
+    panel = json.loads(out)
+    run_id = panel["members"][0]["run"]
+    runs.update(runs.load(run_id, h.env), {"status": runs.WAITING}, allow_closed=True)
+    code, out, err = h.invoke(
+        "--close", panel["panel"], *(["--json"] if as_json else [])
+    )
+    assert code == 0
+    if as_json:
+        assert json.loads(out)["members"] == [
+            {"n": 1, "run": run_id, "closed": True, "close_error": None}
+        ]
+    else:
+        assert out == f"member 1 · run {run_id} · closed\n"
+    assert actions(err) == [f"next: emb panel --status {panel['panel']}"]
+    assert runs.load(run_id, h.env).status == runs.CLOSED

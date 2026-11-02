@@ -14,6 +14,7 @@ positional arguments:
     ground    print what to read before choosing a worker
     merge     merge a reviewed worker branch, then clean it up
     cleanup   remove merged worker branches, their worktrees and sessions
+    prune     remove old ended run, flow and panel records
     deps      show the installed and newest version of each dependency
     app       start the desktop app, or bring it forward
     skill     install or remove the ember skill for Claude Code
@@ -127,9 +128,9 @@ options:
 ==> emb flow --help <==
 usage: emb flow [-h] [--plan FILE] [--dry-run] [--start] [--watch FLOW]
                 [--status [FLOW]] [--lead FLOW TASK] [--resume FLOW]
-                [--writer W] [--reviewer W] [--claim ID] [--stall MINUTES]
-                [--send FILE] [--accept] [--commit SHA] [--review]
-                [--worker W] [--drop] [--json]
+                [--cancel FLOW] [--reason TEXT] [--writer W] [--reviewer W]
+                [--claim ID] [--stall MINUTES] [--send FILE] [--accept]
+                [--commit SHA] [--review] [--worker W] [--drop] [--json]
 
 Run a JSON task plan in waves with writers, read-only reviews and fix rounds.
 Accepted tasks merge into a flow branch. Each non-zero exit prints a next: or
@@ -144,6 +145,8 @@ options:
   --status [FLOW]   show one or all flows
   --lead FLOW TASK  answer a task's lead stop
   --resume FLOW     restart a flow's runner
+  --cancel FLOW     cancel a flow's runner
+  --reason TEXT     the cancellation reason
   --writer W        writer engine:model[@effort]
   --reviewer W      reviewer engine:model[@effort]
   --claim ID        read choices with this claim
@@ -160,7 +163,8 @@ options:
 usage: emb panel [-h] [--question-file FILE] [--dir DIR] [--member W]
                  [--claim ID] [--read PATH] [--stall MINUTES]
                  [--timeout MINUTES] [--dry-run] [--status [PANEL]]
-                 [--recover PANEL] [--json]
+                 [--recover PANEL] [--retry PANEL MEMBER] [--close PANEL]
+                 [--json]
 
 Ask members the same question in parallel read-only runs and write a summary
 of their answers. Each non-zero exit prints a next: or owner: line.
@@ -177,6 +181,8 @@ options:
   --dry-run             validate inputs and print resolved members
   --status [PANEL]      show one or all panels
   --recover PANEL       collect unfinished members without asking again
+  --retry PANEL MEMBER  ask a failed or not-started member again
+  --close PANEL         close every open member run without force
   --json                print JSON
 ==> emb ground --help <==
 usage: emb ground [-h] [--dir DIR] [--json]

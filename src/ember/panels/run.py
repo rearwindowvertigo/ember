@@ -25,6 +25,14 @@ class NothingToRecover(Exception):  # noqa: N818 - fixed public interface.
     """The panel has no member whose turn can be collected."""
 
 
+class RetryRefused(Exception):  # noqa: N818 - command diagnostic.
+    """The member or its old run cannot be retried."""
+
+
+class MemberMissingError(Exception):
+    """The panel has no member with the requested number."""
+
+
 @dataclass
 class Outcome:
     """The final panel snapshot and all threads created for this invocation."""
@@ -150,6 +158,7 @@ class _Coordinator:
         self.threads: list[threading.Thread] = []
         self.jobs: list[_Job] = []
         self.active: set[int] = set()
+        self.retrying = False
 
     def persist(self, summary: bool = False) -> None:
         """Save under the mutex and surface storage failures to the coordinator."""
@@ -255,9 +264,10 @@ class _Coordinator:
                 return False
             if kind == "start":
                 job.member["status"] = "starting"
-            job.member["attempts"].append(
-                {"kind": kind, "at": time.time(), "exit": None}
-            )
+            if kind != "start" or not self.retrying:
+                job.member["attempts"].append(
+                    {"kind": kind, "at": time.time(), "exit": None}
+                )
             self.persist()
             return True
 
@@ -585,3 +595,144 @@ def recover(
         raise NothingToRecover(f"the panel {panel_id} has no unfinished member")
     coordinator.persist()
     return coordinator.drive(members, True, 0.0)
+
+
+def _close_run(
+    panel: dict[str, Any],
+    member: dict[str, Any],
+    run_id: str,
+    env: Mapping[str, str],
+    core_factory: CoreFactory,
+) -> dict[str, Any]:
+    """Close one run without force and append its diagnostics to the member log."""
+    output, errors = io.StringIO(), io.StringIO()
+    core = core_factory(env, quiet=True, out=output, err=errors)
+    code = core.execute(lambda: core.close(run_id))
+    reason = None if code == 0 else _reason(errors.getvalue(), f"close exited {code}")
+    record.append_log(
+        panel["id"], member["n"], output.getvalue() + errors.getvalue(), env
+    )
+    return {"n": member["n"], "run": run_id, "closed": code == 0, "close_error": reason}
+
+
+def close(
+    panel_id: str,
+    env: Mapping[str, str],
+    *,
+    core_factory: CoreFactory = Core,
+) -> list[dict[str, Any]]:
+    """Close open current and retained runs while the caller holds the panel lock."""
+    panel = record.load(panel_id, env)
+    results = []
+    for member in panel["members"]:
+        run_ids = dict.fromkeys(
+            [member["run"]]
+            + [a.get("run") for a in member["attempts"] if a["kind"] == "retry"]
+        )
+        targets: dict[str, str | None] = {}
+        for run_id in run_ids:
+            if not run_id:
+                continue
+            try:
+                existing = runs.load(run_id, env)
+            except runs.RecordError as error:
+                targets[run_id] = str(error)
+            else:
+                if existing.status not in (runs.CLOSED, runs.FAILED):
+                    targets[run_id] = None
+        remaining = set(targets)
+        refused = []
+        for run_id, error in targets.items():
+            if error is not None:
+                result = {
+                    "n": member["n"],
+                    "run": run_id,
+                    "closed": False,
+                    "close_error": error,
+                }
+            else:
+                result = _close_run(panel, member, run_id, env, core_factory)
+            results.append(result)
+            if not result["closed"]:
+                refused.append(f"{run_id}: {result['close_error']}")
+            else:
+                remaining.remove(run_id)
+            member.update(closed=not remaining, close_error="; ".join(refused) or None)
+            record.save(panel, env)
+    return results
+
+
+def retry(
+    panel_id: str,
+    number: str,
+    env: Mapping[str, str],
+    *,
+    stall_minutes: float,
+    timeout_minutes: float,
+    core_factory: CoreFactory = Core,
+    stop: threading.Event | None = None,
+    poll_seconds: float = POLL_SECONDS,
+    err: TextIO | None = None,
+) -> Outcome:
+    """Replace one failed answer while the caller holds the panel's lifetime lock."""
+    coordinator = _Coordinator(panel_id, env, core_factory, stop, poll_seconds, err)
+    panel = coordinator.panel
+    try:
+        n = int(number)
+    except ValueError:
+        n = 0
+    member = next((m for m in panel["members"] if m["n"] == n), None)
+    if member is None:
+        raise MemberMissingError(f"panel {panel_id} has no member {number}")
+    if member["status"] not in (
+        "failed",
+        "stalled",
+        "timed out",
+        "interrupted",
+        "not started",
+    ):
+        raise RetryRefused(f"member {n} is {member['status']}")
+    old_run = member["run"]
+    if old_run:
+        result = _close_run(panel, member, old_run, env, core_factory)
+        member.update(closed=result["closed"], close_error=result["close_error"])
+        record.save(panel, env)
+        if not result["closed"]:
+            raise RetryRefused(
+                f"cannot close old run {old_run}: {result['close_error']}"
+            )
+    member["attempts"].append(
+        {"kind": "retry", "at": time.time(), "exit": None, "run": old_run}
+    )
+    coordinator.retrying = True
+    member.update(
+        status="pending",
+        run=None,
+        exit=None,
+        reason=None,
+        reply=None,
+        bytes=0,
+        changed=[],
+        seconds=None,
+        closed=False,
+        close_error=None,
+    )
+    panel.update(
+        status="running",
+        ended_at=None,
+        exit=None,
+        stall_minutes=stall_minutes,
+        timeout_minutes=timeout_minutes,
+    )
+    coordinator.persist(summary=True)
+    outcome = coordinator.drive([member], False, 0.0)
+    outcome.panel.update(
+        status="done"
+        if all(m["status"] == "answered" for m in outcome.panel["members"])
+        else "incomplete",
+        ended_at=time.time(),
+        exit=exit_code(outcome.panel, outcome.stopped),
+    )
+    record.save(outcome.panel, env)
+    record.write_summary(outcome.panel, env)
+    return outcome
