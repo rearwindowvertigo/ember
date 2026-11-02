@@ -574,10 +574,63 @@ the run's read paths are added with `--add-dir` and edits to them are
 refused. While a tool call or a model message runs, Claude's pane prints a
 line such as `· running Bash for 3 min` at least once a minute.
 
+## `emb ground`
+
+Prints, in one call, what Claude reads before choosing a worker: the machine,
+the Claude Code surface, Claude Code's `worktree.baseRef` setting and the
+state of one folder. It changes nothing.
+
+| Option | Does |
+|---|---|
+| `--dir DIR` | The folder to read; default the current folder |
+| `--json` | Print one JSON object, indented by two spaces |
+
+Without `--json` it prints one `<item>: <value>` line per item on standard
+output, in the order of the table below; a value that cannot be read prints
+as `null (<reason>)`.
+
+| Item | Value |
+|---|---|
+| `machine` | The host name |
+| `surface` | `entrypoint`: the value of `CLAUDE_CODE_ENTRYPOINT`, or null when it is unset or empty; `desktop`: true when it is `claude-desktop` |
+| `worktree_base` | `value`: Claude Code's `worktree.baseRef` setting; `file`: the settings file it came from |
+| `directory.path` | The folder, as an absolute path |
+| `directory.git` | Whether the folder is in a git checkout |
+| `directory.top` | The top of the checkout |
+| `directory.branch` | `name`: the checked-out branch, null on a detached `HEAD`; `commit`: the full commit id of `HEAD`, null before the first commit |
+| `directory.dirty` | `value`: whether `git status --porcelain` lists any path; `paths`: how many paths it lists. Ignored files are not counted |
+| `directory.remote` | `name`: `origin`, or else the first remote `git remote` lists; `url`: its URL; `kind`: `github` when the URL's host is `github.com`, otherwise `other` |
+| `directory.files` | Whether `CLAUDE.md` and `AGENTS.md` are files at the top of the checkout |
+
+A value that cannot be read is null, and in JSON a sibling key
+`<field>_reason` holds the reason: for example `"remote": null` with
+`"remote_reason": "the repository has no remote"`. Outside a git checkout
+`git` is false and `top`, `branch`, `dirty`, `remote` and `files` are null with
+the reason `not a git checkout`. When git cannot run, `git` is null as well.
+
+Git runs with `LC_ALL=C` and without the variables that point it at another
+repository (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`,
+`GIT_OBJECT_DIRECTORY`, `GIT_NAMESPACE` and `GIT_PREFIX`).
+
+`worktree.baseRef` is read from `~/.claude/settings.json`, then, in a
+checkout, from the top's `.claude/settings.json` and
+`.claude/settings.local.json`; a later file wins. A missing file, or a file
+without the key, is skipped. When no file sets it, or a file cannot be read,
+is not a JSON object, has a `worktree` that is not an object or a `baseRef`
+that is not a non-empty string, `worktree_base` is null with the reason.
+
+### Exit codes
+
+| Code | Meaning | Line |
+|---|---|---|
+| 0 | Printed, whatever could not be read | |
+| 64 | Usage error | |
+| 66 | `--dir` does not exist or is not a folder | `next: emb ground --dir <an existing folder>` |
+
 ## Exit codes
 
-These are the exit codes of `emb choices` and `emb engines`; `emb run` has its
-own table above.
+These are the exit codes of `emb choices` and `emb engines`; `emb run` and
+`emb ground` have their own tables above.
 
 | Code | Meaning |
 |---|---|
