@@ -7,6 +7,7 @@ session found Ember to use, over time.
 
 Nothing in Ember, its skill, `AGENTS.md`, `CLAUDE.md` or any memory file
 refers to this folder. A session fills the survey only when the owner asks.
+`review-prompt.md` is the question a panel answers to review an entry.
 
 ## Filling in an entry
 
@@ -26,6 +27,28 @@ Entries are the filling session's own assessment. The rule that committed
 text states facts and does not judge does not apply to `dev/survey/`.
 
 Do not put credentials, tokens or the owner's personal data in an entry.
+
+## Reviewing an entry
+
+A review runs once for each new entry, when the owner asks for it.
+
+1. Copy `review-prompt.md` to a scratch file and replace `{{ENTRY}}` with
+   the entry's path, such as `dev/survey/entries/2026-11-02-0-2-1-build.md`.
+2. Run it as an Ember panel on this checkout, with the scratch file as the
+   question: `emb panel --question-file <scratch file> --dir <repository top>`.
+   The members are the saved `panel.members` unless the owner names others.
+3. Compare the members' answers in the panel's `summary.md`, point by
+   point, and write `reviews/<entry file name>` with:
+   - the panel id and its members, with any member that failed;
+   - one table of every point with the severity, tags and outcome most
+     members gave, and each disagreement with each member's answer;
+   - the tags, merged where members named the same overlap differently;
+   - the proposed changes, each with the members that proposed it.
+4. Commit the review on its own branch, with a `chore(survey):` subject,
+   and open a pull request for it alone.
+
+A proposed change in a review is not a decision. It enters a design
+document only when the owner accepts it.
 
 ## Scores
 
