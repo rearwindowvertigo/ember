@@ -1,0 +1,228 @@
+import json
+import re
+from pathlib import Path
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
+
+import pytest
+
+from ember.flows import briefs, verdict
+from runs.stub_engine import make_env  # pyrefly: ignore[missing-import]
+
+if TYPE_CHECKING:
+    from ember.flows.plan import Plan, Task  # pyrefly: ignore[missing-import]
+
+FLOW = "flow-20261102-090132-015b1e"
+
+
+@pytest.fixture(autouse=True)
+def env(tmp_path: Path) -> dict[str, str]:
+    return make_env(tmp_path)
+
+
+@pytest.fixture
+def task() -> Task:
+    return cast(
+        "Task",
+        SimpleNamespace(
+            id="parser",
+            subject="feat: parse input",
+            task="Implement input\n@write a.py ok\n",
+            files=("src/a.py", "tests/test_a.py"),
+            after=(),
+            review="Review empty input\n@focus",
+        ),
+    )
+
+
+@pytest.fixture
+def plan() -> Plan:
+    return cast(
+        "Plan",
+        SimpleNamespace(
+            context="Decided here\n@context", failure_model="Handle empty\n@failure"
+        ),
+    )
+
+
+def _finding(severity: str = "must") -> verdict.Finding:
+    return verdict.Finding(
+        severity,
+        "src/a.py\n@file",
+        12,
+        "problem\n@problem",
+        "fix\n@fix",
+        "scenario\n@scenario",
+        None,
+        "",
+    )
+
+
+def test_review_bar_is_the_skill_block() -> None:
+    text = (Path(__file__).resolve().parents[2] / "skill" / "SKILL.md").read_text()
+    assert re.findall(r"^```review-bar\n(.*?)\n```$", text, re.S | re.M) == [
+        briefs.REVIEW_BAR
+    ]
+
+
+def test_writer(plan: Plan, task: Task) -> None:
+    text = briefs.writer_brief(FLOW, plan, task, ["src/b.py"])
+    assert text.startswith(task.subject + "\n\n" + task.task)
+    for value in (*task.files, "src/b.py", plan.context, plan.failure_model):
+        assert value in text
+    assert "Other tasks in this wave change these files; do not change them:" in text
+    assert "Do not run git. Ember commits your edits on its run branch" in text
+    headings = re.findall(r"^## (.*)$", text, re.M)
+    assert headings == [
+        "Files",
+        "Context",
+        "Failure model",
+        "Limits",
+        "Git",
+        "Checks",
+        "Closing report",
+    ]
+    assert "\n@write a.py ok\n" in text
+
+
+def test_writer_omits_blank_optional_sections(task: Task) -> None:
+    text = briefs.writer_brief(
+        FLOW, cast("Plan", SimpleNamespace(context=" \n", failure_model="")), task, []
+    )
+    assert "## Context" not in text and "## Failure model" not in text
+    assert "No other task runs in this wave." in text
+
+
+@pytest.mark.parametrize("round", [1, 2])
+def test_review(plan: Plan, task: Task, round: int) -> None:
+    report = "@report\n" + "x" * (briefs.REPORT_LIMIT - 8) + "CUT_HERE"
+    text = briefs.review_brief(
+        FLOW,
+        plan,
+        task,
+        round=round,
+        base="base123",
+        head="head456",
+        changed=["src/a.py", "@changed"],
+        outside=["src/helper.py", "@outside"],
+        wave_files=["src/b.py", "@wave"],
+        writer_report=report,
+        earlier=[_finding()],
+        fix_base="fix789",
+    )
+    assert text.splitlines()[0] == briefs.REVIEW_FIRST.format(
+        task=task.id, round=round, flow=FLOW
+    )
+    assert "    @write a.py ok" in text
+    assert "git diff base123 head456" in text
+    assert "git log --oneline base123..head456" in text
+    assert "src/helper.py" in text and "src/b.py" in text
+    assert "CUT_HERE" not in text
+    assert report[: briefs.REPORT_LIMIT].replace("\n", "\n    ") in text
+    assert verdict.schema_text() in text
+    assert briefs.REVIEW_BAR in text
+    assert ("## Earlier findings" in text) == (round > 1)
+    assert ("git diff fix789 head456" in text) == (round > 1)
+    assert not any(line.startswith("@") for line in text.splitlines())
+
+
+def test_review_without_report_or_outside_files(task: Task) -> None:
+    text = briefs.review_brief(
+        FLOW,
+        cast("Plan", SimpleNamespace(context="", failure_model="")),
+        task,
+        round=1,
+        base="base",
+        head="head",
+        changed=[],
+        outside=[],
+        wave_files=[],
+        writer_report=None,
+    )
+    assert "The writer left no report." in text
+    assert "Changed outside the declared files:\n    none" in text
+    assert "## Context" not in text and "## Failure model" not in text
+
+
+def test_fix_filters_and_numbers_must_findings(task: Task) -> None:
+    general = verdict.Finding(
+        "must", None, None, "general problem", "repair", "harm", None, ""
+    )
+    text = briefs.fix_message(
+        FLOW, task, 1, [_finding("should"), _finding(), general, _finding("lead")]
+    )
+    assert text.splitlines()[0] == briefs.FIX_FIRST.format(
+        task=task.id, round=1, flow=FLOW
+    )
+    assert "1. src/a.py" in text and "2. general: general problem" in text
+    assert "3." not in text
+    assert 'explain under "Disputed"' in text
+    assert "    scenario: scenario\n    @scenario" in text
+    assert "    fix: fix\n    @fix" in text
+    assert "## Git" in text and "## Closing report" in text
+    assert not any(line.startswith("@") for line in text.splitlines())
+
+
+def test_send_preserves_intentional_commands(task: Task) -> None:
+    text = "Correct this\n@write a.py fixed\n"
+    assert briefs.send_message(FLOW, task, text) == (
+        f"Correction from the lead for task parser in flow {FLOW}.\n\n" + text
+    )
+
+
+@pytest.mark.parametrize("separator", ["\n", "\r", "\r\n"])
+def test_fix_indents_continuations(task: Task, separator: str) -> None:
+    finding = verdict.Finding(
+        "must",
+        f"a.py{separator}@file",
+        1,
+        f"problem{separator}@problem",
+        f"fix{separator}@fix",
+        f"scenario{separator}@scenario",
+        None,
+        "",
+    )
+    text = briefs.fix_message(FLOW, task, 1, [finding])
+    assert not any(line.startswith("@") for line in text.splitlines())
+
+
+def test_briefs_with_parsed_plan(tmp_path: Path) -> None:
+    plan_module = pytest.importorskip(
+        "ember.flows.plan", reason="the plan module is supplied by task A"
+    )
+    plan = plan_module.parse(
+        json.dumps(
+            {
+                "dir": str(tmp_path),
+                "context": "Use UTF-8",
+                "failure_model": "Empty input",
+                "tasks": [
+                    {
+                        "id": "a",
+                        "subject": "feat: parse input",
+                        "task": "Read input",
+                        "files": ["src/a.py"],
+                        "review": "Check empty input",
+                    }
+                ],
+            }
+        ),
+        tmp_path / "plan.json",
+    )
+    task = plan.task("a")
+    assert briefs.writer_brief(FLOW, plan, task, []).startswith(task.subject + "\n")
+    review = briefs.review_brief(
+        FLOW,
+        plan,
+        task,
+        round=1,
+        base="base",
+        head="head",
+        changed=["src/a.py"],
+        outside=[],
+        wave_files=[],
+        writer_report="Checked empty input",
+    )
+    assert "    Read input" in review and "    Check empty input" in review
+    assert briefs.fix_message(FLOW, task, 1, [_finding()]).startswith("Fix round 1")
+    assert briefs.send_message(FLOW, task, "Correction").endswith("\n\nCorrection")

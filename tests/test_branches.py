@@ -10,6 +10,7 @@ import pytest
 
 from ember import branches, engines
 from ember.cli import main
+from ember.flows import lock as flow_lock
 from ember.runs import core, record
 from ember.runs.core import Core, StartOptions
 from runs.stub_engine import (  # pyrefly: ignore[missing-import]
@@ -993,3 +994,148 @@ def test_cli_merge_and_cleanup(
     assert capsys.readouterr().out.startswith(f"removed {other.branch}")
     assert not _branch_exists(repo, other.branch, env)
     assert os.path.isdir(repo)
+
+
+# Flow branches
+
+FLOW_ID = "flow-20261102-090132-015b1e"
+
+
+@pytest.mark.parametrize("linked", [False, True])
+def test_create_flow_branch_at_base_in_main_checkout(
+    tmp_path: Path, env: dict[str, str], repo: Path, linked: bool
+) -> None:
+    base = git(repo, "rev-parse", "HEAD", env=env)
+    directory = repo
+    if linked:
+        directory = tmp_path / "linked"
+        git(repo, "worktree", "add", "-q", "-b", "session", str(directory), env=env)
+    (directory / "README.md").write_text("dirty contents stay here\n")
+    flow = branches.create_flow_branch(directory, FLOW_ID, base, env)
+    assert flow == branches.FlowBranch(
+        f"ember/flow/{FLOW_ID}",
+        repo / ".ember" / "worktrees" / FLOW_ID,
+        base,
+        directory,
+        repo,
+    )
+    assert git(flow.worktree, "rev-parse", "HEAD", env=env) == base
+    assert git(flow.worktree, "branch", "--show-current", env=env) == flow.branch
+    assert (flow.worktree / "README.md").read_text() == "hello\n"
+    assert (directory / "README.md").read_text() == "dirty contents stay here\n"
+    assert ".ember/" in (repo / ".git" / "info" / "exclude").read_text().splitlines()
+    assert branches.FLOW_BRANCH.fullmatch(flow.branch)
+    match = branches.WORKER_BRANCH.fullmatch(flow.branch)
+    assert match is not None and match["engine"] == "flow"
+
+
+@pytest.mark.parametrize("base", ["nope", "--help"])
+def test_flow_base_must_be_a_commit(env: dict[str, str], repo: Path, base: str) -> None:
+    with pytest.raises(branches.BranchError) as caught:
+        branches.resolve_base(repo, base, env)
+    assert caught.value.code == 64
+    assert str(caught.value) == f"base {base} is not a commit"
+
+
+def test_flow_needs_a_checkout(tmp_path: Path, env: dict[str, str]) -> None:
+    with pytest.raises(branches.BranchError) as caught:
+        branches.resolve_base(tmp_path, "HEAD", env)
+    assert caught.value.code == 65
+    assert "not in a git checkout" in str(caught.value)
+
+
+def test_flow_worktree_creation_failure(env: dict[str, str], repo: Path) -> None:
+    (repo / ".ember").mkdir()
+    (repo / ".ember" / "worktrees").write_text("not a folder")
+    with pytest.raises(branches.BranchError) as caught:
+        branches.create_flow_branch(repo, FLOW_ID, "HEAD", env)
+    assert caught.value.code == 70
+    assert "git worktree add failed" in str(caught.value)
+    assert caught.value.line == (
+        f"next: git -C {repo} worktree prune, then emb flow --plan <plan> --start"
+    )
+
+
+def test_merge_run_into_flow_uses_flow_worktree(
+    tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    flow = branches.create_flow_branch(repo, FLOW_ID, "HEAD", env)
+    run = _start(tmp_path, env, flow.worktree, driver)
+    assert run.branch is not None
+    streams = Streams()
+    with flow_lock.hold(FLOW_ID, env):
+        assert (
+            _merge(
+                env, driver, streams, run.branch, repo, target=flow.branch, as_json=True
+            )
+            == 0
+        )
+    result = json.loads(streams.take()[0])
+    assert result["merge_commit"] == git(flow.worktree, "rev-parse", "HEAD", env=env)
+    assert result["cleanup"][0]["action"] == "removed"
+    assert (flow.worktree / "work.txt").read_text() == "work\n"
+    assert not (repo / "work.txt").exists()
+    assert not Path(run.worktree).exists() and not _branch_exists(repo, run.branch, env)
+    assert record.load(run.id, env).status == record.CLOSED
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_cleanup_keeps_live_flow(
+    env: dict[str, str], repo: Path, driver: StubDriver, dry_run: bool
+) -> None:
+    flow = branches.create_flow_branch(repo, FLOW_ID, "HEAD", env)
+    streams = Streams()
+    with flow_lock.hold(FLOW_ID, env):
+        assert _cleanup(env, driver, streams, repo, dry_run=dry_run, as_json=True) == 0
+    [result] = json.loads(streams.take()[0])
+    assert result["action"] == "kept"
+    assert result["reason"] == f"the flow {FLOW_ID} is running"
+    assert result["next"] == f"next: emb flow --status {FLOW_ID}"
+    assert flow.worktree.is_dir() and _branch_exists(repo, flow.branch, env)
+
+
+def test_cleanup_flow_dry_run_then_remove(
+    env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    flow = branches.create_flow_branch(repo, FLOW_ID, "HEAD", env)
+    streams = Streams()
+    assert _cleanup(env, driver, streams, repo, dry_run=True, as_json=True) == 0
+    [result] = json.loads(streams.take()[0])
+    assert result["action"] == "would remove"
+    assert flow.worktree.is_dir() and _branch_exists(repo, flow.branch, env)
+    assert _cleanup(env, driver, streams, repo, as_json=True) == 0
+    [result] = json.loads(streams.take()[0])
+    assert result["action"] == "removed" and "closed" not in result["reason"]
+    assert not flow.worktree.exists() and not _branch_exists(repo, flow.branch, env)
+
+
+def test_merge_flow_keeps_live_branch_then_cleans_it(
+    env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    flow = branches.create_flow_branch(repo, FLOW_ID, "HEAD", env)
+    (flow.worktree / "flow.txt").write_text("flow\n")
+    git(flow.worktree, "add", "flow.txt", env=env)
+    git(flow.worktree, "commit", "-q", "-m", "feat: flow change", env=env)
+    streams = Streams()
+    with flow_lock.hold(FLOW_ID, env):
+        assert _merge(env, driver, streams, flow.branch, repo, as_json=True) == 0
+    result = json.loads(streams.take()[0])
+    assert result["cleanup"][0]["action"] == "kept"
+    assert (repo / "flow.txt").read_text() == "flow\n"
+    assert flow.worktree.is_dir()
+    assert _cleanup(env, driver, streams, repo) == 0
+    assert not flow.worktree.exists() and not _branch_exists(repo, flow.branch, env)
+
+
+def test_cleanup_flow_with_unreadable_lock_keeps_it(
+    env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    flow = branches.create_flow_branch(repo, FLOW_ID, "HEAD", env)
+    Path(env["XDG_RUNTIME_DIR"]).write_text("not a folder")
+    streams = Streams()
+    assert _cleanup(env, driver, streams, repo, as_json=True) == 0
+    [result] = json.loads(streams.take()[0])
+    assert result["action"] == "kept"
+    assert "cannot open the lock" in result["reason"]
+    assert result["next"] == f"next: emb flow --status {FLOW_ID}"
+    assert flow.worktree.is_dir() and _branch_exists(repo, flow.branch, env)
