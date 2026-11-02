@@ -4,7 +4,8 @@ Exit codes follow BSD `sysexits.h`. For `emb choices` and `emb engines`: 0 on
 success, 64 for a usage error or an invalid value, 74 when the settings
 database cannot be opened or read, 75 for a stale generation or a busy
 database, 77 for an owner option without a terminal and 78 for an unsupported
-database schema. `emb run` uses the table in `ember.runs.exits`.
+database schema. `emb run` uses the table in `ember.runs.exits`; `emb merge`
+and `emb cleanup` use the codes in `ember.branches`.
 """
 
 import argparse
@@ -14,7 +15,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NoReturn
 
-from ember import __version__, choices, db
+from ember import __version__, branches, choices, db
 from ember.engines import models, status
 from ember.runs import core as run_core
 
@@ -199,6 +200,39 @@ def _add_run(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_merge(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("branch", metavar="BRANCH", help="the reviewed branch")
+    parser.add_argument(
+        "--into", required=True, metavar="TARGET", help="the branch to merge into"
+    )
+    parser.add_argument(
+        "--verdict", metavar="VERDICT", help="the lead's verdict; only keep merges"
+    )
+    parser.add_argument(
+        "--dir", default=".", metavar="DIR", help="a folder in the git checkout"
+    )
+    parser.add_argument("--json", action="store_true", help="print JSON")
+
+
+def _add_cleanup(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--merged-into",
+        required=True,
+        metavar="TARGET",
+        help="the branch the worker branches were merged into",
+    )
+    parser.add_argument("--branch", metavar="BRANCH", help="only this branch")
+    parser.add_argument(
+        "--dir", default=".", metavar="DIR", help="a folder in the git checkout"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what would be done; change nothing",
+    )
+    parser.add_argument("--json", action="store_true", help="print JSON")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the parser for `emb` and its subcommands.
 
@@ -239,6 +273,30 @@ def build_parser() -> argparse.ArgumentParser:
                 "Start one worker in its own worktree and tmux session and wait "
                 "for its turn, or send to, read, interrupt, close or recover a "
                 "run. Each non-zero exit prints a next: or owner: line."
+            ),
+        )
+    )
+    _add_merge(
+        subparsers.add_parser(
+            "merge",
+            help="merge a reviewed worker branch, then clean it up",
+            description=(
+                "Merge a reviewed branch into a local branch with a merge commit, "
+                "in the worktree that has the target checked out, then remove the "
+                "branch, its run's worktree and session as emb cleanup does. "
+                "Never pushes. Each non-zero exit prints a next: or owner: line."
+            ),
+        )
+    )
+    _add_cleanup(
+        subparsers.add_parser(
+            "cleanup",
+            help="remove merged worker branches, their worktrees and sessions",
+            description=(
+                "Remove each Ember run branch the target contains, its run's "
+                "worktree and session, and keep everything else with a reason "
+                "and the command that resolves it. Each non-zero exit prints a "
+                "next: or owner: line."
             ),
         )
     )
@@ -502,6 +560,24 @@ def main(
         return _run_engines(args, env)
     if args.command == "run":
         return _run_run(args, env)
+    if args.command == "merge":
+        return branches.merge(
+            args.branch,
+            args.into,
+            args.verdict,
+            directory=args.dir,
+            as_json=args.json,
+            env=env,
+        )
+    if args.command == "cleanup":
+        return branches.cleanup(
+            args.merged_into,
+            branch=args.branch,
+            directory=args.dir,
+            dry_run=args.dry_run,
+            as_json=args.json,
+            env=env,
+        )
     return EX_OK
 
 

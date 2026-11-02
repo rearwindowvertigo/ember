@@ -465,8 +465,8 @@ session and keeps the worktree and branch. A command waiting on a run that is
 closed stops with 72, also when the driver fails or the session is missing
 after the close.
 
-Ember never pushes, merges, rebases or deletes a branch, and never removes a
-worktree.
+`emb run` never pushes, merges, rebases or deletes a branch, and never removes
+a worktree.
 
 ### Locks
 
@@ -574,10 +574,148 @@ the run's read paths are added with `--add-dir` and edits to them are
 refused. While a tool call or a model message runs, Claude's pane prints a
 line such as `· running Bash for 3 min` at least once a minute.
 
+## `emb merge`
+
+```
+emb merge BRANCH --into TARGET --verdict keep [--dir DIR] [--json]
+```
+
+Merges a reviewed branch into a local branch, then cleans it up as
+`emb cleanup --merged-into TARGET --branch BRANCH` does. `DIR` is a folder in
+the git checkout; the default is the current folder.
+
+- Without `--verdict keep` it changes nothing and exits 64.
+- `BRANCH` and `TARGET` must be existing local branches (65), and different
+  (64).
+- The merge happens in the worktree that has `TARGET` checked out, from
+  `git worktree list`. It exits 75 when no worktree has it checked out.
+- A branch already contained in `TARGET` (see `emb cleanup`) is not merged
+  again; the first line is `already contained: BRANCH at <commit> in TARGET at
+  <commit>`.
+- Otherwise the target's tree must have no changes to tracked files and no
+  untracked files that are not ignored (75); other worktrees of the
+  repository inside it are not counted. Ember then runs
+  `git merge --no-ff --no-edit BRANCH` there, which makes a merge commit with
+  git's default message, and prints `merged BRANCH at <commit> into TARGET:
+  <merge commit>`.
+- On a conflict it runs `git merge --abort`, leaves `TARGET` as it was and
+  exits 75. Any other merge failure exits 70.
+- It never pushes.
+
+The cleanup's lines follow the first line. A branch that is not an Ember run
+branch is kept with `not an Ember run branch; next: git branch -d BRANCH`.
+
+`--json` prints one object:
+
+| Field | Value |
+|---|---|
+| `branch` | `BRANCH` |
+| `target` | `TARGET` |
+| `merge_commit` | The merge commit; null when the branch was already contained |
+| `contained_before` | Whether the branch was already contained |
+| `cleanup` | The cleanup's list, as `emb cleanup --json` prints it |
+
+## `emb cleanup`
+
+```
+emb cleanup --merged-into TARGET [--branch BRANCH] [--dir DIR] [--dry-run] [--json]
+```
+
+Removes the Ember run branches `TARGET` contains, with their run's worktree
+and session. `DIR` is a folder in the git checkout; the default is the current
+folder.
+
+A run branch is `ember/<engine>/<run id>`; its worktree is
+`.ember/worktrees/<run id>` in the repository's main checkout (the first entry
+of `git worktree list`), also when `DIR` is in a linked worktree. No other
+branch is ever removed, and a read-only run, which has no branch, is never
+touched. Without `--branch` every run branch is handled; with it, only
+`BRANCH`.
+
+A branch is contained in `TARGET` when it is an ancestor of `TARGET`, or when
+merging it into `TARGET` gives no conflict and `TARGET`'s own tree, as after a
+squash merge. The check changes no index, worktree or ref; with `--dry-run`
+the objects of the trial merge go to a temporary folder.
+
+For each contained run branch, in order:
+
+1. The run record must belong to the branch: same engine, same branch, its
+   worktree is the branch's worktree in this repository, and its checkout is
+   in this repository (when that checkout still exists).
+2. The branch must not be checked out in a worktree other than its run's, and
+   the run's worktree, when it exists, must have the branch checked out, be
+   unlocked, and have no changes to tracked files and no untracked files that
+   are not ignored. Ignored files do not count.
+3. A run that is not closed is closed through `emb run --close` without
+   `--force`; the close's messages go to standard error.
+4. Both tips are read again and containment is checked again.
+5. The run's worktree is removed with `git worktree remove` (without
+   `--force`), then `git worktree prune` runs, which also clears a worktree
+   whose folder was deleted by hand.
+6. The branch is deleted at the commit checked in step 4
+   (`git update-ref -d refs/heads/BRANCH <commit>`).
+
+A branch with no run record follows the same steps without a session to
+close. Run records are kept. `--dry-run` reports what each branch would get
+and changes nothing; it does not ask the run's session whether it would close.
+
+Everything else is kept, with a reason and what resolves it:
+
+| Kept | Reason | Then |
+|---|---|---|
+| `TARGET` itself | `the merge target` | `next: emb cleanup --merged-into <the branch it was merged into>` |
+| A branch that is not a run branch (with `--branch`) | `not an Ember run branch` | `next: git branch -d BRANCH` |
+| A branch not contained | `not contained in TARGET` | `next: emb merge BRANCH --into TARGET --verdict keep (after a Keep verdict)` |
+| A run record that is not this branch's | `the run record <run> is not this branch's: ...` | `next: emb run --status <run>` |
+| A run record that cannot be read | `cannot read the run record: ...` | `owner: repair or remove <the run.json file>` |
+| A branch checked out in another worktree | `checked out in <path>` | `next: git -C <path> switch --detach, then <the cleanup>` |
+| A run worktree with another branch checked out | `the run's worktree <path> has <branch> checked out` | `next: git -C <path> status` |
+| A locked run worktree | `the worktree <path> is locked` | `next: git worktree unlock <path>, then <the cleanup>` |
+| A run worktree with changes | `the worktree <path> has changes` | `next: git -C <path> status --short` |
+| A run whose close is refused | The close's message: a running or collected turn, a busy session, another command on the run, or messages Ember did not send | The close's `next:` line |
+| A run whose close fails otherwise | The close's message | The close's `owner:` line, or `owner: repair what the message names (emb run --status <run>), then <the cleanup>` |
+| A branch or target that moved | `<branch> moved` | `next: <the cleanup>` |
+
+Each act and keep is one line on standard output:
+`removed BRANCH: <what was done>`, `would remove BRANCH: <what would be done>`,
+or `kept BRANCH: <reason>; next: <command>` (`; owner: <step>` for something
+only the owner does). With nothing to handle it prints nothing on standard
+output and a message on standard error.
+
+`--json` prints a list of objects:
+
+| Field | Value |
+|---|---|
+| `branch` | The branch |
+| `run` | The run id in the branch name, or null |
+| `action` | `removed`, `kept` or `would remove` |
+| `reason` | What was done, or why it was kept |
+| `next` | For a keep, the command that resolves it, or the line starting `owner: `; null otherwise |
+
+A git command that fails while changing the repository (worktree removal,
+`git worktree prune`, branch deletion) stops the cleanup at once with exit
+70. Everything done before it is already printed, or with `--json` is in the
+list; standard error names the failed step and git's message. With
+`emb merge`, a merge already made stays.
+
+### Exit codes of `emb merge` and `emb cleanup`
+
+Messages go to standard error as `emb merge: <message>` or
+`emb cleanup: <message>`; each non-zero exit then prints one `next:` or
+`owner:` line.
+
+| Code | Meaning |
+|---|---|
+| 0 | Done, whatever was kept |
+| 64 | Usage error, or no Keep verdict |
+| 65 | The folder is not in a git checkout, or a named branch or target does not exist |
+| 70 | A git command failed: the merge, listing worktrees, `git status`, worktree removal, prune or branch deletion |
+| 75 | Refused: the target is checked out nowhere or its tree is not clean, or a merge conflict was aborted |
+
 ## Exit codes
 
-These are the exit codes of `emb choices` and `emb engines`; `emb run` has its
-own table above.
+These are the exit codes of `emb choices` and `emb engines`; `emb run`,
+`emb merge` and `emb cleanup` have their own tables above.
 
 | Code | Meaning |
 |---|---|
