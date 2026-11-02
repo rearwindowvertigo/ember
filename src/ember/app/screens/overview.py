@@ -3,13 +3,15 @@
 A live row expands to show the run's screen mirror; one row is expanded at a
 time, and the mirror closes when the row collapses, the run leaves the live
 list, the screen is left or the window hides. A finished row expands to the
-run's record. While the screen is hidden it does not redraw; it redraws the
+run's record. Rows are kept per run id; a finished row is redrawn only when
+a value it shows changed. The sandbox alerts come from the last settings
+snapshot. While the screen is hidden it does not redraw; it redraws the
 next time it is shown. When the runs folder cannot be read, the screen shows
 the reason with Try again, which reads it again at once.
 """
 
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -239,35 +241,74 @@ class _FinishedRow(_Row):
     def __init__(self, run: Run) -> None:
         super().__init__(run, "details")
         self.details: QWidget | None = None
+        self.shown_values: tuple[object, ...] = ()
         self.set_run(run)
+
+    @staticmethod
+    def values(run: Run) -> tuple[object, ...]:
+        """Return everything the row shows of a run, expanded or not."""
+        return (
+            run.status,
+            worker_line(run),
+            finished_detail(run),
+            finished_time(run),
+            tuple(record_rows(run)),
+        )
+
+    def set_run(self, run: Run) -> None:
+        """Show a run's record; nothing is redrawn when no shown value changed."""
+        values = self.values(run)
+        self.run = run
+        if values == self.shown_values:
+            return
+        self.shown_values = values
+        super().set_run(run)
         self.title_label.setText(worker_line(run))
         self.detail_label.setText(finished_detail(run))
         self.time_label.setText(finished_time(run))
+        if self.details is not None:
+            self._drop_details()
+            self._add_details()
 
     def show_details(self, shown: bool) -> None:
         if shown and self.details is None:
-            details = QWidget()
-            grid = QGridLayout(details)
-            grid.setContentsMargins(0, 0, 0, 0)
-            grid.setHorizontalSpacing(16)
-            grid.setVerticalSpacing(4)
-            for row, (label, value) in enumerate(record_rows(self.run)):
-                name = QLabel(label)
-                name.setProperty("role", "secondary")
-                text = QLabel(value)
-                text.setWordWrap(True)
-                text.setTextInteractionFlags(
-                    Qt.TextInteractionFlag.TextSelectableByMouse
-                )
-                grid.addWidget(name, row, 0, Qt.AlignmentFlag.AlignTop)
-                grid.addWidget(text, row, 1)
-            grid.setColumnStretch(1, 1)
-            self.body.addWidget(details)
-            self.details = details
+            self._add_details()
         elif not shown and self.details is not None:
-            discard(self.details, self.body)
-            self.details = None
+            self._drop_details()
         self.set_expanded(shown)
+
+    def _add_details(self) -> None:
+        details = QWidget()
+        grid = QGridLayout(details)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(4)
+        for row, (label, value) in enumerate(record_rows(self.run)):
+            name = QLabel(label)
+            name.setProperty("role", "secondary")
+            text = QLabel(value)
+            text.setWordWrap(True)
+            text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            grid.addWidget(name, row, 0, Qt.AlignmentFlag.AlignTop)
+            grid.addWidget(text, row, 1)
+        grid.setColumnStretch(1, 1)
+        self.body.addWidget(details)
+        self.details = details
+
+    def _drop_details(self) -> None:
+        discard(self.details, self.body)
+        self.details = None
+
+
+def _place(layout: QVBoxLayout, rows: Sequence[QWidget]) -> None:
+    """Put rows in a layout in order, moving them only when the order differs."""
+    if [layout.indexOf(row) for row in rows] == list(range(len(rows))):
+        return
+    for row in rows:
+        layout.removeWidget(row)
+    for row in rows:
+        layout.addWidget(row)
+        row.show()
 
 
 def _card(title: str) -> tuple[Card, QVBoxLayout, QLabel]:
@@ -324,8 +365,6 @@ class OverviewScreen(QWidget):
         self.expanded_live: str | None = None
         self.expanded_finished: str | None = None
         self._stale = True
-        self._sandbox_busy = False
-        self._sandbox_queued = False
 
         self._elapsed = QTimer(self)
         self._elapsed.setInterval(ELAPSED_MS)
@@ -340,7 +379,7 @@ class OverviewScreen(QWidget):
     # Showing
 
     def shown(self) -> None:
-        """Redraw what changed while hidden and check the sandbox settings."""
+        """Redraw what changed while hidden and the sandbox alerts."""
         self._elapsed.start()
         if self._stale:
             self.refresh()
@@ -441,30 +480,36 @@ class OverviewScreen(QWidget):
                 self.live_rows[run.id] = row
             else:
                 row.set_run(run)
-            self.live_rows_layout.removeWidget(row)
-        for run in live:
-            row = self.live_rows[run.id]
-            self.live_rows_layout.addWidget(row)
-            row.show()
+        _place(self.live_rows_layout, [self.live_rows[run.id] for run in live])
         self.live_empty.setVisible(not live)
         self._chain_focus()
 
     def _draw_finished(self, finished: list[Run]) -> None:
-        for row in self.finished_rows.values():
-            discard(row, self.finished_rows_layout)
-        self.finished_rows = {}
-        ids = {run.id for run in finished}
-        if self.expanded_finished not in ids:
+        """Draw the finished rows, reusing each run's row.
+
+        A row is redrawn only when a value it shows changed, so focus, an
+        expanded record and selected text survive a reload.
+        """
+        wanted = {run.id for run in finished}
+        if self.expanded_finished not in wanted:
             self.expanded_finished = None
+        for run_id in [key for key in self.finished_rows if key not in wanted]:
+            discard(self.finished_rows.pop(run_id), self.finished_rows_layout)
         for run in finished:
-            row = _FinishedRow(run)
-            row.expand_button.clicked.connect(
-                lambda _checked=False, key=run.id: self.toggle_finished(key)
-            )
-            self.finished_rows[run.id] = row
-            self.finished_rows_layout.addWidget(row)
-            if run.id == self.expanded_finished:
-                row.show_details(True)
+            row = self.finished_rows.get(run.id)
+            if row is None:
+                row = _FinishedRow(run)
+                row.expand_button.clicked.connect(
+                    lambda _checked=False, key=run.id: self.toggle_finished(key)
+                )
+                self.finished_rows[run.id] = row
+            else:
+                row.set_run(run)
+        self.finished_rows = {run.id: self.finished_rows[run.id] for run in finished}
+        _place(self.finished_rows_layout, list(self.finished_rows.values()))
+        expanded = self.finished_rows.get(self.expanded_finished or "")
+        if expanded is not None and expanded.details is None:
+            expanded.show_details(True)
         self.finished_empty.setVisible(not finished)
         self._chain_focus()
 
@@ -527,35 +572,24 @@ class OverviewScreen(QWidget):
     # Sandbox alerts
 
     def check_sandboxes(self) -> None:
-        """Read each engine's sandbox method in a task and redraw the alerts.
+        """Redraw the alerts from the last settings snapshot.
 
-        Only engines that are on are checked. A check asked for while one
-        runs follows it once.
+        An engine that is on and whose `sandbox.<engine>` setting gives no
+        sandbox has an alert. Nothing is shown before the first snapshot.
         """
-        if self._sandbox_busy:
-            self._sandbox_queued = True
-            return
-        engines = [
-            engine
-            for engine in sandbox.ENGINES
-            if self.context.setting(f"engine.{engine}") == "on"
-        ]
-        self._sandbox_busy = True
-        env = self.context.env
-
-        def read() -> list[str]:
-            return [
+        engines = []
+        if self.context.settings_ready():
+            engines = [
                 engine
-                for engine in engines
-                if sandbox.method(engine, env=env) == sandbox.NONE
+                for engine in sandbox.ENGINES
+                if self.context.setting(f"engine.{engine}") == "on"
+                and sandbox.provider_of(
+                    engine, str(self.context.setting(f"sandbox.{engine}"))
+                )
+                == sandbox.NONE
             ]
-
-        self.context.tasks.run(read, self._sandboxes_read, self._sandboxes_failed)
-
-    def _sandboxes_read(self, engines: list[str]) -> None:
         for engine in [key for key in self.sandbox_alerts if key not in engines]:
-            alert = self.sandbox_alerts.pop(engine)
-            discard(alert, self.alerts)
+            discard(self.sandbox_alerts.pop(engine), self.alerts)
         for engine in engines:
             if engine in self.sandbox_alerts:
                 continue
@@ -565,19 +599,5 @@ class OverviewScreen(QWidget):
                 actions=[("Open Engines", lambda: self.context.show_screen("engines"))],
             )
             self.sandbox_alerts[engine] = alert
-        for engine in sandbox.ENGINES:
-            if engine in self.sandbox_alerts:
-                self.alerts.removeWidget(self.sandbox_alerts[engine])
-                self.alerts.addWidget(self.sandbox_alerts[engine])
+        _place(self.alerts, [self.sandbox_alerts[engine] for engine in engines])
         self._chain_focus()
-        self._sandbox_done()
-
-    def _sandboxes_failed(self, _error: Exception) -> None:
-        # The window shows settings read failures; the alerts stay as they were.
-        self._sandbox_done()
-
-    def _sandbox_done(self) -> None:
-        self._sandbox_busy = False
-        if self._sandbox_queued:
-            self._sandbox_queued = False
-            self.check_sandboxes()

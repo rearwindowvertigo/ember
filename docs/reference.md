@@ -1091,6 +1091,40 @@ command line:
 | Xfce Terminal | `xfce4-terminal -x` |
 | XTerm | `xterm -e` |
 
+### Overview
+
+Overview's subtitle is the tray's status line. Above the lists, an alert
+names each engine that is on and whose `sandbox.<engine>` setting gives it
+no sandbox, read from the last settings snapshot, with Open Engines; an
+alert counts run records that could not be read.
+
+The Live card holds one row per live run, oldest first: an expand arrow,
+the status badge (Starting, Running, Waiting for Claude),
+`<Engine> · <model> · <effort>`, `<repository folder> · <branch or
+read-only> · turn <n>`, the time since the start, redrawn every 30 seconds
+while the screen shows, and Open terminal, which opens a terminal window on
+the run as `emb run --attach` does. The Finished card holds the last twenty
+finished runs, newest first: the badge (Closed, Failed), the same first
+line, `<subject> · <branch or read-only>`, and the end time with the
+duration. Expanding a finished row shows its record: run, subject, engine,
+repository, branch, sandbox, turns and commits, start, end, last exit and
+last reason. One row of each card is expanded at a time.
+
+Rows are kept per run id across reloads. A finished row is redrawn only
+when a value it shows changes, so focus, an expanded record and selected
+text stay when another run saves its record.
+
+Expanding a live row shows the run's screen mirror. The mirror is a tmux
+control-mode client attached to the run's session with the `read-only` and
+`ignore-size` flags, so it cannot type into the pane or change its size.
+After the pane writes output it captures the pane with its colours and
+cursor and redraws; nothing runs on a timer. It closes
+when the row collapses, the run leaves the live list, the screen is left or
+the window hides, and shows "Session ended" when the session ends.
+
+When the runs folder cannot be read, the screen shows the reason and Try
+again in place of the cards.
+
 ### Menu
 
 Menu shows the standing worker menu: the Writer and Reviewer pickers
