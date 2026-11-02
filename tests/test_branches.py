@@ -317,6 +317,20 @@ def test_merge_note_in_json_and_for_a_contained_branch(
     assert git(repo, "rev-parse", "HEAD", env=env) == head
 
 
+def test_merge_from_inside_the_run_worktree_cleans_it_up(
+    tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    run = _start(tmp_path, env, repo, driver)
+    assert run.branch is not None
+    streams = Streams()
+    code = _merge(env, driver, streams, run.branch, Path(run.worktree), note="Keep")
+    out, err = streams.take()
+    assert code == 0, err
+    assert out.splitlines()[2].startswith(f"removed {run.branch}: contained in main")
+    assert not _branch_exists(repo, run.branch, env)
+    assert not Path(run.worktree).exists()
+
+
 @pytest.mark.parametrize("verdict", [None, "drop", "Keep"])
 def test_merge_without_keep_verdict_is_64(
     tmp_path: Path,
@@ -577,6 +591,20 @@ def test_cleanup_removes_a_squash_merged_branch(
     assert not Path(run.worktree).exists()
     assert not _session_live(tmp_path, run.id)
     assert record.load(run.id, env).status == record.CLOSED
+
+
+def test_cleanup_from_inside_the_run_worktree_removes_it(
+    tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    run = _start(tmp_path, env, repo, driver)
+    assert run.branch is not None
+    _squash(repo, run.branch, env)
+    streams = Streams()
+    assert _cleanup(env, driver, streams, Path(run.worktree)) == 0
+    out, err = streams.take()
+    assert out.startswith(f"removed {run.branch}: contained in main"), err
+    assert not _branch_exists(repo, run.branch, env)
+    assert not Path(run.worktree).exists()
 
 
 def test_cleanup_keeps_a_branch_not_contained(

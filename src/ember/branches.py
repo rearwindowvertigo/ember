@@ -264,7 +264,7 @@ class Repository:
     """The repository a command works on."""
 
     top: Path
-    """The top of the checkout the command was given."""
+    """The top of the checkout the command was given, or the main checkout."""
 
     common: Path
     """The repository's common git folder."""
@@ -439,6 +439,8 @@ def open_repository(
     directory: str | Path,
     env: Mapping[str, str],
     command: str,
+    *,
+    from_main: bool = False,
 ) -> Repository:
     """Find the repository of a folder and its main checkout.
 
@@ -449,6 +451,8 @@ def open_repository(
         directory: A folder in the git checkout.
         env: The environment of the git commands.
         command: `merge`, `cleanup` or `flow`, for the lines printed.
+        from_main: Use the main checkout as `top`, so git commands keep a
+            folder when cleanup removes the worktree `directory` is in.
 
     Returns:
         The repository.
@@ -475,7 +479,10 @@ def open_repository(
             f"the repository of {top_path} has no main checkout",
             f"next: git -C {top_path} worktree list",
         )
-    return Repository(top=top_path, common=common, main=entries[0].path, env=env)
+    main = entries[0].path
+    return Repository(
+        top=main if from_main else top_path, common=common, main=main, env=env
+    )
 
 
 @dataclass(frozen=True)
@@ -925,7 +932,7 @@ def cleanup(
     out = out or sys.stdout
     err = err or sys.stderr
     try:
-        repo = open_repository(directory, env, "cleanup")
+        repo = open_repository(directory, env, "cleanup", from_main=True)
     except BranchError as error:
         return _print_failure("cleanup", error, err)
     again = _again(target, branch, repo.top)
@@ -1164,7 +1171,7 @@ def merge(
             err,
         )
     try:
-        repo = open_repository(directory, env, "merge")
+        repo = open_repository(directory, env, "merge", from_main=True)
         for name in (branch, target):
             if not repo.branch_exists(name):
                 raise BranchError(

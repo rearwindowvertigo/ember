@@ -503,6 +503,26 @@ def test_merge_keeps_a_dirty_worktree(tmp_path: Path, env: dict[str, str]) -> No
     assert again.stdout.startswith(f"Verdict: Keep\nalready contained: {branch} at ")
 
 
+def test_merge_from_inside_the_run_worktree(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    work = case("claim-and-menu-writer", tmp_path, env)
+    _, branch, worktree = start(work)
+    result = subprocess.run(
+        ["emb", "merge", branch, "--into", "claude/report-since"]
+        + ["--verdict", "keep", "--note", "Keep"],
+        cwd=worktree,
+        env=work.env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[2].startswith(f"removed {branch}: ")
+    assert not worktree.exists()
+    assert work.git("branch", "--list", branch) == ""
+
+
 def test_merge_refuses_a_dirty_target(tmp_path: Path, env: dict[str, str]) -> None:
     work = case("claim-and-menu-writer", tmp_path, env)
     _, branch, _ = start(work)

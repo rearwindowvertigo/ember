@@ -2000,7 +2000,9 @@ emb merge BRANCH --into TARGET --verdict keep --note TEXT [--dir DIR] [--json]
 
 Merges a reviewed branch into a local branch, then cleans it up as
 `emb cleanup --merged-into TARGET --branch BRANCH` does. `DIR` is a folder in
-the git checkout; the default is the current folder.
+the git checkout; the default is the current folder. `DIR` may be inside
+`BRANCH`'s own worktree: `emb merge` and `emb cleanup` run their git commands
+from the repository's main checkout, which cleanup never removes.
 
 - `--note TEXT` is the lead's verdict line, such as `Keep, with a docstring
   fix`. It is required, and it must be one non-blank line (64 otherwise).
