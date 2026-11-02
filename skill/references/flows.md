@@ -98,9 +98,24 @@ after the owner answers, and run recovery in the background. Exit 77 also
 covers `git add failed`: repair that failure and use `--recover`; the hook
 output send applies only when `git commit was refused`.
 
+## Cancellation
+
+You may cancel a flow for any reason you state. State the reason and run:
+
+```bash
+emb flow --cancel <id> --reason "<reason>" --json
+```
+
+Report the cancellation to the owner with the reason, every kept branch
+(the flow branch and every `task_branches` entry), and every `open_runs`
+entry with its task, role and run id. Cancellation stops the flow runner;
+writer and reviewer turns keep running. It closes no task run and deletes
+no branch or worktree. `emb flow --resume <id>` restarts from the recorded
+task states. A cancelled watch exits 82; `--lead` requires a resume first.
+
 ## Exits
 
-Exit 82 means failed or ended with tasks unmerged. Report every task's
+Exit 82 means cancelled, failed or ended with tasks unmerged. Report every task's
 status and reason and leave unmerged work to the owner. Do not merge the
 flow branch until the owner decides what to do with it.
 

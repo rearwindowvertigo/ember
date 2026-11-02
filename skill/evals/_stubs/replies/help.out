@@ -127,9 +127,9 @@ options:
 ==> emb flow --help <==
 usage: emb flow [-h] [--plan FILE] [--dry-run] [--start] [--watch FLOW]
                 [--status [FLOW]] [--lead FLOW TASK] [--resume FLOW]
-                [--writer W] [--reviewer W] [--claim ID] [--stall MINUTES]
-                [--send FILE] [--accept] [--commit SHA] [--review]
-                [--worker W] [--drop] [--json]
+                [--cancel FLOW] [--reason TEXT] [--writer W] [--reviewer W]
+                [--claim ID] [--stall MINUTES] [--send FILE] [--accept]
+                [--commit SHA] [--review] [--worker W] [--drop] [--json]
 
 Run a JSON task plan in waves with writers, read-only reviews and fix rounds.
 Accepted tasks merge into a flow branch. Each non-zero exit prints a next: or
@@ -144,6 +144,8 @@ options:
   --status [FLOW]   show one or all flows
   --lead FLOW TASK  answer a task's lead stop
   --resume FLOW     restart a flow's runner
+  --cancel FLOW     cancel a flow's runner
+  --reason TEXT     the cancellation reason
   --writer W        writer engine:model[@effort]
   --reviewer W      reviewer engine:model[@effort]
   --claim ID        read choices with this claim
