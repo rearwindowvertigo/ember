@@ -789,6 +789,153 @@ Messages go to standard error as `emb merge: <message>` or
 | 70 | A git command failed: the merge, making the merge message, finding the target's git folder, listing worktrees, `git status`, worktree removal, prune or branch deletion |
 | 75 | Refused: the target is checked out nowhere, its worktree has an unfinished merge, rebase, cherry-pick or revert, or its tree is not clean, or a merge conflict was aborted |
 
+## `emb deps`
+
+```
+emb deps [--refresh] [--json]
+```
+
+Shows each component Ember depends on: its installed version, the newest
+version its source offers, its status and the command that updates or
+installs it. It reads installed versions every time and newest versions when
+due. It installs and updates nothing.
+
+| Option | Does |
+|---|---|
+| `--refresh` | Read every newest version now, even when the cached one is recent |
+| `--json` | Print JSON |
+
+Exit codes: 0 whatever the statuses; 64 for a usage error; 70 when the
+packaged component list cannot be read or is not valid, with the reason on
+standard error as `emb deps: <reason>`.
+
+### Components
+
+The list is `ember/data/components.toml` in the package:
+
+| id | Label | Group | Installed version | Newest version | Update | Install |
+|---|---|---|---|---|---|---|
+| `codex` | Codex | `apps` | `codex --version`, `codex-cli (\S+)` | `version` of `https://registry.npmjs.org/@openai/codex/latest` | `codex update` | `npm install -g @openai/codex` |
+| `opencode` | OpenCode | `apps` | `opencode --version`, `^(\S+)$` | `version` of `https://registry.npmjs.org/opencode-ai/latest` | `opencode upgrade` | `curl -fsSL https://opencode.ai/install \| bash` |
+| `claude` | Claude Code | `apps` | `claude --version`, `^(\S+) \(Claude Code\)$` | the text of `https://downloads.claude.ai/claude-code-releases/latest` | `claude update` | `curl -fsSL https://claude.ai/install.sh \| bash` |
+| `claude-desktop` | Claude Desktop | `apps` | apt `claude-desktop` | apt | `sudo apt install --only-upgrade claude-desktop` | none; note "Not installed." |
+| `tmux` | tmux | `system` | apt `tmux` | apt | `sudo apt install --only-upgrade tmux` | `sudo apt install tmux` |
+| `bubblewrap` | bubblewrap | `system` | apt `bubblewrap` | apt | `sudo apt install --only-upgrade bubblewrap` | `sudo apt install bubblewrap` |
+| `git` | git | `system` | apt `git` | apt | `sudo apt install --only-upgrade git` | `sudo apt install git` |
+| `python3` | Python | `system` | apt `python3` | apt | `sudo apt install --only-upgrade python3` | `sudo apt install python3` |
+| `xdg-terminal-exec` | xdg-terminal-exec | `system` | apt `xdg-terminal-exec` | apt | `sudo apt install --only-upgrade xdg-terminal-exec` | `sudo apt install xdg-terminal-exec` |
+| `pyside6` | PySide6 | `libraries` | Python package `PySide6` | PyPI `PySide6` | none; note "Updates with the next Ember release." | none; note "Reinstall Ember." |
+
+The groups are `apps` (engines and apps), `system` (system tools) and
+`libraries` (Ember's libraries).
+
+Each entry is a `[[components]]` table with these fields; any other field,
+a missing required field, an unknown kind or a repeated `id` makes the list
+not valid:
+
+| Field | Holds |
+|---|---|
+| `id` | Unique, `[a-z0-9-]+` |
+| `label` | The shown name |
+| `group` | `apps`, `system` or `libraries` |
+| `installed` | `kind = "apt"` with `package`; `kind = "command"` with `pattern`, a regular expression whose group 1 is the version, and either `engine` (the engine's CLI run with `--version`) or `argv`; or `kind = "python"` with `package` |
+| `newest` | `kind = "apt"` with `package` (only with an apt `installed`); `kind = "json"` with `url` and `field`; `kind = "text"` with `url`; or `kind = "pypi"` with `package` |
+| `update` | Optional: the command shown while an update is available |
+| `install` | Optional: the command shown while the component is missing |
+| `update_note` | Optional: shown while an update is available and there is no `update` |
+| `install_note` | Optional: shown while the component is missing and there is no `install` |
+
+### Reads
+
+| Kind | Read |
+|---|---|
+| `apt` installed | `dpkg-query -W -f='${db:Status-Status}\t${Version}' <package>`; exit 1, or a status other than `installed`, means missing |
+| `command` installed | The engine's CLI as `emb engines` finds it, or `argv` with its program found on `PATH`, matched against `pattern`; a program that is not found means missing. `claude` runs without the variables whose names start with `CLAUDE_CODE_`, `CLAUDECODE` or `ANTHROPIC_` |
+| `python` installed | The package's version in the Python that runs Ember; a package that is not installed means missing |
+| `apt` newest | The `Candidate:` line of `apt-cache policy <package>`; `(none)` or no such line is a check failure |
+| `json` newest | The string at `field` in the JSON object at `url` |
+| `text` newest | The body at `url`, stripped; it must be one word |
+| `pypi` newest | `info.version` of `https://pypi.org/pypi/<package>/json` |
+
+Every command runs with `LC_ALL=C`, standard input from `/dev/null` and a
+10-second deadline, in its own process group; at the deadline the whole group
+is killed. Every network read has a 10-second timeout.
+
+Versions read with apt are compared with `dpkg --compare-versions`, with the
+epoch and revision. Every other version is compared as dotted numbers: a
+leading `v` is removed and trailing `.0` parts are ignored, so `v1.2.0` equals
+`1.2`. A version that is not dotted numbers is a check failure; it is never
+compared as text.
+
+### Status
+
+`status` is the first that applies:
+
+| Status | When |
+|---|---|
+| `missing` | The installed read found nothing; the newest version is not read |
+| `check failed` | A read failed, a needed version was neither read nor cached, or the versions cannot be compared; `error` names each read that failed (`installed version`, `newest version` or `comparison`) and why. The installed version is kept when it was read |
+| `update available` | The installed version is older than the newest |
+| `current` | Otherwise |
+
+`command` is the update command while an update is available and the install
+command while missing, with `command_kind` `update` or `install`; otherwise
+both are null. `note` is `update_note` or `install_note` for that status when
+there is no command for it; otherwise null.
+
+### Cache
+
+The last reads are cached in `$XDG_CACHE_HOME/ember/dependencies.json`
+(default `~/.cache/ember/dependencies.json`), mode 600 in a mode 700 folder,
+replaced whole on each write. Per component it holds the last installed read
+with its `read_at` and the last newest version read with its `read_at`, in
+seconds since the epoch. A newest version is read again when its cached read
+is missing or six hours old or more; `--refresh` reads it now. A newest read
+that fails is reported and not cached, so the next run reads it again. A cache
+that cannot be read is treated as empty; one that cannot be written is left as
+it was.
+
+### Output
+
+Text output has one line per component, in the order of the list:
+`<label>: <status>[, installed <version>][, newest <version>][: <error>]`,
+then an indented `update: <command>` or `install: <command>` line when there
+is a command.
+
+`--json` prints one object:
+
+```json
+{
+  "components": [
+    {
+      "id": "tmux",
+      "label": "tmux",
+      "group": "system",
+      "status": "update available",
+      "installed": "3.6a-2ubuntu0.1",
+      "newest": "3.6a-2ubuntu0.2",
+      "error": null,
+      "command": "sudo apt install --only-upgrade tmux",
+      "command_kind": "update",
+      "note": null
+    }
+  ],
+  "installed_read_at": {"tmux": 1800000000.0},
+  "newest_read_at": {"tmux": 1800000000.0},
+  "counts": 1,
+  "newest_read_oldest": 1800000000.0,
+  "newest_read_complete": true
+}
+```
+
+| Key | Holds |
+|---|---|
+| `installed_read_at` | When each component's installed version was read, by id; null when it was never read |
+| `newest_read_at` | When each component's reported newest version was read, by id; null when none is reported |
+| `counts` | How many components are `update available` or `missing` |
+| `newest_read_oldest` | The oldest `newest_read_at` among components that are not missing; null when there is none |
+| `newest_read_complete` | Whether every component that is not missing has a newest version read |
+
 ## Exit codes
 
 These are the exit codes of `emb choices` and `emb engines`; `emb run`,

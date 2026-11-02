@@ -1,0 +1,96 @@
+# The software Ember depends on, as `emb deps` and the Dependencies screen
+# show it. Each entry says how its installed version and its newest version
+# are read, and the commands shown while an update is available (`update`) or
+# while it is missing (`install`). Ember shows these commands; it runs one only
+# after the owner confirms it. `update_note` and `install_note` are shown in
+# place of a command that is absent.
+
+[[components]]
+id = "codex"
+label = "Codex"
+group = "apps"
+installed = { kind = "command", engine = "codex", pattern = 'codex-cli (\S+)' }
+newest = { kind = "json", url = "https://registry.npmjs.org/@openai/codex/latest", field = "version" }
+update = "codex update"
+install = "npm install -g @openai/codex"
+
+[[components]]
+id = "opencode"
+label = "OpenCode"
+group = "apps"
+installed = { kind = "command", engine = "opencode", pattern = '^(\S+)$' }
+newest = { kind = "json", url = "https://registry.npmjs.org/opencode-ai/latest", field = "version" }
+update = "opencode upgrade"
+install = "curl -fsSL https://opencode.ai/install | bash"
+
+[[components]]
+id = "claude"
+label = "Claude Code"
+group = "apps"
+installed = { kind = "command", engine = "claude", pattern = '^(\S+) \(Claude Code\)$' }
+newest = { kind = "text", url = "https://downloads.claude.ai/claude-code-releases/latest" }
+update = "claude update"
+install = "curl -fsSL https://claude.ai/install.sh | bash"
+
+[[components]]
+id = "claude-desktop"
+label = "Claude Desktop"
+group = "apps"
+installed = { kind = "apt", package = "claude-desktop" }
+newest = { kind = "apt", package = "claude-desktop" }
+update = "sudo apt install --only-upgrade claude-desktop"
+install_note = "Not installed."
+
+[[components]]
+id = "tmux"
+label = "tmux"
+group = "system"
+installed = { kind = "apt", package = "tmux" }
+newest = { kind = "apt", package = "tmux" }
+update = "sudo apt install --only-upgrade tmux"
+install = "sudo apt install tmux"
+
+[[components]]
+id = "bubblewrap"
+label = "bubblewrap"
+group = "system"
+installed = { kind = "apt", package = "bubblewrap" }
+newest = { kind = "apt", package = "bubblewrap" }
+update = "sudo apt install --only-upgrade bubblewrap"
+install = "sudo apt install bubblewrap"
+
+[[components]]
+id = "git"
+label = "git"
+group = "system"
+installed = { kind = "apt", package = "git" }
+newest = { kind = "apt", package = "git" }
+update = "sudo apt install --only-upgrade git"
+install = "sudo apt install git"
+
+[[components]]
+id = "python3"
+label = "Python"
+group = "system"
+installed = { kind = "apt", package = "python3" }
+newest = { kind = "apt", package = "python3" }
+update = "sudo apt install --only-upgrade python3"
+install = "sudo apt install python3"
+
+[[components]]
+id = "xdg-terminal-exec"
+label = "xdg-terminal-exec"
+group = "system"
+installed = { kind = "apt", package = "xdg-terminal-exec" }
+newest = { kind = "apt", package = "xdg-terminal-exec" }
+update = "sudo apt install --only-upgrade xdg-terminal-exec"
+install = "sudo apt install xdg-terminal-exec"
+
+[[components]]
+id = "pyside6"
+label = "PySide6"
+group = "libraries"
+installed = { kind = "python", package = "PySide6" }
+newest = { kind = "pypi", package = "PySide6" }
+update_note = "Updates with the next Ember release."
+install_note = "Reinstall Ember."
