@@ -595,8 +595,23 @@ class _Runner:
             if not self.send(task, path, fresh=True):
                 return
         elif task.get("explicit_review"):
-            if not self.review_writer(task):
-                return
+            # A recovered review covers only the head it started on; a moved
+            # branch gets a fresh review of its new tip instead.
+            saved = task.get("head")
+            if not (
+                task.get("recover_review")
+                and saved
+                and self.tip(task["branch"]) == saved
+            ):
+                if task.get("recover_review"):
+                    self.change(
+                        task,
+                        recover_review=False,
+                        review_action=None,
+                        reviewer_run=None,
+                    )
+                if not self.review_writer(task):
+                    return
         elif not self.reconcile_writer(task):
             return
         recovering = bool(task.get("recover_review"))

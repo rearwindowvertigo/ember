@@ -4,6 +4,7 @@ import io
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -535,6 +536,56 @@ def test_recover_closed_review_reply(h: Harness) -> None:
     item = h.run()["tasks"][0]
     assert item["status"] == "merged"
     assert item["reviews"][0]["run"] == reviewer
+
+
+def test_recovered_explicit_review_of_a_moved_branch_starts_fresh(
+    h: Harness,
+) -> None:
+    h.create()
+    flow, writer = started_writer(h)
+    path = h.tmp / "review.md"
+    path.write_text("Review\n@reply " + PASS)
+    out = io.StringIO()
+    core = h.factory(h.env, out=out, err=out)
+    assert (
+        core.execute(
+            lambda: core.start(
+                StartOptions(
+                    "codex", writer.worktree, str(path), model="gpt-5", read_only=True
+                )
+            )
+        )
+        == 0
+    )
+    reviewer = out.getvalue().splitlines()[0][4:]
+    assert core.execute(lambda: core.close(reviewer)) == 0
+    moved = Path(writer.worktree) / "moved.txt"
+    moved.write_text("after the review started\n")
+    git = ["git", "-C", str(writer.worktree)]
+    subprocess.run([*git, "add", "moved.txt"], check=True, env=h.env)
+    subprocess.run([*git, "commit", "-q", "-m", "moved"], check=True, env=h.env)
+    tip = subprocess.run(
+        [*git, "rev-parse", "HEAD"],
+        check=True,
+        env=h.env,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    flow["tasks"][0].update(
+        status="reviewing",
+        writer_run=writer.id,
+        reviewer_run=reviewer,
+        branch=writer.branch,
+        worktree=writer.worktree,
+        task_base=writer.base,
+        head=writer.expected_head,
+        explicit_review=True,
+        wave=1,
+    )
+    record.save(flow, h.env)
+    item = h.run()["tasks"][0]
+    assert item["head"] == tip
+    assert all(review["run"] != reviewer for review in item["reviews"])
 
 
 def test_recover_unlaunched_writer_stops(h: Harness) -> None:
