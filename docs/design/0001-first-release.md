@@ -418,7 +418,7 @@ libraries).
 | `git` | system | apt `git` | apt `git` | `sudo apt install --only-upgrade git` | `sudo apt install git` |
 | `python3` | system | apt `python3` | apt `python3` | `sudo apt install --only-upgrade python3` | `sudo apt install python3` |
 | `xdg-terminal-exec` | system | apt `xdg-terminal-exec` | apt `xdg-terminal-exec` | `sudo apt install --only-upgrade xdg-terminal-exec` | `sudo apt install xdg-terminal-exec` |
-| `pyside6` | libraries | Python package `PySide6` | PyPI `PySide6` | None | None |
+| `pyside6` | libraries | Python package `PySide6-Essentials` | PyPI `PySide6-Essentials` | None | None |
 
 A component with no command for its state shows a note instead: Claude
 Desktop missing shows "Not installed."; PySide6 with an update shows

@@ -828,7 +828,7 @@ The list is `ember/data/components.toml` in the package:
 | `git` | git | `system` | apt `git` | apt | `sudo apt install --only-upgrade git` | `sudo apt install git` |
 | `python3` | Python | `system` | apt `python3` | apt | `sudo apt install --only-upgrade python3` | `sudo apt install python3` |
 | `xdg-terminal-exec` | xdg-terminal-exec | `system` | apt `xdg-terminal-exec` | apt | `sudo apt install --only-upgrade xdg-terminal-exec` | `sudo apt install xdg-terminal-exec` |
-| `pyside6` | PySide6 | `libraries` | Python package `PySide6` | PyPI `PySide6` | none; note "Updates with the next Ember release." | none; note "Reinstall Ember." |
+| `pyside6` | PySide6 | `libraries` | Python package `PySide6-Essentials` | PyPI `PySide6-Essentials` | none; note "Updates with the next Ember release." | none; note "Reinstall Ember." |
 
 The groups are `apps` (engines and apps), `system` (system tools) and
 `libraries` (Ember's libraries).
