@@ -1,15 +1,17 @@
-"""Worker sandboxes: the method per engine, the deny list and its checks.
+"""Worker sandboxes: the provider per engine, the deny list and its checks.
 
 A sandboxed worker sees the machine read-only except its worktree, and does
 not see the home folder apart from the paths it needs: the worktree, the
 repository's common git folder, `~/.local/bin`, `~/.local/lib`, git's
-configuration and the paths in the `sandbox.read` setting. The whole of
-`$XDG_RUNTIME_DIR` is hidden, and so are Ember's configuration and state
+configuration, the engine's own folders and the run's read paths. The whole
+of `$XDG_RUNTIME_DIR` is hidden, and so are Ember's configuration and state
 folders wherever they are.
 
-Codex receives the deny list as a permission profile named `ember` in `-c`
-options and applies it with its own `bwrap`. Ember runs OpenCode inside
-`bwrap` with the same list.
+Each engine has one switch, `sandbox.<engine>`, `on` or `off`. Codex's
+sandbox is its own: it receives the deny list as a permission profile named
+`ember` in `-c` options and applies it with a `bwrap`, the system one when it
+is on `PATH`, else the one bundled with Codex. Ember runs OpenCode, and each
+Claude Code turn, inside its own `bwrap` command line with the same list.
 
 Every function that reads the environment takes an optional `env` mapping,
 which defaults to `os.environ`.
@@ -30,11 +32,14 @@ from typing import Any
 
 from ember import choices, db, paths
 
-METHODS = {
-    "codex": ("bubblewrap", "codex-bundled", "none"),
-    "opencode": ("bubblewrap", "none"),
-}
-"""The sandbox methods each sandboxed engine accepts."""
+ENGINES = ("codex", "opencode", "claude")
+"""The engines with a sandbox switch."""
+
+CODEX = "codex"
+BUBBLEWRAP = "bubblewrap"
+NONE = "none"
+PROVIDERS = (CODEX, BUBBLEWRAP, NONE)
+"""Who provides a run's sandbox: Codex's own, Ember's `bwrap`, or nobody."""
 
 PROFILE = "ember"
 """The name of the Codex permission profile Ember defines."""
@@ -68,21 +73,22 @@ class SandboxError(RuntimeError):
 
 @dataclass(frozen=True)
 class SandboxCheck:
-    """The result of running a command under an engine's sandbox method.
+    """The result of running a command under an engine's sandbox.
 
     Attributes:
-        engine: `codex` or `opencode`.
-        method: The sandbox method checked, or `None` if it cannot be read.
+        engine: `codex`, `opencode` or `claude`.
+        provider: Who provides the sandbox, one of `PROVIDERS`, or `None`
+            when the setting cannot be read.
         bwrap_path: The `bwrap` that ran or would run, or `None`.
         bwrap_version: That `bwrap`'s version, or `None`.
-        ok: The command ran under the method and nothing blocks a run.
+        ok: The command ran in the sandbox and nothing blocks a run.
         detail: One line describing the result.
         causes: Known causes of a failure or a refused run.
         checked_at: When the check ran, in seconds since the epoch.
     """
 
     engine: str
-    method: str | None
+    provider: str | None
     bwrap_path: str | None
     bwrap_version: str | None
     ok: bool
@@ -94,7 +100,7 @@ class SandboxCheck:
         """Return the check as a JSON-ready dict."""
         return {
             "engine": self.engine,
-            "method": self.method,
+            "provider": self.provider,
             "bwrap_path": self.bwrap_path,
             "bwrap_version": self.bwrap_version,
             "ok": self.ok,
@@ -109,27 +115,50 @@ def _env(env: Mapping[str, str] | None) -> Mapping[str, str]:
 
 
 def _check_engine(engine: str) -> None:
-    if engine not in METHODS:
-        raise ValueError(f"{engine!r} has no sandbox; expected codex or opencode")
+    if engine not in ENGINES:
+        raise ValueError(
+            f"{engine!r} has no sandbox; expected codex, opencode or claude"
+        )
+
+
+def provider_of(engine: str, switch: str) -> str:
+    """Return who provides an engine's sandbox for a switch value.
+
+    Args:
+        engine: `codex`, `opencode` or `claude`.
+        switch: The `sandbox.<engine>` value, `on` or `off`.
+
+    Returns:
+        `codex` for Codex switched on, `bubblewrap` for OpenCode or Claude
+        switched on, and `none` for `off`.
+
+    Raises:
+        ValueError: `engine` has no sandbox.
+    """
+    _check_engine(engine)
+    if switch != "on":
+        return NONE
+    return CODEX if engine == "codex" else BUBBLEWRAP
 
 
 def method(engine: str, env: Mapping[str, str] | None = None) -> str:
-    """Return the sandbox method for an engine.
+    """Return who provides an engine's sandbox.
 
     Args:
-        engine: `codex` or `opencode`.
+        engine: `codex`, `opencode` or `claude`.
         env: The environment; `None` reads `os.environ`.
 
     Returns:
-        The resolved `sandbox.<engine>` answer, which is the default when the
-        setting is unset.
+        `codex`, `bubblewrap` or `none`, from the resolved `sandbox.<engine>`
+        answer, which is the default when the setting is unset.
 
     Raises:
-        ValueError: `engine` is not `codex` or `opencode`.
+        ValueError: `engine` has no sandbox.
         DatabaseError: The settings database cannot be read.
     """
     _check_engine(engine)
-    return choices.read(env=env)["answers"][f"sandbox.{engine}"]["value"]
+    switch = choices.read(env=env)["answers"][f"sandbox.{engine}"]["value"]
+    return provider_of(engine, switch)
 
 
 def _git_config_dir(home: Path, env: Mapping[str, str]) -> Path:
@@ -155,7 +184,7 @@ def kept_paths(
         home: The home folder.
         worktree: The worker's worktree.
         common: The repository's common git folder.
-        read: The paths of the `sandbox.read` setting.
+        read: The run's read paths.
         env: The environment, for `XDG_CONFIG_HOME`; `None` reads
             `os.environ`.
 
@@ -283,7 +312,7 @@ def codex_args(
     Args:
         worktree: The worker's worktree, writable unless `read_only`.
         common: The repository's common git folder, read-only.
-        read: The paths of the `sandbox.read` setting.
+        read: The run's read paths.
         read_only: The worktree is read-only.
         network: The worker has network.
         env: The environment; `None` reads `os.environ`.
@@ -433,23 +462,126 @@ def codex_bundled_path(
     return folder
 
 
-def _opencode_folders(home: Path, env: Mapping[str, str]) -> list[Path]:
-    """Return OpenCode's data, cache, state and configuration folders."""
-    result = []
-    for variable, default in (
-        ("XDG_DATA_HOME", (".local", "share")),
-        ("XDG_CACHE_HOME", (".cache",)),
-        ("XDG_STATE_HOME", (".local", "state")),
-        ("XDG_CONFIG_HOME", (".config",)),
-    ):
-        value = env.get(variable, "")
-        base = (
-            Path(value)
-            if value and Path(value).is_absolute()
-            else home.joinpath(*default)
-        )
-        result.append(base / "opencode")
-    return result
+def _xdg(home: Path, env: Mapping[str, str], variable: str, *default: str) -> Path:
+    value = env.get(variable, "")
+    return (
+        Path(value) if value and Path(value).is_absolute() else home.joinpath(*default)
+    )
+
+
+def _opencode_folders(home: Path, env: Mapping[str, str]) -> list[tuple[Path, bool]]:
+    """Return OpenCode's folders, each with whether it is writable.
+
+    Its data, cache and state folders are writable and its configuration
+    folder is read-only.
+    """
+    return [
+        (_xdg(home, env, "XDG_DATA_HOME", ".local", "share") / "opencode", True),
+        (_xdg(home, env, "XDG_CACHE_HOME", ".cache") / "opencode", True),
+        (_xdg(home, env, "XDG_STATE_HOME", ".local", "state") / "opencode", True),
+        (_xdg(home, env, "XDG_CONFIG_HOME", ".config") / "opencode", False),
+    ]
+
+
+def claude_folders(home: Path, env: Mapping[str, str]) -> list[Path]:
+    """Return the folders and files Claude Code writes in the home folder.
+
+    They are its configuration folder (`$CLAUDE_CONFIG_DIR`, or
+    `~/.claude`), `~/.claude.json` and its backup, and its cache folders
+    `claude` and `claude-cli-nodejs` in `$XDG_CACHE_HOME`.
+
+    Args:
+        home: The home folder.
+        env: The environment, for `CLAUDE_CONFIG_DIR` and `XDG_CACHE_HOME`.
+
+    Returns:
+        The paths, whether or not they exist.
+    """
+    value = env.get("CLAUDE_CONFIG_DIR", "")
+    config = Path(value) if value and Path(value).is_absolute() else home / ".claude"
+    cache = _xdg(home, env, "XDG_CACHE_HOME", ".cache")
+    return [
+        config,
+        home / ".claude.json",
+        home / ".claude.json.backup",
+        cache / "claude",
+        cache / "claude-cli-nodejs",
+    ]
+
+
+def _wrap(
+    argv: Sequence[str],
+    *,
+    worktree: Path,
+    common: Path,
+    read: Iterable[str | Path],
+    read_only: bool,
+    binary: Path | None,
+    folders: Sequence[tuple[Path, bool]],
+    env: Mapping[str, str],
+) -> list[str]:
+    """Return a `bwrap` command line with Ember's deny list.
+
+    Args:
+        argv: The command to run.
+        worktree: The worker's worktree, also the working folder.
+        common: The repository's common git folder, read-only.
+        read: The run's read paths.
+        read_only: The worktree is read-only.
+        binary: The engine's binary; its folder is kept read-only when it is
+            in the home folder.
+        folders: The engine's own folders and files, each with whether it is
+            writable; missing ones are left out.
+        env: The environment.
+
+    Returns:
+        The command line.
+    """
+    home = paths.home_dir(env)
+    args = [
+        "bwrap",
+        "--ro-bind", "/", "/",
+        "--dev", "/dev",
+        "--proc", "/proc",
+        "--tmpfs", "/tmp",
+        "--tmpfs", str(home),
+        "--tmpfs", str(_runtime_base(env)),
+    ]  # fmt: skip
+    if binary is not None:
+        folder = Path(binary).resolve().parent
+        if folder.is_relative_to(home) and folder.exists():
+            args += ["--ro-bind", str(folder), str(folder)]
+    # A command that reaches the Docker daemon can mount the whole disk.
+    for socket in dict.fromkeys(Path(path).resolve() for path in DOCKER_SOCKETS):
+        if socket.is_socket():
+            args += ["--ro-bind", "/dev/null", str(socket)]
+    kept = kept_paths(home, worktree, common, read, env=env)
+    for path in sorted(kept, key=lambda path: (len(path.parts), str(path))):
+        if path.exists():
+            args += ["--ro-bind", str(path), str(path)]
+    for path, writable in folders:
+        if path.exists():
+            args += ["--bind" if writable else "--ro-bind", str(path), str(path)]
+    args += [
+        "--ro-bind" if read_only else "--bind", str(worktree), str(worktree),
+        "--ro-bind", str(common), str(common),
+    ]  # fmt: skip
+    dotgit = Path(worktree) / ".git"
+    if dotgit.exists():
+        args += ["--ro-bind", str(dotgit), str(dotgit)]
+    for path in _protected(env):
+        if path.is_dir():
+            args += ["--tmpfs", str(path)]
+        elif path.exists():
+            args += ["--ro-bind", "/dev/null", str(path)]
+    return [
+        *args,
+        "--unshare-pid",
+        "--die-with-parent",
+        "--chdir",
+        str(worktree),
+        *argv,
+    ]
 
 
 def opencode_wrap(
@@ -475,7 +607,7 @@ def opencode_wrap(
         argv: The command to run.
         worktree: The worker's worktree, also the working folder.
         common: The repository's common git folder, read-only.
-        read: The paths of the `sandbox.read` setting.
+        read: The run's read paths.
         read_only: The worktree is read-only.
         binary: The `opencode` binary; its folder is kept when it is in the
             home folder.
@@ -488,53 +620,178 @@ def opencode_wrap(
         RuntimeDirError: No runtime base directory is available.
     """
     env = _env(env)
+    return _wrap(
+        argv,
+        worktree=worktree,
+        common=common,
+        read=read,
+        read_only=read_only,
+        binary=binary,
+        folders=_opencode_folders(paths.home_dir(env), env),
+        env=env,
+    )
+
+
+def claude_wrap(
+    argv: Sequence[str],
+    *,
+    worktree: Path,
+    common: Path,
+    read: Iterable[str | Path] = (),
+    read_only: bool = False,
+    network: bool = True,
+    env: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Return the `bwrap` command line that runs one Claude Code turn.
+
+    The sandbox is built as `opencode_wrap` builds OpenCode's, with Claude
+    Code's folders and files from `claude_folders` writable and the folder
+    of the installed `claude`, `argv[0]` after symlinks, read-only when it is
+    in the home folder. The turn keeps network whatever `network` says,
+    because Claude Code needs its API; `worker.network` controls only its web
+    tools, which the driver leaves out.
+
+    Args:
+        argv: The `claude` command to run; `argv[0]` is the `claude`
+            executable.
+        worktree: The worker's worktree, also the working folder.
+        common: The repository's common git folder, read-only.
+        read: The run's read paths.
+        read_only: The worktree is read-only.
+        network: The run's `worker.network` value; the sandbox keeps network
+            either way.
+        env: The environment; `None` reads `os.environ`.
+
+    Returns:
+        The command line.
+
+    Raises:
+        RuntimeDirError: No runtime base directory is available.
+    """
+    del network  # The sandbox keeps network for Claude Code's API.
+    env = _env(env)
     home = paths.home_dir(env)
-    args = [
-        "bwrap",
-        "--ro-bind", "/", "/",
-        "--dev", "/dev",
-        "--proc", "/proc",
-        "--tmpfs", "/tmp",
-        "--tmpfs", str(home),
-        "--tmpfs", str(_runtime_base(env)),
+    binary = None
+    if argv:
+        found = argv[0] if os.path.isabs(argv[0]) else _which(argv[0], env)
+        binary = None if found is None else Path(found)
+    return _wrap(
+        argv,
+        worktree=worktree,
+        common=common,
+        read=read,
+        read_only=read_only,
+        binary=binary,
+        folders=[(path, True) for path in claude_folders(home, env)],
+        env=env,
+    )
+
+
+def codex_bwrap(
+    codex_binary: Path | None, env: Mapping[str, str] | None = None
+) -> tuple[str, Path | None]:
+    """Return the `bwrap` a sandboxed Codex uses, and how to select it.
+
+    The system `bwrap` is used when it is on `PATH`; otherwise the one
+    bundled with Codex, through the folder `codex_bundled_path` makes.
+
+    Args:
+        codex_binary: The `codex` command, or `None` when it is not found.
+        env: The environment; `None` reads `os.environ`.
+
+    Returns:
+        The `bwrap`, and the folder to put first on the worker's `PATH`, or
+        `None` for the system `bwrap`.
+
+    Raises:
+        SandboxError: No `bwrap` is on `PATH` and Codex has no bundled one.
+        RuntimeDirError: No runtime base directory is available.
+    """
+    env = _env(env)
+    system = _which("bwrap", env)
+    if system is not None:
+        return system, None
+    if codex_binary is None:
+        raise SandboxError("bwrap is not on PATH and codex is not installed")
+    folder = codex_bundled_path(codex_binary, env)
+    return str(folder / "bwrap"), folder
+
+
+def probe_bwrap(
+    bwrap: str, env: Mapping[str, str] | None = None, *, run: Runner = subprocess.run
+) -> str | None:
+    """Run `/bin/true` in a minimal `bwrap` sandbox.
+
+    Args:
+        bwrap: The `bwrap` to run.
+        env: The environment; `None` reads `os.environ`.
+        run: Runs a command; `subprocess.run` or a stand-in with its
+            signature.
+
+    Returns:
+        `None` when it ran; otherwise why it did not.
+    """
+    argv = [
+        bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
+        "--unshare-pid", "--die-with-parent", PROBE_COMMAND,
     ]  # fmt: skip
-    if binary is not None:
-        folder = Path(binary).resolve().parent
-        if folder.is_relative_to(home) and folder.exists():
-            args += ["--ro-bind", str(folder), str(folder)]
-    # A command that reaches the Docker daemon can mount the whole disk.
-    for socket in dict.fromkeys(Path(path).resolve() for path in DOCKER_SOCKETS):
-        if socket.is_socket():
-            args += ["--ro-bind", "/dev/null", str(socket)]
-    kept = kept_paths(home, worktree, common, read, env=env)
-    for path in sorted(kept, key=lambda path: (len(path.parts), str(path))):
-        if path.exists():
-            args += ["--ro-bind", str(path), str(path)]
-    folders = _opencode_folders(home, env)
-    for index, path in enumerate(folders):
-        if path.exists():
-            mode = "--ro-bind" if index == len(folders) - 1 else "--bind"
-            args += [mode, str(path), str(path)]
-    args += [
-        "--ro-bind" if read_only else "--bind", str(worktree), str(worktree),
-        "--ro-bind", str(common), str(common),
-    ]  # fmt: skip
-    dotgit = Path(worktree) / ".git"
-    if dotgit.exists():
-        args += ["--ro-bind", str(dotgit), str(dotgit)]
-    for path in _protected(env):
-        if path.is_dir():
-            args += ["--tmpfs", str(path)]
-        elif path.exists():
-            args += ["--ro-bind", "/dev/null", str(path)]
-    return [
-        *args,
-        "--unshare-pid",
-        "--die-with-parent",
-        "--chdir",
-        str(worktree),
-        *argv,
-    ]
+    try:
+        completed = run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT,
+            env=dict(_env(env)),
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        return f"it timed out after {TIMEOUT} seconds"
+    except OSError as error:
+        return f"it could not start: {error}"
+    if completed.returncode:
+        reason = _first_line(completed.stderr) or _first_line(completed.stdout)
+        return f"it exited {completed.returncode}" + (f": {reason}" if reason else "")
+    return None
+
+
+def require(
+    engine: str,
+    env: Mapping[str, str] | None = None,
+    *,
+    run: Runner = subprocess.run,
+) -> Path | None:
+    """Check that an engine's sandbox can start, before a sandboxed run.
+
+    Args:
+        engine: `codex`, `opencode` or `claude`.
+        env: The environment; `None` reads `os.environ`.
+        run: Runs a command; `subprocess.run` or a stand-in with its
+            signature.
+
+    Returns:
+        For Codex with no `bwrap` on `PATH`, the folder that selects its
+        bundled `bwrap`; otherwise `None`.
+
+    Raises:
+        SandboxError: No `bwrap` is found, or it cannot start a sandbox.
+        RuntimeDirError: No runtime base directory is available.
+        ValueError: `engine` has no sandbox.
+    """
+    _check_engine(engine)
+    env = _env(env)
+    folder = None
+    if engine == "codex":
+        codex = _which("codex", env)
+        bwrap, folder = codex_bwrap(None if codex is None else Path(codex), env)
+    else:
+        found = _which("bwrap", env)
+        if found is None:
+            raise SandboxError("bwrap is not installed or not on PATH")
+        bwrap = found
+    reason = probe_bwrap(bwrap, env, run=run)
+    if reason is not None:
+        raise SandboxError(f"{bwrap} cannot start a sandbox: {reason}")
+    return folder
 
 
 def none_warning(engine: str) -> str:
@@ -597,7 +854,6 @@ class _Probe:
 
 
 def _codex_probe(
-    chosen: str,
     worktree: Path,
     common: Path,
     answers: Mapping[str, Any],
@@ -614,22 +870,16 @@ def _codex_probe(
         "the permission profile"
         for path in conflicts
     )
-    if chosen == "codex-bundled":
-        try:
-            folder = codex_bundled_path(Path(codex), env)
-        except (SandboxError, OSError, paths.RuntimeDirError) as error:
-            probe.detail = str(error)
-            return probe
-        probe.bwrap = str(folder / "bwrap")
+    try:
+        probe.bwrap, folder = codex_bwrap(Path(codex), env)
+    except (SandboxError, OSError, paths.RuntimeDirError) as error:
+        probe.detail = str(error)
+        return probe
+    if folder is not None:
         probe.run_env = {
             **env,
             "PATH": os.pathsep.join([str(folder), env.get("PATH", "")]),
         }
-    else:
-        probe.bwrap = _which("bwrap", env)
-        if probe.bwrap is None:
-            bundled = codex_bundled_bwrap(Path(codex))
-            probe.bwrap = None if bundled is None else str(bundled)
     probe.argv = [
         codex,
         "sandbox",
@@ -645,22 +895,32 @@ def _codex_probe(
     return probe
 
 
-def _opencode_probe(
-    worktree: Path, common: Path, answers: Mapping[str, Any], env: Mapping[str, str]
+def _wrap_probe(
+    engine: str,
+    worktree: Path,
+    common: Path,
+    answers: Mapping[str, Any],
+    env: Mapping[str, str],
 ) -> _Probe:
     probe = _Probe(run_env=dict(env), bwrap=_which("bwrap", env))
     if probe.bwrap is None:
         probe.detail = "bwrap is not installed or not on PATH"
         return probe
-    opencode = _which("opencode", env)
-    argv = opencode_wrap(
-        [PROBE_COMMAND],
-        worktree=worktree,
-        common=common,
-        read=answers["sandbox.read"]["value"],
-        binary=None if opencode is None else Path(opencode),
-        env=env,
-    )
+    read = answers["sandbox.read"]["value"]
+    if engine == "opencode":
+        opencode = _which("opencode", env)
+        argv = opencode_wrap(
+            [PROBE_COMMAND],
+            worktree=worktree,
+            common=common,
+            read=read,
+            binary=None if opencode is None else Path(opencode),
+            env=env,
+        )
+    else:
+        argv = claude_wrap(
+            [PROBE_COMMAND], worktree=worktree, common=common, read=read, env=env
+        )
     probe.argv = [probe.bwrap, *argv[1:]]
     return probe
 
@@ -691,17 +951,18 @@ def check(
     *,
     run: Runner = subprocess.run,
 ) -> SandboxCheck:
-    """Run a command under an engine's sandbox method and report the result.
+    """Run a command under an engine's sandbox and report the result.
 
     The check is generic to the engine: it builds a sandbox for a temporary
     folder laid out as a repository, with the standing `sandbox.read` and
     `worker.network` settings, and runs `/bin/true` in it. Codex runs it with
-    `codex sandbox` and Ember's profile; OpenCode's check runs the `bwrap`
-    command line. A `sandbox_mode` key in a Codex configuration file fails
-    the check, because Ember refuses a sandboxed Codex run while it is there.
+    `codex sandbox` and Ember's profile; the checks of OpenCode and Claude
+    run their `bwrap` command lines. A `sandbox_mode` key in a Codex
+    configuration file fails the check, because Ember refuses a sandboxed
+    Codex run while it is there.
 
     Args:
-        engine: `codex` or `opencode`.
+        engine: `codex`, `opencode` or `claude`.
         env: The environment; `None` reads `os.environ`.
         run: Runs a command; `subprocess.run` or a stand-in with its
             signature.
@@ -710,7 +971,7 @@ def check(
         The result. Failures are reported in it, not raised.
 
     Raises:
-        ValueError: `engine` is not `codex` or `opencode`.
+        ValueError: `engine` has no sandbox.
     """
     _check_engine(engine)
     env = _env(env)
@@ -725,7 +986,7 @@ def check(
     ) -> SandboxCheck:
         return SandboxCheck(
             engine=engine,
-            method=chosen,
+            provider=chosen,
             bwrap_path=bwrap,
             bwrap_version=_bwrap_version(bwrap, env, run),
             ok=ok,
@@ -738,8 +999,8 @@ def check(
         answers = choices.read(env=env)["answers"]
     except db.DatabaseError as error:
         return result(None, None, False, f"cannot read the settings: {error}")
-    chosen = answers[f"sandbox.{engine}"]["value"]
-    if chosen == "none":
+    chosen = provider_of(engine, answers[f"sandbox.{engine}"]["value"])
+    if chosen == NONE:
         return result(chosen, _which("bwrap", env), True, "no sandbox")
     tmp = env.get("TMPDIR", "")
     try:
@@ -750,9 +1011,9 @@ def check(
             common = worktree / ".git"
             common.mkdir(parents=True)
             if engine == "codex":
-                probe = _codex_probe(chosen, worktree, common, answers, env)
+                probe = _codex_probe(worktree, common, answers, env)
             else:
-                probe = _opencode_probe(worktree, common, answers, env)
+                probe = _wrap_probe(engine, worktree, common, answers, env)
             if probe.argv is None:
                 return result(chosen, probe.bwrap, False, probe.detail, probe.causes)
             try:
@@ -783,5 +1044,6 @@ def check(
     if probe.causes:
         detail = "the sandbox test passed, but Ember refuses a sandboxed run"
         return result(chosen, probe.bwrap, False, detail, probe.causes)
-    detail = f"{PROBE_COMMAND} ran under {chosen}"
+    sandbox = "Codex's sandbox" if chosen == CODEX else "bubblewrap"
+    detail = f"{PROBE_COMMAND} ran under {sandbox}"
     return result(chosen, probe.bwrap, True, detail)

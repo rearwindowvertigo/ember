@@ -126,9 +126,9 @@ class Driver(ABC):
     def command(self, run: Run, first_message: str) -> LaunchSpec:
         """Return how to start the engine's interactive session for a run.
 
-        The model, effort, read-only mode and sandbox method come from `run`.
-        The core wraps the command in the run's sandbox afterwards and relies
-        on these placements:
+        The model, effort, read-only mode, sandbox provider, network and read
+        paths come from `run`. The core wraps the command in the run's
+        sandbox afterwards and relies on these placements:
 
         - Codex: `argv[0]` is the `codex` executable itself, not a wrapper or
           a shell. The core inserts the sandbox's `-c` options right after
@@ -136,7 +136,10 @@ class Driver(ABC):
         - OpenCode: `ember.sandbox.opencode_wrap` wraps the whole `argv` in
           `bwrap`; `argv[0]` is the `opencode` executable, whose folder is
           kept in the sandbox when it is in the home folder.
-        - Claude: the command runs as returned, with no wrapping.
+        - Claude: the command runs as returned, with no wrapping. The
+          program it starts wraps each turn's `claude` in
+          `ember.sandbox.claude_wrap` when the run's sandbox is
+          `bubblewrap`.
 
         Args:
             run: The run, with status `starting`.
@@ -193,6 +196,36 @@ class Driver(ABC):
         Returns:
             `idle`, `busy` or `unknown`, with a reason.
         """
+
+    def foreign_input(self, run: Run) -> str | None:
+        """Return whether the session holds messages Ember did not send.
+
+        The owner can type into a session through a terminal window. `--send`
+        and `--close` without `--force` refuse a run for which this returns a
+        description.
+
+        Args:
+            run: The run.
+
+        Returns:
+            `None` once the session's history was read and every message in
+            it was sent by Ember; otherwise a short description of the
+            messages Ember did not send, or of why the history could not be
+            checked. The default, for an engine that cannot be typed into,
+            is `None`.
+        """
+        return None
+
+    def accept_input(self, run: Run) -> None:
+        """Accept the messages `foreign_input` reports.
+
+        `--send --force` calls this, so the same messages do not refuse later
+        commands. The default does nothing.
+
+        Args:
+            run: The run.
+        """
+        return None
 
     def interrupt(self, run: Run) -> None:
         """Interrupt the current turn.

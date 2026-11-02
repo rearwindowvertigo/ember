@@ -140,7 +140,9 @@ def test_editing_run_commits_its_turn(
     assert run.worktree == str(worktree)
     assert run.base == git(repo, "rev-parse", "HEAD", env=env)
     assert run.expected_head == run.commits[0]
-    assert run.sandbox is None
+    assert run.sandbox == "none"
+    assert run.network is False
+    assert run.read_effective == ()
     assert run.subject == "Add a greeting"
     assert run.last_exit == 0
     assert (worktree / "hello.txt").read_text() == "hi there\n"
@@ -315,7 +317,7 @@ def test_read_only_run_works_in_the_checkout(
     assert run.commits == ()
     assert run.turn_state == record.COLLECTED
     assert run.last_reason is None
-    assert "WARNING" not in err
+    assert "WARNING: read-only" not in err
     assert not (repo / ".ember").exists()
     assert _fields(out)["branch"] == "-"
 
@@ -922,10 +924,90 @@ def test_sandbox_none_warns_and_is_recorded(
     assert (run.model, run.effort) == ("gpt-5", "medium")
 
 
+def test_claude_sandbox_off_warns(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = _start(_core(env), repo, _brief(tmp_path, "Task\n"))
+    out, err = capsys.readouterr()
+    assert code == 0, err
+    assert "WARNING: claude runs without a sandbox" in err
+    assert record.load(_run_id(out), env).sandbox == "none"
+
+
+@pytest.mark.parametrize(("engine", "model"), [("claude", "opus"), ("codex", "gpt-5")])
+def test_sandbox_on_without_bwrap_is_69(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    engine: str,
+    model: str,
+) -> None:
+    choices.set_settings({f"sandbox.{engine}": "on"}, env=env)
+    core_ = _core(env, _driver(env, engine))
+    code = _start(core_, repo, _brief(tmp_path, "Task\n"), engine=engine, model=model)
+    assert code == 69
+    err = capsys.readouterr().err
+    assert "bwrap is not" in err
+    assert err.splitlines()[-1] == (
+        "owner: install bubblewrap (the bwrap command) or make it work, "
+        f"or set sandbox.{engine} to off"
+    )
+    assert not paths.runs_dir(env).exists()
+
+
+def test_sandbox_on_with_a_blocked_bwrap_is_69(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bwrap = Path(env["PATH"].split(":")[0]) / "bwrap"
+    bwrap.write_text(
+        "#!/bin/sh\necho 'bwrap: setting up uid map: denied' >&2\nexit 1\n"
+    )
+    bwrap.chmod(0o755)
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    code = _start(_core(env), repo, _brief(tmp_path, "Task\n"))
+    assert code == 69
+    err = capsys.readouterr().err
+    assert "setting up uid map: denied" in err
+    assert err.splitlines()[-1].endswith("or set sandbox.claude to off")
+    assert not paths.runs_dir(env).exists()
+
+
+def test_claude_run_records_its_sandbox_network_and_read_paths(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sandbox, "require", lambda engine, env=None: None)
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    choices.set_settings(
+        {
+            "sandbox.claude": "on",
+            "worker.network": "on",
+            "sandbox.read": [str(shared)],
+        },
+        env=env,
+    )
+    code = _start(_core(env), repo, _brief(tmp_path, "Task\n"), read=(str(extra),))
+    out, err = capsys.readouterr()
+    assert code == 0, err
+    assert "WARNING" not in err
+    run = record.load(_run_id(out), env)
+    assert run.sandbox == "bubblewrap"
+    assert run.network is True
+    assert run.read == (str(extra),)
+    assert run.read_effective == (str(shared), str(extra))
+
+
 def test_codex_sandbox_conflict_is_69(
     tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    choices.set_settings({"sandbox.codex": "bubblewrap"}, env=env)
+    choices.set_settings({"sandbox.codex": "on"}, env=env)
     (repo / ".codex").mkdir()
     (repo / ".codex" / "config.toml").write_text('sandbox_mode = "danger"\n')
     core_ = _core(env, _driver(env, "codex"))
@@ -940,9 +1022,14 @@ def test_codex_sandbox_conflict_is_69(
 
 
 def test_codex_sandbox_conflict_in_the_new_worktree_is_69(
-    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    choices.set_settings({"sandbox.codex": "bubblewrap"}, env=env)
+    monkeypatch.setattr(sandbox, "require", lambda engine, env=None: None)
+    choices.set_settings({"sandbox.codex": "on"}, env=env)
     (repo / ".codex").mkdir()
     (repo / ".codex" / "config.toml").write_text('sandbox_mode = "danger"\n')
     git(repo, "add", "-A", env=env)
@@ -965,7 +1052,7 @@ def test_codex_sandbox_conflict_in_the_new_worktree_is_69(
 
 
 def _bare_run(
-    env: dict[str, str], tmp_path: Path, engine: str, method: str
+    env: dict[str, str], tmp_path: Path, engine: str, provider: str
 ) -> record.Run:
     return record.Run(
         id=f"{engine}-20260101-000000-abcdef",
@@ -977,8 +1064,10 @@ def _bare_run(
         worktree=str(tmp_path / "wt"),
         branch="b",
         base="0" * 40,
-        sandbox=method,
+        sandbox=provider,
+        network=False,
         read=(str(tmp_path / "extra"),),
+        read_effective=(str(tmp_path / "setting"), str(tmp_path / "extra")),
         trailers=(),
         claim=None,
         status=record.STARTING,
@@ -999,19 +1088,32 @@ def _bare_run(
 
 
 def test_codex_command_gets_the_permission_profile(
-    tmp_path: Path, env: dict[str, str]
+    tmp_path: Path, env: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "wt").mkdir()
-    choices.set_settings({"sandbox.read": [str(tmp_path / "setting")]}, env=env)
-    settings = choices.read(env=env)
-    run = _bare_run(env, tmp_path, "codex", "bubblewrap")
+    (tmp_path / "setting").mkdir()
+    monkeypatch.setattr(sandbox, "codex_bwrap", lambda binary, env=None: ("b", None))
+    run = replace(_bare_run(env, tmp_path, "codex", "codex"), network=True)
     spec = LaunchSpec(argv=("codex", "--model", "m"), cwd=tmp_path / "wt")
-    wrapped = _core(env)._sandboxed(spec, run, tmp_path / ".git", settings)
+    wrapped = _core(env)._sandboxed(spec, run, tmp_path / ".git")
     assert wrapped.argv[0] == "codex"
     assert wrapped.argv[1] == "-c"
     assert wrapped.argv[-2:] == ("--model", "m")
     assert any("default_permissions" in arg for arg in wrapped.argv)
-    assert "permissions.ember.network.enabled=false" in wrapped.argv
+    assert "permissions.ember.network.enabled=true" in wrapped.argv
+    assert "PATH" not in wrapped.env
+
+
+def test_codex_without_a_system_bwrap_uses_the_bundled_one(
+    tmp_path: Path, env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "wt").mkdir()
+    folder = tmp_path / "bundled"
+    monkeypatch.setattr(sandbox, "codex_bwrap", lambda binary, env=None: ("b", folder))
+    run = _bare_run(env, tmp_path, "codex", "codex")
+    spec = LaunchSpec(argv=("codex",), cwd=tmp_path / "wt")
+    wrapped = _core(env)._sandboxed(spec, run, tmp_path / ".git")
+    assert wrapped.env["PATH"] == f"{folder}:{env['PATH']}"
 
 
 def test_opencode_command_runs_inside_bwrap(
@@ -1019,10 +1121,9 @@ def test_opencode_command_runs_inside_bwrap(
 ) -> None:
     (tmp_path / "wt").mkdir()
     (tmp_path / "extra").mkdir()
-    settings = choices.read(env=env)
     run = _bare_run(env, tmp_path, "opencode", "bubblewrap")
     spec = LaunchSpec(argv=("opencode", "run"), cwd=tmp_path / "wt")
-    wrapped = _core(env)._sandboxed(spec, run, tmp_path / ".git", settings)
+    wrapped = _core(env)._sandboxed(spec, run, tmp_path / ".git")
     assert wrapped.argv[0] == "bwrap"
     assert wrapped.argv[-2:] == ("opencode", "run")
     extra = str(tmp_path / "extra")
@@ -1031,14 +1132,17 @@ def test_opencode_command_runs_inside_bwrap(
     )
 
 
-def test_no_sandbox_leaves_the_command(tmp_path: Path, env: dict[str, str]) -> None:
-    settings = choices.read(env=env)
-    run = _bare_run(env, tmp_path, "claude", "none")
+@pytest.mark.parametrize(
+    ("engine", "provider"), [("claude", "none"), ("claude", "bubblewrap")]
+)
+def test_claude_and_no_sandbox_leave_the_command(
+    tmp_path: Path, env: dict[str, str], engine: str, provider: str
+) -> None:
+    run = _bare_run(env, tmp_path, engine, provider)
     spec = LaunchSpec(argv=("claude",), cwd=tmp_path)
-    assert (
-        _core(env)._sandboxed(spec, replace(run, sandbox=None), tmp_path, settings)
-        == spec
-    )
+    assert _core(env)._sandboxed(spec, run, tmp_path) == spec
+    codex = _bare_run(env, tmp_path, "codex", "none")
+    assert _core(env)._sandboxed(spec, codex, tmp_path) == spec
 
 
 # Commands on a run
@@ -1169,6 +1273,69 @@ def test_send_first_commits_a_collected_turn(
     assert len(run.commits) == 2
     subjects = git(Path(run.worktree), "log", "--format=%s", env=env).splitlines()
     assert subjects[:2] == ["Task (turn 2)", "Task"]
+
+
+FOREIGN = "1 message(s) in the session were not sent by Ember"
+
+
+def test_send_refuses_a_session_holding_foreign_messages_before_committing(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    driver = _driver(env)
+    run_id = _started(tmp_path, env, repo, capsys, driver=driver)
+    run = record.update(record.load(run_id, env), {"turn_state": record.COLLECTED})
+    Path(run.worktree, "left.txt").write_text("left\n")
+    driver.foreign = FOREIGN
+    message = _brief(tmp_path, "@write next.txt n\n", "m.md")
+    core_ = _core(env, driver)
+    assert core_.execute(lambda: core_.send(run_id, message)) == 75
+    err = capsys.readouterr().err.splitlines()
+    assert err[0] == (
+        f"emb run: the session of {run_id} holds messages Ember did not send "
+        f"({FOREIGN}); Claude asks the owner before going on"
+    )
+    assert err[1] == (
+        f"next: ask the owner about the messages in the session of {run_id}; "
+        "with their go-ahead, repeat the command with --force"
+    )
+    after = record.load(run_id, env)
+    assert (after.turn, after.turn_state, after.commits) == (
+        1,
+        record.COLLECTED,
+        run.commits,
+    )
+    assert core_.execute(lambda: core_.send(run_id, message, force=True)) == 0
+    after = record.load(run_id, env)
+    assert after.turn == 2
+    assert len(after.commits) == 2
+    assert driver.foreign is None
+
+
+def test_send_with_force_keeps_the_busy_check(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    driver = _driver(env, idle=engines.BUSY, foreign=FOREIGN)
+    run_id = _started(tmp_path, env, repo, capsys, driver=driver)
+    message = _brief(tmp_path, "more\n", "m.md")
+    core_ = _core(env, driver)
+    assert core_.execute(lambda: core_.send(run_id, message, force=True)) == 75
+    err = capsys.readouterr().err
+    assert err.splitlines()[-1].startswith(f"next: emb run --recover {run_id}")
+    assert driver.foreign_checks == 0
+
+
+def test_close_refuses_a_session_holding_foreign_messages_unless_forced(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    driver = _driver(env, foreign=FOREIGN)
+    run_id = _started(tmp_path, env, repo, capsys, driver=driver)
+    core_ = _core(env, driver)
+    assert core_.execute(lambda: core_.close(run_id)) == 75
+    assert "repeat the command with --force" in capsys.readouterr().err
+    assert record.load(run_id, env).status != record.CLOSED
+    assert driver.closed == []
+    assert core_.execute(lambda: core_.close(run_id, force=True)) == 0
+    assert record.load(run_id, env).status == record.CLOSED
 
 
 def test_recover_adopts_a_commit_it_made_but_did_not_record(

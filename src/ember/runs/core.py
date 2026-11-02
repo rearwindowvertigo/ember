@@ -556,43 +556,53 @@ class Core:
 
     # Sandbox
 
-    def _sandbox_method(self, engine: str) -> str | None:
-        if engine not in sandbox.METHODS:
-            return None
+    def _sandbox_provider(self, engine: str) -> str:
         try:
             return sandbox.method(engine, self.env)
         except db.DatabaseError as error:
             raise RunError(exits.UNEXPECTED, str(error), "database") from error
 
-    def _sandboxed(
-        self, spec: LaunchSpec, run: Run, common: Path, settings: Mapping[str, Any]
-    ) -> LaunchSpec:
-        """Wrap a driver's command in the run's sandbox."""
-        if run.sandbox in (None, "none"):
+    def _require_sandbox(self, engine: str, provider: str) -> None:
+        """Refuse with 69 a sandboxed run whose `bwrap` is missing or blocked."""
+        if provider == sandbox.NONE:
+            return
+        try:
+            sandbox.require(engine, self.env)
+        except (sandbox.SandboxError, paths.RuntimeDirError) as error:
+            raise RunError(
+                exits.UNAVAILABLE,
+                f"the {engine} sandbox cannot start: {error}",
+                "bwrap",
+                engine=engine,
+            ) from error
+
+    def _sandboxed(self, spec: LaunchSpec, run: Run, common: Path) -> LaunchSpec:
+        """Wrap a driver's command in the run's sandbox.
+
+        A Claude command runs as the driver returned it; its program wraps
+        each turn.
+        """
+        if run.sandbox == sandbox.NONE or run.engine == "claude":
             return spec
-        answers = settings["answers"]
-        read = [*answers["sandbox.read"]["value"], *run.read]
         worktree = Path(run.worktree)
         binary = self._which(spec.argv[0]) if spec.argv else None
         if run.engine == "codex":
             options = sandbox.codex_args(
                 worktree,
                 common,
-                read,
+                run.read_effective,
                 read_only=run.read_only,
-                network=answers["worker.network"]["value"] == "on",
+                network=run.network,
                 env=self.env,
             )
             env_vars = dict(spec.env)
-            if run.sandbox == "codex-bundled":
-                try:
-                    folder = sandbox.codex_bundled_path(
-                        Path(binary or spec.argv[0]), self.env
-                    )
-                except sandbox.SandboxError as error:
-                    raise RunError(
-                        exits.UNAVAILABLE, str(error), "bundled", run=run.id
-                    ) from error
+            try:
+                _, folder = sandbox.codex_bwrap(Path(binary or spec.argv[0]), self.env)
+            except sandbox.SandboxError as error:
+                raise RunError(
+                    exits.UNAVAILABLE, str(error), "bwrap", engine=run.engine
+                ) from error
+            if folder is not None:
                 path = env_vars.get("PATH", self.env.get("PATH", os.defpath))
                 env_vars["PATH"] = f"{folder}{os.pathsep}{path}"
             return replace(
@@ -602,12 +612,25 @@ class Core:
             spec.argv,
             worktree=worktree,
             common=common,
-            read=read,
+            read=run.read_effective,
             read_only=run.read_only,
             binary=None if binary is None else Path(binary),
             env=self.env,
         )
         return replace(spec, argv=tuple(argv))
+
+    def _check_foreign(self, run: Run, driver: Driver, variant: str) -> None:
+        """Refuse with 75 a session holding messages Ember did not send."""
+        with self._engine_calls(run, variant):
+            found = driver.foreign_input(run)
+        if found:
+            raise RunError(
+                exits.REFUSED,
+                f"the session of {run.id} holds messages Ember did not send "
+                f"({found}); Claude asks the owner before going on",
+                "foreign",
+                run=run.id,
+            )
 
     # Read-only snapshots
 
@@ -710,8 +733,11 @@ class Core:
                 )
             worktree = str(main / ".ember" / "worktrees" / run_id)
             branch = f"ember/{engine}/{run_id}"
-        method = self._sandbox_method(engine)
-        self._check_codex_config(engine, method, worktree, common)
+        provider = self._sandbox_provider(engine)
+        self._check_codex_config(engine, provider, worktree, common)
+        self._require_sandbox(engine, provider)
+        answers = settings["answers"]
+        read = tuple(str(Path(path).resolve()) for path in options.read)
         now = time.time()
         with self._turn_lock(run_id):
             run = Run(
@@ -724,8 +750,12 @@ class Core:
                 worktree=worktree,
                 branch=branch,
                 base=base,
-                sandbox=method,
-                read=tuple(str(Path(path).resolve()) for path in options.read),
+                sandbox=provider,
+                network=answers["worker.network"]["value"] == "on",
+                read=read,
+                read_effective=tuple(
+                    dict.fromkeys([*answers["sandbox.read"]["value"], *read])
+                ),
                 trailers=tuple(options.trailers),
                 claim=options.claim,
                 status=record.STARTING,
@@ -774,10 +804,10 @@ class Core:
             return self._turn(run, driver, started, window)
 
     def _check_codex_config(
-        self, engine: str, method: str | None, worktree: str, common: Path
+        self, engine: str, provider: str, worktree: str, common: Path
     ) -> None:
         """Refuse a sandboxed Codex run that a `sandbox_mode` key would undo."""
-        if engine != "codex" or method in (None, "none"):
+        if engine != "codex" or provider == sandbox.NONE:
             return
         conflicts = sandbox.codex_config_conflicts(Path(worktree), common, self.env)
         if conflicts:
@@ -804,11 +834,11 @@ class Core:
             self._create_worktree(run, main, common)
             # The new worktree can hold a tracked .codex/config.toml.
             self._check_codex_config(run.engine, run.sandbox, run.worktree, common)
-        if run.sandbox == "none":
+        if run.sandbox == sandbox.NONE:
             self._warn(sandbox.none_warning(run.engine))
         with self._engine_calls(run, "starting"):
             spec = driver.command(run, first_message(run.id, brief))
-        spec = self._sandboxed(spec, run, common, settings)
+        spec = self._sandboxed(spec, run, common)
         if run.read_only:
             self._save_snapshot(run, 1)
         if spec.first_message is None:
@@ -1207,12 +1237,14 @@ class Core:
 
     # Commands on a run
 
-    def send(self, run_id: str, message_file: str) -> int:
+    def send(self, run_id: str, message_file: str, *, force: bool = False) -> int:
         """Send a message into a run's session and wait for its turn.
 
         Args:
             run_id: The run.
             message_file: The file holding the message.
+            force: Send even when the session holds messages Ember did not
+                send; every other check still applies.
 
         Returns:
             The exit code.
@@ -1253,6 +1285,11 @@ class Core:
                     "busy",
                     run=run_id,
                 )
+            if force:
+                with contextlib.suppress(engines.DriverError, tmux.TmuxError):
+                    driver.accept_input(run)
+            else:
+                self._check_foreign(run, driver, "send")
             if run.turn_state == record.COLLECTED and not run.read_only:
                 run, _, _, code, message = self._commit(run)
                 if code:
@@ -1416,14 +1453,16 @@ class Core:
 
         Args:
             run_id: The run.
-            force: Close even while a turn runs or a command waits on it.
+            force: Close even while a turn runs, a command waits on it or its
+                live session holds messages Ember did not send.
 
         Returns:
             The exit code.
 
         Raises:
-            RunError: A turn is running or a command waits on the run, and
-                `force` is false.
+            RunError: A turn is running, a command waits on the run, or its
+                live session holds messages Ember did not send, and `force`
+                is false.
         """
         run = self._load(run_id)
         if run.status == record.CLOSED:
@@ -1459,6 +1498,7 @@ class Core:
                         "close",
                         run=run_id,
                     )
+                self._check_foreign(run, driver, "close")
             self._end_session(run)
         return exits.OK
 

@@ -41,6 +41,9 @@ COMMITTED = "committed"
 TURN_STATES = (SENT, COLLECTED, COMMITTED)
 """The values of `turn_state`."""
 
+SANDBOXES = ("codex", "bubblewrap", "none")
+"""The values of `sandbox`: who provides the run's sandbox."""
+
 _ID = re.compile(r"[a-z0-9][a-z0-9-]{5,63}")
 
 
@@ -97,11 +100,20 @@ class Run:
     base: str | None
     """The commit the run started from; `None` in a checkout with no commit."""
 
-    sandbox: str | None
-    """The sandbox method, or `None` for an engine with no sandbox (`claude`)."""
+    sandbox: str
+    """Who provides the sandbox: `codex` (Codex's own), `bubblewrap` (Ember's)
+    or `none`."""
+
+    network: bool
+    """Whether `worker.network` was `on` when the run started; every turn
+    uses this value."""
 
     read: tuple[str, ...]
     """The run's own read-only paths, from `--read`."""
+
+    read_effective: tuple[str, ...]
+    """Every path the run may read: the `sandbox.read` setting when the run
+    started, then the `--read` paths; every turn uses this list."""
 
     trailers: tuple[str, ...]
     """The trailer lines of each commit."""
@@ -178,8 +190,10 @@ _TYPES: dict[str, tuple[tuple[type, ...], bool]] = {
     "worktree": (_STR, False),
     "branch": (_STR, True),
     "base": (_STR, True),
-    "sandbox": (_STR, True),
+    "sandbox": (_STR, False),
+    "network": ((bool,), False),
     "read": ((list,), False),
+    "read_effective": ((list,), False),
     "trailers": ((list,), False),
     "claim": (_STR, True),
     "status": (_STR, False),
@@ -302,6 +316,8 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
         values[key] = item
     if values["id"] != name:
         raise RecordError(name, "run.json names another run")
+    if values["sandbox"] not in SANDBOXES:
+        raise RecordError(name, "run.json has an invalid sandbox")
     if values["status"] not in STATUSES:
         raise RecordError(name, "run.json has an invalid status")
     if values["turn_state"] is not None and values["turn_state"] not in TURN_STATES:

@@ -110,8 +110,10 @@ def _run(setup: Setup, **changes: Any) -> Run:  # noqa: ANN401
         worktree=str(setup.repo),
         branch=f"ember/codex/{RUN_ID}",
         base=None,
-        sandbox="bubblewrap",
+        sandbox="codex",
+        network=False,
         read=(),
+        read_effective=(),
         trailers=(),
         claim=None,
         status="running",
@@ -160,7 +162,14 @@ def _rollout(
                 "payload": {
                     "type": "message",
                     "role": "user",
-                    "content": [{"type": "input_text", "text": f"run {run_id}"}],
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Brief from Claude, the lead, for Ember run "
+                            f"{run_id}."
+                            "\n\nDo the work.",
+                        }
+                    ],
                 },
             }
         ),
@@ -263,10 +272,9 @@ def test_command_without_effort_or_sandbox(setup: Setup) -> None:
     assert "read-only" not in spec.argv
 
 
-@pytest.mark.parametrize("method", ["bubblewrap", "codex-bundled"])
-def test_command_leaves_a_sandboxed_run_to_the_core(setup: Setup, method: str) -> None:
+def test_command_leaves_a_sandboxed_run_to_the_core(setup: Setup) -> None:
     for read_only in (False, True):
-        run = _run(setup, sandbox=method, read_only=read_only)
+        run = _run(setup, sandbox="codex", read_only=read_only)
         spec = CodexDriver(setup.env).command(run, BRIEF)
         assert "--sandbox" not in spec.argv
         assert "-s" not in spec.argv
@@ -354,6 +362,40 @@ def test_discovery_finds_the_rollout_that_names_the_run(setup: Setup) -> None:
     assert driver.wait(run).state == engines.RUNNING
     assert _saved(run) == ("", "")
     path = _rollout(setup)
+    assert driver.wait(run).state == engines.RUNNING
+    assert _saved(run) == (str(path), THREAD)
+
+
+def test_discovery_matches_the_run_only_in_the_first_line(setup: Setup) -> None:
+    driver, run = _started(setup)
+    folder = setup.codex_home / "sessions" / "2026" / "11" / "01"
+    folder.mkdir(parents=True)
+    meta = {"type": "session_meta", "payload": {"id": THREAD, "cwd": str(setup.repo)}}
+    quoted = {
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": f"Look at run {RUN_ID}.\n\n{BRIEF}"}
+            ],
+        },
+    }
+    path = folder / "rollout-0.jsonl"
+    path.write_text(json.dumps(meta) + "\n" + json.dumps(quoted) + "\n")
+    assert driver.wait(run).state == engines.RUNNING
+    assert _saved(run) == ("", "")
+
+
+def test_discovery_skips_a_rollout_another_run_claimed(setup: Setup) -> None:
+    driver, run = _started(setup)
+    claimed = _rollout(setup, name="rollout-0.jsonl")
+    other = setup.tmp / "other-run"
+    other.mkdir()
+    (other / codex.STATE_NAME).write_text(json.dumps({"rollout": str(claimed)}))
+    assert driver.wait(run).state == engines.RUNNING
+    assert _saved(run) == ("", "")
+    path = _rollout(setup, name="rollout-1.jsonl")
     assert driver.wait(run).state == engines.RUNNING
     assert _saved(run) == (str(path), THREAD)
 
@@ -455,7 +497,8 @@ def test_send_counts_from_where_the_rollout_stood(
         _line("error", message="old failure"),
         _line("task_complete", last_agent_message="first"),
     )
-    assert driver.wait(run).reply == "first"
+    # An error in the same turn as its task_complete fails the turn.
+    assert driver.wait(run) == codex.error_outcome("old failure")
     run = dataclasses.replace(run, turn=2)
     with _tmux_calls(monkeypatch) as calls:
         driver.send(run, "Next step.\nWith detail.")
@@ -470,6 +513,17 @@ def test_send_counts_from_where_the_rollout_stood(
     assert driver.wait(run).reply == "second"
 
 
+def test_an_error_after_the_turn_ended_does_not_fail_it(setup: Setup) -> None:
+    driver, run = _started(setup)
+    _rollout(
+        setup,
+        _line("task_started"),
+        _line("task_complete", last_agent_message="ok"),
+        _line("error", message="later"),
+    )
+    assert driver.wait(run) == engines.TurnOutcome(engines.DONE, reply="ok")
+
+
 def test_a_later_turn_with_no_send_record_cannot_be_read(setup: Setup) -> None:
     driver, run = _started(setup)
     _rollout(setup, _line("task_started"), _line("task_complete"))
@@ -482,6 +536,104 @@ def test_send_needs_the_session(setup: Setup, monkeypatch: pytest.MonkeyPatch) -
     with _tmux_calls(monkeypatch) as calls, pytest.raises(DriverError, match="find"):
         driver.send(dataclasses.replace(run, turn=2), "hello")
     assert calls == []
+
+
+# Messages Ember did not send
+
+
+def _user(text: str) -> str:
+    return _line("user_message", message=text, images=[])
+
+
+def test_foreign_input_is_none_for_the_messages_ember_pasted(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    driver, run = _started(setup)
+    with _tmux_calls(monkeypatch):
+        driver.send(run, BRIEF)
+    path = _rollout(setup, _user(BRIEF + "\n"), _line("task_started"))
+    _append(path, _line("task_complete", last_agent_message="ok"))
+    assert driver.foreign_input(run) is None
+    run = dataclasses.replace(run, turn=2)
+    with _tmux_calls(monkeypatch):
+        driver.send(run, "Next step.  \r\nWith detail.")
+    assert driver.foreign_input(run) is None
+    _append(path, _user("Next step.\nWith detail."))
+    assert driver.foreign_input(run) is None
+
+
+def test_foreign_input_counts_messages_the_owner_typed(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    driver, run = _started(setup)
+    with _tmux_calls(monkeypatch):
+        driver.send(run, BRIEF)
+    _rollout(setup, _user(BRIEF), _user("also fix the README"), _user(BRIEF))
+    assert driver.foreign_input(run) == (
+        "2 message(s) in the Codex session were not sent by Ember"
+    )
+
+
+def test_a_failed_paste_is_not_recorded_as_sent(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    driver, run = _started(setup)
+    with _tmux_calls(monkeypatch):
+        driver.send(run, BRIEF)
+    path = _rollout(setup, _user(BRIEF), _line("task_started"))
+    _append(path, _line("task_complete", last_agent_message="ok"))
+    run = dataclasses.replace(run, turn=2)
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise codex.tmux.TmuxError("no session")
+
+    monkeypatch.setattr(codex.tmux, "send_text", fail)
+    with pytest.raises(codex.tmux.TmuxError):
+        driver.send(run, "Lost.")
+    with _tmux_calls(monkeypatch):
+        driver.send(run, "Next.")
+    _append(path, _user("Next."))
+    assert driver.foreign_input(run) is None
+
+
+def test_accept_input_accepts_the_messages_in_the_rollout(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    driver, run = _started(setup)
+    with _tmux_calls(monkeypatch):
+        driver.send(run, BRIEF)
+    path = _rollout(setup, _user(BRIEF), _user("also fix the README"))
+    assert driver.foreign_input(run) is not None
+    driver.accept_input(run)
+    assert driver.foreign_input(run) is None
+    run = dataclasses.replace(run, turn=2)
+    with _tmux_calls(monkeypatch):
+        driver.send(run, "Next.")
+    _append(path, _user("Next."))
+    assert driver.foreign_input(run) is None
+
+
+@pytest.mark.parametrize("damage", ["no rollout", "no sent list", "bad event"])
+def test_foreign_input_reports_a_history_it_cannot_check(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch, damage: str
+) -> None:
+    driver, run = _started(setup)
+    with _tmux_calls(monkeypatch):
+        driver.send(run, BRIEF)
+    if damage != "no rollout":
+        _rollout(
+            setup,
+            _line("user_message", message=None if damage == "bad event" else BRIEF),
+        )
+    if damage == "no sent list":
+        driver.wait(run)
+        path = run.folder / codex.STATE_NAME
+        state = json.loads(path.read_text())
+        del state["sent"]
+        path.write_text(json.dumps(state))
+    found = driver.foreign_input(run)
+    assert found is not None
+    assert found.startswith("the session history could not be checked: ")
 
 
 def test_a_missing_rollout_or_state_is_an_error(setup: Setup) -> None:

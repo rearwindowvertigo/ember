@@ -271,12 +271,15 @@ class StubDriver(Driver):
         paste: bool = True,
         on_wait: Callable[[Run], None] | None = None,
         idle: str | None = None,
+        foreign: str | None = None,
     ) -> None:
         self.name = name
         self.script = script
         self.paste = paste
         self.on_wait = on_wait
         self.idle = idle
+        self.foreign = foreign
+        self.foreign_checks = 0
         self.commands: list[tuple[Run, str]] = []
         self.closed: list[str] = []
 
@@ -321,6 +324,13 @@ class StubDriver(Driver):
         if (self.out(run) / f"turn-{run.turn}.json").exists():
             return IdleState(engines.IDLE, "the turn's outcome is written")
         return IdleState(engines.BUSY, "the turn is running")
+
+    def foreign_input(self, run: Run) -> str | None:
+        self.foreign_checks += 1
+        return self.foreign
+
+    def accept_input(self, run: Run) -> None:
+        self.foreign = None
 
     def close(self, run: Run) -> None:
         self.closed.append(run.id)
@@ -413,8 +423,9 @@ def make_env(tmp_path: Path) -> dict[str, str]:
             "shortlist.codex": ["gpt-5@high"],
             "single.writer": "claude:opus",
             "single.reviewer": "claude:opus",
-            "sandbox.codex": "none",
-            "sandbox.opencode": "none",
+            "sandbox.codex": "off",
+            "sandbox.opencode": "off",
+            "sandbox.claude": "off",
         },
         env=env,
     )

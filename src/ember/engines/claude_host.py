@@ -6,7 +6,10 @@ from `<turn>` on, runs that request's argv in the worktree with
 `prompt-<n>.md` on standard input, copies standard output to
 `turn-<n>.jsonl` and standard error to `turn-<n>.stderr`, and writes
 `turn-<n>.exit` when the CLI ends. The CLI runs without the variables of the
-session that started Ember. The program never ends by itself; ending the
+session that started Ember. When the request names a sandbox, the CLI runs
+inside `ember.sandbox.claude_wrap`; the program itself runs outside it. While
+a tool call or a model message is in progress, the program prints a status
+line at least once a minute. The program never ends by itself; ending the
 session ends it. Ctrl+C in the pane ends the running turn as interrupted and
 leaves the program running.
 """
@@ -17,17 +20,25 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import FrameType
 from typing import Any
 
+from ember import paths, sandbox
 from ember.engines.claude import READY_NAME, turn_files
 from ember.engines.status import CLAUDE_HIDDEN
 
 POLL_SECONDS = 0.2
 """How often the program looks for the next request."""
+
+STATUS_SECONDS = 60.0
+"""The longest time without output before the program prints a status line."""
+
+WAITING = "waiting for the model"
+"""The activity between tool calls."""
 
 _LINE_LIMIT = 160
 
@@ -101,6 +112,80 @@ def show(event: Mapping[str, Any]) -> str:
     return ""
 
 
+class Progress:
+    """What the running turn is doing, for the status line."""
+
+    def __init__(self, now: float, every: float = STATUS_SECONDS) -> None:
+        """Start a turn that waits for the model.
+
+        Args:
+            now: The current monotonic time.
+            every: The longest time without output before a status line.
+        """
+        self.every = every
+        self.activity = WAITING
+        self.since = now
+        self.printed = now
+        self.lock = threading.Lock()
+
+    def event(self, event: Mapping[str, Any], now: float) -> None:
+        """Follow one `stream-json` event.
+
+        A tool call starts `running <tool>`; anything else from the turn's
+        own messages, such as a tool's result or the model's text, starts
+        waiting for the model.
+
+        Args:
+            event: The event.
+            now: The current monotonic time.
+        """
+        if event.get("parent_tool_use_id"):
+            return
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        blocks = (
+            [block for block in content if isinstance(block, dict)]
+            if isinstance(content, list)
+            else []
+        )
+        tools = [
+            str(block.get("name") or "a tool")
+            for block in blocks
+            if block.get("type") == "tool_use"
+        ]
+        activity = f"running {tools[-1]}" if tools else WAITING
+        with self.lock:
+            if activity != self.activity or tools:
+                self.activity, self.since = activity, now
+
+    def shown(self, now: float) -> None:
+        """Note that the turn printed a line.
+
+        Args:
+            now: The current monotonic time.
+        """
+        with self.lock:
+            self.printed = now
+
+    def line(self, now: float) -> str | None:
+        """Return the status line due now, and note it as printed.
+
+        Args:
+            now: The current monotonic time.
+
+        Returns:
+            `· <activity> for <n> min`, or `for <n> s` under a minute, when
+            nothing was printed for `every` seconds; otherwise `None`.
+        """
+        with self.lock:
+            if now - self.printed < self.every:
+                return None
+            self.printed = now
+            seconds = int(now - self.since)
+            took = f"{seconds} s" if seconds < 60 else f"{seconds // 60} min"
+            return f"· {self.activity} for {took}"
+
+
 def _write_exit(path: Path, code: int) -> None:
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps({"code": code}), encoding="utf-8")
@@ -110,17 +195,28 @@ def _write_exit(path: Path, code: int) -> None:
 class Host:
     """Runs one run's turns in order."""
 
-    def __init__(self, folder: Path, worktree: str, env: Mapping[str, str]) -> None:
+    def __init__(
+        self,
+        folder: Path,
+        worktree: str,
+        env: Mapping[str, str],
+        *,
+        status_seconds: float = STATUS_SECONDS,
+    ) -> None:
         """Keep the driver's folder, the worktree and the CLI's environment.
 
         Args:
             folder: The driver's folder.
             worktree: The working folder of each turn.
             env: The program's environment.
+            status_seconds: The longest time without output before a status
+                line.
         """
         self.folder = folder
         self.worktree = worktree
+        self.outer_env = dict(env)
         self.env = cli_environment(env)
+        self.status_seconds = status_seconds
         self.running: int | None = None
 
     def on_interrupt(self, signum: int, frame: FrameType | None) -> None:
@@ -150,12 +246,17 @@ class Host:
             request = json.loads(files["json"].read_text(encoding="utf-8"))
             argv = [str(item) for item in request["argv"]]
             prompt_path = Path(request["prompt"])
-        except (OSError, ValueError, KeyError, TypeError) as error:
-            files["stderr"].write_text(
-                f"cannot read the request of turn {turn}: {error}\n", encoding="utf-8"
+            box = request.get("sandbox")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+            return self._refuse(
+                files, f"cannot read the request of turn {turn}: {error}"
             )
-            _write_exit(files["exit"], 127)
-            return 127
+        try:
+            argv = self.wrap(argv, box)
+        except (KeyError, TypeError, paths.RuntimeDirError) as error:
+            return self._refuse(
+                files, f"cannot build the sandbox of turn {turn}: {error}"
+            )
         self.running = turn
         try:
             code = self._run(argv, prompt_path, files)
@@ -165,8 +266,72 @@ class Host:
         print("· waiting for the next turn", flush=True)
         return code
 
+    def _refuse(self, files: Mapping[str, Path], reason: str) -> int:
+        """End a turn that cannot start, with its reason as standard error."""
+        files["stderr"].write_text(reason + "\n", encoding="utf-8")
+        _write_exit(files["exit"], 127)
+        print(f"· {reason}", flush=True)
+        return 127
+
+    def wrap(self, argv: list[str], box: object) -> list[str]:
+        """Return a turn's command, inside the sandbox the request names.
+
+        Args:
+            argv: The `claude` command.
+            box: The request's `sandbox`: `None`, or the worktree, common git
+                folder, read paths, read-only mode and network value.
+
+        Returns:
+            `argv` itself for no sandbox; otherwise its `bwrap` command line.
+
+        Raises:
+            TypeError: The sandbox is not as the driver writes it.
+            RuntimeDirError: No runtime base directory is available.
+        """
+        if box is None:
+            return argv
+        if not isinstance(box, dict):
+            raise TypeError("the request's sandbox is not an object")
+        read = box["read"]
+        if not isinstance(read, list):
+            raise TypeError("the request's read paths are not a list")
+        return sandbox.claude_wrap(
+            argv,
+            worktree=Path(str(box["worktree"])),
+            common=Path(str(box["common"])),
+            read=[str(item) for item in read],
+            read_only=box["read_only"] is True,
+            network=box["network"] is True,
+            env=self.outer_env,
+        )
+
+    def _report(self, progress: Progress, done: threading.Event) -> None:
+        while not done.wait(1.0):
+            text = progress.line(time.monotonic())
+            if text:
+                print(text, flush=True)
+
     def _run(
         self, argv: Sequence[str], prompt_path: Path, files: Mapping[str, Path]
+    ) -> int:
+        progress = Progress(time.monotonic(), self.status_seconds)
+        done = threading.Event()
+        reporter = threading.Thread(
+            target=self._report, args=(progress, done), daemon=True
+        )
+        reporter.start()
+        try:
+            return self._stream(argv, prompt_path, files, progress)
+        finally:
+            done.set()
+            reporter.join()
+
+    def _stream(
+        self,
+        argv: Sequence[str],
+        prompt_path: Path,
+        files: Mapping[str, Path],
+        progress: Progress,
     ) -> int:
         with files["jsonl"].open("wb") as output, files["stderr"].open("wb") as errors:
             try:
@@ -189,11 +354,15 @@ class Host:
                 output.flush()
                 try:
                     event = json.loads(line)
-                    text = show(event) if isinstance(event, dict) else ""
                 except ValueError:
-                    text = ""
+                    event = None
+                text = ""
+                if isinstance(event, dict):
+                    progress.event(event, time.monotonic())
+                    text = show(event)
                 if text:
                     print(text, flush=True)
+                    progress.shown(time.monotonic())
             return process.wait()
 
     def serve(self, turn: int) -> None:

@@ -7,10 +7,10 @@ one in the worktree and shows its progress. For turn `n` the folder holds:
 | File | Holds |
 |---|---|
 | `prompt-<n>.md` | The message, given to the CLI on standard input |
-| `turn-<n>.json` | The request: the turn, the prompt file and the argv |
+| `turn-<n>.json` | The request: the turn, the prompt file, the argv and the sandbox |
 | `turn-<n>.jsonl` | The CLI's `stream-json` output |
 | `turn-<n>.stderr` | The CLI's standard error |
-| `turn-<n>.pid` | The CLI's process id while it runs |
+| `turn-<n>.pid` | The process id of the CLI, or of its `bwrap`, while it runs |
 | `turn-<n>.exit` | The CLI's exit code, written when the turn ends |
 | `turn-<n>.interrupt` | Present when the turn was interrupted |
 
@@ -19,18 +19,25 @@ The host also writes `ready` there when it starts.
 Turn 1's request is written by `ClaudeDriver.command`, so the brief goes in
 without a paste. Later turns resume the CLI session that the newest earlier
 turn reported.
+
+When the run's sandbox is `bubblewrap`, the request's `sandbox` holds the
+worktree, the repository's common git folder, the run's read paths, its
+read-only mode and its network value, and the host runs the CLI inside
+`ember.sandbox.claude_wrap`; the host itself runs outside the sandbox.
 """
 
 import json
 import os
 import re
+import shutil
 import signal
+import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ember import choices, db, engines
+from ember import engines
 from ember.engines import DriverError, IdleState, LaunchSpec, TurnOutcome, models
 from ember.engines import status as engine_status
 
@@ -53,7 +60,10 @@ READ_TOOLS = ("Read", "Glob", "Grep")
 """The tools of a read-only run."""
 
 NETWORK_TOOLS = ("WebSearch", "WebFetch")
-"""The tools an editing run also gets when `worker.network` is `on`."""
+"""The tools an editing run also gets when its stored `network` is true."""
+
+GIT_TIMEOUT = 30
+"""Seconds the git command that finds the repository's git folder may take."""
 
 GIT_WRITES = (
     "add", "commit", "push", "merge", "rebase", "reset", "checkout", "switch",
@@ -288,13 +298,6 @@ class ClaudeDriver(engines.Driver):
             raise DriverError("claude (the Claude Code CLI) is not on PATH")
         return binary
 
-    def _network(self) -> bool:
-        try:
-            reply = choices.read(env=self.env)
-        except (choices.InvalidChoiceError, db.DatabaseError) as error:
-            raise DriverError(f"cannot read worker.network: {error}") from error
-        return reply["answers"]["worker.network"]["value"] == "on"
-
     def tools(self, run: Run) -> tuple[str, ...]:
         """Return the tools a run's turns may use.
 
@@ -303,24 +306,51 @@ class ClaudeDriver(engines.Driver):
 
         Returns:
             The read tools for a read-only run; otherwise the editing tools,
-            with the web tools when `worker.network` is `on`.
-
-        Raises:
-            DriverError: The settings cannot be read.
+            with the web tools when the run's stored `network` is true.
         """
         if run.read_only:
             return READ_TOOLS
-        if self._network():
+        if run.network:
             return (*WRITE_TOOLS, *NETWORK_TOOLS)
         return WRITE_TOOLS
+
+    def read_folders(self, run: Run) -> list[tuple[str, str]]:
+        """Return the folders a run's read paths add to Claude's file tools.
+
+        A folder is added as it is, and a file through its folder, whose
+        files the tools then cannot edit either. A path
+        that is the worktree, holds it or is inside it adds nothing, because
+        the worktree is already the working folder.
+
+        Args:
+            run: The run.
+
+        Returns:
+            For each read path that adds a folder, the folder for `--add-dir`
+            and the permission rule that keeps the tools from editing the
+            path.
+        """
+        worktree = Path(run.worktree)
+        result = []
+        for item in run.read_effective:
+            path = Path(item)
+            if path.is_relative_to(worktree) or worktree.is_relative_to(path):
+                continue
+            if path.is_dir():
+                result.append((str(path), f"Edit(/{path}/**)"))
+            else:
+                result.append((str(path.parent), f"Edit(/{path.parent}/**)"))
+        return result
 
     def turn_argv(self, run: Run, session: str | None) -> list[str]:
         """Return one turn's command.
 
-        `--restricted` keeps the file tools in the working folder and loads no
-        `CLAUDE.md`, memory or settings files; `--safe-mode` loads no plugins
-        or hooks; `--strict-mcp-config` with no `--mcp-config` loads no MCP
-        server.
+        `--restricted` keeps the file tools in the working folder and the
+        folders given with `--add-dir`, and loads no `CLAUDE.md`, memory or
+        settings files; `--safe-mode` loads no plugins or hooks;
+        `--strict-mcp-config` with no `--mcp-config` loads no MCP server. The
+        run's read paths are added with `--add-dir`, and edits to them are
+        refused.
 
         Args:
             run: The run.
@@ -330,20 +360,26 @@ class ClaudeDriver(engines.Driver):
             The argv.
 
         Raises:
-            DriverError: The CLI is not on `PATH`, or the settings cannot be
-                read.
+            DriverError: The CLI is not on `PATH`.
         """
         tools = ",".join(self.tools(run))
+        folders = self.read_folders(run)
+        denied = [
+            *(f"Bash(git {verb}:*)" for verb in GIT_WRITES),
+            *(rule for _, rule in folders),
+        ]
         argv = [
             self._claude(), "-p", "--output-format", "stream-json", "--verbose",
             "--model", run.model,
             *(() if run.effort is None else ("--effort", run.effort)),
             "--restricted", "--safe-mode", "--strict-mcp-config",
             "--tools", tools, "--allowedTools", tools,
-            "--disallowedTools", ",".join(f"Bash(git {verb}:*)" for verb in GIT_WRITES),
+            "--disallowedTools", ",".join(denied),
             "--permission-mode", "default" if run.read_only else "acceptEdits",
             "--permission-prompts", "none",
         ]  # fmt: skip
+        for folder_path, _ in folders:
+            argv += ["--add-dir", folder_path]
         if session:
             argv += ["--resume", session]
         return argv
@@ -355,6 +391,52 @@ class ClaudeDriver(engines.Driver):
                 return session
         return None
 
+    def _common(self, run: Run) -> str:
+        """Return the repository's common git folder of the run's worktree."""
+        git = shutil.which("git", path=run.env.get("PATH", os.defpath))
+        if git is None:
+            raise DriverError("git is not on PATH")
+        try:
+            result = subprocess.run(
+                [git, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                cwd=run.worktree,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                env=dict(run.env),
+                timeout=GIT_TIMEOUT,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise DriverError(f"cannot run git in {run.worktree}: {error}") from error
+        if result.returncode or not result.stdout.strip():
+            raise DriverError(f"not a git repository: {run.worktree}")
+        return result.stdout.strip()
+
+    def sandbox_request(self, run: Run) -> dict[str, Any] | None:
+        """Return what the host needs to run a turn in the sandbox.
+
+        Args:
+            run: The run.
+
+        Returns:
+            `None` unless the run's sandbox is `bubblewrap`; otherwise the
+            worktree, the common git folder, the read paths, the read-only
+            mode and the stored network value, as `claude_wrap` takes them.
+
+        Raises:
+            DriverError: The repository's git folder cannot be found.
+        """
+        if run.sandbox != "bubblewrap":
+            return None
+        return {
+            "worktree": run.worktree,
+            "common": self._common(run),
+            "read": list(run.read_effective),
+            "read_only": run.read_only,
+            "network": run.network,
+        }
+
     def _request(self, run: Run, turn: int, text: str) -> None:
         """Write a turn's prompt and request; the request appears atomically."""
         base = folder(run)
@@ -362,7 +444,12 @@ class ClaudeDriver(engines.Driver):
         if files["json"].exists():
             raise DriverError(f"turn {turn} of {run.id} was already requested")
         argv = self.turn_argv(run, self._session(base, turn))
-        request = {"turn": turn, "prompt": str(files["prompt"]), "argv": argv}
+        request = {
+            "turn": turn,
+            "prompt": str(files["prompt"]),
+            "argv": argv,
+            "sandbox": self.sandbox_request(run),
+        }
         temporary = files["json"].with_suffix(".tmp")
         try:
             base.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -386,8 +473,8 @@ class ClaudeDriver(engines.Driver):
             the run's working folder, with no message to paste.
 
         Raises:
-            DriverError: The CLI is not on `PATH`, the settings cannot be
-                read, or the request cannot be written.
+            DriverError: The CLI is not on `PATH`, the repository's git
+                folder cannot be found, or the request cannot be written.
         """
         self._request(run, 1, first_message)
         argv = (
@@ -496,15 +583,18 @@ class ClaudeDriver(engines.Driver):
         return IdleState(engines.IDLE, "no turn is running")
 
     def interrupt(self, run: Run) -> None:
-        """Mark the running turn interrupted and send the CLI `SIGINT`.
+        """Mark the running turn interrupted and send its CLI `SIGINT`.
 
-        The host program keeps running and takes the next turn.
+        The signal goes to the process group of the turn's process, as
+        Ctrl+C in the pane would, so it reaches the CLI also inside its
+        `bwrap`. The host program keeps running and takes the next turn.
 
         Args:
             run: The run.
 
         Raises:
-            DriverError: No turn is running, or its CLI cannot be signalled.
+            DriverError: No turn is running, its process id cannot be read,
+                or its CLI cannot be signalled.
         """
         base = folder(run)
         turn = running_turn(base)
@@ -512,10 +602,19 @@ class ClaudeDriver(engines.Driver):
             raise DriverError(f"no turn is running in {run.id}")
         files = turn_files(base, turn)
         try:
-            files["interrupt"].write_text("interrupted\n", encoding="utf-8")
             pid = int(files["pid"].read_text(encoding="utf-8").strip())
-            os.kill(pid, signal.SIGINT)
         except (OSError, ValueError) as error:
+            raise DriverError(
+                f"cannot read the process of turn {turn} of {run.id}: {error}"
+            ) from error
+        try:
+            files["interrupt"].write_text("interrupted\n", encoding="utf-8")
+            group = os.getpgid(pid)
+            if group == os.getpgrp():
+                os.kill(pid, signal.SIGINT)
+            else:
+                os.killpg(group, signal.SIGINT)
+        except OSError as error:
             raise DriverError(
                 f"cannot signal turn {turn} of {run.id}: {error}"
             ) from error

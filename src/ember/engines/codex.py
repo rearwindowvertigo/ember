@@ -8,18 +8,21 @@ input. The driver reads every turn from Codex's own files in its home folder
 (`$CODEX_HOME`, or `~/.codex`):
 
 - The rollout, `sessions/**/rollout-*.jsonl`, one JSON event per line. The
-  driver finds the run's rollout by its working folder and the run id in its
-  first message. `task_started` begins a turn; `task_complete`, with the final
-  reply in `last_agent_message`, or `turn_aborted` ends it; `error` reports a
-  provider or sign-in failure.
+  driver finds the run's rollout by its working folder and the first line of
+  its first message, which names the run, and skips rollouts that another
+  run has claimed. `task_started` begins a turn; `task_complete`, with the
+  final reply in `last_agent_message`, or `turn_aborted` ends it; `error`
+  reports a provider or sign-in failure. `user_message` events hold the
+  messages typed or pasted into the session.
 - The queue database, `queue_1.sqlite`, which holds messages waiting for a
   running turn. It is read from a private copy in memory, built under shared
   locks from the database and its write-ahead log, so reading it never
   creates or changes a file.
 
 The driver's own state is `codex.json` in the run's folder: the rollout, the
-session id and, for each turn after the first, the rollout's counts of ended
-turns and errors when its message was sent.
+session id, each message Ember pasted, in order, and, for each turn after
+the first, the rollout's counts of ended turns and errors when its message
+was sent.
 """
 
 import contextlib
@@ -51,10 +54,15 @@ from ember.engines import (
     models,
 )
 from ember.runs import record
+from ember.runs.core import BRIEF_LINE
 from ember.runs.record import Run
 
 STATE_NAME = "codex.json"
 """The driver's state file in the run's folder."""
+
+CLAIM_LOCK_NAME = ".codex-rollouts.lock"
+"""The lock, in the folder of the run folders, under which a run claims its
+rollout."""
 
 QUEUE_NAME = "queue_1.sqlite"
 """Codex's queue database in its home folder."""
@@ -139,6 +147,9 @@ class Turns:
     errors: list[str] = field(default_factory=list)
     """Each error's message, in order."""
 
+    errors_at_end: list[int] = field(default_factory=list)
+    """For each ended turn, the number of errors before its end event."""
+
 
 def read_turns(path: str | Path) -> Turns:
     """Summarize a rollout's turns.
@@ -157,12 +168,77 @@ def read_turns(path: str | Path) -> Turns:
         elif kind in ENDED:
             reply = event.get("last_agent_message") if kind == "task_complete" else None
             turns.ended.append((str(kind), reply if isinstance(reply, str) else None))
+            turns.errors_at_end.append(len(turns.errors))
         elif kind == "error":
             message = event.get("message")
             turns.errors.append(
                 message if isinstance(message, str) and message else "error"
             )
     return turns
+
+
+def user_messages(path: str | Path) -> list[str] | None:
+    """Return the messages typed or pasted into a session, from its rollout.
+
+    Reading stops at the first line that is not complete JSON, such as the
+    line Codex is still writing.
+
+    Args:
+        path: The rollout.
+
+    Returns:
+        The text of each `user_message` event, in order; `None` when the
+        rollout cannot be read or an event has no text.
+    """
+    messages = []
+    try:
+        with Path(path).open(encoding="utf-8") as source:
+            for line in source:
+                try:
+                    value = json.loads(line)
+                except ValueError:
+                    break
+                if not isinstance(value, dict):
+                    continue
+                payload = value.get("payload")
+                if (
+                    value.get("type") != "event_msg"
+                    or not isinstance(payload, dict)
+                    or payload.get("type") != "user_message"
+                ):
+                    continue
+                message = payload.get("message")
+                if not isinstance(message, str):
+                    return None
+                messages.append(message)
+    except OSError, UnicodeError:
+        return None
+    return messages
+
+
+def same_message(left: str, right: str) -> bool:
+    """Return whether two message texts are the same message.
+
+    Line endings, white space at the end of each line, and blank lines at
+    the start and end do not count.
+
+    Args:
+        left: One text.
+        right: The other.
+
+    Returns:
+        `True` when they match.
+    """
+
+    def normal(text: str) -> list[str]:
+        lines = [line.rstrip() for line in text.replace("\r\n", "\n").split("\n")]
+        while lines and not lines[0]:
+            lines.pop(0)
+        while lines and not lines[-1]:
+            lines.pop()
+        return lines
+
+    return normal(left) == normal(right)
 
 
 def error_outcome(message: str) -> TurnOutcome:
@@ -454,7 +530,12 @@ def _same_folder(left: object, right: str) -> bool:
 
 
 def _names_run(lines: list[str], run_id: str) -> bool:
-    """Return whether a user message in rollout lines contains the run id."""
+    """Return whether a user message in rollout lines starts with the run's line.
+
+    The line is the first line of the run's first message,
+    `Brief from Claude, the lead, for Ember run <id>.`
+    """
+    header = BRIEF_LINE.format(id=run_id)
     for line in lines:
         try:
             payload = json.loads(line).get("payload", {})
@@ -466,7 +547,11 @@ def _names_run(lines: list[str], run_id: str) -> bool:
             continue
         content = payload.get("content")
         for part in content if isinstance(content, list) else []:
-            if isinstance(part, dict) and run_id in str(part.get("text", "")):
+            text = part.get("text") if isinstance(part, dict) else None
+            if not isinstance(text, str):
+                continue
+            first = next((row.strip() for row in text.splitlines() if row.strip()), "")
+            if first == header:
                 return True
     return False
 
@@ -494,7 +579,13 @@ class CodexDriver(Driver):
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            return {"launched": None, "rollout": "", "thread": "", "turns": {}}
+            return {
+                "launched": None,
+                "rollout": "",
+                "thread": "",
+                "turns": {},
+                "sent": [],
+            }
         except (OSError, ValueError) as error:
             raise DriverError(f"cannot read {path}: {error}") from error
         if not isinstance(value, dict) or not isinstance(value.get("turns"), dict):
@@ -508,11 +599,51 @@ class CodexDriver(Driver):
         except OSError as error:
             raise DriverError(f"cannot write {path}: {error}") from error
 
+    def _claimed(self, run: Run) -> set[str]:
+        """Return the rollouts other runs have claimed, as resolved paths."""
+        claimed = set()
+        try:
+            folders = [
+                entry
+                for entry in run.folder.parent.iterdir()
+                if entry.is_dir() and entry != run.folder
+            ]
+        except OSError:
+            return claimed
+        for folder in folders:
+            try:
+                value = json.loads((folder / STATE_NAME).read_text(encoding="utf-8"))
+            except OSError, UnicodeError, ValueError:
+                continue
+            saved = value.get("rollout") if isinstance(value, dict) else None
+            if isinstance(saved, str) and saved:
+                claimed.add(os.path.realpath(saved))
+        return claimed
+
+    @contextlib.contextmanager
+    def _claim_lock(self, run: Run) -> Iterator[None]:
+        """Hold the lock under which runs find and claim their rollouts."""
+        path = run.folder.parent / CLAIM_LOCK_NAME
+        try:
+            fd = paths.open_private_file(path)
+        except OSError as error:
+            raise DriverError(f"cannot open {path}: {error}") from error
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
     def _rollout(self, run: Run, state: dict[str, Any]) -> Path | None:
-        """Return the run's rollout, finding and saving it the first time.
+        """Return the run's rollout, finding and claiming it the first time.
+
+        Finding a rollout and saving it in the state file happen under one
+        lock, and a rollout another run's state file names is skipped, so
+        two runs in the same checkout never take the same rollout.
 
         Raises:
-            DriverError: The saved rollout is gone.
+            DriverError: The saved rollout is gone, or the lock cannot be
+                taken.
         """
         saved = state.get("rollout")
         if isinstance(saved, str) and saved:
@@ -520,6 +651,10 @@ class CodexDriver(Driver):
             if not path.is_file():
                 raise DriverError(f"the Codex rollout {path} is missing")
             return path
+        with self._claim_lock(run):
+            return self._find_rollout(run, state)
+
+    def _find_rollout(self, run: Run, state: dict[str, Any]) -> Path | None:
         launched = state.get("launched")
         since = (
             launched - DISCOVERY_SLACK if isinstance(launched, (int, float)) else 0.0
@@ -529,7 +664,10 @@ class CodexDriver(Driver):
             found = sorted(sessions.rglob("rollout-*.jsonl"))
         except OSError as error:
             raise DriverError(f"cannot read {sessions}: {error}") from error
+        claimed = self._claimed(run)
         for path in found:
+            if os.path.realpath(path) in claimed:
+                continue
             try:
                 if path.stat().st_mtime < since:
                     continue
@@ -616,7 +754,7 @@ class CodexDriver(Driver):
             [-c model_reasoning_effort=...] -a never
             [--sandbox danger-full-access] --search`, in the worktree, with
             the first message to paste. The sandbox option is
-            added only for the sandbox method `none`.
+            added only for a run whose sandbox is `none`.
 
         Raises:
             DriverError: Codex is not on PATH, or Codex does not trust the
@@ -639,11 +777,18 @@ class CodexDriver(Driver):
         if run.effort is not None:
             argv += ["-c", f"model_reasoning_effort={json.dumps(run.effort)}"]
         argv += ["-a", "never"]
-        if run.sandbox in (None, "none"):
+        if run.sandbox == "none":
             argv += ["--sandbox", "danger-full-access"]
         argv.append("--search")
         self._save_state(
-            run, {"launched": time.time(), "rollout": "", "thread": "", "turns": {}}
+            run,
+            {
+                "launched": time.time(),
+                "rollout": "",
+                "thread": "",
+                "turns": {},
+                "sent": [],
+            },
         )
         return LaunchSpec(
             argv=tuple(argv), cwd=Path(run.worktree), first_message=first_message
@@ -665,8 +810,12 @@ class CodexDriver(Driver):
 
     # Turns
 
+    def _record_sent(self, state: dict[str, Any], text: str) -> None:
+        sent = state.get("sent")
+        state["sent"] = [*(sent if isinstance(sent, list) else []), text]
+
     def send(self, run: Run, text: str) -> None:
-        """Record where the rollout stands, then paste the message.
+        """Record where the rollout stands and the message, then paste it.
 
         The first message is pasted before the rollout exists; its turn
         counts from an empty rollout.
@@ -684,15 +833,85 @@ class CodexDriver(Driver):
         if rollout is None:
             if run.turn > 1:
                 raise DriverError(f"cannot find the Codex session of {run.id}")
-            tmux.send_text(run.id, text, env=run.env)
+            self._paste(run, state, text)
             return
         turns = read_turns(rollout)
         state["turns"][str(run.turn)] = {
             "ended": len(turns.ended),
             "errors": len(turns.errors),
         }
+        self._paste(run, state, text)
+
+    def _paste(self, run: Run, state: dict[str, Any], text: str) -> None:
+        """Record the message as sent, paste it, and drop it if the paste fails."""
+        self._record_sent(state, text)
         self._save_state(run, state)
-        tmux.send_text(run.id, text, env=run.env)
+        try:
+            tmux.send_text(run.id, text, env=run.env)
+        except BaseException:
+            state["sent"] = state["sent"][:-1]
+            self._save_state(run, state)
+            raise
+
+    def accept_input(self, run: Run) -> None:
+        """Record every message now in the rollout as one Ember accepts.
+
+        Args:
+            run: The run.
+
+        Raises:
+            DriverError: The rollout cannot be found or read.
+        """
+        state = self._load_state(run)
+        rollout = self._rollout(run, state)
+        if rollout is None:
+            raise DriverError(f"cannot find the Codex session of {run.id}")
+        messages = user_messages(rollout)
+        if messages is None:
+            raise DriverError(f"cannot read the Codex rollout {rollout}")
+        state["sent"] = list(messages)
+        self._save_state(run, state)
+
+    def foreign_input(self, run: Run) -> str | None:
+        """Compare the rollout's messages with the messages Ember pasted.
+
+        The rollout's `user_message` events are matched in order against the
+        messages recorded by `send`; every event that does not match the next
+        recorded message is a message Ember did not send.
+
+        Args:
+            run: The run.
+
+        Returns:
+            `None` when every message in the rollout was pasted by Ember;
+            otherwise how many were not, or why the rollout could not be
+            checked.
+        """
+        unchecked = "the session history could not be checked"
+        try:
+            state = self._load_state(run)
+            rollout = self._rollout(run, state)
+        except DriverError as error:
+            return f"{unchecked}: {error}"
+        if rollout is None:
+            return f"{unchecked}: no Codex session of {run.id} was found"
+        sent = state.get("sent")
+        if not isinstance(sent, list) or not all(
+            isinstance(item, str) for item in sent
+        ):
+            return f"{unchecked}: {self._state_path(run)} has no valid sent messages"
+        messages = user_messages(rollout)
+        if messages is None:
+            return f"{unchecked}: cannot read the Codex rollout {rollout}"
+        index, foreign = 0, 0
+        for message in messages:
+            if index < len(sent) and same_message(message, sent[index]):
+                index += 1
+            else:
+                foreign += 1
+        if foreign:
+            return f"{foreign} message(s) in the Codex session were not sent by Ember"
+        return None
 
     def wait(self, run: Run) -> TurnOutcome:
         """Read the current turn from the rollout.
@@ -702,11 +921,11 @@ class CodexDriver(Driver):
 
         Returns:
             `running` until a turn ends or Codex reports an error after the
-            message was sent. A completed turn is `done` with its final
-            reply; an interrupted turn is `done` with no reply, or `failed`
-            when Codex reported an error during it. An error is `failed`,
-            as a sign-in failure when its message says so and otherwise as a
-            provider error.
+            message was sent. A turn that Codex reported an error during is
+            `failed`, as a sign-in failure when the error's message says so
+            and otherwise as a provider error. Otherwise a completed turn is
+            `done` with its final reply, and an interrupted turn `done` with
+            no reply.
 
         Raises:
             DriverError: The driver state or the rollout cannot be read.
@@ -720,9 +939,10 @@ class CodexDriver(Driver):
         new_errors = turns.errors[errors:]
         if len(turns.ended) > ended:
             kind, reply = turns.ended[ended]
+            during = turns.errors[errors : turns.errors_at_end[ended]]
+            if during:
+                return error_outcome(during[-1])
             if kind == "turn_aborted":
-                if new_errors:
-                    return error_outcome(new_errors[-1])
                 return TurnOutcome(DONE)
             return TurnOutcome(DONE, reply=reply or None)
         if new_errors:

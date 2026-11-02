@@ -63,9 +63,10 @@ VALID = [
     ("single.reviewer", "ask"),
     ("single.writer_as", "subagent"),
     ("single.reviewer_as", "cli"),
-    ("sandbox.codex", "codex-bundled"),
-    ("sandbox.codex", "none"),
-    ("sandbox.opencode", "bubblewrap"),
+    ("sandbox.codex", "on"),
+    ("sandbox.codex", "off"),
+    ("sandbox.opencode", "on"),
+    ("sandbox.claude", "off"),
     ("sandbox.read", ["/opt/data", "/srv"]),
     ("sandbox.read", []),
     ("terminal", "gnome-terminal -- 'a b'"),
@@ -97,7 +98,9 @@ INVALID = [
     ("single.reviewer", ""),
     ("single.writer_as", "agent"),
     ("sandbox.codex", "landlock"),
-    ("sandbox.opencode", "codex-bundled"),
+    ("sandbox.codex", "bubblewrap"),
+    ("sandbox.opencode", "none"),
+    ("sandbox.claude", "codex-bundled"),
     ("sandbox.read", ["relative/path"]),
     ("sandbox.read", ["/a", "/a"]),
     ("sandbox.read", [""]),
@@ -152,8 +155,9 @@ def test_defaults(env: dict[str, str]) -> None:
         "single.writer_as": "cli",
         "single.reviewer": "ask",
         "single.reviewer_as": "cli",
-        "sandbox.codex": "none",
-        "sandbox.opencode": "none",
+        "sandbox.codex": "off",
+        "sandbox.opencode": "off",
+        "sandbox.claude": "off",
         "sandbox.read": [],
         "terminal": "xdg-terminal-exec",
         "app.autostart": "on",
@@ -163,7 +167,7 @@ def test_defaults(env: dict[str, str]) -> None:
     }
 
 
-def test_sandbox_defaults_to_bubblewrap_when_bwrap_is_on_path(
+def test_sandbox_defaults_to_on_when_bwrap_is_on_path(
     env: dict[str, str], tmp_path: Path
 ) -> None:
     bin_dir = tmp_path / "bin"
@@ -173,11 +177,28 @@ def test_sandbox_defaults_to_bubblewrap_when_bwrap_is_on_path(
     bwrap.chmod(0o755)
     with_bwrap = {**env, "PATH": f"{env['PATH']}:{bin_dir}"}
     answers = choices.read(env=with_bwrap)["answers"]
-    assert answers["sandbox.codex"]["value"] == "bubblewrap"
-    assert answers["sandbox.opencode"]["value"] == "bubblewrap"
+    for engine in ("codex", "opencode", "claude"):
+        assert answers[f"sandbox.{engine}"]["value"] == "on"
     answers = choices.read(env=env)["answers"]
-    assert answers["sandbox.codex"]["value"] == "none"
-    assert answers["sandbox.opencode"]["value"] == "none"
+    for engine in ("codex", "opencode", "claude"):
+        assert answers[f"sandbox.{engine}"]["value"] == "off"
+
+
+def test_codex_sandbox_defaults_to_on_with_a_bundled_bwrap(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    package = tmp_path / "codex-package"
+    (package / "bin").mkdir(parents=True)
+    (package / "codex-resources").mkdir()
+    (package / "codex-resources" / "bwrap").write_text("#!/bin/sh\n")
+    codex = package / "bin" / "codex"
+    codex.write_text("#!/bin/sh\n")
+    codex.chmod(0o755)
+    with_codex = {**env, "PATH": f"{env['PATH']}:{package / 'bin'}"}
+    answers = choices.read(env=with_codex)["answers"]
+    assert answers["sandbox.codex"]["value"] == "on"
+    assert answers["sandbox.opencode"]["value"] == "off"
+    assert answers["sandbox.claude"]["value"] == "off"
 
 
 def test_missing_database_reads_defaults_without_creating_it(

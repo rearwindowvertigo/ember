@@ -170,7 +170,10 @@ def _add_run(parser: argparse.ArgumentParser) -> None:
         "--close", metavar="RUN", help="end the session; keep worktree and branch"
     )
     existing.add_argument(
-        "--force", action="store_true", help="with --close: close even while busy"
+        "--force",
+        action="store_true",
+        help="with --close: close even while busy or holding messages Ember did "
+        "not send; with --send: send even to a session holding such messages",
     )
     existing.add_argument(
         "--recover", metavar="RUN", help="collect a turn that ended unwatched"
@@ -435,8 +438,8 @@ def _run_mode(args: argparse.Namespace) -> str:
             raise UsageError(f"{', '.join(extra)} cannot be used with --{mode}")
     if (args.message_file is not None) != (mode == "send"):
         raise UsageError("--send and --message-file go together")
-    if args.force and mode != "close":
-        raise UsageError("--force needs --close")
+    if args.force and mode not in ("close", "send"):
+        raise UsageError("--force needs --close or --send")
     if args.json and mode != "status":
         raise UsageError("--json needs --status")
     return mode
@@ -465,7 +468,7 @@ def _run_run(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
                 window=args.window,
             )
         ),
-        "send": lambda: core.send(args.send, args.message_file),
+        "send": lambda: core.send(args.send, args.message_file, force=args.force),
         "screen": lambda: core.screen(args.screen),
         "interrupt": lambda: core.interrupt(args.interrupt),
         "attach": lambda: core.attach(args.attach),

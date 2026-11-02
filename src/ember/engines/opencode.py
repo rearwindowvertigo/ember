@@ -4,9 +4,11 @@ The run's pane runs OpenCode's interactive view with its built-in server
 listening on a free port of `127.0.0.1`, protected by a password. The core
 wraps that one command in the run's sandbox. The driver talks to the server's
 session API: once the server answers it creates the run's session and shows
-it in the interactive view, sends each message with `prompt_async`, reads the
-turn's end and reply from the session's messages and the session status, and
-aborts a turn through the API.
+it in the interactive view once the view has drawn its screen, sends each
+message with `prompt_async`, reads the turn's end and reply from the
+session's messages and the session status, and aborts a turn through the
+API. A user message in the session whose id the driver did not record was
+typed by someone else, such as the owner in a terminal window.
 
 Every run uses OpenRouter as the provider, with zero data retention required
 for every request, and the agent `ember-worker`, defined in the configuration
@@ -227,6 +229,54 @@ def choose_port(previous: int = 0) -> int:
         raise DriverError(f"cannot choose a port for OpenCode: {error}") from error
 
 
+def _made_by_opencode(message: Mapping[str, Any]) -> bool:
+    """Return whether OpenCode made this user message when it compacted the session.
+
+    OpenCode marks a compaction with a user message holding a `compaction`
+    part, and after an automatic compaction adds a user message holding a
+    synthetic text part.
+    """
+    parts = message.get("parts")
+    if not isinstance(parts, list) or not parts:
+        return False
+    return all(
+        isinstance(part, dict)
+        and (
+            part.get("type") == "compaction"
+            or (part.get("type") == "text" and part.get("synthetic") is True)
+        )
+        for part in parts
+    )
+
+
+def _is_compaction_summary(message: Mapping[str, Any]) -> bool:
+    """Return whether this is the assistant message that summarises a compaction."""
+    info = message.get("info")
+    return (
+        isinstance(info, dict)
+        and info.get("role") == "assistant"
+        and (info.get("summary") is True or info.get("mode") == "compaction")
+    )
+
+
+def _content(message: Mapping[str, Any]) -> tuple[tuple[Any, Any], ...] | None:
+    """Return the type and text of each part of a user message.
+
+    Returns `None` for a message with a `compaction` part or no readable
+    parts. When OpenCode compacts a session that overflowed, it copies the
+    parts of the last such message into a new user message with new ids, so
+    the copy has the same content as the message it replays.
+    """
+    parts = message.get("parts")
+    if not isinstance(parts, list) or not parts:
+        return None
+    if not all(isinstance(part, dict) for part in parts):
+        return None
+    if any(part.get("type") == "compaction" for part in parts):
+        return None
+    return tuple((part.get("type"), part.get("text")) for part in parts)
+
+
 class OpenCodeDriver(Driver):
     """Runs OpenCode's interactive view and its built-in server in a run's pane."""
 
@@ -359,7 +409,20 @@ class OpenCodeDriver(Driver):
         return value
 
     def _messages(self, run: Run, session: str) -> list[Any] | None:
-        return self._get(run, f"/session/{quote(session, safe='')}/message", list)
+        """Return the session's messages, read a second time after a failure."""
+        path = f"/session/{quote(session, safe='')}/message"
+        messages = self._get(run, path, list)
+        if messages is None:
+            time.sleep(self.poll_seconds)
+            messages = self._get(run, path, list)
+        return messages
+
+    def _view_drawn(self, run: Run) -> bool:
+        """Return whether the interactive view has drawn anything in the pane."""
+        try:
+            return bool(tmux.capture(run.id, env=run.env).strip())
+        except tmux.TmuxError:
+            return False
 
     def _select(self, run: Run, session: str) -> None:
         """Show the session in the interactive view; a failure changes nothing."""
@@ -484,14 +547,15 @@ class OpenCodeDriver(Driver):
         """Return whether the server answers, creating the run's session.
 
         The first time the server answers, the driver records the identity
-        of the pane's process, which runs the server, creates the session
-        and shows it in the interactive view.
+        of the pane's process, which runs the server, and creates the
+        session. Once the interactive view has drawn its screen, so that it
+        is connected to the server, the driver shows the session in it.
 
         Args:
             run: The run.
 
         Returns:
-            `True` once the session exists.
+            `True` once the session exists and the view has drawn its screen.
 
         Raises:
             DriverError: The server refuses the password, or cannot create
@@ -527,6 +591,8 @@ class OpenCodeDriver(Driver):
             if code != 200 or not isinstance(session, str) or not session:
                 raise DriverError(f"OpenCode could not create a session: HTTP {code}")
             self._save(run, session=session)
+        if not self._view_drawn(run):
+            return False
         self._select(run, session)
         return True
 
@@ -682,6 +748,87 @@ class OpenCodeDriver(Driver):
         if isinstance(current, dict) and current["type"] != "idle":
             return IdleState(engines.BUSY, "a turn is running")
         return IdleState(engines.IDLE)
+
+    def foreign_input(self, run: Run) -> str | None:
+        """Look for user messages in the session that the driver did not send.
+
+        Args:
+            run: The run.
+
+        Returns:
+            `None` when every user message in the session has an id the
+            driver recorded when it sent it or was made by OpenCode when it
+            compacted the session; otherwise how many do not, or why the
+            session could not be read. A user message that directly follows
+            a compaction summary and has the content of the last earlier
+            user message without a compaction part is OpenCode's replay of
+            that message, and counts only when that message counts.
+        """
+        unchecked = "the session history could not be checked"
+        try:
+            state = self._state(run)
+            session = self._session(state)
+        except DriverError as error:
+            return f"{unchecked}: {error}"
+        sent = state.get("sent")
+        if not isinstance(sent, list):
+            return f"{unchecked}: the sent message ids were not recorded"
+        messages = self._messages(run, session)
+        if messages is None:
+            return f"{unchecked}: cannot read the OpenCode session's messages"
+        foreign = 0
+        previous: Mapping[str, Any] | None = None
+        source: tuple[tuple[tuple[Any, Any], ...] | None, bool] = (None, False)
+        for message in messages:
+            info = message.get("info") if isinstance(message, dict) else None
+            if not isinstance(info, dict) or not isinstance(info.get("role"), str):
+                return f"{unchecked}: a message in the session has no role"
+            if info["role"] == "user":
+                content = _content(message)
+                if (
+                    previous is not None
+                    and _is_compaction_summary(previous)
+                    and (content is not None and content == source[0])
+                ):
+                    counted = source[1]
+                else:
+                    counted = info.get("id") not in sent and not _made_by_opencode(
+                        message
+                    )
+                foreign += counted
+                if content is not None:
+                    source = (content, counted)
+            previous = message
+        if foreign:
+            return (
+                f"{foreign} message(s) in the OpenCode session were not sent by Ember"
+            )
+        return None
+
+    def accept_input(self, run: Run) -> None:
+        """Record every user message now in the session as one Ember accepts.
+
+        Args:
+            run: The run.
+
+        Raises:
+            DriverError: The run has no session, or its messages cannot be
+                read.
+        """
+        state = self._state(run)
+        messages = self._messages(run, self._session(state))
+        if messages is None:
+            raise DriverError("cannot read the OpenCode session's messages")
+        sent = state.get("sent") if isinstance(state.get("sent"), list) else []
+        ids = [
+            info["id"]
+            for message in messages
+            if isinstance(message, dict)
+            and isinstance(info := message.get("info"), dict)
+            and info.get("role") == "user"
+            and isinstance(info.get("id"), str)
+        ]
+        self._save(run, sent=[*sent, *(i for i in ids if i not in sent)])
 
     def interrupt(self, run: Run) -> None:
         """Abort the session's current turn through the server.
