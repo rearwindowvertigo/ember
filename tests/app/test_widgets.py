@@ -1,10 +1,83 @@
+from collections.abc import Sequence
+from typing import cast
+
 import pytest
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QGuiApplication, QIcon
-from PySide6.QtWidgets import QApplication, QDialog, QLineEdit
+from PySide6.QtGui import QGuiApplication, QIcon, QPaintEvent, QTextLayout
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QLineEdit
 from pytestqt.qtbot import QtBot
 
 from ember.app import theme, widgets
+
+
+@pytest.mark.parametrize(
+    ("shown", "start", "length", "expected"),
+    [
+        ("abcdef…", 1, 3, [(1, 3)]),
+        ("abcdef…", 2, 4, [(2, 4)]),
+        ("abcdef…", 2, 5, [(2, 5)]),
+        ("abcdef…", 2, 12, [(2, 5)]),
+        ("abcdef…", 6, 2, [(6, 1)]),
+        ("abcdef…", 10, 3, [(6, 1)]),
+        ("abcdef…", 0, 16, [(0, 7)]),
+        ("abcdef…", 2, 0, []),
+        ("…", 10, 3, [(0, 1)]),
+        ("", 2, 3, []),
+    ],
+)
+def test_elided_label_maps_selection_to_shown_text(
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    shown: str,
+    start: int,
+    length: int,
+    expected: list[tuple[int, int]],
+) -> None:
+    """Map full-text selections onto the displayed prefix and ellipsis."""
+    label = widgets.ElidedLabel("abcdefghijklmnop")
+    qtbot.addWidget(label)
+    label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    label.setSelection(start, length)
+    label.resize(220, 36)
+    monkeypatch.setattr(label, "display_text", lambda: shown)
+    ranges: list[tuple[int, int]] = []
+
+    class RecordingLayout(QTextLayout):
+        def setFormats(self, formats: Sequence[QTextLayout.FormatRange]) -> None:  # noqa: N802
+            """Record the selection ranges passed to the text layout."""
+            ranges.extend(
+                (cast(int, item.start), cast(int, item.length)) for item in formats
+            )
+            super().setFormats(formats)
+
+    monkeypatch.setattr(widgets, "QTextLayout", RecordingLayout)
+    assert not label.grab().isNull()
+    assert ranges == expected
+    assert label.selectedText() == label.text()[start : start + length]
+
+
+def test_elided_label_delegates_painting_without_elision(
+    qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Use QLabel's paint method when the full text fits."""
+    label = widgets.ElidedLabel("short")
+    qtbot.addWidget(label)
+    label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    label.setSelection(1, 3)
+    label.resize(label.fontMetrics().horizontalAdvance(label.text()) + 20, 36)
+    calls: list[QLabel] = []
+    paint = QLabel.paintEvent
+
+    def record_paint(widget: QLabel, event: QPaintEvent) -> None:
+        """Record calls to QLabel's paint method."""
+        calls.append(widget)
+        paint(widget, event)
+
+    monkeypatch.setattr(QLabel, "paintEvent", record_paint)
+    assert label.display_text() == label.text()
+    assert not label.grab().isNull()
+    assert calls == [label]
+    assert label.selectedText() == "hor"
 
 
 @pytest.mark.parametrize("mode", theme.MODES)
