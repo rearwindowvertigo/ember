@@ -71,6 +71,7 @@ HELP_COMMANDS = (
     "run",
     "gapcheck",
     "flow",
+    "panel",
     "ground",
     "merge",
     "cleanup",

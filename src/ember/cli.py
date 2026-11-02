@@ -14,6 +14,7 @@ after Quit Ember or when the running app takes over, 64 for a usage error and
 69 without a graphical session. `emb skill` uses the codes in `ember.skill`.
 `emb gapcheck` uses the codes in `ember.gapcheck.command`.
 `emb flow` uses the codes in `ember.flows.command`.
+`emb panel` uses the codes in `ember.panels.command`.
 """
 
 import argparse
@@ -274,6 +275,57 @@ def _add_flow(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="print JSON")
 
 
+def _add_panel(parser: argparse.ArgumentParser) -> None:
+    """Add panel start, validation, status and recovery options."""
+    parser.add_argument(
+        "--question-file", metavar="FILE", help="the question as UTF-8 text"
+    )
+    parser.add_argument(
+        "--dir", metavar="DIR", help="a checkout folder (default: current folder)"
+    )
+    parser.add_argument(
+        "--member",
+        action="append",
+        default=[],
+        metavar="W",
+        help="engine:model[@effort]; repeatable",
+    )
+    parser.add_argument("--claim", metavar="ID", help="read choices with this claim")
+    parser.add_argument(
+        "--read",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="an additional path members may read; repeatable",
+    )
+    parser.add_argument(
+        "--stall",
+        type=_positive_minutes,
+        metavar="MINUTES",
+        help="minutes without a screen change (default 10)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=_positive_minutes,
+        metavar="MINUTES",
+        help="panel deadline in minutes (default 30)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate inputs and print resolved members",
+    )
+    parser.add_argument(
+        "--status", nargs="?", const="", metavar="PANEL", help="show one or all panels"
+    )
+    parser.add_argument(
+        "--recover",
+        metavar="PANEL",
+        help="collect unfinished members without asking again",
+    )
+    parser.add_argument("--json", action="store_true", help="print JSON")
+
+
 def _add_ground(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--dir", metavar="DIR", help="the folder to read (default: the current one)"
@@ -423,6 +475,17 @@ def build_parser() -> argparse.ArgumentParser:
             description=(
                 "Run a JSON task plan in waves with writers, read-only reviews "
                 "and fix rounds. Accepted tasks merge into a flow branch. "
+                "Each non-zero exit prints a next: or owner: line."
+            ),
+        )
+    )
+    _add_panel(
+        subparsers.add_parser(
+            "panel",
+            help="ask several models one question and collect their answers",
+            description=(
+                "Ask members the same question in parallel read-only runs "
+                "and write a summary of their answers. "
                 "Each non-zero exit prints a next: or owner: line."
             ),
         )
@@ -833,6 +896,10 @@ def main(
         return command.main(args, env)
     if args.command == "flow":
         from ember.flows import command
+
+        return command.main(args, env)
+    if args.command == "panel":
+        from ember.panels import command
 
         return command.main(args, env)
     if args.command == "ground":
