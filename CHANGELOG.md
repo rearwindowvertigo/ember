@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.1](https://github.com/rearwindowvertigo/ember/compare/v0.2.0...v0.2.1) (2026-11-02)
+
+
+### Fixed
+
+* **app:** give each settings save its own result callback ([6b8e4a2](https://github.com/rearwindowvertigo/ember/commit/6b8e4a27063310b016951cf1791f2bea2afceffb))
+* **app:** highlight only the shown part of an elided selection ([73e0a02](https://github.com/rearwindowvertigo/ember/commit/73e0a0215e51da07fa183f21c231c9fe3cfd54f6))
+* **app:** pass the tray click's activation token to the terminal ([f1c1b44](https://github.com/rearwindowvertigo/ember/commit/f1c1b449ad5874f622ec7a52dec95c90c3e73b80))
+* **app:** show the plan wave on Overview's flow line ([ebb1e96](https://github.com/rearwindowvertigo/ember/commit/ebb1e967be8ca37f2512777f8f428d9f9bdeb8c7))
+* **app:** straighten the Engines screen's model rows and cards ([e476595](https://github.com/rearwindowvertigo/ember/commit/e4765957c15f1021691de9da4d22c47427e9ce17))
+* **codex:** treat a model at capacity as a provider error ([723403e](https://github.com/rearwindowvertigo/ember/commit/723403e8d51f3e9ecb1fd13d823e7691e23f5c4d))
+* **flows:** leave next: and owner: lines out of a stop reason ([e5989f8](https://github.com/rearwindowvertigo/ember/commit/e5989f8b1c2da7df6e202c45db2d6d5640bc06a7))
+* **flows:** pass a hook's refusal to the writer with a send answer ([ed1e3d9](https://github.com/rearwindowvertigo/ember/commit/ed1e3d9f712bfed531630350bb2f9c5b19da1d96))
+* **skill:** keep verdicts visible and leave kept worktrees alone ([feb143e](https://github.com/rearwindowvertigo/ember/commit/feb143e9a587aaf894847ce75e2e9008e2a7778d))
+
 ## [0.2.0](https://github.com/rearwindowvertigo/ember/compare/v0.1.0...v0.2.0) (2026-11-02)
 
 
