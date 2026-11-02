@@ -254,3 +254,18 @@ def test_unreadable_record_is_not_a_folder_failure(
     assert model.unreadable() == 1
     assert model.error() is None
     model.stop()
+
+
+def test_flow_and_panel_folders_are_not_watched(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    run = write_run(make_run(env))
+    root = paths.runs_dir(env)
+    for name in ("flow-20261102-100823-3fcbde", "panel-20261102-111904-37e695"):
+        (root / name).mkdir(mode=0o700)
+    model = _model(env, qtbot)
+    qtbot.waitUntil(lambda: str(run.folder) in model.watched())
+    watched = model.watched()
+    assert not [item for item in watched if "/flow-" in item or "/panel-" in item]
+    assert model.unreadable() == 0
+    model.stop()
