@@ -4,6 +4,9 @@ Every call that runs a subprocess, reads the network or opens the settings
 database goes through `TaskRunner.run`, so the window never waits on it.
 """
 
+import contextlib
+import itertools
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -11,55 +14,59 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Slot
 
 
 class _Relay(QObject):
-    """Carries one task's outcome to the GUI thread.
+    """Carries finished job ids from pool threads to the GUI thread.
 
-    The relay lives on the GUI thread; the worker thread emits its signals,
-    so Qt queues the call to `_deliver` onto the GUI thread's event loop.
+    The runner owns one relay, which lives on the GUI thread. A worker emits
+    only a job id, so Qt queues the call to the runner on the GUI thread's
+    event loop and the worker never holds a callback or an outcome.
     """
 
-    finished = Signal(bool, object)
+    finished = Signal(int)
 
-    def __init__(
-        self,
-        done: Callable[[Any], None],
-        failed: Callable[[Exception], None],
-        release: Callable[[_Relay], None],
-    ) -> None:
-        super().__init__()
-        self._done = done
-        self._failed = failed
-        self._release = release
-        self.finished.connect(self._deliver)
+    def __init__(self, parent: QObject) -> None:
+        super().__init__(parent)
+        self._lock = threading.Lock()
+        self._outcomes: dict[int, tuple[bool, object, object]] = {}
 
-    @Slot(bool, object)
-    def _deliver(self, ok: bool, value: object) -> None:
-        self._release(self)
-        if ok:
-            self._done(value)
-        else:
-            assert isinstance(value, Exception)
-            self._failed(value)
+    def put(self, job_id: int, ok: bool, value: object, fn: object) -> None:
+        """Keep a job's outcome and function until the GUI thread takes them."""
+        with self._lock:
+            self._outcomes[job_id] = (ok, value, fn)
+
+    def take(self, job_id: int) -> tuple[bool, object, object] | None:
+        """Remove and return a job's entry, or `None` when there is none."""
+        with self._lock:
+            return self._outcomes.pop(job_id, None)
 
 
 class _Job(QRunnable):
-    def __init__(self, fn: Callable[[], Any], relay: _Relay) -> None:
+    def __init__(
+        self,
+        job_id: int,
+        fn: Callable[[], Any],
+        relay: _Relay,
+    ) -> None:
         super().__init__()
-        self._fn = fn
-        self._relay: _Relay | None = relay
+        self._job_id = job_id
+        self._fn: Callable[[], Any] | None = fn
+        self._relay = relay
 
     def run(self) -> None:
-        relay, self._relay = self._relay, None
-        if relay is None:
+        fn, self._fn = self._fn, None
+        if fn is None:
             return
         try:
-            result = self._fn()
+            self._relay.put(self._job_id, True, fn(), fn)
         except Exception as error:
-            relay.finished.emit(False, error)
-        else:
-            relay.finished.emit(True, result)
-        # The runner keeps the relay until delivery, so the last reference
-        # is dropped on the GUI thread, never here.
-        del relay
+            self._relay.put(self._job_id, False, error, fn)
+        # The relay now holds `fn` and the outcome, and the runner holds the
+        # callbacks; the worker drops its own references before it signals, so
+        # the last reference to each is dropped on the GUI thread.
+        del fn
+        # A RuntimeError means the runner and its relay were deleted, so
+        # nothing waits for this job.
+        with contextlib.suppress(RuntimeError):
+            self._relay.finished.emit(self._job_id)
 
 
 class TaskRunner(QObject):
@@ -76,7 +83,12 @@ class TaskRunner(QObject):
         """
         super().__init__(parent)
         self._pool = QThreadPool.globalInstance() if pool is None else pool
-        self._relays: set[_Relay] = set()
+        self._ids = itertools.count(1)
+        self._callbacks: dict[
+            int, tuple[Callable[[Any], None], Callable[[Exception], None]]
+        ] = {}
+        self._relay = _Relay(self)
+        self._relay.finished.connect(self._deliver)
 
     def run(
         self,
@@ -93,13 +105,27 @@ class TaskRunner(QObject):
             done: Called with `fn`'s return value.
             failed: Called with the exception `fn` raised.
         """
-        relay = _Relay(done, failed, self._relays.discard)
-        self._relays.add(relay)
-        self._pool.start(_Job(fn, relay))
+        job_id = next(self._ids)
+        self._callbacks[job_id] = (done, failed)
+        self._pool.start(_Job(job_id, fn, self._relay))
+
+    @Slot(int)
+    def _deliver(self, job_id: int) -> None:
+        outcome = self._relay.take(job_id)
+        callbacks = self._callbacks.pop(job_id, None)
+        if outcome is None or callbacks is None:
+            return
+        ok, value, _fn = outcome
+        done, failed = callbacks
+        if ok:
+            done(value)
+        else:
+            assert isinstance(value, Exception)
+            failed(value)
 
     def pending(self) -> int:
         """Return how many tasks have not delivered their outcome yet."""
-        return len(self._relays)
+        return len(self._callbacks)
 
     def wait(self, msecs: int = -1) -> bool:
         """Wait for the pool's running tasks to end, without delivering them.

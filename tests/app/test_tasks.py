@@ -1,4 +1,6 @@
+import gc
 import threading
+import weakref
 
 from PySide6.QtCore import QThread
 from pytestqt.qtbot import QtBot
@@ -56,3 +58,37 @@ def test_many_tasks_each_deliver_once(qtbot: QtBot) -> None:
     assert sorted(results) == [index * 2 for index in range(20)]
     assert runner.wait(1000)
     assert runner.pending() == 0
+
+
+def test_callbacks_and_work_are_released_on_the_gui_thread(qtbot: QtBot) -> None:
+    runner = TaskRunner()
+    gui = threading.get_ident()
+    released: list[int] = []
+    delivered: list[int] = []
+
+    class Held:
+        pass
+
+    for index in range(50):
+        work_held, done_held, failed_held = Held(), Held(), Held()
+        for held in (work_held, done_held, failed_held):
+            weakref.finalize(held, lambda: released.append(threading.get_ident()))
+
+        def work(held: Held = work_held, index: int = index) -> int:
+            assert held
+            return index
+
+        def done(result: int, held: Held = done_held) -> None:
+            assert held
+            delivered.append(result)
+
+        def failed(_error: Exception, held: Held = failed_held) -> None:
+            assert held
+
+        runner.run(work, done, failed)
+        del work, done, failed, work_held, done_held, failed_held, held
+    qtbot.waitUntil(lambda: len(delivered) == 50)
+    assert runner.wait(1000)
+    gc.collect()
+    assert len(released) == 150
+    assert set(released) == {gui}
