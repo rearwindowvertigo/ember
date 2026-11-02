@@ -1,0 +1,87 @@
+{
+  "event": "lead_stop",
+  "flow": "{{FLOW}}",
+  "status": "stopped",
+  "reason": "needs the lead",
+  "exit": null,
+  "branch": "{{BRANCH}}",
+  "worktree": "{{WORKTREE}}",
+  "tip": "{{TIP}}",
+  "dir": "{{DIR}}",
+  "tasks": [
+    {
+      "id": "parse",
+      "status": "merged",
+      "reason": null,
+      "round": 0,
+      "writer_run": null,
+      "branch": null,
+      "worktree": null,
+      "merge_commit": "{{TIP}}",
+      "outside_files": [],
+      "cleanup": [],
+      "choices": [],
+      "findings": {
+        "must": 0,
+        "should": 0,
+        "lead": 0
+      },
+      "finding_details": []
+    },
+    {
+      "id": "strict",
+      "status": "stopped",
+      "reason": "needs the lead",
+      "round": 0,
+      "writer_run": "codex-20261102-120100-bbbbbb",
+      "branch": "ember/codex/codex-20261102-120100-bbbbbb",
+      "worktree": "{{DIR}}/.ember/worktrees/codex-20261102-120100-bbbbbb",
+      "merge_commit": null,
+      "outside_files": [],
+      "cleanup": [],
+      "choices": [
+        "emb flow --lead {{FLOW}} strict --send <file>",
+        "emb flow --lead {{FLOW}} strict --accept [--commit <commit>]",
+        "emb flow --lead {{FLOW}} strict --review",
+        "emb flow --lead {{FLOW}} strict --worker <engine>:<model>[@<effort>]",
+        "emb flow --lead {{FLOW}} strict --drop"
+      ],
+      "findings": {
+        "must": 0,
+        "should": 0,
+        "lead": 1
+      },
+      "finding_details": [
+        {
+          "severity": "lead",
+          "file": "tools/report.py",
+          "line": null,
+          "problem": "What report.py prints without --strict for a file with a bad row: skip it with a warning, or print no totals and exit 1?",
+          "fix": "Ask the owner to choose the behavior without --strict.",
+          "scenario": "An input file contains a non-integer quantity and the caller omits --strict.",
+          "earlier": null,
+          "note": ""
+        }
+      ]
+    }
+  ],
+  "stops": [
+    {
+      "seq": 1,
+      "at": 1793620860.0,
+      "kind": "lead_stop",
+      "task": "strict",
+      "status": "stopped",
+      "reason": "needs the lead",
+      "choices": [
+        "emb flow --lead {{FLOW}} strict --send <file>",
+        "emb flow --lead {{FLOW}} strict --accept [--commit <commit>]",
+        "emb flow --lead {{FLOW}} strict --review",
+        "emb flow --lead {{FLOW}} strict --worker <engine>:<model>[@<effort>]",
+        "emb flow --lead {{FLOW}} strict --drop"
+      ]
+    }
+  ],
+  "abandoned": [],
+  "next": "next: report every stop and choice to the owner; no runner is live, an answer starts it"
+}

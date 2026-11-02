@@ -25,6 +25,10 @@ CASES = (
     "send-refused-foreign-messages",
     "owner-line-not-run",
     "merge-and-cleanup-keeps",
+    "flow-gap-check-first",
+    "owner-away-named-workers",
+    "flow-lead-stop-waits",
+    "panel-named-members-compared",
 )
 
 REVIEW_BAR = """\
@@ -133,7 +137,7 @@ def test_parse_simple() -> None:
 # Case files
 
 
-def test_the_eight_cases_and_no_others() -> None:
+def test_the_twelve_cases_and_no_others() -> None:
     found = {
         p.name
         for p in EVALS.iterdir()
@@ -202,12 +206,15 @@ def test_help_reply_matches_the_parser(
 def env(tmp_path: Path) -> dict[str, str]:
     home = tmp_path / "home"
     home.mkdir()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
     return {
         "HOME": str(home),
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "XDG_CONFIG_HOME": str(tmp_path / "config"),
         "XDG_STATE_HOME": str(tmp_path / "state"),
         "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "XDG_RUNTIME_DIR": str(runtime),
         "GIT_CONFIG_NOSYSTEM": "1",
         "LC_ALL": "C.UTF-8",
     }
@@ -695,3 +702,339 @@ def test_no_file_under_skill_names_an_earlier_system() -> None:
 )
 def test_name_check_matches_whole_tokens(text: str, hits: int) -> None:
     assert sum(len(pattern.findall(text)) for pattern in FORBIDDEN) == hits
+
+
+# Flow, panel and gap-check replies
+
+
+NEW_ROUTES = (
+    (["gapcheck", "--brief"], "gapcheck-brief"),
+    (["gapcheck", "--reply", "reply.md"], "gapcheck-reply"),
+    (["gapcheck"], "gapcheck"),
+    (["flow", "--dry-run"], "flow-dry-run"),
+    (["flow", "--start"], "flow-start"),
+    (["flow", "--watch", "flow-id"], "flow-watch"),
+    (["flow", "--status", "flow-id"], "flow-status"),
+    (["flow", "--lead", "flow-id", "task", "--review"], "flow-lead"),
+    (["flow", "--resume", "flow-id"], "flow-resume"),
+    (["panel", "--dry-run"], "panel-dry-run"),
+    (["panel", "--status", "panel-id"], "panel-status"),
+    (["panel", "--recover", "panel-id"], "panel-recover"),
+    (["panel"], "panel-start"),
+)
+
+
+@pytest.mark.parametrize(("args", "route"), NEW_ROUTES)
+def test_new_routes(
+    tmp_path: Path, env: dict[str, str], args: list[str], route: str
+) -> None:
+    work = case("small-change-no-worker", tmp_path, env)
+    replies = work.eval / "replies"
+    (replies / f"{route}.out").write_text("text {{FLOW}} {{PANEL}}\n")
+    (replies / f"{route}.json").write_text('{"route": "' + route + '"}\n')
+    result = work.emb(*args)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("text ")
+    assert work.calls()[-1]["route"] == route
+    result = work.emb(*args, "--json")
+    assert json.loads(result.stdout) == {"route": route}
+    assert work.calls()[-1]["seq"] == 2
+
+
+@pytest.mark.parametrize(("args", "route"), NEW_ROUTES)
+def test_new_route_needs_reply(
+    tmp_path: Path, env: dict[str, str], args: list[str], route: str
+) -> None:
+    work = case("small-change-no-worker", tmp_path, env)
+    result = work.emb(*args)
+    assert result.returncode == 69
+    assert result.stderr.startswith(f"emb eval stub: no reply for {route} ")
+    assert work.calls()[-1]["exit"] == 69
+
+
+def flow_plan(work: Case, tasks: list[dict[str, str]] | None = None) -> Path:
+    plan = work.work.parent / "plan.json"
+    plan.write_text(
+        json.dumps(
+            {
+                "dir": str(work.work),
+                "tasks": [{"id": "one", "subject": "feat: extend the report"}]
+                if tasks is None
+                else tasks,
+                "trailers": ["Co-Authored-By: Claude <noreply@anthropic.com>"],
+                "failure_model": "Empty selections print zero totals.",
+            }
+        )
+    )
+    return plan
+
+
+@pytest.mark.parametrize("name", CASES[-4:-1])
+def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) -> None:
+    work = case(name, tmp_path, env)
+    plan = flow_plan(work)
+    head = work.git("rev-parse", "HEAD")
+    result = work.emb("flow", "--plan", str(plan), "--start", "--claim", "run-abc123")
+    assert result.returncode == 0, result.stderr
+    flow_id = result.stdout.splitlines()[0].removeprefix("flow ")
+    assert re.fullmatch(r"flow-\d{8}-\d{6}-[0-9a-f]{6}", flow_id)
+    branch = f"ember/flow/{flow_id}"
+    tree = work.work / ".ember/worktrees" / flow_id
+    assert result.stdout.splitlines() == [
+        f"flow {flow_id}",
+        f"branch {branch}",
+        f"worktree {tree}",
+    ]
+    assert result.stderr == f"next: emb flow --watch {flow_id} --json\n"
+    assert work.git("rev-parse", f"{branch}^") == head
+    assert work.git("log", "-1", "--format=%B", branch) == (
+        "feat: extend the report\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
+    )
+    assert work.git("diff", "--name-only", f"HEAD...{branch}") == (
+        "tests/test_report.py\ntools/report.py"
+    )
+    assert work.git("status", "--porcelain") == ""
+    state = json.loads((work.eval / "state.json").read_text())
+    assert state["flows"][flow_id] == {
+        "dir": str(work.work),
+        "branch": branch,
+        "worktree": str(tree),
+    }
+    assert state["runs"] == {}
+    check = subprocess.run(
+        ["python3", "-m", "unittest", "discover", "-s", "tests"],
+        cwd=tree,
+        env={**work.env, "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check.returncode == 0, check.stderr
+    watch = work.emb("flow", "--watch", flow_id, "--json")
+    report = json.loads(watch.stdout)
+    assert report["flow"] == flow_id
+    assert report["worktree"] == str(tree)
+    assert report["tip"] == work.git("rev-parse", branch)
+    if name == "flow-lead-stop-waits":
+        assert report["event"] == "lead_stop"
+        assert report["tasks"][1]["findings"] == {"must": 0, "should": 0, "lead": 1}
+        answer = work.emb("flow", "--lead", flow_id, "strict", "--send", work.brief())
+        assert answer.stdout == f"queued answer 1: send for strict\nflow {flow_id}\n"
+        watch = work.emb("flow", "--watch", flow_id, "--json")
+        report = json.loads(watch.stdout)
+    assert report["event"] == "end"
+    assert all(task["status"] == "merged" for task in report["tasks"])
+    assert report["next"] + "\n" == watch.stderr
+    tip = work.git("rev-parse", branch)
+    merged = work.emb("merge", branch, "--into", f"claude/{name}", "--verdict", "keep")
+    assert merged.returncode == 0, merged.stderr
+    assert (
+        f"removed {branch}: removed worktree {tree}; deleted at {tip}" in merged.stdout
+    )
+    assert work.git("branch", "--list", branch) == ""
+    assert not tree.exists()
+    assert work.git("rev-parse", "HEAD^2") == tip
+
+
+@pytest.mark.parametrize("tasks", [[], [{"id": "first", "task": "x" * 100}]])
+def test_flow_empty_plan_and_subject_fallback(
+    tmp_path: Path, env: dict[str, str], tasks: list[dict[str, str]]
+) -> None:
+    work = case("flow-gap-check-first", tmp_path, env)
+    plan = flow_plan(work, tasks)
+    result = work.emb("flow", "--plan", str(plan), "--start")
+    assert result.returncode == 0, result.stderr
+    flow_id = result.stdout.splitlines()[0].split()[1]
+    subject = work.git("log", "-1", "--format=%s", f"ember/flow/{flow_id}")
+    expected = ("first: " + "x" * 100)[:72] if tasks else f"{flow_id}: Flow changes"
+    assert subject == expected
+
+
+@pytest.mark.parametrize("content", [None, "", "{bad", "[]"])
+def test_flow_unreadable_plan(
+    tmp_path: Path, env: dict[str, str], content: str | None
+) -> None:
+    work = case("flow-gap-check-first", tmp_path, env)
+    plan = tmp_path / "plan.json"
+    if content is not None:
+        plan.write_text(content)
+    result = work.emb("flow", "--plan", str(plan), "--start")
+    assert result.returncode == 66
+    assert result.stderr == f"emb flow: cannot read {plan}\nnext: ls -l {plan}\n"
+    assert work.git("branch", "--list", "ember/*") == ""
+
+
+def test_flow_without_files_keeps_head(tmp_path: Path, env: dict[str, str]) -> None:
+    work = case("small-change-no-worker", tmp_path, env)
+    (work.eval / "replies/flow-start.code").write_text("0\n")
+    plan = flow_plan(work, [])
+    head = work.git("rev-parse", "HEAD")
+    result = work.emb("flow", "--plan", str(plan), "--start")
+    assert result.returncode == 0, result.stderr
+    flow_id = result.stdout.splitlines()[0].split()[1]
+    assert work.git("rev-parse", f"ember/flow/{flow_id}") == head
+    (work.eval / "replies/flow-status.out").write_text("{{FLOW}}")
+    assert work.emb("flow", "--status").stdout == flow_id
+    assert work.emb("flow", "--status=another").stdout == "another"
+
+
+def test_flow_start_canned_failure_builds_nothing(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    work = case("flow-gap-check-first", tmp_path, env)
+    (work.eval / "replies/flow-start.code").write_text("75\n")
+    (work.eval / "replies/flow-start.err").write_text("refused {{PLAN}}\n")
+    plan = flow_plan(work)
+    result = work.emb("flow", "--plan", str(plan), "--start")
+    assert result.returncode == 75
+    assert result.stderr == f"refused {plan}\n"
+    assert not work.git("branch", "--list", "ember/*")
+    assert json.loads((work.eval / "state.json").read_text())["flows"] == {}
+
+
+def test_flow_cleanup_keeps_dirty_worktree(tmp_path: Path, env: dict[str, str]) -> None:
+    work = case("flow-gap-check-first", tmp_path, env)
+    result = work.emb("flow", "--plan", str(flow_plan(work)), "--start")
+    flow_id = result.stdout.splitlines()[0].split()[1]
+    branch = f"ember/flow/{flow_id}"
+    tree = work.work / ".ember/worktrees" / flow_id
+    extra = tree / "untracked.txt"
+    extra.write_text("kept\n")
+    merged = work.emb(
+        "merge", branch, "--into", "claude/flow-gap-check-first", "--verdict", "keep"
+    )
+    assert merged.returncode == 0, merged.stderr
+    assert f"kept {branch}: the worktree {tree} has changes" in merged.stdout
+    assert extra.read_text() == "kept\n"
+    extra.unlink()
+    cleaned = work.emb(
+        "cleanup", "--merged-into", "claude/flow-gap-check-first", "--branch", branch
+    )
+    assert cleaned.returncode == 0, cleaned.stderr
+    assert f"removed {branch}: removed worktree {tree}" in cleaned.stdout
+    assert not tree.exists()
+    assert not work.git("branch", "--list", branch)
+
+
+@pytest.mark.parametrize("code", [0, 83])
+def test_panel_start_writes_summary(
+    tmp_path: Path, env: dict[str, str], code: int
+) -> None:
+    work = case("panel-named-members-compared", tmp_path, env)
+    (work.eval / "replies/panel-start.code").write_text(str(code))
+    result = work.emb("panel", "--question-file", work.brief(), "--dir", ".")
+    assert result.returncode == code, result.stderr
+    panel_id = result.stdout.splitlines()[0].removeprefix("panel ")
+    assert re.fullmatch(r"panel-\d{8}-\d{6}-[0-9a-f]{6}", panel_id)
+    summary = work.eval / "runs" / panel_id / "summary.md"
+    assert f"summary {summary}\n" in result.stdout
+    assert str(summary) in result.stderr
+    assert summary.stat().st_mode & 0o777 == 0o600
+    text = summary.read_text()
+    assert text.startswith(f"# Panel {panel_id}\n\nCheckout: {work.work}\n")
+    assert "compute_totals" in text
+    assert "Reason: the turn ended with no reply\n\n(no answer)" in text
+    state = json.loads((work.eval / "state.json").read_text())
+    assert state["panels"] == {panel_id: {"summary": str(summary)}}
+    (work.eval / "replies/panel-status.out").write_text("{{PANEL}} {{SUMMARY}}")
+    assert work.emb("panel", "--status").stdout == f"{panel_id} {summary}"
+    assert work.emb("panel", "--status=another").stdout == (
+        f"another {work.eval}/runs/another/summary.md"
+    )
+
+
+def test_plan_and_directory_templates(tmp_path: Path, env: dict[str, str]) -> None:
+    work = case("flow-gap-check-first", tmp_path, env)
+    plan = flow_plan(work)
+    result = work.emb(
+        "flow", "--plan", "../plan.json", "--dir", "/unused", "--dry-run", "--json"
+    )
+    data = json.loads(result.stdout)
+    assert data["plan"] == str(plan)
+    assert data["dir"] == str(work.work)
+    assert str(plan) in data["gapcheck"]
+    (work.eval / "replies/gapcheck-brief.out").write_text("{{PLAN}} {{DIR}}")
+    plan.write_text("not JSON")
+    result = work.emb("gapcheck", "--brief", "--plan", "../plan.json", "--dir", "..")
+    assert result.stdout == f"{plan} {tmp_path}"
+
+
+@pytest.mark.parametrize("name", CASES[-4:-1])
+def test_flow_case_reports_have_reference_fields(
+    tmp_path: Path, env: dict[str, str], name: str
+) -> None:
+    work = case(name, tmp_path, env)
+    gap = json.loads(work.emb("gapcheck", "--json").stdout)
+    assert set(gap) == {
+        "plan",
+        "plan_steps",
+        "failure_model",
+        "reviewer",
+        "run",
+        "steps",
+        "ranked",
+        "counts",
+        "uncovered_steps",
+        "unknown_steps",
+        "parse_error",
+    }
+    assert set(gap["counts"]) == {"high", "medium", "low"}
+    assert gap["uncovered_steps"] == gap["unknown_steps"] == []
+    assert gap["parse_error"] is None
+    assert gap["counts"] == {
+        harm: sum(g["harm"] == harm for g in gap["ranked"])
+        for harm in ("high", "medium", "low")
+    }
+    if name == "flow-lead-stop-waits":
+        assert gap["ranked"] == []
+        assert gap["counts"] == {"high": 0, "medium": 0, "low": 0}
+    for _ in range(2 if name == "flow-lead-stop-waits" else 1):
+        report = json.loads(work.emb("flow", "--watch", "flow-id", "--json").stdout)
+        assert set(report) == {
+            "event",
+            "flow",
+            "status",
+            "reason",
+            "exit",
+            "branch",
+            "worktree",
+            "tip",
+            "dir",
+            "tasks",
+            "stops",
+            "abandoned",
+            "next",
+        }
+        for task in report["tasks"]:
+            assert set(task) == {
+                "id",
+                "status",
+                "reason",
+                "round",
+                "writer_run",
+                "branch",
+                "worktree",
+                "merge_commit",
+                "outside_files",
+                "cleanup",
+                "choices",
+                "findings",
+                "finding_details",
+            }
+
+
+def test_default_choices_include_multi_and_panel() -> None:
+    for name in (
+        "choices-claim.out",
+        "choices-read-id.out",
+        "choices-read.out",
+        "menu.json",
+    ):
+        data = json.loads((STUBS / "replies" / name).read_text())
+        menu = data if name == "menu.json" else data["menu"]
+        assert menu["multi.runs_as"] == {
+            "value": "ask",
+            "state": "ask",
+            "reason": "asks at each run",
+        }
+        assert menu["panel.members"] == {"value": [], "state": "empty", "members": []}

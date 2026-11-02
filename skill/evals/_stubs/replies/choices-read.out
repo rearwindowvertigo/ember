@@ -47,6 +47,14 @@
       "value": "cli",
       "layer": "default"
     },
+    "multi.runs_as": {
+      "value": "ask",
+      "layer": "default"
+    },
+    "panel.members": {
+      "value": [],
+      "layer": "default"
+    },
     "sandbox.codex": {
       "value": "on",
       "layer": "default"
@@ -77,7 +85,7 @@
     }
   },
   "claim": null,
-  "generation": 2,
+  "generation": 3,
   "errors": [],
   "source_error": false,
   "menu": {
@@ -98,6 +106,16 @@
       "effort": "medium",
       "run_as": null,
       "reason": null
+    },
+    "multi.runs_as": {
+      "value": "ask",
+      "state": "ask",
+      "reason": "asks at each run"
+    },
+    "panel.members": {
+      "value": [],
+      "state": "empty",
+      "members": []
     }
   }
 }

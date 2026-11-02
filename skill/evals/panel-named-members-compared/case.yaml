@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: panel-named-members-compared
+expected_outcome: |
+  Claude claims, names the members and OpenRouter credit, and starts the named panel in the background. On exit 83 it reads the whole summary, compares in five parts, checks tools/report.py including the nonexistent compute_totals name, and reports the failed member and its reason without a forced close.
+context:
+  scaffold_script: place-files.sh

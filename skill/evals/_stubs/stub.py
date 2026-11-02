@@ -13,18 +13,23 @@ and the number of earlier calls on that route: the first of
     .json        standard output when the call has --json, a template
     .err         standard error, a template
     .code        the exit code (default 0)
-    .files/      a tree committed in the run's worktree (run-start, run-send)
+    .files/      a tree committed in a run or flow worktree
     .untracked/  a tree left uncommitted in the run's worktree
     .reply       the turn's reply text, a template
+    .summary     a panel's summary text, a template
 
 Templates replace `{{ID}}`, `{{RUN}}`, `{{BRANCH}}`, `{{WORKTREE}}`, `{{TIP}}`,
-`{{TARGET}}` and `{{EVAL}}`. A folder named `pycache` in a tree is placed as
+`{{TARGET}}`, `{{EVAL}}`, `{{FLOW}}`, `{{PANEL}}`, `{{PLAN}}`, `{{DIR}}`
+and `{{SUMMARY}}`. A folder named `pycache` in a tree is placed as
 `__pycache__` and a name ending in `.placeholder` loses that ending, which the
 repository's ignore rules would otherwise leave out of the kit.
 
 `run-start`, `run-send`, `run-recover`, `run-status`, `run-close`, `merge`,
 `cleanup` and `ground` are built from the call and the repository unless the
-reply gives `.out` or a non-zero `.code`. `help` prints the matching section
+reply gives `.out` or a non-zero `.code`. `flow-start` also builds a branch
+when its reply has neither override. `panel-start` writes a summary whenever
+its reply has `.summary`, including with a non-zero `.code`.
+`help` prints the matching section
 of `replies/help.out`. With `EMBER_EVAL_SETUP` set, a call is neither logged
 nor counted, so a case can start a run while it is set up.
 
@@ -48,7 +53,7 @@ EVAL = Path(os.environ.get("EMBER_EVAL_DIR") or Path(__file__).resolve().parent.
 REPLIES = EVAL / "replies"
 STATE = EVAL / "state.json"
 LOG = EVAL / "calls.log"
-PARTS = (".out", ".json", ".err", ".code", ".files", ".untracked", ".reply")
+PARTS = (".out", ".json", ".err", ".code", ".files", ".untracked", ".reply", ".summary")
 RUN_MODES = ("send", "screen", "interrupt", "attach", "close", "recover", "status")
 OWNER_OPTIONS = ("--set", "--clear", "--once", "--clear-once")
 REPLY_MARK = "--- reply ---"
@@ -182,6 +187,16 @@ def route(args: list[str]) -> str:
         return "run-start"
     if command in ("ground", "merge", "cleanup", "deps", "skill"):
         return command
+    modes = {
+        "gapcheck": ("brief", "reply"),
+        "flow": ("dry-run", "start", "watch", "status", "lead", "resume"),
+        "panel": ("dry-run", "status", "recover"),
+    }
+    if command in modes:
+        for mode in modes[command]:
+            if has(rest, f"--{mode}"):
+                return f"{command}-{mode}"
+        return "panel-start" if command == "panel" else command
     return "unknown"
 
 
@@ -306,7 +321,7 @@ def load_state() -> dict[str, Any]:
     """Read the stub's state.
 
     Returns:
-        `counters` by route and `runs` by id.
+        `counters` by route and `runs`, `flows` and `panels` by id.
     """
     try:
         state = json.loads(STATE.read_text())
@@ -314,6 +329,8 @@ def load_state() -> dict[str, Any]:
         state = {}
     state.setdefault("counters", {})
     state.setdefault("runs", {})
+    state.setdefault("flows", {})
+    state.setdefault("panels", {})
     return state
 
 
@@ -756,6 +773,119 @@ def run_other(
     return Reply(0, turn_block(run, 0, commits[-1] if commits else None))
 
 
+# emb flow and emb panel ----------------------------------------------------
+
+
+def flow_start(
+    args: list[str], state: dict[str, Any], base: Path | None, variables: dict[str, str]
+) -> Reply:
+    """Build a flow branch and commit the reply tree with the plan's subject."""
+    plan_path = variables["PLAN"]
+    try:
+        plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
+        if not isinstance(plan, dict):
+            raise ValueError("not an object")
+    except OSError, ValueError:
+        return Reply(
+            66, err=f"emb flow: cannot read {plan_path}\nnext: ls -l {plan_path}\n"
+        )
+    directory = Path(plan.get("dir") or variables["DIR"]).resolve()
+    repo = main_checkout(directory)
+    flow_id = new_run_id("flow")
+    branch = f"ember/flow/{flow_id}"
+    worktree = repo / ".ember" / "worktrees" / flow_id
+    common = Path(out(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    exclude = common / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    current = exclude.read_text() if exclude.exists() else ""
+    if ".ember/" not in current.splitlines():
+        exclude.write_text(current.rstrip("\n") + "\n.ember/\n")
+    head = out(directory, "rev-parse", "HEAD")
+    git(repo, "worktree", "add", "-q", "-b", branch, str(worktree), head)
+    tree = part(base, ".files")
+    if tree is not None:
+        copy_tree(tree, worktree)
+        git(worktree, "add", "-A")
+        if git(worktree, "diff", "--cached", "--quiet", check=False).returncode:
+            tasks = plan.get("tasks") or []
+            first = tasks[0] if tasks else {}
+            task = str(first.get("task", "")).splitlines()
+            subject = (
+                first.get("subject")
+                or (
+                    f"{first.get('id', flow_id)}: {task[0] if task else 'Flow changes'}"
+                )[:72]
+            )
+            trailers = plan.get("trailers") or []
+            message = subject + ("\n\n" + "\n".join(trailers) if trailers else "")
+            git(worktree, "commit", "-q", "--no-verify", "-m", message)
+    state["flows"][flow_id] = {
+        "dir": str(directory),
+        "branch": branch,
+        "worktree": str(worktree),
+    }
+    return Reply(
+        0,
+        f"flow {flow_id}\nbranch {branch}\nworktree {worktree}\n",
+        f"next: emb flow --watch {flow_id} --json\n",
+    )
+
+
+def panel_start(
+    state: dict[str, Any], base: Path | None, variables: dict[str, str], as_json: bool
+) -> Reply:
+    """Write a panel's summary even when its canned result reports failure."""
+    panel_id = new_run_id("panel")
+    summary = EVAL / "runs" / panel_id / "summary.md"
+    summary.parent.mkdir(parents=True, exist_ok=True)
+    variables.update(PANEL=panel_id, SUMMARY=str(summary))
+    with summary.open("w", encoding="utf-8") as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(read_part(base, ".summary", variables))
+    state["panels"][panel_id] = {"summary": str(summary)}
+    return canned_reply(base, variables, as_json)
+
+
+def record_variables(args: list[str], state: dict[str, Any]) -> dict[str, str]:
+    """Resolve plan, flow and panel template values for the current call."""
+    plan_path = option(args, "--plan")
+    plan: dict[str, Any] = {}
+    if plan_path:
+        try:
+            value = json.loads(Path(plan_path).expanduser().read_text(encoding="utf-8"))
+            if isinstance(value, dict):
+                plan = value
+        except OSError, ValueError:
+            pass
+    directory = plan.get("dir") or option(args, "--dir") or os.getcwd()
+    flow_id = next(reversed(state["flows"]), "")
+    panel_id = next(reversed(state["panels"]), "")
+    if args and args[0] == "flow":
+        flow_id = next(
+            (
+                option(args, flag)
+                for flag in ("--watch", "--status", "--lead", "--resume")
+                if option(args, flag)
+            ),
+            flow_id,
+        )
+    if args and args[0] == "panel":
+        panel_id = option(args, "--status") or option(args, "--recover") or panel_id
+    variables = {
+        "FLOW": flow_id,
+        "PANEL": panel_id,
+        "PLAN": str(Path(plan_path).expanduser().resolve()) if plan_path else "",
+        "DIR": str(Path(directory).expanduser().resolve()),
+        "SUMMARY": str(EVAL / "runs" / panel_id / "summary.md") if panel_id else "",
+    }
+    flow = state["flows"].get(flow_id)
+    if flow:
+        variables.update(BRANCH=flow["branch"], WORKTREE=flow["worktree"])
+        if branch_exists(Path(flow["dir"]), flow["branch"]):
+            variables["TIP"] = out(flow["dir"], "rev-parse", flow["branch"])
+    return variables
+
+
 # emb merge and emb cleanup -------------------------------------------------
 
 
@@ -771,9 +901,12 @@ def cleanup_branch(repo: Path, branch: str, state: dict[str, Any]) -> str:
         The `removed` or `kept` line.
     """
     match = re.fullmatch(r"ember/(codex|opencode|claude)/(.+)", branch)
-    if match is None:
+    flow_match = re.fullmatch(
+        r"ember/flow/(flow-[0-9]{8}-[0-9]{6}-[0-9a-f]{6})", branch
+    )
+    if match is None and flow_match is None:
         return f"kept {branch}: not an Ember run branch; next: git branch -d {branch}"
-    run_id = match.group(2)
+    run_id = match.group(2) if match else flow_match.group(1)
     main = main_checkout(repo)
     worktree = main / ".ember" / "worktrees" / run_id
     parts = []
@@ -921,7 +1054,7 @@ def merge(args: list[str], state: dict[str, Any], variables: dict[str, str]) -> 
 
 
 def cleanup(args: list[str], state: dict[str, Any], variables: dict[str, str]) -> Reply:
-    """Clean up contained run branches as `emb cleanup` does.
+    """Clean up contained run and flow branches as `emb cleanup` does.
 
     Args:
         args: The arguments after `cleanup`.
@@ -1219,6 +1352,10 @@ def dispatch(
         return Reply(
             69, err=f"emb eval stub: no reply for {name} (emb {' '.join(args)})\n"
         )
+    if name == "flow-start" and not canned(base):
+        return flow_start(rest, state, base, variables)
+    if name == "panel-start" and part(base, ".summary") is not None:
+        return panel_start(state, base, variables, as_json)
     return canned_reply(base, variables, as_json)
 
 
@@ -1240,6 +1377,7 @@ def main(argv: list[str]) -> int:
     base = reply_base(name, max(count, 1))
     stamp = datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
     variables = {
+        **record_variables(argv, state),
         "EVAL": str(EVAL),
         "ID": option(argv, "--id")
         or option(argv, "--finish")

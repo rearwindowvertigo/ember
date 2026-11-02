@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: owner-away-named-workers
+expected_outcome: |
+  Claude uses the explicitly named Codex gpt-6-astra at high effort for both flow workers and the gap reviewer despite ask rows. It writes no owner setting and asks no worker question. After the low gap answer it starts the flow, verifies, gives a verdict and merges with emb merge.
+context:
+  scaffold_script: place-files.sh

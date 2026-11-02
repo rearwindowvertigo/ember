@@ -1,0 +1,54 @@
+{
+  "event": "end",
+  "flow": "{{FLOW}}",
+  "status": "done",
+  "reason": null,
+  "exit": 0,
+  "branch": "{{BRANCH}}",
+  "worktree": "{{WORKTREE}}",
+  "tip": "{{TIP}}",
+  "dir": "{{DIR}}",
+  "tasks": [
+    {
+      "id": "item",
+      "status": "merged",
+      "reason": null,
+      "round": 0,
+      "writer_run": null,
+      "branch": null,
+      "worktree": null,
+      "merge_commit": "{{TIP}}",
+      "outside_files": [],
+      "cleanup": [],
+      "choices": [],
+      "findings": {
+        "must": 0,
+        "should": 0,
+        "lead": 0
+      },
+      "finding_details": []
+    },
+    {
+      "id": "json",
+      "status": "merged",
+      "reason": null,
+      "round": 0,
+      "writer_run": null,
+      "branch": null,
+      "worktree": null,
+      "merge_commit": "{{TIP}}",
+      "outside_files": [],
+      "cleanup": [],
+      "choices": [],
+      "findings": {
+        "must": 0,
+        "should": 0,
+        "lead": 0
+      },
+      "finding_details": []
+    }
+  ],
+  "stops": [],
+  "abandoned": [],
+  "next": "next: review the flow branch and run emb merge ember/flow/{{FLOW}} --into <your branch> --verdict keep --dir {{DIR}}"
+}

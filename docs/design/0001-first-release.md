@@ -458,7 +458,9 @@ plan check before a Claude Workflow runs `assets/plan-check-brief.md` with
 the `single.reviewer` row.
 
 L2. Eval cases in `skill/evals/` run in a real Claude session against a stub
-`emb` command and check the skill's rules.
+`emb` command and check the skill's rules. The cases include flows, panels
+and the gap check, with stub replies for `emb gapcheck`, `emb flow` and
+`emb panel`.
 
 L3. `emb skill install` links the skill into Claude Code's skills folder:
 `$CLAUDE_CONFIG_DIR/skills/ember` when `CLAUDE_CONFIG_DIR` is set and not

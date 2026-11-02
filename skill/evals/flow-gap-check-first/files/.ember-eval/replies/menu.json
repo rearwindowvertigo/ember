@@ -1,0 +1,30 @@
+{
+  "single.writer": {
+    "value": "codex:gpt-6.1-sol",
+    "state": "set",
+    "engine": "codex",
+    "model": "gpt-6.1-sol",
+    "effort": "high",
+    "run_as": null,
+    "reason": null
+  },
+  "single.reviewer": {
+    "value": "codex:gpt-6.1-sol-mini",
+    "state": "set",
+    "engine": "codex",
+    "model": "gpt-6.1-sol-mini",
+    "effort": "medium",
+    "run_as": null,
+    "reason": null
+  },
+  "multi.runs_as": {
+    "value": "flow",
+    "state": "set",
+    "reason": null
+  },
+  "panel.members": {
+    "value": [],
+    "state": "empty",
+    "members": []
+  }
+}

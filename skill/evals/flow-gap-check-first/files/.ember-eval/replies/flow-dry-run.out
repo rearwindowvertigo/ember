@@ -1,0 +1,9 @@
+writer: codex:gpt-6.1-sol@high (menu)
+reviewer: codex:gpt-6.1-sol-mini@medium (menu)
+base: 0000000000000000000000000000000000000000
+check: python3 -m unittest discover -s tests
+wave 1:
+  item: tools/report.py, tests/test_report.py
+wave 2:
+  json: tools/report.py, tests/test_report.py
+gap check: emb gapcheck --plan {{PLAN}} --dir {{DIR}} --engine codex --model gpt-6.1-sol-mini --effort medium
