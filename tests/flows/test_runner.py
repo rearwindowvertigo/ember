@@ -292,7 +292,8 @@ def test_writer_failure_and_provider_halt(h: Harness, failure: str) -> None:
     h.create([task("a", text=failure), task("b")], parallel=1)
     flow = h.run()
     assert flow["tasks"][0]["status"] == "stopped"
-    assert "next:" in flow["tasks"][0]["reason"]
+    assert "next:" not in flow["tasks"][0]["reason"]
+    assert "owner:" not in flow["tasks"][0]["reason"]
     if failure.startswith("@provider"):
         assert flow["halted"] == "provider error on codex; new runs halted"
         assert flow["tasks"][1]["writer_run"] is None
@@ -302,6 +303,46 @@ def test_writer_failure_and_provider_halt(h: Harness, failure: str) -> None:
         assert resumed["tasks"][1]["status"] == "merged"
     else:
         assert flow["tasks"][1]["status"] == "merged"
+
+
+@pytest.mark.parametrize("role", ["writer", "reviewer"])
+@pytest.mark.parametrize(
+    ("error_output", "reason"),
+    [
+        (
+            "emb run: failed\nnext: retry\n\n  detail stays  \n\towner: lead\n"
+            " \t\nlast diagnostic\n  next: inspect\nowner: user\n",
+            "emb run: failed;   detail stays  ; last diagnostic",
+        ),
+        (
+            "detail next: retry\n  detail owner: lead\nnext steps\nowner name\n",
+            "detail next: retry;   detail owner: lead; next steps; owner name",
+        ),
+        ("next: retry\n", "the run exited 77"),
+        ("\towner: lead\n", "the run exited 77"),
+        ("\n  next: retry\n \t\n\towner: lead\n", "the run exited 77"),
+        ("\n \t\n", "the run exited 77"),
+        ("", "the run exited 77"),
+    ],
+)
+def test_run_error_stop_reason(
+    h: Harness, role: str, error_output: str, reason: str
+) -> None:
+    """Keep diagnostics in order and omit next and owner instruction lines."""
+    h.create()
+    instance = h.instance()
+    item = instance.flow["tasks"][0]
+
+    def fail(core: Core) -> int:
+        """Write the run's error output and return its failure code."""
+        assert core.err is not None
+        core.err.write(error_output)
+        return 77
+
+    assert not instance.call(item, role, fail)
+    saved = h.flow()["tasks"][0]
+    assert saved["status"] == "stopped"
+    assert saved["reason"] == reason
 
 
 def test_failed_check_resumes_with_a_distinct_log(h: Harness) -> None:

@@ -6,12 +6,13 @@ and listen to the signals; every read and save runs in a task.
 """
 
 import io
+import os
 import subprocess
 from collections import deque
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QProcessEnvironment, Signal
 from PySide6.QtWidgets import QDialog, QWidget
 
 from ember import choices, db, terminals
@@ -414,12 +415,19 @@ class AppContext(QObject):
     def open_run_terminal(self, run_id: str) -> None:
         """Open a terminal window on a run's session, as `emb run --attach`.
 
+        The native process's activation token is consumed for this launch.
         A failure emits `error` with what `emb run` reported.
 
         Args:
             run_id: The run.
         """
-        env = self.env
+        env = dict(self.env)
+        env.pop("XDG_ACTIVATION_TOKEN", None)
+        # Qt's tray adaptor sets the native environment with qputenv.
+        token = QProcessEnvironment.systemEnvironment().value("XDG_ACTIVATION_TOKEN")
+        os.unsetenv("XDG_ACTIVATION_TOKEN")
+        if token:
+            env["XDG_ACTIVATION_TOKEN"] = token
 
         def opened(result: tuple[int, str]) -> None:
             code, text = result

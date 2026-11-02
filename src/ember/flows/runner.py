@@ -308,7 +308,11 @@ class _Runner:
             recovered = runs.load(run_id, self.env)
             if recovered.turn_state == runs.COMMITTED:
                 return not self.shutdown.is_set()
-        reason = "; ".join(line for line in err.getvalue().splitlines() if line.strip())
+        reason = "; ".join(
+            line
+            for line in err.getvalue().splitlines()
+            if line.strip() and not line.lstrip().startswith(("next:", "owner:"))
+        )
         if code == 124:
             reason = f"stalled; the turn keeps running in {run_id}"
         if code == 73:
