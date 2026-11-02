@@ -8,6 +8,7 @@ positional arguments:
     choices   read settings and choices, claim or set them
     engines   show whether each engine is connected, or its models
     run       start a worker run, or work with one
+    gapcheck  review a plan for undefined or contradictory behaviour
     ground    print what to read before choosing a worker
     merge     merge a reviewed worker branch, then clean it up
     cleanup   remove merged worker branches, their worktrees and sessions
@@ -96,6 +97,31 @@ waiting and output:
   --quiet              print only the first line and summary
   --stall MINUTES      minutes without a screen change before exit 124
                        (default 10)
+==> emb gapcheck --help <==
+usage: emb gapcheck [-h] --plan FILE [--dir DIR]
+                    [--engine {codex,opencode,claude}] [--model MODEL]
+                    [--effort EFFORT] [--claim ID] [--read PATH] [--window]
+                    [--stall MINUTES] [--json] [--brief] [--reply FILE]
+
+Review a plan in one read-only run, print its brief, or read a reply from
+another worker.
+
+options:
+  -h, --help            show this help message and exit
+  --plan FILE           the plan
+  --dir DIR             checkout folder (default: .)
+  --engine {codex,opencode,claude}
+                        reviewer engine
+  --model MODEL         reviewer model
+  --effort EFFORT       reviewer effort
+  --claim ID            the existing claim id
+  --read PATH           an additional readable path; repeatable
+  --window              open a run window
+  --stall MINUTES       minutes without a screen change before exit 124
+                        (default 10)
+  --json                print a JSON result
+  --brief               print the brief only
+  --reply FILE          read an existing reply
 ==> emb ground --help <==
 usage: emb ground [-h] [--dir DIR] [--json]
 

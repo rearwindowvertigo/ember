@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ember/gapcheck-reply/1",
+  "title": "Gap check reply",
+  "description": "A read-only review of a plan, with one entry per step and a list of undefined or contradictory behaviours. A step with no gaps has an empty gaps list.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["steps"],
+  "properties": {
+    "steps": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/step"}
+    }
+  },
+  "$defs": {
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step", "gaps"],
+      "properties": {
+        "step": {"type": "integer", "minimum": 1},
+        "gaps": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/gap"}
+        }
+      }
+    },
+    "gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gap", "harm", "why", "default"],
+      "properties": {
+        "gap": {"type": "string", "minLength": 1},
+        "harm": {"type": "string", "minLength": 1, "enum": ["high", "medium", "low"]},
+        "why": {"type": "string", "minLength": 1},
+        "default": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
