@@ -92,10 +92,18 @@ def test_driver_needs_its_abstract_methods() -> None:
 
 
 def test_load_driver_from_engine_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    received: list[object] = []
+
+    def factory(env: object) -> Minimal:
+        received.append(env)
+        return Minimal()
+
     module = types.ModuleType("ember.engines.codex")
-    module.driver = Minimal  # type: ignore[attr-defined]
+    module.driver = factory  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "ember.engines.codex", module)
-    assert isinstance(engines.load_driver("codex"), Minimal)
+    env = {"HOME": "/home/test"}
+    assert isinstance(engines.load_driver("codex", env), Minimal)
+    assert received == [env]
 
 
 def test_load_driver_without_module(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,7 +114,7 @@ def test_load_driver_without_module(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_load_driver_that_is_not_a_driver(monkeypatch: pytest.MonkeyPatch) -> None:
     module = types.ModuleType("ember.engines.claude")
-    module.driver = object  # type: ignore[attr-defined]
+    module.driver = lambda env: object()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "ember.engines.claude", module)
     with pytest.raises(engines.DriverMissingError, match="is not a Driver"):
         engines.load_driver("claude")

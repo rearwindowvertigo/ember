@@ -818,6 +818,27 @@ def test_start_failure_after_the_run_folder_exists_is_recorded(
     assert str(error) in (run.last_reason or "")
 
 
+def test_failed_start_calls_driver_close_and_keeps_the_start_error(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    closed: list[str] = []
+
+    class Raising(StubDriver):
+        def command(self, run: record.Run, first_message: str) -> LaunchSpec:
+            raise OSError("disk full")
+
+        def close(self, run: record.Run) -> None:
+            closed.append(run.id)
+            raise RuntimeError("clean-up failed too")
+
+    driver = Raising("claude", script_path(env))
+    assert _start(_core(env, driver), repo, _brief(tmp_path, "Task\n")) == 1
+    out = capsys.readouterr().out
+    run_id = _run_id(out)
+    assert closed == [run_id]
+    assert "disk full" in (record.load(run_id, env).last_reason or "")
+
+
 def test_settings_database_error_is_1(
     tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

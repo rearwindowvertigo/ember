@@ -221,7 +221,9 @@ class Core:
             err: Standard error; `None` for `sys.stderr`.
         """
         self.env: Mapping[str, str] = os.environ if env is None else env
-        self.load_driver = load_driver or engines.load_driver
+        self.load_driver = load_driver or (
+            lambda name: engines.load_driver(name, self.env)
+        )
         self.stall_seconds = stall_minutes * 60
         self.quiet = quiet
         self.poll_seconds = POLL_SECONDS if poll_seconds is None else poll_seconds
@@ -750,9 +752,11 @@ class Core:
                     run, driver, brief, options, settings, common, main
                 )
             except RunError as error:
+                _close_quietly(driver, run)
                 self._record_exit(run, error.code, str(error), status=record.FAILED)
                 raise
             except KeyboardInterrupt as error:
+                _close_quietly(driver, run)
                 self._record_exit(
                     run, exits.INTERRUPTED, "interrupted", status=record.FAILED
                 )
@@ -763,6 +767,7 @@ class Core:
                     run=run_id,
                 ) from error
             except Exception as error:
+                _close_quietly(driver, run)
                 failure = _start_failure(run, error)
                 self._record_exit(run, failure.code, str(failure), status=record.FAILED)
                 raise failure from error
@@ -1569,3 +1574,13 @@ def _hash(path: Path) -> str | None:
         return digest.hexdigest()
     except OSError:
         return None
+
+
+def _close_quietly(driver: Driver, run: Run) -> None:
+    """Let the driver clean up after a failed start; its own errors are dropped.
+
+    The start's failure is the one reported, so a clean-up error must not
+    replace it.
+    """
+    with contextlib.suppress(Exception):
+        driver.close(run)

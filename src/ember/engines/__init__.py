@@ -216,7 +216,10 @@ class Driver(ABC):
     def close(self, run: Run) -> None:  # noqa: B027
         """Clean up the engine's own state before the core kills the session.
 
-        The default does nothing.
+        The core also calls it when a start fails after the driver was
+        chosen, whatever was or was not started, so it must be safe to call
+        more than once and on a run whose engine never started. The default
+        does nothing.
 
         Args:
             run: The run.
@@ -245,14 +248,16 @@ class Driver(ABC):
         """
 
 
-def load_driver(name: str) -> Driver:
+def load_driver(name: str, env: Mapping[str, str] | None = None) -> Driver:
     """Return the driver for an engine.
 
     Args:
         name: `codex`, `opencode` or `claude`.
+        env: The run's environment, passed to the driver; `None` reads
+            `os.environ`.
 
     Returns:
-        A new driver from `ember.engines.<name>.driver()`.
+        A new driver from `ember.engines.<name>.driver(env)`.
 
     Raises:
         DriverMissingError: `name` is not an engine, or Ember has no driver
@@ -266,7 +271,7 @@ def load_driver(name: str) -> Driver:
         if error.name != f"ember.engines.{name}":
             raise
         raise DriverMissingError(f"Ember has no driver for {name}") from error
-    driver = module.driver()
+    driver = module.driver(env)
     if not isinstance(driver, Driver):
-        raise DriverMissingError(f"ember.engines.{name}.driver() is not a Driver")
+        raise DriverMissingError(f"ember.engines.{name}.driver(env) is not a Driver")
     return driver

@@ -539,7 +539,7 @@ def test_run_start_status_and_close(
     monkeypatch.setattr(
         engines,
         "load_driver",
-        lambda name: stub.StubDriver(name, stub.script_path(run_env)),
+        lambda name, env=None: stub.StubDriver(name, stub.script_path(run_env)),
     )
     repo = stub.make_repo(tmp_path, run_env)
     brief = tmp_path / "brief.md"
