@@ -1,0 +1,5 @@
+panel {{PANEL}}
+member 1 codex:gpt-6-astra · default · answered · 31s · exit 0 · 246 bytes · run codex-20261102-120000-aaaaa1
+member 2 claude:opus · default · answered · 32s · exit 0 · 282 bytes · run claude-20261102-120000-aaaaa2
+member 3 opencode:deepseek/deepseek-v4.1-flash-1017 · default · failed · 33s · exit 80 · 0 bytes · run opencode-20261102-120000-aaaaa3
+summary {{SUMMARY}}

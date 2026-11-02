@@ -45,9 +45,9 @@ Do not fan out beyond what you can review.
 
 ## Claude Workflow
 
-Opt-in comes only from `/ember` or the owner's own words asking for a
-Workflow; loading the skill is not opt-in. A Workflow is one run and one
-claim, whatever its agent count.
+Opt-in comes from `/ember`, the owner's words asking for a Workflow, or
+saved `multi.runs_as=workflow` for multi-task work. Loading the skill is
+not opt-in. A Workflow is one run and one claim, whatever its agent count.
 
 Do not set a model or effort on `agent()`: agents use this session's.
 Give each editing agent `isolation: 'worktree'` and a schema that returns
@@ -67,28 +67,8 @@ agent and every later one run again.
 Verify, review and merge every editing result as the skill says, one
 branch at a time.
 
-## Plan check before a Claude Workflow
-
-A multi-task Claude Workflow starts only after this check.
-
-1. Write the plan with a Failure model: the cases it must handle, and the
-   cases it accepts.
-2. Fill `assets/plan-check-brief.md`: paste the plan where it says.
-3. Run it read-only by the `single.reviewer` row, under the run's claim:
-   - a CLI row:
-     `emb run --engine <engine> --read-only --dir <repo> --task-file <brief> --claim <id>`,
-     as a background command;
-   - a `claude` row with run-as `subagent`: a read-only general-purpose
-     subagent, without isolation, given the brief;
-   - a row that is not `set`, or `ask`: ask the owner live, as for any
-     picker.
-4. Read the reply. Ask each `harm: high` gap as its own question.
-5. Offer the remaining gaps together as one answer that accepts them into
-   the failure model.
-6. Put the answers into the plan before starting.
-
-Never let the reviewer decide missing behaviour: it finds gaps; the owner
-or you settle them.
+A Claude Workflow of two or more tasks starts only after the gap check
+in `references/gap-check.md`.
 
 ## Deadlines
 

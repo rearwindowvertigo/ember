@@ -320,8 +320,8 @@ missing items, each only when above zero.
 
 | Screen | Holds |
 |---|---|
-| Overview | Live runs; the last twenty finished runs. In 0.2.0 also flows with their tasks and steps |
-| Menu | The worker menu (C1) |
+| Overview | Live runs; the last twenty finished runs; flows with their tasks, and panels with their members (0.2.0) |
+| Menu | The worker menu (C1): single tasks, multi-task work and panel members |
 | Engines | One card per engine: logo, status, Use switch, sandbox switch, provider and checks; open for models, efforts and shortlists; OpenCode's OpenRouter model browser and filters; setup steps with copyable commands when not connected |
 | Dependencies | One tile per component, grouped (engines and apps, system tools, Ember's libraries): installed and newest version, status, and the update or install command; Claude Desktop installed and its version |
 | Settings | General: start at login, theme. Workers: worker network, terminal, sandbox read paths |
@@ -345,9 +345,16 @@ missing items, each only when above zero.
 - The app does not interrupt, close or send to a run.
 - While an engine's sandbox method is `none`, Overview and Engines show a
   warning naming the engine (I3).
+- Overview's Flows and Panels cards show flow tasks and panel members,
+  read-only. Runner gone and Process gone come from lifetime lock ownership
+  read through `/proc/locks`, after sixty seconds without a record update.
+  A stopped flow needs no runner. Show run expands a task's or member's
+  live or finished run row when that row is on Overview.
 - Menu holds the Writer and Reviewer pickers and, for a Claude model, how it
   runs (CLI or subagent). Each picker lists Ask each time, then the
   shortlisted models under their engine. Engines that are off are left out.
+  Multi-task work offers Ask each time, Flow and Claude Workflow. The Panel
+  card lists members with Add member and Remove, at most eight.
   One-time choices (C2) are not shown in the app.
 - Engines shows three cards side by side, each with the engine maker's logo.
   Models opens that engine's model list below the cards, with a switch per
@@ -385,6 +392,8 @@ J6. Run records are watched with Qt's `QFileSystemWatcher` (inotify), with a
 check every sixty seconds as a backstop. While the window is hidden, the app
 reads only what the tray needs, besides the reads at start and the engine
 status read after a run fails with a sign-in error; screens do not redraw.
+Flow and panel records are watched the same way, only while Overview is
+shown and the window is visible.
 
 J7. Theme follows the desktop's light or dark setting, with an override in
 Settings (System, Light, Dark).
@@ -450,15 +459,16 @@ them at once.
 ## L. Skill
 
 L1. An `ember` skill for Claude Code in `skill/`: `SKILL.md` and references
-for claims, runs and Claude agents; references for flows, panels and gap
-checks are added in 0.2.0. It covers grounding, claiming, choosing a worker,
-the editing boundary, briefs, following a run, verification against the
-review bar, reporting, merging and cleanup. Until `emb gapcheck` (H2), the
-plan check before a Claude Workflow runs `assets/plan-check-brief.md` with
-the `single.reviewer` row.
+for claims, runs and Claude agents. It covers grounding, claiming, choosing
+a worker, the editing boundary, briefs, following a run, verification against the
+review bar, reporting, merging and cleanup. Before a flow or a Claude
+Workflow of two or more tasks, the skill runs `emb gapcheck`. In 0.2.0 the
+skill adds references for flows, panels and the gap check.
 
 L2. Eval cases in `skill/evals/` run in a real Claude session against a stub
-`emb` command and check the skill's rules.
+`emb` command and check the skill's rules. The cases include flows, panels
+and the gap check, with stub replies for `emb gapcheck`, `emb flow` and
+`emb panel`.
 
 L3. `emb skill install` links the skill into Claude Code's skills folder:
 `$CLAUDE_CONFIG_DIR/skills/ember` when `CLAUDE_CONFIG_DIR` is set and not
@@ -520,6 +530,7 @@ Claude session against a stub `emb` command.
 3. Supporting commands (H, without H2).
 4. Dependencies (K) and the desktop app (J).
 5. Skill (L), packaging (M). 0.1.0 is released.
-6. For 0.2.0: gap check (H2), flows (F), panels (G).
+6. For 0.2.0: gap check (H2), flows (F), panels (G), then flows and panels
+   in the app and the skill (J2, L).
 
 Each step passes `make check` on its own and lands as its own pull request.

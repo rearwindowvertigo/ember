@@ -456,6 +456,18 @@ def update(
     return changed
 
 
+def is_run_folder(name: str) -> bool:
+    """Return whether a folder in the runs folder holds a run, not a flow or panel.
+
+    Args:
+        name: The folder's name.
+
+    Returns:
+        False for a flow or panel folder, True otherwise.
+    """
+    return not (_FLOW_ID.fullmatch(name) or _PANEL_ID.fullmatch(name))
+
+
 def list_runs(
     env: Mapping[str, str] | None = None,
 ) -> tuple[list[Run], list[RecordError]]:
@@ -476,7 +488,7 @@ def list_runs(
     runs: list[Run] = []
     errors: list[RecordError] = []
     for name in names:
-        if _FLOW_ID.fullmatch(name) or _PANEL_ID.fullmatch(name):
+        if not is_run_folder(name):
             continue
         try:
             runs.append(load(name, env))

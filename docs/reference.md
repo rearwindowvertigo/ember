@@ -2378,6 +2378,13 @@ app keeps the records it read last and Overview shows the reason with Try
 again, which reads the folder again at once. A run whose turn failed since
 the last read makes the app check the engines again.
 
+While Overview is shown, the app also reads `flow.json` and `panel.json`
+off the window's thread and watches their folders and record files, with
+the same sixty-second backstop and coalesced reads. It takes no lock and
+reads lifetime lock ownership from `/proc/locks`. It stops these reads and
+watches when Overview is left or the window is hidden. Unreadable flow and
+panel folders are counted in their cards.
+
 ### Commands
 
 An update, install or sign-in command runs only after the "Run this
@@ -2415,7 +2422,53 @@ command line:
 Overview's subtitle is the tray's status line. Above the lists, an alert
 names each engine that is on and whose `sandbox.<engine>` setting gives it
 no sandbox, read from the last settings snapshot, with Open Engines; an
-alert counts run records that could not be read.
+alert counts run records that could not be read. The cards appear in order:
+Flows, Panels, Live, Finished. Flows and Panels are hidden when they have
+neither readable nor unreadable records.
+
+The Flows card lists every active flow (`starting`, `running`, `checking`,
+`stopped`), oldest first, followed by the last five ended flows (`done`,
+`failed`), newest end time first. Each row shows an expand arrow, a badge,
+`<repository folder> · <n> tasks · <merged>/<n> merged`,
+`ember/flow/<id> · wave <n>` with its reason when set, and elapsed time or
+end time and duration.
+
+| Flow status | Badge |
+|---|---|
+| `starting` | Starting |
+| `running` | Running |
+| `checking` | Checking |
+| `stopped` | Waiting for Claude |
+| `done` | Done |
+| `failed` | Failed |
+| Runner missing after the grace period | Runner gone |
+
+Expanded, a flow shows its tasks in plan order: task id, status, round,
+writer engine and model, reason, number of reviews, last verdict and its
+must, should and lead counts. A task-specific writer overrides the flow's
+writer. Current writer and review run ids are selectable text. Show run
+appears beside an id with a live or finished row on Overview; it expands
+that row and scrolls to it.
+
+The Panels card lists every running panel, oldest first, followed by the
+last five ended panels (`done`, `incomplete`), newest end time first. A row
+shows the badge Running, Done, Incomplete or Process gone,
+`Panel · <n> members · <answered>/<n> answered`, the repository folder and
+the first non-empty question line cut to eighty characters, and elapsed
+time or end time and duration. Expanded, it shows each member's number,
+engine, model, effort (or default), status, seconds, reason and changed
+paths, with its run id and Show run when available. It then lists left-out
+members and their reasons and the selectable path to `summary.md`.
+
+A starting, running or checking flow shows Runner gone, and a running
+panel shows Process gone, when its lifetime lock is not held and its
+record has not been updated for more than sixty seconds. A stopped flow
+needs no runner. An unreadable lock table or runtime folder leaves the
+stored status on screen. The app never takes these locks or creates lock
+files. Flow and panel rows are read-only; one row per card can be expanded.
+Rows and expanded details survive unrelated record changes. Elapsed times
+update every thirty seconds while shown, without rereading records or
+rebuilding expanded details.
 
 The Live card holds one row per live run, oldest first: an expand arrow,
 the status badge (Starting, Running, Waiting for Claude),
@@ -2442,11 +2495,19 @@ when the row collapses, the run leaves the live list, the screen is left or
 the window hides, and shows "Session ended" when the session ends.
 
 When the runs folder cannot be read, the screen shows the reason and Try
-again in place of the cards.
+again in place of the cards. When only the flow and panel read fails, an
+alert replaces those two cards: "Ember could not read the flow and panel
+records: <reason>." Try again reads them again. Unreadable individual
+records are counted inside their card, such as "1 flow record could not be
+read." The initial loading state waits for both record models. When there
+are no runs, flows or panels, Overview shows "No runs yet" and "Runs, flows
+and panels appear here when Claude starts them with `emb run`, `emb flow`
+or `emb panel`."
 
 ### Menu
 
-Menu shows the standing worker menu: the Writer and Reviewer pickers
+Menu shows the standing worker menu in three cards: Single tasks, Work of
+several tasks and Panel. Single tasks holds the Writer and Reviewer pickers
 (`single.writer`, `single.reviewer`). Each lists Ask each time (`ask`), then,
 for Codex, OpenCode and Claude in that order, each engine that is on and has
 shortlisted models, under the engine's name, with its models as
@@ -2463,7 +2524,35 @@ app's last engine status read, or before the first read the status cache the
 settings snapshot reports. When no engine
 offers a model, the pickers hold Ask each time only and the screen shows
 "Shortlist models in Engines to offer them here." with Open Engines.
-One-time choices are not shown. Each change saves at once.
+
+Work of several tasks holds Multi-task work (`multi.runs_as`): Ask each time
+(`ask`), Flow (`flow`) or Claude Workflow (`workflow`). It is available even
+when no engine offers a model.
+
+Panel lists `panel.members` in saved order. A member shows
+`<Engine> · <model> · <effort>`, omitting effort when none is set. A member
+whose engine is off, was not connected at its last check, or whose model is
+not shortlisted shows its saved `<engine>:<model>` value and a warning
+explaining how to change it. An invalid value also shows a removal warning.
+Each member has a Remove button. Add member lists shortlisted models of
+engines that are on, grouped by engine, excluding saved members. Choosing
+one appends it and returns the picker to Add member. With no members the
+card says "No members. Claude asks for members, or uses the ones it is given,
+each time." At eight members Add member is disabled and the card says
+"A panel has at most eight members."
+
+A member missing from its shortlist disables Add member, even when its
+engine is off or not connected. The warning asks the owner to remove those
+members or shortlist them in Engines. Remove saves only when every remaining
+member is shortlisted. Otherwise it sends no save, names the first remaining
+member to shortlist, and shows Remove all, which saves an empty list. An
+engine being off or not connected alone does not block saving. Add member
+is also disabled when no unused shortlisted model is offered.
+
+One-time choices are not shown. Each change saves at once with the settings
+generation check; choosing an already saved multi-task value saves nothing.
+Panel mutation controls stay disabled until the save resolves and the screen
+refreshes. A stale save reloads the settings and shows the app's stale alert.
 
 ### Settings
 

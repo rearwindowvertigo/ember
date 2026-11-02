@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: flow-lead-stop-waits
+expected_outcome: |
+  Claude reports the strict task lead stop, its reason, finding, no blocked tasks and every choice. With no runner live it waits for the owner before another watch or lead answer. It sends the owner decision in a correction file, watches in the background, then verifies, gives a verdict and merges the completed flow branch.
+context:
+  scaffold_script: place-files.sh

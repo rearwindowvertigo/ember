@@ -1,0 +1,9 @@
+writer: codex:gpt-6-astra@high (option)
+reviewer: codex:gpt-6-astra@high (option)
+base: {{HEAD}}
+check: python3 -m unittest discover -s tests
+wave 1:
+  before: tools/report.py, tests/test_report.py
+wave 2:
+  decimals: tools/report.py, tests/test_report.py
+gap check: emb gapcheck --plan {{PLAN}} --dir {{DIR}} --engine codex --model gpt-6-astra --effort high

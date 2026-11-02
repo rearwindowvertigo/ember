@@ -47,7 +47,11 @@ def _read(env: Mapping[str, str]) -> tuple[list[Run], int, list[str]]:
     runs, errors = record.list_runs(env)
     watch = [str(root)]
     try:
-        folders = sorted(entry for entry in root.iterdir() if entry.is_dir())
+        folders = sorted(
+            entry
+            for entry in root.iterdir()
+            if entry.is_dir() and record.is_run_folder(entry.name)
+        )
     except OSError:
         folders = []
     for folder in folders:
