@@ -306,6 +306,7 @@ class MenuScreen(QWidget):
         self.member_removes: dict[str, QPushButton] = {}
         self._panel_pending = False
         self._panel_refresh = False
+        self._panel_refresh_failed = False
         self._remove_blocker: str | None = None
         self.remove_warning = ToneLine("warning")
         panel_layout.addWidget(self.remove_warning)
@@ -441,27 +442,37 @@ class MenuScreen(QWidget):
         chain_tab_order(order)
 
     def _settings_changed(self, *_args: object) -> None:
-        """Redraw settings, completing a failed save's requested refresh."""
-        if self._panel_refresh:
-            self._panel_pending = self._panel_refresh = False
+        """Redraw settings, allowing a retry after the Panel refresh failed."""
+        if self._panel_refresh_failed:
+            self._panel_refresh_failed = False
+            self.context.reload_settings(self._panel_done)
         self._redraw()
 
     def _panel_done(self, *_args: object) -> None:
         """Release Panel controls after the save and its settings refresh."""
-        self._panel_pending = self._panel_refresh = False
+        self._panel_pending = self._panel_refresh = self._panel_refresh_failed = False
         self._redraw()
 
-    def _save_failed(self, *_args: object) -> None:
+    def _save_failed(self, message: str) -> None:
         """Refresh after a failed Panel save before enabling another edit."""
-        if self._panel_pending:
+        # The context emits errors for other actions and earlier queued saves.
+        # Its save callback leaves the queue only when that save starts; success
+        # calls _panel_done, while a stale save drops the queue and emits stale.
+        queued = any(done == self._panel_done for _, done in self.context._save_queue)
+        if (
+            self._panel_pending
+            and not queued
+            and not self._panel_refresh
+            and message.startswith("The setting was not saved:")
+        ):
             self._panel_refresh = True
-            self.context.reload_settings()
+            self.context.reload_settings(self._panel_done)
         self._redraw()
 
     def _settings_failed(self, *_args: object) -> None:
         """Keep Panel disabled until a failed settings refresh succeeds."""
-        if self._panel_pending:
-            self._panel_refresh = True
+        if self._panel_refresh:
+            self._panel_refresh_failed = True
 
     def _fill(
         self,

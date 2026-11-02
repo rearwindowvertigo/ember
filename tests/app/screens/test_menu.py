@@ -1,4 +1,5 @@
 import threading
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import pytest
@@ -6,7 +7,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from pytestqt.qtbot import QtBot
 
-from ember import choices
+from ember import choices, db
 from ember.app.context import AppContext
 from ember.app.screens import menu
 from ember.app.screens.menu import MenuScreen
@@ -562,6 +563,85 @@ def test_panel_failed_save_refreshes_and_unlocks(
     assert _stored(env, "panel.members") == ["codex:gpt-5"]
     assert screen.add_member.isEnabled()
     assert screen.member_removes["codex:gpt-5"].isEnabled()
+
+
+@pytest.mark.parametrize("panel_fails", [False, True])
+def test_panel_queued_behind_failed_save_stays_locked_until_its_own_completion(
+    env: dict[str, str],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    panel_fails: bool,
+) -> None:
+    _panel(env, ["codex:gpt-5", "claude:opus"])
+    context, screen = _screen(env, qtbot)
+    first_started, first_release = threading.Event(), threading.Event()
+    panel_started, panel_release = threading.Event(), threading.Event()
+    set_settings = choices.set_settings
+    reload_settings = context.reload_settings
+    reloads: list[Callable[[], None] | None] = []
+    writes: list[dict[str, object]] = []
+
+    def reload(done: Callable[[], None] | None = None) -> None:
+        reloads.append(done)
+        reload_settings(done)
+
+    def save(
+        values: Mapping[str, object],
+        expect_generation: int | None = None,
+        *,
+        env: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        writes.append(dict(values))
+        if "multi.runs_as" in values:
+            first_started.set()
+            assert first_release.wait(5)
+            raise db.DatabaseBusyError("test earlier save is busy")
+        panel_started.set()
+        assert panel_release.wait(5)
+        if panel_fails:
+            raise db.DatabaseBusyError("test Panel save is busy")
+        return set_settings(values, expect_generation=expect_generation, env=env)
+
+    monkeypatch.setattr(choices, "set_settings", save)
+    monkeypatch.setattr(context, "reload_settings", reload)
+    try:
+        screen.multi.buttons()[1].click()
+        qtbot.waitUntil(first_started.is_set)
+        screen.member_removes["codex:gpt-5"].click()
+        with qtbot.waitSignal(context.error, timeout=5000):
+            first_release.set()
+        qtbot.waitUntil(panel_started.is_set)
+        assert reloads == []
+        context.error.emit("Ember could not open a terminal.")
+        assert reloads == []
+        # A read can complete while the queued removal is still running.
+        with qtbot.waitSignal(context.settings_changed, timeout=5000):
+            context.reload_settings()
+        assert _stored(env, "panel.members") == ["codex:gpt-5", "claude:opus"]
+        assert not screen.add_member.isEnabled()
+        assert not screen.remove_all.isEnabled()
+        assert all(not b.isEnabled() for b in screen.member_removes.values())
+        screen.add_member.set_value("claude:sonnet")
+        screen.add_member.activated.emit(screen.add_member.currentIndex())
+        with qtbot.waitSignal(context.settings_changed, timeout=5000):
+            panel_release.set()
+    finally:
+        first_release.set()
+        panel_release.set()
+    qtbot.waitUntil(lambda: context.tasks.pending() == 0)
+    assert reloads == ([None, screen._panel_done] if panel_fails else [None])
+    assert writes == [
+        {"multi.runs_as": "flow"},
+        {"panel.members": ["claude:opus"]},
+    ]
+    expected = ["codex:gpt-5", "claude:opus"] if panel_fails else ["claude:opus"]
+    assert _stored(env, "panel.members") == expected
+    assert list(screen.member_removes) == expected
+    assert screen.add_member.isEnabled()
+    assert all(b.isEnabled() for b in screen.member_removes.values())
+    monkeypatch.setattr(choices, "set_settings", set_settings)
+    _pick(context, screen.add_member, "claude:sonnet", qtbot)
+    assert _stored(env, "panel.members") == [*expected, "claude:sonnet"]
 
 
 def test_menu_none_uses_answers_and_snapshot_rows_until_status_read(
