@@ -682,6 +682,42 @@ def test_run_without_driver_exits_69(
     )
 
 
+# emb gapcheck
+
+
+def test_gapcheck_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["gapcheck", "--help"])
+    assert exit_info.value.code == 0
+    output = capsys.readouterr().out
+    for option in (
+        "--plan",
+        "--dir",
+        "--engine",
+        "--model",
+        "--effort",
+        "--claim",
+        "--read",
+        "--window",
+        "--stall",
+        "--json",
+        "--brief",
+        "--reply",
+    ):
+        assert option in output
+
+
+def test_gapcheck_unknown_option_exits_64(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["gapcheck", "--plan", "plan.md", "--nope"])
+    assert exit_info.value.code == 64
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "unrecognized arguments: --nope" in captured.err
+
+
 # emb skill
 
 

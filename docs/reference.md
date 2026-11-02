@@ -578,6 +578,117 @@ the run's read paths are added with `--add-dir` and edits to them are
 refused. While a tool call or a model message runs, Claude's pane prints a
 line such as `· running Bash for 3 min` at least once a minute.
 
+## `emb gapcheck`
+
+Reviews a plan for undefined or contradictory behaviour in one read-only
+`emb run` run. The run's folder keeps its record, brief and reply. After a
+successful turn the command reads the reply and closes the run without
+`--force`. A refused or failed close leaves it open and prints a warning.
+The command creates and finishes no claim; `--claim` passes an existing
+claim to the run.
+
+### Options
+
+| Option | Does |
+|---|---|
+| `--plan FILE` | Required: the plan to review; an empty or blank file exits 64 |
+| `--dir DIR` | A folder in the checkout; defaults to the current folder. The brief and run use the checkout's top |
+| `--engine ENGINE` | Use `codex`, `opencode` or `claude`; otherwise use `single.reviewer` |
+| `--model MODEL` | Use this model, whether or not shortlisted; requires `--engine` |
+| `--effort EFFORT` | Use this effort; requires `--engine` |
+| `--claim ID` | Read choices with this claim and pass it to the run |
+| `--read PATH` | Add a readable path to the run; repeatable |
+| `--window` | Open a terminal window on the run's session |
+| `--stall MINUTES` | Stop waiting after this many minutes without a screen change; default 10 |
+| `--json` | Print the result as JSON |
+| `--brief` | Print the brief and start nothing; accepts `--dir` |
+| `--reply FILE` | Read a reply from another worker and start nothing; accepts `--json` |
+| `--help` | Print the command's options |
+
+`--brief` and `--reply` cannot be combined. Neither accepts `--engine`,
+`--model`, `--effort`, `--claim`, `--read`, `--window` or `--stall`.
+`--brief` accepts no `--json`; `--reply` accepts no `--dir`.
+
+Without `--model`, the `single.reviewer` row must be `set`; when `--engine`
+is given it must match the row. A Claude row that runs as a subagent exits
+64 with the `--brief` and `--reply` route. With `--engine` and `--model`,
+the row may be `ask`. The run checks that the engine is on and connected
+and that its driver accepts the effort. A `gone` or `unknown` claim stops
+before the reviewer row is inspected.
+
+Checkout discovery and the run share an environment without `GIT_DIR`,
+`GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
+`GIT_NAMESPACE` or `GIT_PREFIX`.
+
+The brief contains the whole plan with line numbers. Its temporary file is
+`$XDG_RUNTIME_DIR/ember/gapcheck-<pid>-<6 hex>.md`, mode 600, with the usual
+Ember runtime fallback. It is removed after the start returns or fails;
+the run keeps its own copy as `brief.md`.
+
+### Output
+
+The default text has a block for each covered step:
+
+```text
+step 1: <title>
+  high: <gap>
+    why: <reason>
+    default: <proposed behaviour>
+step 2: <title>
+  no gaps
+counts: high 1, medium 0, low 0
+uncovered steps: none
+unknown steps: none
+```
+
+`--json` prints an object with these fields:
+
+| Field | Value |
+|---|---|
+| `plan` | Absolute plan path |
+| `plan_steps` | `tasks`, `numbered`, `headings` or `whole` |
+| `failure_model` | Whether the plan has a failure model |
+| `reviewer` | `engine`, `model`, `effort` and `source`; values come from the run record, and `source` is `option` when `--engine` was given, otherwise `menu` |
+| `run` | `id`, `reply` (absolute reply path or null), `exit` (the start's exit), `closed` and `close_error` (null or a reason) |
+| `steps` | Covered steps, each with `step`, `title` and `gaps` |
+| `ranked` | Gaps with their `step`, ranked high, medium, low |
+| `counts` | Gap counts for `high`, `medium` and `low`, including zero |
+| `uncovered_steps` | Plan step numbers with no valid reply entry |
+| `unknown_steps` | Reply step numbers absent from the plan |
+| `parse_error` | Null, or the reply's validation or reading error |
+
+For `--reply`, `reviewer` and `run` are null. Once a run id exists, a result
+prints even when the run fails. Before a run starts, a failure prints no
+result. A run with no reply reports `the run produced no reply` and every
+step uncovered.
+
+Standard error first receives all the run's messages, action lines and
+warnings, including those from a successful run. Then come the gap check's
+`emb gapcheck:` problem, warnings for a missing failure model or an open
+run, and at most one action line from the gap check. A failed close prints
+`WARNING: the run <id> stays open: <reason>; close it with emb run --close <id>`.
+When no failure model is present, the warning is
+`WARNING: the plan has no failure model; every unsettled case is reported as a gap`.
+
+A non-zero run exit keeps the run open. Its follow-up names
+`emb gapcheck --plan <plan> --reply <run folder>/turn-1.md` only when the
+reply file exists; otherwise it names a new gap check. An unreadable
+existing reply exits 66. A successful turn with no reply file exits 81.
+
+### Exit codes
+
+| Code | Meaning | Line |
+|---|---|---|
+| 0 | The reply covers every step, or the brief was printed | A failed close prints a warning |
+| 1 | Settings database or run record cannot be read, or checkout discovery times out | `owner: repair or remove the settings database the message names`, `next: emb run --status <run>` or a new check |
+| 64 | Usage error, invalid claim, reviewer row not `set`, Claude subagent row, or a run start check | `next: emb gapcheck --help`, the claim's `emb choices` line, `owner: name the reviewer for this gap check, or set Reviewer on the Menu screen`, the `--brief`/`--reply` route, or the run's line |
+| 65 | `--dir` is not in a git checkout | `next: emb gapcheck --plan <plan> --dir <a folder in the checkout>` |
+| 66 | Plan or reply cannot be read, or `--dir` does not exist or is not a folder | `next: ls -l <path>` |
+| 69 | Git is unavailable, the runtime folder cannot be used, or the run exits 69 | `owner: install git`, the run's runtime-folder instruction, or the run's line |
+| 74 | Interrupted | The run's recovery line when a run exists, then a gap check action |
+| 81 | Invalid reply, missing or unknown steps, or a successful run without a reply file | `next: emb gapcheck --plan <plan> --reply <reply>` after fixing the reply, or a new check |
+| Other | The run's exit from the `emb run` table | The run's line, then a gap check action |
+
 ## `emb ground`
 
 Prints, in one call, what Claude reads before choosing a worker: the machine,
@@ -1299,7 +1410,7 @@ skill into Claude Code; `emb skill install` does.
 ## Exit codes
 
 These are the exit codes of `emb choices` and `emb engines`; `emb run`,
-`emb ground`, `emb merge`, `emb cleanup`, `emb deps`, `emb skill` and
+`emb gapcheck`, `emb ground`, `emb merge`, `emb cleanup`, `emb deps`, `emb skill` and
 `emb app` have their own tables above.
 
 | Code | Meaning |

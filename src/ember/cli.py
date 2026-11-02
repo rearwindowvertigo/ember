@@ -12,6 +12,7 @@ not a folder, or, without `--dir`, when the current folder cannot be read.
 the packaged component list cannot be read or is not valid. `emb app` exits 0
 after Quit Ember or when the running app takes over, 64 for a usage error and
 69 without a graphical session. `emb skill` uses the codes in `ember.skill`.
+`emb gapcheck` uses the codes in `ember.gapcheck.command`.
 """
 
 import argparse
@@ -208,6 +209,33 @@ def _add_run(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_gapcheck(parser: argparse.ArgumentParser) -> None:
+    """Add the plan review, brief and reply options."""
+    parser.add_argument("--plan", required=True, metavar="FILE", help="the plan")
+    parser.add_argument("--dir", metavar="DIR", help="checkout folder (default: .)")
+    parser.add_argument("--engine", choices=status.ENGINES, help="reviewer engine")
+    parser.add_argument("--model", metavar="MODEL", help="reviewer model")
+    parser.add_argument("--effort", metavar="EFFORT", help="reviewer effort")
+    parser.add_argument("--claim", metavar="ID", help="the existing claim id")
+    parser.add_argument(
+        "--read",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="an additional readable path; repeatable",
+    )
+    parser.add_argument("--window", action="store_true", help="open a run window")
+    parser.add_argument(
+        "--stall",
+        type=_positive_minutes,
+        metavar="MINUTES",
+        help="minutes without a screen change before exit 124 (default 10)",
+    )
+    parser.add_argument("--json", action="store_true", help="print a JSON result")
+    parser.add_argument("--brief", action="store_true", help="print the brief only")
+    parser.add_argument("--reply", metavar="FILE", help="read an existing reply")
+
+
 def _add_ground(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--dir", metavar="DIR", help="the folder to read (default: the current one)"
@@ -340,6 +368,14 @@ def build_parser() -> argparse.ArgumentParser:
                 "for its turn, or send to, read, interrupt, close or recover a "
                 "run. Each non-zero exit prints a next: or owner: line."
             ),
+        )
+    )
+    _add_gapcheck(
+        subparsers.add_parser(
+            "gapcheck",
+            help="review a plan for undefined or contradictory behaviour",
+            description="Review a plan in one read-only run, print its brief, "
+            "or read a reply from another worker.",
         )
     )
     _add_ground(
@@ -742,6 +778,10 @@ def main(
         return _run_engines(args, env)
     if args.command == "run":
         return _run_run(args, env)
+    if args.command == "gapcheck":
+        from ember.gapcheck import command
+
+        return command.main(args, env)
     if args.command == "ground":
         return _run_ground(args, env)
     if args.command == "deps":
