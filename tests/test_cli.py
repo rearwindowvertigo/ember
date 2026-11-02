@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from ember import __version__, choices, paths
+from ember import __version__, choices, deps, paths
 from ember.cli import main
 from ember.engines import models, status
 
@@ -460,6 +460,105 @@ def test_engines_models_invalid_engine_exits_64(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "--models" in captured.err
+
+
+# emb deps
+
+
+class _DepsFetch:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def __call__(self, url: str, timeout: float) -> str:
+        self.calls.append(url)
+        if url == "https://registry.npmjs.org/@openai/codex/latest":
+            return '{"version": "1.0.0"}'
+        raise OSError("no network")
+
+
+@pytest.fixture
+def deps_fetch(monkeypatch: pytest.MonkeyPatch) -> _DepsFetch:
+    fetch = _DepsFetch()
+    monkeypatch.setattr(deps, "fetch_text", fetch)
+    return fetch
+
+
+def _deps_stubs(env: dict[str, str]) -> None:
+    _stub(env, "dpkg-query", 'printf "installed\\t1.0"\n')
+    _stub(env, "apt-cache", 'printf "  Candidate: 1.1\\n"\n')
+    _stub(env, "dpkg", "exit 0\n")
+    _stub(env, "codex", "echo codex-cli 1.0.0\n")
+
+
+def test_deps_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["deps", "--help"])
+    assert exit_info.value.code == 0
+    assert "--refresh" in capsys.readouterr().out
+
+
+def test_deps_usage_error_exits_64(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["deps", "--nope"], env=env)
+    assert exit_info.value.code == 64
+    assert capsys.readouterr().out == ""
+
+
+def test_deps_text(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str], deps_fetch: _DepsFetch
+) -> None:
+    _deps_stubs(env)
+    assert main(["deps"], env=env) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    lines = captured.out.splitlines()
+    assert lines[:8] == [
+        "Codex: current, installed 1.0.0, newest 1.0.0",
+        "OpenCode: missing",
+        "  install: curl -fsSL https://opencode.ai/install | bash",
+        "Claude Code: missing",
+        "  install: curl -fsSL https://claude.ai/install.sh | bash",
+        "Claude Desktop: update available, installed 1.0, newest 1.1",
+        "  update: sudo apt install --only-upgrade claude-desktop",
+        "tmux: update available, installed 1.0, newest 1.1",
+    ]
+    assert lines[-1].startswith("PySide6: ")
+
+
+def test_deps_json_and_refresh(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str], deps_fetch: _DepsFetch
+) -> None:
+    _deps_stubs(env)
+    codex = "https://registry.npmjs.org/@openai/codex/latest"
+    assert main(["deps", "--json"], env=env) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert [item["id"] for item in data["components"]][:3] == [
+        "codex",
+        "opencode",
+        "claude",
+    ]
+    assert data["components"][0]["status"] == "current"
+    assert deps_fetch.calls.count(codex) == 1
+    assert main(["deps", "--json"], env=env) == 0
+    capsys.readouterr()
+    assert deps_fetch.calls.count(codex) == 1
+    assert main(["deps", "--refresh"], env=env) == 0
+    capsys.readouterr()
+    assert deps_fetch.calls.count(codex) == 2
+
+
+def test_deps_invalid_component_list_exits_70(
+    env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(deps, "components_text", lambda: "[[components]\n")
+    assert main(["deps"], env=env) == 70
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("emb deps: components.toml is not valid TOML")
 
 
 # emb run

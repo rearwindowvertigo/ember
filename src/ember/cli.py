@@ -8,6 +8,8 @@ database schema. `emb run` uses the table in `ember.runs.exits`; `emb merge`
 and `emb cleanup` use the codes in `ember.branches`. `emb ground` exits 0 once
 it has printed, 64 for a usage error and 66 when `--dir` does not exist or is
 not a folder, or, without `--dir`, when the current folder cannot be read.
+`emb deps` exits 0 whatever the statuses, 64 for a usage error and 70 when
+the packaged component list cannot be read or is not valid.
 """
 
 import argparse
@@ -17,13 +19,14 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NoReturn
 
-from ember import __version__, branches, choices, db, ground
+from ember import __version__, branches, choices, db, deps, ground
 from ember.engines import models, status
 from ember.runs import core as run_core
 
 EX_OK = 0
 EX_USAGE = 64
 EX_NOINPUT = 66
+EX_SOFTWARE = 70
 EX_NOPERM = 77
 
 
@@ -243,6 +246,15 @@ def _add_cleanup(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="print JSON")
 
 
+def _add_deps(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="read newest versions now, even when the cached ones are recent",
+    )
+    parser.add_argument("--json", action="store_true", help="print JSON")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the parser for `emb` and its subcommands.
 
@@ -318,6 +330,19 @@ def build_parser() -> argparse.ArgumentParser:
                 "worktree and session, and keep everything else with a reason "
                 "and the command that resolves it. Each non-zero exit prints a "
                 "next: or owner: line."
+            ),
+        )
+    )
+    _add_deps(
+        subparsers.add_parser(
+            "deps",
+            help="show the installed and newest version of each dependency",
+            description=(
+                "Show each component Ember depends on: its installed version, "
+                "the newest version its source offers, its status and the "
+                "command that updates or installs it. Newest versions are read "
+                "when the cached ones are six hours old or more, or with "
+                "--refresh."
             ),
         )
     )
@@ -573,6 +598,35 @@ def _run_ground(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
     return EX_OK
 
 
+def _deps_lines(item: deps.Component) -> list[str]:
+    head = f"{item.label}: {item.status}"
+    if item.installed is not None:
+        head += f", installed {item.installed}"
+    if item.newest is not None:
+        head += f", newest {item.newest}"
+    if item.error:
+        head += f": {item.error}"
+    lines = [head]
+    if item.command is not None:
+        lines.append(f"  {item.command_kind}: {item.command}")
+    return lines
+
+
+def _run_deps(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
+    try:
+        report = deps.read(env, newest="always" if args.refresh else "due")
+    except deps.ComponentsError as error:
+        print(f"emb deps: {error}", file=sys.stderr)
+        return EX_SOFTWARE
+    if args.json:
+        print(json.dumps(report.to_json(), indent=2))
+        return EX_OK
+    for item in report.components:
+        for line in _deps_lines(item):
+            print(line)
+    return EX_OK
+
+
 def main(
     argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = None
 ) -> int:
@@ -598,6 +652,8 @@ def main(
         return _run_run(args, env)
     if args.command == "ground":
         return _run_ground(args, env)
+    if args.command == "deps":
+        return _run_deps(args, env)
     if args.command == "merge":
         return branches.merge(
             args.branch,
