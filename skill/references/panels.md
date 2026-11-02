@@ -21,8 +21,9 @@ with the members' `owner:` line goes to the owner for a corrected choice.
 Do not repeat an unchanged refusal. Claude members run through the CLI;
 do not add a subagent the owner did not pick.
 
-Before starting, say one line naming the members and their efforts and
-that OpenCode members spend OpenRouter credit. Add `--dry-run` to the
+Before starting, post one visible line to the owner naming the members
+and their efforts and that OpenCode members spend OpenRouter credit,
+whatever the dry run returns. Add `--dry-run` to the
 start command to resolve members and efforts without starting any run.
 
 ## Question and start

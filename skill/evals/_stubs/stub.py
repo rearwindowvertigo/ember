@@ -37,6 +37,7 @@ No stub reaches the network, starts a model or opens a window. The only
 program it runs is git, on the case's own repository.
 """
 
+import contextlib
 import datetime
 import json
 import os
@@ -878,6 +879,8 @@ def record_variables(args: list[str], state: dict[str, Any]) -> dict[str, str]:
         "DIR": str(Path(directory).expanduser().resolve()),
         "SUMMARY": str(EVAL / "runs" / panel_id / "summary.md") if panel_id else "",
     }
+    with contextlib.suppress(Exception):
+        variables["HEAD"] = out(variables["DIR"], "rev-parse", "HEAD")
     flow = state["flows"].get(flow_id)
     if flow:
         variables.update(BRANCH=flow["branch"], WORKTREE=flow["worktree"])

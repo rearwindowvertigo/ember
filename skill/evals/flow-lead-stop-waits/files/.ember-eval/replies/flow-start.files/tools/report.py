@@ -1,10 +1,9 @@
 """Print the totals of an orders file.
 
-Usage: python3 tools/report.py data/orders.csv
+Usage: python3 tools/report.py [--strict] data/orders.csv
 """
 
 import csv
-import getopt
 import sys
 
 
@@ -36,15 +35,13 @@ def totals(rows: list[dict[str, str]]) -> tuple[int, float]:
 def main(argv: list[str] | None = None) -> int:
     """Print valid totals or report a strict input error with exit 65."""
     argv = sys.argv[1:] if argv is None else argv
-    try:
-        flags, paths = getopt.gnu_getopt(argv, "", ["strict"])
-        if len(paths) != 1:
-            raise ValueError("expected one orders CSV path")
-    except (getopt.GetoptError, ValueError) as error:
-        print(f"report.py: {error}", file=sys.stderr)
+    strict = "--strict" in argv
+    paths = [arg for arg in argv if arg != "--strict"]
+    if argv.count("--strict") > 1 or len(paths) != 1 or paths[0].startswith("-"):
+        print("usage: report.py [--strict] <orders.csv>", file=sys.stderr)
         return 64
     try:
-        rows = read_orders(paths[0], strict=bool(flags))
+        rows = read_orders(paths[0], strict=strict)
     except ValueError as error:
         print(str(error), file=sys.stderr)
         return 65

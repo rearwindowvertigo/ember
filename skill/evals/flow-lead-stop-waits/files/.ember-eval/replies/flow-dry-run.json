@@ -1,7 +1,7 @@
 {
   "plan": "{{PLAN}}",
   "dir": "{{DIR}}",
-  "base": "0000000000000000000000000000000000000000",
+  "base": "{{HEAD}}",
   "writer": {
     "engine": "codex",
     "model": "gpt-6.1-sol",

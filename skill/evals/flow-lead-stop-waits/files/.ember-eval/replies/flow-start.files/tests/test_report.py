@@ -84,6 +84,25 @@ class OptionTests(unittest.TestCase):
             self.call("--strict"), (0, "quantity: 6\nrevenue: 12.80\n", "")
         )
 
+    def test_non_numeric_and_empty_quantities(self) -> None:
+        """A word or an empty quantity is also a bad row."""
+        with open(self.path, "a", encoding="utf-8") as stream:
+            stream.write("2026-01-04,Tea,x,2.00\n2026-01-05,Tea,,2.00\n")
+        code, out, err = self.call()
+        self.assertEqual((code, out), (0, "quantity: 6\nrevenue: 12.80\n"))
+        self.assertEqual(
+            err.splitlines(),
+            [
+                "warning: line 5: quantity must be a whole number",
+                "warning: line 6: quantity must be a whole number",
+            ],
+        )
+
+    def test_strict_is_exact(self) -> None:
+        """Only the exact option name turns on strict mode."""
+        self.assertEqual(self.call("--str")[0], 64)
+        self.assertEqual(self.call("--strict", "--strict")[0], 64)
+
 
 if __name__ == "__main__":
     unittest.main()

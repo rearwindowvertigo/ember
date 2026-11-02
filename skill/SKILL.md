@@ -307,8 +307,8 @@ owner's work. Report runs parked and runs left open, with reasons.
 
 ### 9. Merge, clean up and finish
 
-State the verdict before `emb merge`, and state it again when a branch
-under correction comes back. Merge only Keep or Keep-with-fix work into
+Write the verdict as visible text in its own message before running
+`emb merge`, and again when a branch under correction comes back. Merge only Keep or Keep-with-fix work into
 the session branch:
 
 ```bash

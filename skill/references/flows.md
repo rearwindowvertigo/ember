@@ -62,7 +62,9 @@ warnings and follow `next:` within these rules; bring `owner:` to the owner.
 A `lead_stop` returns exit 0; it is not a completed flow. For every stop,
 send the owner one message naming the task, status, reason, open `lead`
 and `must` findings, and the tasks it blocks (or none). List every choice
-in its `choices`, what each does, and your recommendation among them.
+in its `choices`, each with its flags (an optional flag such as
+`--accept --commit <commit>` is its own choice), what each does, and your
+recommendation among them.
 Use the report's available choices, not an assumed list:
 
 | Answer after `emb flow --lead <id> <task>` | Does |
