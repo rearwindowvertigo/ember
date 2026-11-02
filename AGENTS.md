@@ -29,6 +29,8 @@ follow `docs/releasing.md`.
 - Every test is independent: its own temporary folders and state, no
   dependence on another test or on run order, safe to run in parallel with
   every other test.
+- A pull request merges only after every check GitHub reports for its
+  latest commit has passed.
 
 ## Conventions
 
