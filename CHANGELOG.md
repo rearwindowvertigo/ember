@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.2.0](https://github.com/rearwindowvertigo/ember/compare/v0.1.0...v0.2.0) (2026-11-02)
+
+
+### Added
+
+* **app:** add multi-task work and panel members to the Menu ([5c815a3](https://github.com/rearwindowvertigo/ember/commit/5c815a3ff735115d6e6604f6d8c7d6aaeaf7c919))
+* **app:** add multi-task work and panel members to the Menu (turn 2) ([a7d5c85](https://github.com/rearwindowvertigo/ember/commit/a7d5c853c595bad37fbdf123a8b5f802e90d2770))
+* **app:** show flows and panels on Overview with their tasks ([48d20ee](https://github.com/rearwindowvertigo/ember/commit/48d20ee316aa823eff24928f88de8f474a92d670))
+* emb flow (build step 6b) ([d4690b8](https://github.com/rearwindowvertigo/ember/commit/d4690b8c478683a3d3a3aa7912bbb68e3020b97c))
+* emb gapcheck (build step 6a) ([aaaa70f](https://github.com/rearwindowvertigo/ember/commit/aaaa70fb39443a52e68fa34968d07e2c1ff7c140))
+* emb panel (build step 6c) ([96caec3](https://github.com/rearwindowvertigo/ember/commit/96caec38a5cd450ac0ecf0e76f248c8c2e9e5035))
+* flows and panels in the app and the skill (build step 6d) ([8282a7a](https://github.com/rearwindowvertigo/ember/commit/8282a7aef6ab08d0cc12f63a39ba2ae8733afd93))
+* **flows:** add emb flow to plan, start, watch and answer flows ([d36d886](https://github.com/rearwindowvertigo/ember/commit/d36d8862ea9abc51df7e68fe71c73be2e93e07ea))
+* **flows:** add emb flow to plan, start, watch and answer flows (turn 2) ([61e8f82](https://github.com/rearwindowvertigo/ember/commit/61e8f8284b1a0dd61a24930bc431c48618f2f9be))
+* **flows:** add flow reviews, the runner lock and flow branches ([1a84d21](https://github.com/rearwindowvertigo/ember/commit/1a84d210d4921a867600bb7689608bf8d3a104fa))
+* **flows:** load and validate flow plans and keep flow records ([b329322](https://github.com/rearwindowvertigo/ember/commit/b3293220739cd53e02be17a1f40d382133f520e5))
+* **flows:** load and validate flow plans and keep flow records (turn 2) ([544b0bd](https://github.com/rearwindowvertigo/ember/commit/544b0bdd80c17886655fcd264c2547c485cced8a))
+* **flows:** run flows in waves with reviews, fix rounds and merges ([3166606](https://github.com/rearwindowvertigo/ember/commit/31666068df8a86953714141ecf19046052b8a8e9))
+* **flows:** run flows in waves with reviews, fix rounds and merges (turn 2) ([8029e5f](https://github.com/rearwindowvertigo/ember/commit/8029e5fc94e499d1ffebe4cc4b4ede34d8fc3737))
+* **flows:** run flows in waves with reviews, fix rounds and merges (turn 3) ([185e54a](https://github.com/rearwindowvertigo/ember/commit/185e54ae977ac9109dfa4e2e396dcb189eb41774))
+* **gapcheck:** add emb gapcheck ([83380c9](https://github.com/rearwindowvertigo/ember/commit/83380c9c0a30dc47846a58e6c625359761cb7a8d))
+* **gapcheck:** split plans into steps, write the gap check brief and re (turn 2) ([f6477bb](https://github.com/rearwindowvertigo/ember/commit/f6477bb7f269fe2251962d84fcf3679ed475e5ec))
+* **panels:** add emb panel to ask members and recover late answers (turn 1, incomplete: no reply) ([64436a1](https://github.com/rearwindowvertigo/ember/commit/64436a13962c431f9aeb52972fbe313c03510138))
+* **panels:** add emb panel to ask members and recover late answers (turn 2) ([365ca65](https://github.com/rearwindowvertigo/ember/commit/365ca6565f4b83059c2f3272d58e2aba30b35dd0))
+* **panels:** add panel members and the panel.members menu key ([28513a0](https://github.com/rearwindowvertigo/ember/commit/28513a0dd46dbe291c274401a5a00a0fb5c229dd))
+* **panels:** run panel members in parallel and write the summary ([aab6cad](https://github.com/rearwindowvertigo/ember/commit/aab6cad6a3d5bc3dcab3650c8130ebab13fdb827))
+* **panels:** run panel members in parallel and write the summary (turn 2) ([9897894](https://github.com/rearwindowvertigo/ember/commit/98978941f07f5677ce8bfcc63c7c5f6aa3c51af7))
+* **skill:** add the gap check, flow and panel references to Ember ([fbedef5](https://github.com/rearwindowvertigo/ember/commit/fbedef5293a84ebf532e284ae407092e1b4bbc86))
+
+
+### Fixed
+
+* **app:** unlock Panel members after a stale save whose reload failed ([3fc7c2a](https://github.com/rearwindowvertigo/ember/commit/3fc7c2a406e68237c97410921299eae464b74d9e))
+* **app:** watch only run folders for the runs list ([4a03238](https://github.com/rearwindowvertigo/ember/commit/4a03238eed3ec1a970b790be3e579f86ec99b514))
+* **cli:** end every usage error with a next line ([5e6134b](https://github.com/rearwindowvertigo/ember/commit/5e6134b4e031b3be898d564f4c7bdaa0152122c0))
+* **flows:** review a moved branch afresh when recovering an explicit review ([3362352](https://github.com/rearwindowvertigo/ember/commit/336235274f623ef8003cf9d27f2157ece055ce7f))
+* **skill:** merge a flow kept with a fix and keep failure models to the request ([0ea7839](https://github.com/rearwindowvertigo/ember/commit/0ea7839710e2440f52707d019207c4d2730ffe57))
+* **skill:** run emb merge as its own command after the verdict line ([4710822](https://github.com/rearwindowvertigo/ember/commit/47108222aceed4c50c5bf226173bdb1f6a88f758))
+* **skill:** state verdicts before merging and keep briefs to the request ([25de01d](https://github.com/rearwindowvertigo/ember/commit/25de01d2deaea48270b97a7b3371ec8f5e40f6fb))
+* **skill:** visible verdicts and member lines, and eval stubs that follow the plan ([54861f2](https://github.com/rearwindowvertigo/ember/commit/54861f298eb3d8d301ca02eaf5efc0cbebd958e8))
+* **skill:** write the flow verdict before its merge and keep a Discard unmerged ([78496e1](https://github.com/rearwindowvertigo/ember/commit/78496e1c8dc428b2c58211556b478d89a29cbc0b))
+* **skill:** write the menu and verdict lines right before their commands ([39e75d5](https://github.com/rearwindowvertigo/ember/commit/39e75d5dbe596e3d5e27b319e77c62dc59f7c327))
+
 ## 0.1.0 (2026-11-02)
 
 
