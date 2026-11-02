@@ -4,7 +4,8 @@ A live row expands to show the run's screen mirror; one row is expanded at a
 time, and the mirror closes when the row collapses, the run leaves the live
 list, the screen is left or the window hides. A finished row expands to the
 run's record. While the screen is hidden it does not redraw; it redraws the
-next time it is shown.
+next time it is shown. When the runs folder cannot be read, the screen shows
+the reason with Try again, which reads it again at once.
 """
 
 import time
@@ -111,6 +112,14 @@ def unreadable_line(count: int) -> str:
     if count == 1:
         return "1 run record could not be read."
     return f"{count} run records could not be read."
+
+
+def read_failure(reason: str) -> str:
+    """Return the error text for a runs folder that could not be read."""
+    return (
+        f"Ember could not read the run records: {reason}. Try again; if this "
+        "keeps happening, check the runs folder's permissions."
+    )
 
 
 def sandbox_warning(engine: str) -> str:
@@ -323,6 +332,7 @@ class OverviewScreen(QWidget):
         self._elapsed.timeout.connect(self._update_elapsed)
 
         context.runs.changed.connect(self._runs_changed)
+        context.runs.failed.connect(self._runs_changed)
         context.settings_changed.connect(self._settings_changed)
         context.visible_changed.connect(self._visible_changed)
         self.refresh()
@@ -346,7 +356,7 @@ class OverviewScreen(QWidget):
             self._elapsed.stop()
             self.collapse_live()
 
-    def _runs_changed(self) -> None:
+    def _runs_changed(self, *_args: object) -> None:
         if self.isVisible():
             self.refresh()
         else:
@@ -374,17 +384,21 @@ class OverviewScreen(QWidget):
         unreadable = runs.unreadable()
         self.unreadable_alert.title_label.setText(unreadable_line(unreadable))
         self.unreadable_alert.setAccessibleName(unreadable_line(unreadable))
-        self.unreadable_alert.setVisible(unreadable > 0)
+        error = runs.error()
+        self.unreadable_alert.setVisible(unreadable > 0 and error is None)
+        if error is not None:
+            self.collapse_live()
+            self._show_state()
+            self.state_view.show_error(read_failure(error), self.retry_runs)
+            return
         if not runs.loaded():
-            self.live_card.hide()
-            self.finished_card.hide()
+            self._show_state()
             self.state_view.show_loading("Reading runs")
             return
         if not live and not finished:
             self._draw_live([])
             self._draw_finished([])
-            self.live_card.hide()
-            self.finished_card.hide()
+            self._show_state()
             self.state_view.show_empty(
                 "inbox",
                 "No runs yet",
@@ -397,6 +411,17 @@ class OverviewScreen(QWidget):
         self.finished_card.show()
         self._draw_live(live)
         self._draw_finished(finished)
+
+    def _show_state(self) -> None:
+        """Hide the run cards and give the state view their place."""
+        self.live_card.hide()
+        self.finished_card.hide()
+        self.state_view.show()
+
+    def retry_runs(self) -> None:
+        """Read the runs folder again now, showing that it is being read."""
+        self.state_view.show_loading("Reading runs")
+        self.context.runs.reload()
 
     def _draw_live(self, live: list[Run]) -> None:
         wanted = {run.id for run in live}

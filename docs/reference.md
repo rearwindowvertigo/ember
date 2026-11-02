@@ -1054,8 +1054,10 @@ seconds, while the window is hidden too. At most one read runs at a time and
 one more follows it when a change came in meanwhile. Live runs are those
 `starting`, `running` or `waiting`, oldest first; finished runs are the last
 twenty `closed` or `failed`, newest `ended_at` first. A record that cannot be
-read is skipped and counted. A run whose turn failed since the last read
-makes the app check the engines again.
+read is skipped and counted. When the runs folder itself cannot be read, the
+app keeps the records it read last and Overview shows the reason with Try
+again, which reads the folder again at once. A run whose turn failed since
+the last read makes the app check the engines again.
 
 ### Commands
 

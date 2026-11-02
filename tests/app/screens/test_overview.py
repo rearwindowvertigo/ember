@@ -1,3 +1,4 @@
+import shutil
 from collections.abc import Iterator
 
 import pytest
@@ -346,3 +347,48 @@ def test_keyboard_reach(
         screen.focusNextChild()
         seen.append(QApplication.focusWidget())
     assert seen == controls
+
+
+def test_runs_folder_error_and_try_again(
+    env: dict[str, str],
+    context: AppContext,
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    screen = loaded(env, context, qtbot)
+
+    def refuse(_env: object) -> object:
+        raise PermissionError(13, "Permission denied", "runs")
+
+    monkeypatch.setattr(record, "list_runs", refuse)
+    with qtbot.waitSignal(context.runs.failed, timeout=5000):
+        context.runs.reload()
+    assert screen.state_view.error.isVisible()
+    assert "could not read the run records" in screen.state_view.error_text.text()
+    assert "Permission denied" in screen.state_view.error_text.text()
+    assert screen.state_view.retry_button.isVisible()
+    assert not screen.live_card.isVisible()
+    assert not screen.finished_card.isVisible()
+
+    monkeypatch.undo()
+    with qtbot.waitSignal(context.runs.changed, timeout=5000):
+        qtbot.mouseClick(screen.state_view.retry_button, Qt.MouseButton.LeftButton)
+        assert context.runs._in_flight
+    assert not screen.state_view.error.isVisible()
+    assert screen.live_card.isVisible()
+    assert list(screen.live_rows) == [LIVE_A, LIVE_B]
+
+
+def test_empty_state_after_the_last_run_goes(
+    env: dict[str, str], context: AppContext, qtbot: QtBot
+) -> None:
+    write_run(make_run(env, LIVE_A))
+    context.runs.reload()
+    qtbot.waitUntil(lambda: len(context.runs.live()) == 1)
+    screen = screen_for(context, qtbot)
+    assert screen.live_card.isVisible()
+    shutil.rmtree(paths.runs_dir(env) / LIVE_A)
+    context.runs.reload()
+    qtbot.waitUntil(lambda: not context.runs.runs())
+    assert screen.state_view.empty.isVisible()
+    assert not screen.live_card.isVisible()
