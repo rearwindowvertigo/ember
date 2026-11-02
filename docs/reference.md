@@ -2446,7 +2446,8 @@ again in place of the cards.
 
 ### Menu
 
-Menu shows the standing worker menu: the Writer and Reviewer pickers
+Menu shows the standing worker menu in three cards: Single tasks, Work of
+several tasks and Panel. Single tasks holds the Writer and Reviewer pickers
 (`single.writer`, `single.reviewer`). Each lists Ask each time (`ask`), then,
 for Codex, OpenCode and Claude in that order, each engine that is on and has
 shortlisted models, under the engine's name, with its models as
@@ -2463,7 +2464,35 @@ app's last engine status read, or before the first read the status cache the
 settings snapshot reports. When no engine
 offers a model, the pickers hold Ask each time only and the screen shows
 "Shortlist models in Engines to offer them here." with Open Engines.
-One-time choices are not shown. Each change saves at once.
+
+Work of several tasks holds Multi-task work (`multi.runs_as`): Ask each time
+(`ask`), Flow (`flow`) or Claude Workflow (`workflow`). It is available even
+when no engine offers a model.
+
+Panel lists `panel.members` in saved order. A member shows
+`<Engine> · <model> · <effort>`, omitting effort when none is set. A member
+whose engine is off, was not connected at its last check, or whose model is
+not shortlisted shows its saved `<engine>:<model>` value and a warning
+explaining how to change it. An invalid value also shows a removal warning.
+Each member has a Remove button. Add member lists shortlisted models of
+engines that are on, grouped by engine, excluding saved members. Choosing
+one appends it and returns the picker to Add member. With no members the
+card says "No members. Claude asks for members, or uses the ones it is given,
+each time." At eight members Add member is disabled and the card says
+"A panel has at most eight members."
+
+A member missing from its shortlist disables Add member, even when its
+engine is off or not connected. The warning asks the owner to remove those
+members or shortlist them in Engines. Remove saves only when every remaining
+member is shortlisted. Otherwise it sends no save, names the first remaining
+member to shortlist, and shows Remove all, which saves an empty list. An
+engine being off or not connected alone does not block saving. Add member
+is also disabled when no unused shortlisted model is offered.
+
+One-time choices are not shown. Each change saves at once with the settings
+generation check; choosing an already saved multi-task value saves nothing.
+Panel mutation controls stay disabled until the save resolves and the screen
+refreshes. A stale save reloads the settings and shows the app's stale alert.
 
 ### Settings
 
