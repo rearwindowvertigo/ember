@@ -1,3 +1,4 @@
+import json
 import shutil
 import threading
 from collections.abc import Iterator
@@ -499,7 +500,7 @@ def labels(widget: QWidget) -> list[str]:
 def test_record_formatters(env: dict[str, str]) -> None:
     flow = make_flow(env, count=1)
     assert overview.flow_title(flow) == "project · 1 task · 0/1 merged"
-    assert overview.flow_detail(flow) == f"ember/flow/{FLOW} · wave 0"
+    assert overview.flow_detail(flow) == f"ember/flow/{FLOW}"
     task = flow["tasks"][0]
     assert overview.task_line(flow, task) == (
         "task-0 · Pending · round 0 · Codex · test-model"
@@ -534,7 +535,13 @@ def test_flow_details_and_run_links(
 ) -> None:
     write_run(make_run(env, LIVE_A))
     write_run(make_run(env, DONE_A, status=record.CLOSED, ended_at=200))
-    flow = make_flow(env, status="stopped", wave=2, reason="Needs an answer")
+    flow = make_flow(
+        env,
+        status="stopped",
+        wave=12,
+        reason="Needs an answer",
+        plan_waves=[["task-0"], ["task-1"]],
+    )
     flow["tasks"][0].update(status="merged", writer_run=DONE_A)
     flow["tasks"][1].update(
         status="stopped",
@@ -553,8 +560,12 @@ def test_flow_details_and_run_links(
     row = screen.flow_rows[FLOW]
     assert row.badge.text() == "Waiting for Claude"
     assert row.title_label.text() == "project · 2 tasks · 1/2 merged"
-    assert row.detail_label.text().endswith("wave 2 · Needs an answer")
+    assert row.detail_label.text() == (
+        f"ember/flow/{FLOW} · wave 2 of 2 · Needs an answer"
+    )
     qtbot.mouseClick(row.expand_button, Qt.MouseButton.LeftButton)
+    assert row.details is not None
+    assert labels(row.details)[0] == "passes 12"
     assert "Choose a format" in labels(row)
     assert "1 review · last fix · 2 must, 1 should, 1 lead" in labels(row)
     assert "task-0 · Merged · round 0 · Codex · test-model" in labels(row)
@@ -578,6 +589,25 @@ def test_flow_details_and_run_links(
         "",
         "Show run",
     }
+
+
+@pytest.mark.parametrize("stored_waves", [False, True])
+def test_flow_without_plan_wave_shows_passes_zero(
+    env: dict[str, str], context: AppContext, qtbot: QtBot, stored_waves: bool
+) -> None:
+    """Flow details show zero passes when the flow line has no plan wave."""
+    flow = make_flow(env, reason="Waiting")
+    if not stored_waves:
+        flow["tasks"][0]["status"] = "writing"
+        del flow["plan_waves"]
+        path = flow_record.folder(FLOW, env) / flow_record.FLOW_NAME
+        path.write_text(json.dumps(flow))
+    screen = screen_for(context, qtbot)
+    row = screen.flow_rows[FLOW]
+    assert row.detail_label.text() == f"ember/flow/{FLOW} · Waiting"
+    row.expand_button.click()
+    assert row.details is not None
+    assert labels(row.details)[0] == "passes 0"
 
 
 def test_panel_details(env: dict[str, str], context: AppContext, qtbot: QtBot) -> None:

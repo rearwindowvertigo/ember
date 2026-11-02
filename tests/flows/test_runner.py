@@ -126,7 +126,9 @@ def h(tmp_path: Path) -> Iterator[Harness]:
 
 def test_parallel_wave_merges_cleans_and_checks(h: Harness) -> None:
     h.create([task("a"), task("b")], check=[sys.executable, "-c", "print('checked')"])
+    assert h.flow()["plan_waves"] == [["a", "b"]]
     flow = h.run()
+    assert flow["plan_waves"] == [["a", "b"]]
     assert flow["status"] == "done"
     assert flow["wave"] == 1
     assert [t["status"] for t in flow["tasks"]] == ["merged", "merged"]
@@ -158,7 +160,9 @@ def test_dependencies_and_overlaps_form_two_waves(h: Harness, overlap: bool) -> 
         after=[] if overlap else ["a"],
     )
     h.create([task("a"), second])
+    assert h.flow()["plan_waves"] == [["a"], ["b"]]
     flow = h.run()
+    assert flow["plan_waves"] == [["a"], ["b"]]
     assert flow["wave"] == 2
     a, b = flow["tasks"]
     assert runs.load(b["writer_run"], h.env).base == a["merge_commit"]
@@ -353,6 +357,7 @@ def test_check_cleans_files_and_environment(h: Harness) -> None:
 def test_answers_resume_stopped_tasks(h: Harness, kind: str) -> None:
     h.scripts_update(**{"Review of task a,": "@reply " + FIX})
     h.create([task("a"), task("b", after=["a"])], rounds=0)
+    assert h.flow()["plan_waves"] == [["a"], ["b"]]
     before = h.run()["tasks"][0]
     h.script_data = {"a read-only review;": "@reply " + PASS}
     h.scripts_update()
@@ -367,6 +372,7 @@ def test_answers_resume_stopped_tasks(h: Harness, kind: str) -> None:
         fields["worker"] = "codex:another@low"
     h.answer(kind, **fields)
     flow = h.run()
+    assert flow["plan_waves"] == [["a"], ["b"]]
     item = flow["tasks"][0]
     assert flow["answers_seen"] == 1
     assert item["entry"] is None

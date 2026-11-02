@@ -1107,6 +1107,7 @@ class _Runner:
     def jobs(self, wave: list[dict[str, Any]]) -> None:
         """Wait for a whole wave, allowing main to observe handled signals."""
         with self.mutex:
+            # Each job batch increments the runner pass count.
             self.flow["wave"] += 1
             for task in wave:
                 # Recovery retains the declarations of the interrupted wave.
