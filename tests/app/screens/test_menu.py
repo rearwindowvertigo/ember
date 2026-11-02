@@ -613,7 +613,12 @@ def test_panel_queued_behind_failed_save_stays_locked_until_its_own_completion(
         qtbot.waitUntil(panel_started.is_set)
         assert reloads == []
         context.error.emit("Ember could not open a terminal.")
+        context.error.emit("The setting was not saved: another save failed.")
+        context.stale.emit()
+        context.settings_failed.emit("An unrelated settings read failed.")
         assert reloads == []
+        assert not screen.add_member.isEnabled()
+        assert not screen._panel_refresh_failed
         # A read can complete while the queued removal is still running.
         with qtbot.waitSignal(context.settings_changed, timeout=5000):
             context.reload_settings()
@@ -642,6 +647,128 @@ def test_panel_queued_behind_failed_save_stays_locked_until_its_own_completion(
     monkeypatch.setattr(choices, "set_settings", set_settings)
     _pick(context, screen.add_member, "claude:sonnet", qtbot)
     assert _stored(env, "panel.members") == [*expected, "claude:sonnet"]
+
+
+@pytest.mark.parametrize("reload_succeeds", [False, True])
+def test_panel_dropped_by_stale_save_waits_for_its_result_after_reload(
+    env: dict[str, str],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    reload_succeeds: bool,
+) -> None:
+    """A dropped Panel save unlocks only after its stale reload succeeds."""
+    _panel(env, ["codex:gpt-5", "claude:opus"])
+    context, screen = _screen(env, qtbot)
+    choices.set_settings({"panel.members": ["claude:sonnet"]}, env=env)
+    save_started, save_release = threading.Event(), threading.Event()
+    read_started, read_release = threading.Event(), threading.Event()
+    set_settings, snapshot = choices.set_settings, choices.snapshot
+    writes: list[dict[str, object]] = []
+    reloads: list[Callable[[], None] | None] = []
+    reload_settings = context.reload_settings
+
+    def save(
+        values: Mapping[str, object],
+        expect_generation: int | None = None,
+        *,
+        env: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Hold the sent save until the Panel save is queued behind it."""
+        writes.append(dict(values))
+        save_started.set()
+        assert save_release.wait(5)
+        return set_settings(values, expect_generation=expect_generation, env=env)
+
+    def read(*, env: Mapping[str, str] | None = None) -> dict[str, Any]:
+        """Hold the stale reload and deliver its selected outcome."""
+        read_started.set()
+        assert read_release.wait(5)
+        if not reload_succeeds:
+            raise OSError("reload failed")
+        return snapshot(env=env)
+
+    def reload(done: Callable[[], None] | None = None) -> None:
+        """Record refreshes requested through the context's public method."""
+        reloads.append(done)
+        reload_settings(done)
+
+    monkeypatch.setattr(choices, "set_settings", save)
+    monkeypatch.setattr(choices, "snapshot", read)
+    monkeypatch.setattr(context, "reload_settings", reload)
+    try:
+        screen.multi.buttons()[1].click()
+        qtbot.waitUntil(save_started.is_set)
+        screen.member_removes["codex:gpt-5"].click()
+        save_release.set()
+        qtbot.waitUntil(read_started.is_set)
+        context.error.emit("The setting was not saved: another save failed.")
+        context.stale.emit()
+        assert not screen.add_member.isEnabled()
+        assert all(not b.isEnabled() for b in screen.member_removes.values())
+        assert reloads == []
+        signal = context.stale if reload_succeeds else context.settings_failed
+        with qtbot.waitSignal(signal, timeout=5000):
+            read_release.set()
+        qtbot.waitUntil(lambda: context.tasks.pending() == 0)
+    finally:
+        save_release.set()
+        read_release.set()
+    assert writes == [{"multi.runs_as": "flow"}]
+    assert reloads == []
+    if not reload_succeeds:
+        assert not screen.add_member.isEnabled()
+        assert screen._panel_pending
+        assert screen._panel_refresh_failed
+        monkeypatch.setattr(choices, "snapshot", snapshot)
+        with qtbot.waitSignal(context.settings_changed, timeout=5000):
+            context.reload_settings()
+        qtbot.waitUntil(lambda: context.tasks.pending() == 0)
+        assert reloads == [None, screen._panel_done]
+    assert list(screen.member_removes) == ["claude:sonnet"]
+    assert screen.add_member.isEnabled()
+    assert screen.member_removes["claude:sonnet"].isEnabled()
+    assert not screen._panel_pending
+
+
+@pytest.mark.parametrize("write_succeeds", [False, True])
+def test_panel_failed_save_and_failed_refresh_stay_locked_until_refresh_succeeds(
+    env: dict[str, str],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    write_succeeds: bool,
+) -> None:
+    """The Panel stays locked after its own refresh fails following an error."""
+    _panel(env, ["codex:gpt-5", "claude:opus"])
+    context, screen = _screen(env, qtbot)
+    snapshot = choices.snapshot
+
+    def fail_read(*, env: Mapping[str, str] | None = None) -> dict[str, Any]:
+        """Fail the save's snapshot and the Panel's settings refresh."""
+        raise OSError("snapshot failed")
+
+    def fail_write(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        """Fail the Panel's settings write."""
+        raise OSError("write failed")
+
+    monkeypatch.setattr(choices, "snapshot", fail_read)
+    if not write_succeeds:
+        monkeypatch.setattr(choices, "set_settings", fail_write)
+    with qtbot.waitSignal(context.settings_failed, timeout=5000):
+        screen.member_removes["codex:gpt-5"].click()
+    qtbot.waitUntil(lambda: context.tasks.pending() == 0)
+    assert screen._panel_pending
+    assert screen._panel_refresh_failed
+    assert not screen.add_member.isEnabled()
+    assert all(not b.isEnabled() for b in screen.member_removes.values())
+    monkeypatch.setattr(choices, "snapshot", snapshot)
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        context.reload_settings()
+    qtbot.waitUntil(lambda: context.tasks.pending() == 0)
+    expected = ["claude:opus"] if write_succeeds else ["codex:gpt-5", "claude:opus"]
+    assert list(screen.member_removes) == expected
+    assert screen.add_member.isEnabled()
+    assert all(b.isEnabled() for b in screen.member_removes.values())
+    assert not screen._panel_pending
 
 
 def test_menu_none_uses_answers_and_snapshot_rows_until_status_read(
