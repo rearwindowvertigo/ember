@@ -7,6 +7,39 @@ from pytestqt.qtbot import QtBot
 from ember.app import theme, widgets
 
 
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_elided_label_keeps_full_text_for_copy(
+    qapp: QApplication, qtbot: QtBot, mode: str
+) -> None:
+    previous = theme.current_mode()
+    sheet = qapp.styleSheet()
+    try:
+        theme.apply(qapp, mode)
+        text = "provider/" + "long-model-name-" * 20
+        name = widgets.ElidedLabel(text)
+        qtbot.addWidget(name)
+        name.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        name.resize(220, 36)
+        name.show()
+        assert name.text() == name.toolTip() == text
+        assert name.display_text().endswith("…")
+        name.setFocus()
+        qtbot.keyClick(name, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+        assert name.selectedText() == text
+        qtbot.keyClick(name, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+        assert QGuiApplication.clipboard().text() == text
+        assert not name.grab().isNull()
+        name.resize(name.fontMetrics().horizontalAdvance(text) + 20, 36)
+        assert name.display_text() == text
+        name.setText("short")
+        assert name.display_text() == name.text() == name.toolTip() == "short"
+        name.setText("")
+        assert not name.grab().isNull()
+    finally:
+        theme.apply(qapp, previous)
+        qapp.setStyleSheet(sheet)
+
+
 def test_switch_toggles_by_click_and_space(qtbot: QtBot) -> None:
     switch = widgets.Switch()
     switch.setAccessibleName("Worker network")

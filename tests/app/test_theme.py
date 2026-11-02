@@ -4,10 +4,56 @@ from typing import cast
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QGuiApplication
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QLabel,
+    QVBoxLayout,
+    QWidget,
+)
 from pytestqt.qtbot import QtBot
 
 from ember.app import theme
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_selectable_labels_render_frameless_and_keep_selection(
+    qapp: QApplication, qtbot: QtBot, mode: str
+) -> None:
+    previous = theme.current_mode()
+    sheet = qapp.styleSheet()
+    try:
+        theme.apply(qapp, mode)
+        host = QWidget()
+        qtbot.addWidget(host)
+        layout = QVBoxLayout(host)
+        mouse = QLabel("Selectable with the mouse")
+        mouse.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(mouse)
+        keyboard = QLabel("Selectable with the keyboard")
+        keyboard.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        keyboard.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        layout.addWidget(keyboard)
+        host.show()
+        qtbot.waitExposed(host)
+        with qtbot.waitActive(host):
+            host.activateWindow()
+        mouse.setFocus()
+        assert mouse.focusPolicy() == Qt.FocusPolicy.ClickFocus
+        assert mouse.frameShape() == QFrame.Shape.NoFrame
+        mouse.setSelection(0, len(mouse.text()))
+        assert mouse.selectedText() == mouse.text()
+        keyboard.setFocus(Qt.FocusReason.TabFocusReason)
+        assert keyboard.hasFocus()
+        qtbot.keyClick(keyboard, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+        assert keyboard.selectedText() == keyboard.text()
+        assert not host.grab().isNull()
+    finally:
+        theme.apply(qapp, previous)
+        qapp.setStyleSheet(sheet)
+
 
 OPAQUE_BACKGROUNDS = [
     name
