@@ -458,10 +458,9 @@ class MenuScreen(QWidget):
         # The context emits errors for other actions and earlier queued saves.
         # Its save callback leaves the queue only when that save starts; success
         # calls _panel_done, while a stale save drops the queue and emits stale.
-        queued = any(done == self._panel_done for _, done in self.context._save_queue)
         if (
             self._panel_pending
-            and not queued
+            and not self._panel_queued()
             and not self._panel_refresh
             and message.startswith("The setting was not saved:")
         ):
@@ -470,9 +469,17 @@ class MenuScreen(QWidget):
         self._redraw()
 
     def _settings_failed(self, *_args: object) -> None:
-        """Keep Panel disabled until a failed settings refresh succeeds."""
-        if self._panel_refresh:
+        """Keep Panel disabled until a failed settings refresh succeeds.
+
+        This covers the refresh after a failed Panel save and the reload after
+        a Panel save refused as stale, which emits `stale` only when it reads.
+        """
+        if self._panel_pending and not self._panel_queued():
             self._panel_refresh_failed = True
+
+    def _panel_queued(self) -> bool:
+        """Return whether the pending Panel save still waits in the save queue."""
+        return any(done == self._panel_done for _, done in self.context._save_queue)
 
     def _fill(
         self,

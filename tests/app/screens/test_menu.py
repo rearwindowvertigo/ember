@@ -724,3 +724,30 @@ def test_member_helpers_and_shortlist_checks(env: dict[str, str]) -> None:
         ("opencode", [("openrouter/qwen3-coder", None)])
     ]
     assert menu.blocks_save(answers, []) == []
+
+
+def test_panel_stale_save_with_failed_reload_unlocks_after_a_read(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _panel(env, ["codex:gpt-5", "claude:opus"])
+    context, screen = _screen(env, qtbot)
+    choices.set_settings({"panel.members": ["claude:opus"]}, env=env)
+    snapshot = choices.snapshot
+    failures = [db.DatabaseBusyError("test settings read is busy")]
+
+    def read(*, env: Mapping[str, str] | None = None) -> dict[str, Any]:
+        if failures:
+            raise failures.pop()
+        return snapshot(env=env)
+
+    monkeypatch.setattr(choices, "snapshot", read)
+    with qtbot.waitSignal(context.settings_failed, timeout=5000):
+        screen.member_removes["codex:gpt-5"].click()
+    assert not screen.add_member.isEnabled()
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        context.reload_settings()
+    qtbot.waitUntil(lambda: context.tasks.pending() == 0)
+    qtbot.waitUntil(lambda: not screen._panel_pending)
+    assert list(screen.member_removes) == ["claude:opus"]
+    assert screen.add_member.isEnabled()
+    assert screen.member_removes["claude:opus"].isEnabled()
