@@ -278,7 +278,7 @@ def _add_flow(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_panel(parser: argparse.ArgumentParser) -> None:
-    """Add panel start, validation, status and recovery options."""
+    """Add panel start, validation, status, recovery, retry and close options."""
     parser.add_argument(
         "--question-file", metavar="FILE", help="the question as UTF-8 text"
     )
@@ -324,6 +324,15 @@ def _add_panel(parser: argparse.ArgumentParser) -> None:
         "--recover",
         metavar="PANEL",
         help="collect unfinished members without asking again",
+    )
+    parser.add_argument(
+        "--retry",
+        nargs=2,
+        metavar=("PANEL", "MEMBER"),
+        help="ask a failed or not-started member again",
+    )
+    parser.add_argument(
+        "--close", metavar="PANEL", help="close every open member run without force"
     )
     parser.add_argument("--json", action="store_true", help="print JSON")
 

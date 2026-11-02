@@ -201,10 +201,15 @@ def _validate(panel_id: str, panel: object) -> None:
             _fields(
                 panel_id,
                 attempt,
-                {"kind": "str", "at": "number", "exit": "int?"},
+                {
+                    "kind": "str",
+                    "at": "number",
+                    "exit": "int?",
+                    **({"run": "str?"} if "run" in attempt else {}),
+                },
                 f"member {n} attempt",
             )
-            if attempt["kind"] not in ("start", "stall", "recover"):
+            if attempt["kind"] not in ("start", "stall", "recover", "retry"):
                 raise PanelError(panel_id, f"member {n} has an invalid attempt kind")
     for item in panel["left_out"]:
         _fields(panel_id, item, {"value": "str", "reason": "str"}, "left-out member")
