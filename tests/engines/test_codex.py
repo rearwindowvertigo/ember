@@ -239,6 +239,8 @@ def test_command_leaves_the_brief_to_paste(setup: Setup) -> None:
         "-m",
         "gpt-5.5",
         "-c",
+        "check_for_update_on_startup=false",
+        "-c",
         'model_reasoning_effort="xhigh"',
         "-a",
         "never",
@@ -255,7 +257,7 @@ def test_command_leaves_the_brief_to_paste(setup: Setup) -> None:
 def test_command_without_effort_or_sandbox(setup: Setup) -> None:
     run = _run(setup, effort=None, sandbox="none", read_only=True)
     spec = CodexDriver(setup.env).command(run, BRIEF)
-    assert "-c" not in spec.argv
+    assert not any(arg.startswith("model_reasoning_effort") for arg in spec.argv)
     index = spec.argv.index("--sandbox")
     assert spec.argv[index + 1] == "danger-full-access"
     assert "read-only" not in spec.argv

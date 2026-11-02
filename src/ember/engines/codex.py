@@ -612,9 +612,10 @@ class CodexDriver(Driver):
             first_message: The attributed brief.
 
         Returns:
-            `codex -C <worktree> -m <model> [-c model_reasoning_effort=...]
-            -a never [--sandbox danger-full-access] --search`, in the
-            worktree, with the first message to paste. The sandbox option is
+            `codex -C <worktree> -m <model> -c check_for_update_on_startup=false
+            [-c model_reasoning_effort=...] -a never
+            [--sandbox danger-full-access] --search`, in the worktree, with
+            the first message to paste. The sandbox option is
             added only for the sandbox method `none`.
 
         Raises:
@@ -633,6 +634,8 @@ class CodexDriver(Driver):
                 "codex there once and choosing to trust the folder"
             )
         argv = [binary, "-C", run.worktree, "-m", run.model]
+        # An update prompt would hold the session before it takes the brief.
+        argv += ["-c", "check_for_update_on_startup=false"]
         if run.effort is not None:
             argv += ["-c", f"model_reasoning_effort={json.dumps(run.effort)}"]
         argv += ["-a", "never"]
