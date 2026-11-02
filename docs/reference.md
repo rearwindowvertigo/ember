@@ -2085,12 +2085,15 @@ symlinks are refused. Files named by a record outside its folder are kept.
 `--dry-run` lists the records that would be removed and removes nothing.
 Text output has `removed <kind> <id>` lines (`would remove` for a dry run),
 `skipped <id>: <reason>` lines, and kept branch and worktree lines with
-removal commands. Existing worktrees of listed branches are listed next
-to their branch unless an open run uses the worktree. In that case the
-branch-deletion command is still listed, without a worktree-removal step.
+removal commands. Text output lists every remaining worktree of a removed
+record unless an open run uses it. Each worktree appears under its branch
+line with its removal command, including when the branch is merged or
+already deleted. When an open run uses the worktree, an unmerged branch's
+deletion command is still listed, without a worktree-removal step.
 Prune deletes no branch, worktree or tmux session.
 
-Prune lists only branches that exist and are unmerged. A branch is unmerged
+Prune lists branch-deletion commands only for branches that exist and are
+unmerged. A branch is unmerged
 when it is not an ancestor of its target. Task branches are checked against
 their flow branch. Run and flow records save
 `base_branch` at creation and use it even if the source checkout switches
@@ -2100,13 +2103,14 @@ has no base branch, the branch is listed as unmerged. Missing target refs
 are not errors and do not change the exit code. Saved commits are not used
 as targets. This check does not treat a squash merge as ancestry.
 
-Every listed run, task and flow branch gets
+Every listed unmerged run, task and flow branch gets
 `git -C <dir> branch -D <branch>`. Records with a null or missing
 `base_branch` list their existing branches as unmerged using this command.
 When the worktree exists and no open run uses it,
 `git -C <dir> worktree remove <path>` precedes branch deletion with `&&`.
-Paths and branch names are shell-quoted. Merged and absent branches and
-their worktrees are omitted. Prune never prints `emb cleanup`.
+Paths and branch names are shell-quoted. Merged and absent branches have
+no branch-deletion command; their remaining worktrees still have worktree
+removal commands in text output. Prune never prints `emb cleanup`.
 
 `--json` prints an object with three arrays:
 

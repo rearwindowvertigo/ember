@@ -347,6 +347,14 @@ def _artifacts(
     for branch, worktree, target in candidates:
         if not branch:
             continue
+        worktree_command = None
+        if worktree and worktree not in live_worktrees and Path(worktree).exists():
+            worktree_command = shlex.join(
+                ["git", "-C", directory, "worktree", "remove", worktree]
+            )
+            item = dict(branch=branch, worktree=worktree, command=worktree_command)
+            if item not in result.worktrees:
+                result.worktrees.append(item)
         contained = False
         try:
             if not _branch_exists(directory, branch, env):
@@ -380,13 +388,7 @@ def _artifacts(
         if contained:
             continue
         command = shlex.join(["git", "-C", directory, "branch", "-D", branch])
-        if worktree and worktree not in live_worktrees and Path(worktree).exists():
-            worktree_command = shlex.join(
-                ["git", "-C", directory, "worktree", "remove", worktree]
-            )
-            item = dict(branch=branch, worktree=worktree, command=worktree_command)
-            if item not in result.worktrees:
-                result.worktrees.append(item)
+        if worktree_command:
             command = f"{worktree_command} && {command}"
         item = dict(branch=branch, command=command)
         if item not in result.branches:

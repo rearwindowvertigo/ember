@@ -432,7 +432,7 @@ def test_branch_commands_worktrees_and_ancestry(
     ) in calls
     assert worktree.is_dir() and checkout.is_dir()
     if merged:
-        assert result.branches == [] and result.worktrees == []
+        assert result.branches == []
     else:
         command = result.branches[0]["command"]
         assert shlex.quote(str(worktree)) in command
@@ -440,15 +440,15 @@ def test_branch_commands_worktrees_and_ancestry(
             shlex.join(["git", "-C", str(checkout), "branch", "-D", branch])
         )
         assert " && " in command and "emb cleanup" not in command
-        assert result.worktrees == [
-            dict(
-                branch=branch,
-                worktree=str(worktree),
-                command=shlex.join(
-                    ["git", "-C", str(checkout), "worktree", "remove", str(worktree)]
-                ),
-            )
-        ]
+    assert result.worktrees == [
+        dict(
+            branch=branch,
+            worktree=str(worktree),
+            command=shlex.join(
+                ["git", "-C", str(checkout), "worktree", "remove", str(worktree)]
+            ),
+        )
+    ]
 
 
 def test_flow_and_task_branch_targets(
@@ -909,13 +909,14 @@ def test_merged_and_absent_branches_are_never_listed(
     assert captured.err == ""
     if as_json:
         assert json.loads(captured.out)["branches"] == []
+        assert str(worktree) not in captured.out
     else:
-        assert not any(
-            line.startswith(("branch ", "  worktree "))
-            for line in captured.out.splitlines()
+        command = shlex.join(
+            ["git", "-C", "/checkout", "worktree", "remove", str(worktree)]
         )
+        assert f"branch {branch}\n  worktree {worktree}: {command}\n" in captured.out
+        assert "branch -D" not in captured.out
     assert "emb cleanup" not in captured.out
-    assert str(worktree) not in captured.out
     if branch_state == "merged":
         assert (
             "merge-base",
@@ -950,3 +951,46 @@ def test_flow_without_base_lists_task_as_unmerged(
         dict(branch=branch, command=f"git -C /checkout branch -D {branch}")
         for branch in (parent["branch"], "ember/task/old-task")
     ]
+
+
+def test_removed_flow_reports_merged_task_worktree(
+    env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    worktree = tmp_path / "merged task tree"
+    worktree.mkdir()
+    (worktree / "kept.txt").write_text("task changes")
+    parent = flow(env, status="done", base_branch="main")
+    child = run(env, worktree=str(worktree), base_branch=parent["branch"])
+    branch = f"ember/codex/{child.id}"
+    runs.save(replace(child, branch=branch, read_only=False))
+    parent["tasks"][0].update(
+        status="merged", branch=branch, worktree=str(worktree), writer_run=child.id
+    )
+    flows.save(parent, env)
+
+    def git(
+        directory: str, *args: str, env: Mapping[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(prune, "_git", git)
+    command = shlex.join(
+        ["git", "-C", "/checkout", "worktree", "remove", str(worktree)]
+    )
+    preview = prune.remove(0, dry_run=True, env=env)
+    assert ids(preview) == {parent["id"], child.id}
+    assert preview.branches == []
+    assert preview.worktrees == [
+        dict(branch=branch, worktree=str(worktree), command=command)
+    ]
+    assert child.folder.exists() and flows.folder(parent["id"], env).exists()
+    assert prune.main(0, env=env) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert f"branch {branch}\n  worktree {worktree}: {command}\n" in captured.out
+    assert "branch -D" not in captured.out and "emb cleanup" not in captured.out
+    assert not child.folder.exists() and not flows.folder(parent["id"], env).exists()
+    assert (worktree / "kept.txt").read_text() == "task changes"
