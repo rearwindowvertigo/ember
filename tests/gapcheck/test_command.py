@@ -660,3 +660,39 @@ def test_invalid_reply_and_refused_close_have_one_gapcheck_action(
     ]
     assert len(actions) == 1 and "--reply" in actions[0]
     assert "WARNING: the run" in err
+
+
+def test_interrupt_while_waiting_keeps_the_run(
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    driver: StubDriver,
+) -> None:
+    class WaitInterrupted(Core):
+        def _wait_turn(self, run: Any, driver: Any) -> Any:  # noqa: ANN401
+            raise KeyboardInterrupt
+
+    def make(environment: Mapping[str, str], **kwargs: Any) -> Core:  # noqa: ANN401
+        return WaitInterrupted(
+            environment, load_driver=lambda name: driver, poll_seconds=0.05, **kwargs
+        )
+
+    code, out, err = invoke(
+        env,
+        plan_file,
+        "--dir",
+        str(repo),
+        "--engine",
+        "codex",
+        "--model",
+        "m",
+        "--json",
+        factory=make,
+    )
+    assert code == 74, err
+    data = json.loads(out)
+    assert data["run"]["exit"] == 74 and not data["run"]["closed"]
+    assert "keeps running" in err
+    assert err.splitlines()[-1].startswith("next: ")
+    assert not list(paths.runtime_dir(env).glob("gapcheck-*.md"))
+    assert record.load(data["run"]["id"], env).status != record.CLOSED
