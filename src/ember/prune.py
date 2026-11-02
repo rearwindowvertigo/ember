@@ -345,25 +345,17 @@ def _artifacts(
             (task["branch"], task["worktree"], data["branch"]) for task in data["tasks"]
         ]
     for branch, worktree, target in candidates:
-        if not branch or worktree in live_worktrees:
+        if not branch:
             continue
-        worktree_command = None
-        if worktree and Path(worktree).exists():
-            worktree_command = shlex.join(
-                ["git", "-C", directory, "worktree", "remove", worktree]
-            )
-            item = dict(branch=branch, worktree=worktree, command=worktree_command)
-            if item not in result.worktrees:
-                result.worktrees.append(item)
         contained = False
         try:
             if not _branch_exists(directory, branch, env):
-                if worktree_command:
-                    result.branches.append(
-                        dict(branch=branch, command=worktree_command)
-                    )
                 continue
-            target = _target_branch(directory, target, fallbacks, env)
+            target = (
+                _target_branch(directory, target, fallbacks, env)
+                if data.get("base_branch")
+                else None
+            )
             while target:
                 merged = _git(
                     directory,
@@ -384,30 +376,17 @@ def _artifacts(
                 target = replacement
         except (OSError, subprocess.SubprocessError) as error:
             result.errors.append(f"{entry.id}: {branch}: {error}")
-        if (
-            contained
-            and data.get("base_branch")
-            and target != branch
-            and re.fullmatch(
-                r"ember/(?:codex|opencode|claude)/[a-z0-9][a-z0-9-]{5,63}", branch
+            continue
+        if contained:
+            continue
+        command = shlex.join(["git", "-C", directory, "branch", "-D", branch])
+        if worktree and worktree not in live_worktrees and Path(worktree).exists():
+            worktree_command = shlex.join(
+                ["git", "-C", directory, "worktree", "remove", worktree]
             )
-        ):
-            assert target is not None
-            command = shlex.join(
-                [
-                    "emb",
-                    "cleanup",
-                    "--merged-into",
-                    target,
-                    "--branch",
-                    branch,
-                    "--dir",
-                    directory,
-                ]
-            )
-        else:
-            command = shlex.join(["git", "-C", directory, "branch", "-D", branch])
-        if worktree_command:
+            item = dict(branch=branch, worktree=worktree, command=worktree_command)
+            if item not in result.worktrees:
+                result.worktrees.append(item)
             command = f"{worktree_command} && {command}"
         item = dict(branch=branch, command=command)
         if item not in result.branches:

@@ -430,24 +430,25 @@ def test_branch_commands_worktrees_and_ancestry(
         f"refs/heads/{branch}",
         "refs/heads/main",
     ) in calls
-    command = result.branches[0]["command"]
-    assert shlex.quote(str(worktree)) in command
-    assert ("emb cleanup --merged-into main" in command) == merged
-    if not merged:
+    assert worktree.is_dir() and checkout.is_dir()
+    if merged:
+        assert result.branches == [] and result.worktrees == []
+    else:
+        command = result.branches[0]["command"]
+        assert shlex.quote(str(worktree)) in command
         assert command.endswith(
             shlex.join(["git", "-C", str(checkout), "branch", "-D", branch])
         )
-        assert " && " in command
-    assert worktree.is_dir() and checkout.is_dir()
-    assert result.worktrees == [
-        dict(
-            branch=branch,
-            worktree=str(worktree),
-            command=shlex.join(
-                ["git", "-C", str(checkout), "worktree", "remove", str(worktree)]
-            ),
-        )
-    ]
+        assert " && " in command and "emb cleanup" not in command
+        assert result.worktrees == [
+            dict(
+                branch=branch,
+                worktree=str(worktree),
+                command=shlex.join(
+                    ["git", "-C", str(checkout), "worktree", "remove", str(worktree)]
+                ),
+            )
+        ]
 
 
 def test_flow_and_task_branch_targets(
@@ -572,7 +573,7 @@ def test_busy_member_prevents_panel_removal(env: dict[str, str]) -> None:
     assert panels.load(parent["id"], env)["status"] == "done"
 
 
-def test_repository_failure_reports_command_and_continues(
+def test_repository_failure_omits_command_and_continues(
     env: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -592,7 +593,7 @@ def test_repository_failure_reports_command_and_continues(
     result = json.loads(captured.out)
     assert {item["id"] for item in result["removed"]} == {child.id, other.id}
     assert "git unavailable" in captured.err
-    assert result["branches"][0]["command"].startswith("git -C /checkout branch -D ")
+    assert result["branches"] == []
 
 
 def test_unmerged_task_using_run_branch_lists_deletion_once(
@@ -660,11 +661,13 @@ def test_deleted_target_uses_flow_base_without_error(
     assert captured.err == ""
     result = json.loads(captured.out)
     assert {item["id"] for item in result["removed"]} == {parent["id"], child.id}
-    command = next(
-        item["command"] for item in result["branches"] if item["branch"] == branch
-    )
-    assert ("emb cleanup --merged-into main" in command) == contained
-    assert ("branch -D" in command) != contained
+    if contained:
+        assert result["branches"] == []
+    else:
+        command = next(
+            item["command"] for item in result["branches"] if item["branch"] == branch
+        )
+        assert "branch -D" in command and "emb cleanup" not in command
     assert all(
         args[-1] == "refs/heads/main" for args in queries if args[0] == "merge-base"
     )
@@ -796,18 +799,30 @@ def test_flow_child_reopens_before_run_lock(
     assert child.id in reason and "running" in reason
 
 
-def test_unrelated_live_run_suppresses_shared_worktree_commands(
+def test_unrelated_live_run_keeps_branch_command_without_worktree_removal(
     env: dict[str, str],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     worktree = tmp_path / "shared tree"
     worktree.mkdir()
     live = run(env, status="running", worktree=str(worktree))
-    ended = run(env, worktree=str(worktree))
+    ended = run(env, worktree=str(worktree), base_branch="main")
     runs.save(replace(ended, branch=f"ember/codex/{ended.id}", read_only=False))
+
+    def git(
+        directory: str, *args: str, env: Mapping[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, int(args[0] == "merge-base"), "", "")
+
+    monkeypatch.setattr(prune, "_git", git)
     result = prune.remove(0, env=env)
     assert ids(result) == {ended.id}
-    assert not result.branches and not result.worktrees
+    branch = f"ember/codex/{ended.id}"
+    assert result.branches == [
+        dict(branch=branch, command=f"git -C /checkout branch -D {branch}")
+    ]
+    assert not result.worktrees
     assert live.folder.exists() and worktree.exists()
 
 
@@ -819,7 +834,7 @@ def test_reopened_run_protects_shared_worktree_before_any_removal(
     worktree = tmp_path / "shared tree"
     worktree.mkdir()
     reopening = run(env, worktree=str(worktree))
-    other = run(env, worktree=str(worktree))
+    other = run(env, worktree=str(worktree), base_branch="main")
     runs.save(replace(other, branch=f"ember/codex/{other.id}", read_only=False))
     original = prune._hold
 
@@ -831,7 +846,107 @@ def test_reopened_run_protects_shared_worktree_before_any_removal(
         original(entry, stack, env)
 
     monkeypatch.setattr(prune, "_hold", hold)
+
+    def git(
+        directory: str, *args: str, env: Mapping[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, int(args[0] == "merge-base"), "", "")
+
+    monkeypatch.setattr(prune, "_git", git)
     result = prune.remove(0, env=env)
     assert ids(result) == {other.id}
-    assert not result.branches and not result.worktrees
+    branch = f"ember/codex/{other.id}"
+    assert result.branches == [
+        dict(branch=branch, command=f"git -C /checkout branch -D {branch}")
+    ]
+    assert not result.worktrees
     assert reopening.folder.exists() and worktree.exists()
+
+
+@pytest.mark.parametrize("kind", ["run", "task", "flow"])
+@pytest.mark.parametrize("branch_state", ["merged", "absent"])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_merged_and_absent_branches_are_never_listed(
+    env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    kind: str,
+    branch_state: str,
+    as_json: bool,
+) -> None:
+    worktree = tmp_path / "kept worktree"
+    worktree.mkdir()
+    if kind == "run":
+        record = run(env, base_branch="main", worktree=str(worktree))
+        branch = f"ember/codex/{record.id}"
+        runs.save(replace(record, branch=branch, read_only=False))
+        ident = record.id
+        target = "main"
+    else:
+        parent = flow(env, base_branch="main", worktree=str(worktree))
+        ident = parent["id"]
+        if kind == "task":
+            branch = "ember/task/task-branch"
+            target = parent["branch"]
+            parent["tasks"][0].update(branch=branch, worktree=str(worktree))
+            flows.save(parent, env)
+        else:
+            branch, target = parent["branch"], "main"
+    queries: list[tuple[str, ...]] = []
+
+    def git(
+        directory: str, *args: str, env: Mapping[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        queries.append(args)
+        return subprocess.CompletedProcess(
+            args, int(branch_state == "absent" and args[0] == "show-ref"), "", ""
+        )
+
+    monkeypatch.setattr(prune, "_git", git)
+    assert prune.main(0, as_json=as_json, env=env) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    if as_json:
+        assert json.loads(captured.out)["branches"] == []
+    else:
+        assert not any(
+            line.startswith(("branch ", "  worktree "))
+            for line in captured.out.splitlines()
+        )
+    assert "emb cleanup" not in captured.out
+    assert str(worktree) not in captured.out
+    if branch_state == "merged":
+        assert (
+            "merge-base",
+            "--is-ancestor",
+            f"refs/heads/{branch}",
+            f"refs/heads/{target}",
+        ) in queries
+    else:
+        assert all(args[0] != "merge-base" for args in queries)
+    assert not runs.run_dir(ident, env).exists()
+    assert worktree.exists()
+
+
+def test_flow_without_base_lists_task_as_unmerged(
+    env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = flow(env, base_branch=None)
+    parent["tasks"][0]["branch"] = "ember/task/old-task"
+    flows.save(parent, env)
+
+    def git(
+        directory: str, *args: str, env: Mapping[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        assert args[0] == "show-ref"
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(prune, "_git", git)
+    result = prune.remove(0, env=env)
+    assert not result.errors
+    assert result.branches == [
+        dict(branch=branch, command=f"git -C /checkout branch -D {branch}")
+        for branch in (parent["branch"], "ember/task/old-task")
+    ]

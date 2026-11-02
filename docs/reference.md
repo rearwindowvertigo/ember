@@ -2085,29 +2085,28 @@ symlinks are refused. Files named by a record outside its folder are kept.
 `--dry-run` lists the records that would be removed and removes nothing.
 Text output has `removed <kind> <id>` lines (`would remove` for a dry run),
 `skipped <id>: <reason>` lines, and kept branch and worktree lines with
-removal commands. Existing worktrees are listed next to their branch.
-Prune deletes no branch, worktree or tmux session. It lists no removal
-command for a worktree used by an open run.
+removal commands. Existing worktrees of listed branches are listed next
+to their branch unless an open run uses the worktree. In that case the
+branch-deletion command is still listed, without a worktree-removal step.
+Prune deletes no branch, worktree or tmux session.
 
-A branch is unmerged when it is not an ancestor of its target. Task
-branches are checked against their flow branch. Run and flow records save
+Prune lists only branches that exist and are unmerged. A branch is unmerged
+when it is not an ancestor of its target. Task branches are checked against
+their flow branch. Run and flow records save
 `base_branch` at creation and use it even if the source checkout switches
 branches. If the target branch has been deleted, prune checks against the
 owning flow's `base_branch`. If that branch is also absent, or the record
 has no base branch, the branch is listed as unmerged. Missing target refs
-are not errors and do not change the exit code. Saved commits are never
-used as `--merged-into` targets. This check does not treat a squash merge
-as ancestry.
+are not errors and do not change the exit code. Saved commits are not used
+as targets. This check does not treat a squash merge as ancestry.
 
-Unmerged run, task and flow branches list
-`git -C <dir> branch -D <branch>`. A run branch (`ember/<engine>/<id>`)
-contained in an existing target branch can list
-`emb cleanup --merged-into <target> --branch <branch> --dir <dir>`.
-Records with a null or missing `base_branch` use the direct branch-deletion
-form. Existing worktrees list `git -C <dir> worktree remove <path>`.
-When both operations are listed, worktree removal precedes the branch
-command with `&&`. Paths and branch names are shell-quoted. An absent
-branch with an existing worktree lists just the worktree removal command.
+Every listed run, task and flow branch gets
+`git -C <dir> branch -D <branch>`. Records with a null or missing
+`base_branch` list their existing branches as unmerged using this command.
+When the worktree exists and no open run uses it,
+`git -C <dir> worktree remove <path>` precedes branch deletion with `&&`.
+Paths and branch names are shell-quoted. Merged and absent branches and
+their worktrees are omitted. Prune never prints `emb cleanup`.
 
 `--json` prints an object with three arrays:
 
