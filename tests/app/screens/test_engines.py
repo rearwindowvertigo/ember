@@ -695,6 +695,29 @@ def test_unreadable_list_shows_error_with_try_again(
     assert stubs["list_calls"][-1] == ("opencode", True)
 
 
+def test_unreadable_list_lists_no_shortlist_entry_as_missing(
+    env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
+) -> None:
+    choices.set_settings(
+        {"shortlist.opencode": ["openai/gpt-5@high", "anthropic/claude-x"]}, env=env
+    )
+    stubs["lists"] = {
+        "opencode": models.ModelList((), models.OPENROUTER, None, "no network")
+    }
+    screen, context = _screen(env, qtbot)
+    panel = _open(screen, context, qtbot, "opencode")
+    assert "no network" in panel.state.error_text.text()
+    assert panel.missing == []
+    assert panel.missing_widget.isHidden()
+    stubs["lists"] = {"opencode": _router_list()}
+    qtbot.mouseClick(panel.state.retry_button, Qt.MouseButton.LeftButton)
+    qtbot.waitUntil(lambda: len(panel.rows) == 3, timeout=5000)
+    assert sorted(row.model_id for row in panel.missing) == [
+        "anthropic/claude-x",
+        "openai/gpt-5",
+    ]
+
+
 def test_refresh_list_reads_again(
     env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
 ) -> None:

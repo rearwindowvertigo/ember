@@ -700,6 +700,7 @@ class _ModelPanel(Card):
         self.state = StateView()
         layout.addWidget(self.state)
         self.models: tuple[models.Model, ...] | None = None
+        self.delivered = False
         self._token = 0
 
     def _add_filters(self, layout: QVBoxLayout) -> None:
@@ -776,6 +777,7 @@ class _ModelPanel(Card):
         _clear(self.rows_area)
         self.rows = []
         self.models = result.models
+        self.delivered = bool(result.models) or result.reason is None
         saved = self.saved()
         for model in result.models:
             effort = initial_effort(self.engine, model, saved.get(model.id))
@@ -832,14 +834,17 @@ class _ModelPanel(Card):
             return {}
         return choices.shortlist_models(self.engine, entries)
 
+    def _absent(self, saved: dict[str, str | None]) -> list[tuple[str, str | None]]:
+        """Return the saved entries missing from a delivered model list."""
+        if self.models is None or not self.delivered:
+            return []
+        known = {model.id for model in self.models}
+        return [(m, e) for m, e in saved.items() if m not in known]
+
     def _draw_missing(self, saved: dict[str, str | None]) -> None:
         _clear(self.missing_area)
         self.missing = []
-        if self.models is None:
-            self.missing_widget.hide()
-            return
-        known = {model.id for model in self.models}
-        absent = [(m, e) for m, e in saved.items() if m not in known]
+        absent = self._absent(saved)
         if absent:
             heading = QLabel("Shortlisted, not in the list")
             heading.setFont(theme.font("label"))
@@ -860,8 +865,7 @@ class _ModelPanel(Card):
                 effort = initial_effort(self.engine, row.model, saved[row.model.id])
                 row.picker.set_value(effort)
         missing = {row.model_id for row in self.missing}
-        known = set() if self.models is None else {m.id for m in self.models}
-        if missing != {m for m in saved if m not in known}:
+        if missing != {m for m, _e in self._absent(saved)}:
             self._draw_missing(saved)
             self.owner.chain_focus()
 
