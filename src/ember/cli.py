@@ -4,7 +4,10 @@ Exit codes follow BSD `sysexits.h`. For `emb choices` and `emb engines`: 0 on
 success, 64 for a usage error or an invalid value, 74 when the settings
 database cannot be opened or read, 75 for a stale generation or a busy
 database, 77 for an owner option without a terminal and 78 for an unsupported
-database schema. `emb run` uses the table in `ember.runs.exits`.
+database schema. `emb run` uses the table in `ember.runs.exits`. `emb ground`
+exits 0 once it has printed, 64 for a usage error and 66 when `--dir` does not
+exist or is not a folder, or, without `--dir`, when the current folder cannot be
+read.
 """
 
 import argparse
@@ -14,12 +17,13 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NoReturn
 
-from ember import __version__, choices, db
+from ember import __version__, choices, db, ground
 from ember.engines import models, status
 from ember.runs import core as run_core
 
 EX_OK = 0
 EX_USAGE = 64
+EX_NOINPUT = 66
 EX_NOPERM = 77
 
 
@@ -199,6 +203,13 @@ def _add_run(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_ground(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--dir", metavar="DIR", help="the folder to read (default: the current one)"
+    )
+    parser.add_argument("--json", action="store_true", help="print JSON")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the parser for `emb` and its subcommands.
 
@@ -239,6 +250,17 @@ def build_parser() -> argparse.ArgumentParser:
                 "Start one worker in its own worktree and tmux session and wait "
                 "for its turn, or send to, read, interrupt, close or recover a "
                 "run. Each non-zero exit prints a next: or owner: line."
+            ),
+        )
+    )
+    _add_ground(
+        subparsers.add_parser(
+            "ground",
+            help="print what to read before choosing a worker",
+            description=(
+                "Print the machine, the Claude Code surface, Claude Code's "
+                "worktree.baseRef setting and the folder's checkout, branch, "
+                "dirty state, remote and instruction files."
             ),
         )
     )
@@ -479,6 +501,21 @@ def _run_run(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
     return core.execute(actions[mode])
 
 
+def _run_ground(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
+    try:
+        result = ground.read(args.dir, env)
+    except ground.DirectoryMissingError as error:
+        print(f"emb ground: {error}", file=sys.stderr)
+        print("next: emb ground --dir <an existing folder>", file=sys.stderr)
+        return EX_NOINPUT
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        for line in ground.lines(result):
+            print(line)
+    return EX_OK
+
+
 def main(
     argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = None
 ) -> int:
@@ -502,6 +539,8 @@ def main(
         return _run_engines(args, env)
     if args.command == "run":
         return _run_run(args, env)
+    if args.command == "ground":
+        return _run_ground(args, env)
     return EX_OK
 
 
