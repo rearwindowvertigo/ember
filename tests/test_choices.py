@@ -152,6 +152,7 @@ def test_defaults(env: dict[str, str]) -> None:
         "single.reviewer": "ask",
         "single.reviewer_as": "cli",
         "multi.runs_as": "ask",
+        "panel.members": [],
         "sandbox.codex": "off",
         "sandbox.opencode": "off",
         "sandbox.claude": "off",
@@ -1047,3 +1048,221 @@ def test_flow_plan_schema_agreement(env: dict[str, str]) -> None:
     for key, minimum, maximum in (("rounds", 0, 3), ("parallel", 1, 8)):
         assert schema["properties"][key]["minimum"] == minimum
         assert schema["properties"][key]["maximum"] == maximum
+
+
+@pytest.fixture
+def panel_env(tmp_path: Path) -> dict[str, str]:
+    from runs.stub_engine import make_env  # pyrefly: ignore[missing-import]
+
+    return make_env(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("codex:gpt-6-astra", "not a list of strings"),
+        ([1], "not a list of strings"),
+        (["bad"], "not <engine>:<model>"),
+        (["ask"], "not <engine>:<model>"),
+        (["codex:gpt-6-astra@low"], "not <engine>:<model>"),
+        (["codex:gpt-6-astra"] * 2, "listed more than once"),
+        ([f"codex:model-{n}" for n in range(9)], "at most 8 members"),
+    ],
+)
+def test_panel_members_invalid(value: object, message: str) -> None:
+    with pytest.raises(choices.InvalidChoiceError, match=message):
+        choices.validate_value("panel.members", value)
+
+
+@pytest.mark.parametrize("once", [False, True])
+def test_panel_members_must_be_shortlisted(
+    panel_env: dict[str, str], once: bool
+) -> None:
+    save = choices.set_once if once else choices.set_settings
+    with pytest.raises(
+        choices.InvalidChoiceError,
+        match="panel.members: other is not on the codex shortlist",
+    ):
+        save({"panel.members": ["codex:other"]}, env=panel_env)
+
+
+def test_panel_members_read_reply_and_allowed(panel_env: dict[str, str]) -> None:
+    choices.set_settings(
+        {
+            "shortlist.opencode": ["vendor/model:free"],
+            "panel.members": ["codex:gpt-5", "opencode:vendor/model:free"],
+        },
+        env=panel_env,
+    )
+    reply = choices.read(env=panel_env)
+    assert list(reply["menu"]) == [
+        "single.writer",
+        "single.reviewer",
+        "multi.runs_as",
+        "panel.members",
+    ]
+    assert reply["menu"]["panel.members"] == {
+        "value": ["codex:gpt-5", "opencode:vendor/model:free"],
+        "state": "set",
+        "members": [
+            {
+                "value": "codex:gpt-5",
+                "state": "set",
+                "engine": "codex",
+                "model": "gpt-5",
+                "effort": "high",
+                "reason": None,
+            },
+            {
+                "value": "opencode:vendor/model:free",
+                "state": "set",
+                "engine": "opencode",
+                "model": "vendor/model:free",
+                "effort": None,
+                "reason": None,
+            },
+        ],
+    }
+    assert choices.allowed_values(reply["answers"])["panel.members"] == {
+        "values": ["claude:opus", "codex:gpt-5", "opencode:vendor/model:free"]
+    }
+    assert choices.parse_value(
+        "panel.members", "opencode:vendor/model:free,codex:gpt-6-astra"
+    ) == ["opencode:vendor/model:free", "codex:gpt-6-astra"]
+    assert choices.parse_value("panel.members", "") == []
+    choices.set_settings({"panel.members": []}, env=panel_env)
+    assert choices.read(env=panel_env)["menu"]["panel.members"] == {
+        "value": [],
+        "state": "empty",
+        "members": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "enabled", "connected", "shortlist", "state", "reason"),
+    [
+        ("bad", "off", False, [], "invalid", "not <engine>:<model>"),
+        ("ask", "on", True, [], "invalid", "not <engine>:<model>"),
+        ("codex:gpt-5", "off", False, [], "engine off", "codex is off"),
+        ("codex:gpt-5", "on", False, [], "not connected", "codex is not connected"),
+        (
+            "codex:gpt-5",
+            "on",
+            True,
+            [],
+            "not shortlisted",
+            "not on the codex shortlist",
+        ),
+        ("codex:gpt-5", "on", True, ["gpt-5@low"], "set", None),
+    ],
+)
+def test_panel_member_row_check_order(
+    panel_env: dict[str, str],
+    value: str,
+    enabled: str,
+    connected: bool,
+    shortlist: list[str],
+    state: str,
+    reason: str | None,
+) -> None:
+    answers = choices.read(env=panel_env)["answers"]
+    answers["panel.members"]["value"] = [value]
+    answers["engine.codex"]["value"] = enabled
+    answers["shortlist.codex"]["value"] = shortlist
+    result = choices.panel_row(answers, {"codex": connected})
+    assert result["state"] == "set"
+    row = result["members"][0]
+    assert row["state"] == state
+    assert row["reason"] == reason
+    assert row["effort"] == ("low" if state == "set" else None)
+    assert "run_as" not in row
+    assert row["engine"] == (None if state == "invalid" else "codex")
+    assert row["model"] == (None if state == "invalid" else "gpt-5")
+
+
+def test_panel_members_accepts_eight_and_empty_layers(
+    panel_env: dict[str, str],
+) -> None:
+    values = [f"codex:model-{n}" for n in range(8)]
+    choices.set_settings(
+        {
+            "shortlist.codex": [f"model-{n}@low" for n in range(8)],
+            "panel.members": values,
+        },
+        env=panel_env,
+    )
+    assert choices.read(env=panel_env)["menu"]["panel.members"]["value"] == values
+    choices.set_once({"panel.members": []}, env=panel_env)
+    choices.claim("panel-choice", env=panel_env)
+    reply = choices.read("panel-choice", env=panel_env)
+    assert _answer(reply, "panel.members") == ([], "one-time")
+    assert reply["menu"]["panel.members"]["state"] == "empty"
+    reply = choices.read(
+        "panel-choice", request={"panel.members": values}, env=panel_env
+    )
+    assert _answer(reply, "panel.members") == (values, "request")
+
+
+@pytest.mark.parametrize("layer", ["setting", "one-time", "claim"])
+def test_broken_panel_data_preserves_other_settings(
+    panel_env: dict[str, str], layer: str
+) -> None:
+    choices.set_settings(
+        {"engine.codex": "off", "sandbox.codex": "on", "worker.network": "on"},
+        env=panel_env,
+    )
+    claim = None
+    if layer == "setting":
+        _raw(panel_env, "INSERT INTO settings VALUES (?, ?)", "panel.members", "{")
+    elif layer == "one-time":
+        choices.set_once({"panel.members": []}, env=panel_env)
+        _raw(
+            panel_env,
+            "UPDATE once SET value = ?",
+            json.dumps({"panel.members": "bad", "multi.runs_as": "flow"}),
+        )
+    else:
+        choices.set_once({"panel.members": [], "multi.runs_as": "flow"}, env=panel_env)
+        choices.claim("panel-choice", env=panel_env)
+        _raw(
+            panel_env,
+            "UPDATE claims SET copy = ? WHERE id = ?",
+            json.dumps({"panel.members": "bad", "multi.runs_as": "flow"}),
+            "panel-choice",
+        )
+        claim = "panel-choice"
+    reply = choices.read(claim, env=panel_env)
+    assert reply["source_error"] is True
+    assert reply["menu"] is None
+    assert "panel.members" in reply["errors"][0]
+    assert _answer(reply, "engine.codex") == ("off", "setting")
+    assert _answer(reply, "sandbox.codex") == ("on", "setting")
+    assert _answer(reply, "worker.network") == ("on", "setting")
+    if layer == "claim":
+        assert _answer(reply, "multi.runs_as") == ("flow", "one-time")
+
+
+def test_panel_error_does_not_hide_other_corruption(panel_env: dict[str, str]) -> None:
+    choices.set_settings({"panel.members": [], "app.theme": "dark"}, env=panel_env)
+    _raw(
+        panel_env,
+        "UPDATE settings SET value = ? WHERE key IN (?, ?)",
+        '"bad"',
+        "panel.members",
+        "app.theme",
+    )
+    reply = choices.read(env=panel_env)
+    assert reply["source_error"]
+    assert len(reply["errors"]) == 2
+    assert all(answer["layer"] == "default" for answer in reply["answers"].values())
+
+
+def test_invalid_panel_once_is_not_claimed(panel_env: dict[str, str]) -> None:
+    choices.set_once({"panel.members": []}, env=panel_env)
+    _raw(panel_env, "UPDATE once SET value = ?", '{"panel.members":"bad"}')
+    reply = choices.claim("panel-choice", env=panel_env)
+    assert reply["claim"]["status"] == "unknown"
+    assert reply["source_error"]
+    with sqlite3.connect(_db_path(panel_env)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM once").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0

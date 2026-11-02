@@ -19,7 +19,7 @@ import shutil
 import sqlite3
 import time
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -164,6 +164,20 @@ def _menu_value(value: object) -> None:
         _fail(f"{value!r} is not ask or <engine>:<model>")
 
 
+def _panel_members(value: object) -> None:
+    """Validate the saved panel member syntax, count and uniqueness."""
+    entries = _string_list(value)
+    seen: set[str] = set()
+    for entry in entries:
+        if _split_menu(entry) is None:
+            _fail(f"{entry!r} is not <engine>:<model>")
+        if entry in seen:
+            _fail(f"{entry!r} is listed more than once")
+        seen.add(entry)
+    if len(entries) > 8:
+        _fail("at most 8 members")
+
+
 def _absolute_paths(value: object) -> None:
     items = _string_list(value)
     for item in items:
@@ -270,6 +284,19 @@ def _keys() -> dict[str, Key]:
             _enum("ask", "flow", "workflow"),
             _constant("ask"),
             allowed=("ask", "flow", "workflow"),
+        )
+    )
+    keys.append(
+        Key(
+            "panel.members",
+            _ALL,
+            _panel_members,
+            _constant([]),
+            is_list=True,
+            pattern=(
+                "<engine>:<model> from that engine's shortlist, "
+                "comma-separated; at most 8"
+            ),
         )
     )
     for engine in SANDBOXED:
@@ -413,9 +440,15 @@ class _State:
     claim_status: str | None
     claim_copy: dict[str, object] | None
     errors: list[str]
+    panel_errors: list[str] = field(default_factory=list)
 
 
-def _decode_object(text: str, what: str, errors: list[str]) -> dict[str, object] | None:
+def _decode_object(
+    text: str,
+    what: str,
+    errors: list[str],
+    panel_errors: list[str] | None = None,
+) -> dict[str, object] | None:
     try:
         value = json.loads(text)
     except ValueError:
@@ -424,13 +457,18 @@ def _decode_object(text: str, what: str, errors: list[str]) -> dict[str, object]
     if not isinstance(value, dict):
         errors.append(f"{what} is not a JSON object")
         return None
+    result: dict[str, object] = {}
     for name, item in value.items():
         try:
             validate_value(name, item, ONCE)
         except InvalidChoiceError as error:
+            if name == "panel.members" and panel_errors is not None:
+                panel_errors.append(f"{what}: {error}")
+                continue
             errors.append(f"{what}: {error}")
             return None
-    return value
+        result[name] = item
+    return result
 
 
 def _load(
@@ -457,12 +495,15 @@ def _load(
             value = json.loads(text)
             validate_value(name, value, SETTING)
         except ValueError as error:
-            state.errors.append(f"setting {name}: {error}")
+            errors = state.panel_errors if name == "panel.members" else state.errors
+            errors.append(f"setting {name}: {error}")
             continue
         state.settings[name] = value
     row = conn.execute("SELECT value, set_at FROM once WHERE id = 1").fetchone()
     if include_once and row is not None and row[1] + ONCE_TTL > now:
-        state.once = _decode_object(row[0], "one-time choice", state.errors)
+        state.once = _decode_object(
+            row[0], "one-time choice", state.errors, state.panel_errors
+        )
         state.once_set_at = row[1]
     if run_id is not None:
         row = conn.execute(
@@ -480,7 +521,7 @@ def _load(
                     state.errors.append(f"claim {run_id} has no copy")
                 else:
                     state.claim_copy = _decode_object(
-                        copy, f"claim {run_id} copy", state.errors
+                        copy, f"claim {run_id} copy", state.errors, state.panel_errors
                     )
     return state
 
@@ -495,6 +536,8 @@ def _defaults(env: Mapping[str, str] | None) -> dict[str, dict[str, Any]]:
 def _resolve(
     state: _State, request: Mapping[str, object], env: Mapping[str, str] | None
 ) -> dict[str, dict[str, Any]]:
+    # A broken panel list must not replace engine and sandbox switches with
+    # defaults when explicit members are used. Its menu remains unavailable.
     answers = _defaults(env)
     if state.errors or state.claim_status in ("gone", "unknown"):
         return answers
@@ -541,14 +584,35 @@ def menu_row(
     if value == "ask":
         row.update(state="ask", reason="asks at each run")
         return row
+    member = _member_row(answers, value, connected)
+    row.update(member)
+    if row["state"] == "invalid":
+        row.update(state="invalid", reason="not ask or <engine>:<model>")
+    if row["engine"] == "claude":
+        row["run_as"] = answers[f"{name}_as"]["value"]
+    return row
+
+
+def _member_row(
+    answers: Mapping[str, Mapping[str, Any]],
+    value: object,
+    connected: Mapping[str, bool] | None,
+) -> dict[str, Any]:
+    """Describe one engine and model using the shared worker checks."""
+    row: dict[str, Any] = {
+        "value": value,
+        "state": "set",
+        "engine": None,
+        "model": None,
+        "effort": None,
+        "reason": None,
+    }
     parts = _split_menu(value) if isinstance(value, str) else None
     if parts is None:
-        row.update(state="invalid", reason="not ask or <engine>:<model>")
+        row.update(state="invalid", reason="not <engine>:<model>")
         return row
     engine, model = parts
     row.update(engine=engine, model=model)
-    if engine == "claude":
-        row["run_as"] = answers[f"{name}_as"]["value"]
     if answers[f"engine.{engine}"]["value"] != "on":
         row.update(state="engine off", reason=f"{engine} is off")
         return row
@@ -561,6 +625,19 @@ def menu_row(
         return row
     row["effort"] = models[model]
     return row
+
+
+def panel_row(
+    answers: Mapping[str, Mapping[str, Any]],
+    connected: Mapping[str, bool] | None = None,
+) -> dict[str, Any]:
+    """Describe the panel list and each member without a run-as choice."""
+    values = answers["panel.members"]["value"]
+    return {
+        "value": values,
+        "state": "set" if values else "empty",
+        "members": [_member_row(answers, value, connected) for value in values],
+    }
 
 
 def runs_as_row(answers: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
@@ -580,7 +657,8 @@ def _reply(
     env: Mapping[str, str] | None,
 ) -> dict[str, Any]:
     answers = _resolve(state, request, env)
-    source_error = bool(state.errors)
+    errors = [*state.errors, *state.panel_errors]
+    source_error = bool(errors)
     held = None if source_error else status.cached(env)
     connected = (
         None if held is None else {name: item.connected for name, item in held.items()}
@@ -591,13 +669,14 @@ def _reply(
         if run_id is None
         else {"id": run_id, "status": state.claim_status},
         "generation": state.generation,
-        "errors": list(state.errors),
+        "errors": errors,
         "source_error": source_error,
         "menu": None
         if source_error
         else {
             **{name: menu_row(answers, name, connected) for name in MENU_KEYS},
             "multi.runs_as": runs_as_row(answers),
+            "panel.members": panel_row(answers, connected),
         },
     }
 
@@ -796,8 +875,12 @@ def _check_shortlisted(
     values: Mapping[str, object], settings: Mapping[str, object]
 ) -> None:
     """Refuse a menu value whose model is not on its engine's shortlist."""
-    for name in MENU_KEYS:
-        value = values.get(name)
+    entries = [(name, values.get(name)) for name in MENU_KEYS]
+    entries.extend(
+        ("panel.members", value)
+        for value in _string_list(values.get("panel.members", []))
+    )
+    for name, value in entries:
         if not isinstance(value, str) or value == "ask":
             continue
         parts = _split_menu(value)
@@ -977,13 +1060,13 @@ def allowed_values(answers: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
 
     Returns:
         Key to `{"values": [...]}` for keys with a fixed set of values, or
-        `{"pattern": ...}` for the others. Menu keys list `ask` and every
-        shortlisted `<engine>:<model>`.
+        `{"pattern": ...}` for the others. Worker menu keys list `ask` and
+        every shortlisted `<engine>:<model>`; `panel.members` omits `ask`.
     """
     result: dict[str, Any] = {}
     for name, key in KEYS.items():
-        if name in MENU_KEYS:
-            options = ["ask"]
+        if name in MENU_KEYS or name == "panel.members":
+            options = ["ask"] if name in MENU_KEYS else []
             for engine in ENGINES:
                 shortlist = answers[f"shortlist.{engine}"]["value"]
                 options += [

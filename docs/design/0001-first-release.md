@@ -104,7 +104,8 @@ and every sandboxed worker is denied them.
 
 C1. Standing settings: the worker menu (which engine, model and effort writes
 single tasks, which reviews; in 0.2.0 also how multi-task work runs
-(`multi.runs_as`: ask, a flow or a Claude Workflow) and panel members),
+(`multi.runs_as`: ask, a flow or a Claude Workflow) and panel members
+(`panel.members`)),
 per-engine on or off, model shortlists with efforts, worker network access,
 a sandbox switch per engine, the terminal that shows worker sessions and
 start at login.
