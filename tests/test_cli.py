@@ -2,6 +2,7 @@ import importlib
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import time
 import types
@@ -679,3 +680,53 @@ def test_run_without_driver_exits_69(
     assert captured.err.splitlines()[-1] == (
         "owner: this Ember build has no driver for codex; update Ember"
     )
+
+
+# emb app
+
+
+def test_app_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["app", "--help"])
+    assert exit_info.value.code == 0
+    assert "--hidden" in capsys.readouterr().out
+
+
+def test_app_usage_error_exits_64(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["app", "--nope"])
+    assert exit_info.value.code == 64
+    assert "unrecognized arguments: --nope" in capsys.readouterr().err
+
+
+def test_app_without_a_graphical_session_exits_69(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env = {"HOME": str(tmp_path), "XDG_RUNTIME_DIR": str(tmp_path / "run")}
+    assert main(["app", "--hidden"], env=env) == 69
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "emb app: no graphical session (WAYLAND_DISPLAY and DISPLAY are unset)\n"
+    )
+
+
+def test_other_commands_do_not_import_qt(tmp_path: Path) -> None:
+    script = (
+        "import sys\n"
+        "from ember.cli import main\n"
+        "try:\n"
+        "    main(['deps', '--help'])\n"
+        "except SystemExit:\n"
+        "    pass\n"
+        "print(sorted(name for name in sys.modules if name.startswith('PySide6')))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+        cwd=tmp_path,
+    )
+    assert result.stdout.splitlines()[-1] == "[]"
