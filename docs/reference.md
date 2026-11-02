@@ -1018,6 +1018,11 @@ durations as `18 min`, `1 h 5 min` or `2 h`.
 | Ctrl+1 to Ctrl+5 | Open Overview, Menu, Engines, Dependencies, Settings |
 | Ctrl+W | Hide the window to the tray; quit when there is no tray |
 | Ctrl+Q | Quit |
+| Left, Right, Home, End | In a screen mirror that has focus: scroll it sideways |
+| Up, Down, Page Up, Page Down | In a screen mirror that has focus: scroll it, or the screen around it when it shows every line |
+
+A screen mirror takes focus with Tab and then shows the focus ring. Keys
+pressed in it never reach the run's session.
 
 ### Tray
 

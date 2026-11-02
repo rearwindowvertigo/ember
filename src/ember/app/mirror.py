@@ -9,7 +9,10 @@ from that text. At most one capture is in flight; output that arrives during
 a capture causes exactly one more. Nothing runs on a timer.
 
 `MirrorView` paints the captured screen in the terminal font with the
-mirror's colours (`resolve`).
+mirror's colours (`resolve`). Its scroll area takes focus with Tab and shows
+the focus ring; Left, Right, Home and End scroll it sideways, and Up, Down,
+Page Up and Page Down scroll it, or the screen around it when the mirror
+shows every line. Keys never reach tmux.
 """
 
 import contextlib
@@ -28,8 +31,26 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPaintEvent, QPen
-from PySide6.QtWidgets import QFrame, QLabel, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QKeyEvent,
+    QKeySequence,
+    QPainter,
+    QPaintEvent,
+    QPen,
+)
+from PySide6.QtWidgets import (
+    QAbstractScrollArea,
+    QAbstractSlider,
+    QFrame,
+    QLabel,
+    QScrollArea,
+    QScrollBar,
+    QVBoxLayout,
+    QWidget,
+)
 
 from ember import paths, tmux
 from ember.app import sgr, theme
@@ -439,11 +460,66 @@ class _Canvas(QWidget):
         painter.end()
 
 
+_Action = QAbstractSlider.SliderAction
+
+_HORIZONTAL = {
+    Qt.Key.Key_Left: _Action.SliderSingleStepSub,
+    Qt.Key.Key_Right: _Action.SliderSingleStepAdd,
+    Qt.Key.Key_Home: _Action.SliderToMinimum,
+    Qt.Key.Key_End: _Action.SliderToMaximum,
+}
+
+_VERTICAL = {
+    Qt.Key.Key_Up: _Action.SliderSingleStepSub,
+    Qt.Key.Key_Down: _Action.SliderSingleStepAdd,
+    Qt.Key.Key_PageUp: _Action.SliderPageStepSub,
+    Qt.Key.Key_PageDown: _Action.SliderPageStepAdd,
+}
+
+
+class _Scroller(QScrollArea):
+    """The mirror's scroll area: it takes focus and scrolls with keys only."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setProperty("role", "mirror")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def _vertical_bar(self) -> QScrollBar | None:
+        """Return the bar Up and Down move: its own, else the enclosing one."""
+        own = self.verticalScrollBar()
+        if own.maximum() > own.minimum():
+            return own
+        parent = self.parentWidget()
+        while parent is not None:
+            if isinstance(parent, QAbstractScrollArea):
+                return parent.verticalScrollBar()
+            parent = parent.parentWidget()
+        return None
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: D102
+        key = Qt.Key(event.key())
+        if event.matches(QKeySequence.StandardKey.MoveToPreviousPage):
+            key = Qt.Key.Key_PageUp
+        elif event.matches(QKeySequence.StandardKey.MoveToNextPage):
+            key = Qt.Key.Key_PageDown
+        if key in _HORIZONTAL:
+            self.horizontalScrollBar().triggerAction(_HORIZONTAL[key])
+        elif key in _VERTICAL:
+            bar = self._vertical_bar()
+            if bar is not None:
+                bar.triggerAction(_VERTICAL[key])
+        else:
+            event.ignore()
+            return
+        event.accept()
+
+
 class MirrorView(QWidget):
     """The read-only screen of a live run.
 
-    No key or mouse input reaches tmux. When the client ends, the view shows
-    "Session ended" above the last screen.
+    No key or mouse input reaches tmux; keys only scroll the view. When the
+    client ends, the view shows "Session ended" above the last screen.
     """
 
     def __init__(
@@ -467,13 +543,13 @@ class MirrorView(QWidget):
         self.ended_label.hide()
         layout.addWidget(self.ended_label)
         self.canvas = _Canvas()
-        self.scroller = QScrollArea()
+        self.scroller = _Scroller()
+        self.scroller.setAccessibleName(f"Screen of run {run_id}")
         self.scroller.setFrameShape(QFrame.Shape.NoFrame)
         self.scroller.setWidgetResizable(False)
         self.scroller.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroller.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.scroller.setWidget(self.canvas)
-        self.scroller.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         layout.addWidget(self.scroller)
         self.canvas.setFixedSize(0, 0)
         self._fit()
@@ -500,8 +576,11 @@ class MirrorView(QWidget):
         return self.ended_label.isVisibleTo(self)
 
     def _fit(self) -> None:
+        # The style sheet gives the scroll area its focus ring border.
+        self.scroller.ensurePolished()
         bar = self.scroller.horizontalScrollBar().sizeHint().height()
-        self.scroller.setFixedHeight(self.canvas.height() + bar)
+        frame = 2 * self.scroller.frameWidth()
+        self.scroller.setFixedHeight(self.canvas.height() + bar + frame)
 
     def _updated(self, screen: Screen) -> None:
         self.canvas.show_screen(screen)
