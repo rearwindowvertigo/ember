@@ -114,7 +114,8 @@ python3 scripts/verify_branch.py --repo <repo> --base <session branch> --branch 
 Omit `--expect-files`. Run your own checks and apply the skill's exact
 review bar to the whole flow diff. Inspect each task's `outside_files`,
 every retained `should` and `lead` finding, and every retained branch.
-Give one verdict for the flow branch.
+Give one verdict for the flow branch, written as visible text such as
+`Verdict: Keep.` right before the `emb merge` call.
 
 If verification rejects the result, keep the flow branch and claim open,
 name the failed check, and make a separately reviewed correction on the
@@ -123,9 +124,10 @@ the flow worktree, review its result and merge that correction into the
 flow branch through `emb merge`; do not answer a completed flow with
 `--lead` or merge the rejected result into the session branch. When that
 correction fails too, the verdict is `Keep, with <fix>` naming what is
-missing, or Discard; state it before any merge.
+missing, or Discard; write it right before any merge, and leave a
+Discard unmerged.
 
-After Keep, merge under the skill's merge and cleanup rules:
+After `Verdict: Keep.` or `Verdict: Keep, with <fix>.`, merge under the skill's merge and cleanup rules:
 
 ```bash
 emb merge ember/flow/<id> --into <session branch> --verdict keep --dir <dir>

@@ -847,6 +847,14 @@ def panel_start(
     return canned_reply(base, variables, as_json)
 
 
+def _cwd() -> str:
+    """Return the working directory, or `PWD` when it was removed."""
+    try:
+        return os.getcwd()
+    except FileNotFoundError:
+        return os.environ.get("PWD", "/")
+
+
 def record_variables(args: list[str], state: dict[str, Any]) -> dict[str, str]:
     """Resolve plan, flow and panel template values for the current call."""
     plan_path = option(args, "--plan")
@@ -858,7 +866,7 @@ def record_variables(args: list[str], state: dict[str, Any]) -> dict[str, str]:
                 plan = value
         except OSError, ValueError:
             pass
-    directory = plan.get("dir") or option(args, "--dir") or os.getcwd()
+    directory = plan.get("dir") or option(args, "--dir") or _cwd()
     flow_id = next(reversed(state["flows"]), "")
     panel_id = next(reversed(state["panels"]), "")
     if args and args[0] == "flow":
@@ -1398,7 +1406,7 @@ def main(argv: list[str]) -> int:
             "seq": sum(state["counters"].values()),
             "at": stamp.replace("+00:00", "Z"),
             "argv": argv,
-            "cwd": os.getcwd(),
+            "cwd": _cwd(),
             "route": name,
             "reply": base.name if base else None,
             "exit": reply.code,
