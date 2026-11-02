@@ -22,6 +22,17 @@ RUN_ID = "codex-20261101-120000-abc123"
 THREAD = "thread-0001"
 BRIEF = f"Brief from Claude, the lead, for Ember run {RUN_ID}.\n\nDo the work."
 
+CAPACITY_MESSAGE = "Selected model is at capacity. Please try a different model."
+CAPACITY_COMPLETE = (
+    '{"timestamp":"2026-11-02T11:05:28.068Z","ordinal":108,"type":"event_msg",'
+    '"payload":{"type":"task_complete",'
+    '"root_turn_id":"01a19be9-d12c-7b03-9b8a-abfd89531e5c",'
+    '"turn_id":"01a19be9-d12c-7b03-9b8a-abfd89531e5c","last_agent_message":null,'
+    '"error":{"message":"Selected model is at capacity. Please try a different model.",'
+    '"codex_error_info":"server_overloaded"},"started_at":1793617154,'
+    '"completed_at":1793617528,"duration_ms":373714,"time_to_first_token_ms":10677}}'
+)
+
 MODELS = {
     "models": [
         {
@@ -473,13 +484,22 @@ def test_a_turn_aborted_by_an_error_fails(setup: Setup) -> None:
     [
         ("You've hit your usage limit. Try again later.", False),
         ("unexpected status 503 Service Unavailable", False),
+        (CAPACITY_MESSAGE, False),
         ("unexpected status 401 Unauthorized: token expired", True),
         ("Your access token could not be refreshed. Please log in again.", True),
     ],
 )
-def test_an_error_fails_the_turn(setup: Setup, message: str, signed_out: bool) -> None:
+@pytest.mark.parametrize("kind", ["error", "task_complete"])
+def test_an_error_fails_the_turn(
+    setup: Setup, message: str, signed_out: bool, kind: str
+) -> None:
     driver, run = _started(setup)
-    _rollout(setup, _line("task_started"), _line("error", message=message))
+    error = (
+        _line(kind, message=message)
+        if kind == "error"
+        else _line(kind, error={"message": message})
+    )
+    _rollout(setup, _line("task_started"), error)
     outcome = driver.wait(run)
     assert outcome.state == engines.FAILED
     assert outcome.signed_out is signed_out
@@ -487,30 +507,116 @@ def test_an_error_fails_the_turn(setup: Setup, message: str, signed_out: bool) -
     assert outcome.reason == f"Codex reported an error: {message}"
 
 
+def test_a_captured_capacity_completion_fails_the_turn(setup: Setup) -> None:
+    driver, run = _started(setup)
+    path = _rollout(setup, _line("task_started"))
+    assert driver.wait(run).state == engines.RUNNING
+    _append(path, CAPACITY_COMPLETE)
+    assert driver.wait(run) == engines.TurnOutcome(
+        engines.FAILED,
+        reason=f"Codex reported an error: {CAPACITY_MESSAGE}",
+        provider_error=True,
+    )
+    turns = codex.read_turns(path)
+    assert turns.errors == []
+    assert turns.errors_at_end == [0]
+    assert turns.completion_errors == [CAPACITY_MESSAGE]
+
+
+@pytest.mark.parametrize(
+    "error", [{}, {"message": ""}, {"message": 7}, "failure", False]
+)
+def test_a_completion_error_without_a_message_fails(
+    setup: Setup, error: object
+) -> None:
+    driver, run = _started(setup)
+    _rollout(setup, _line("task_started"), _line("task_complete", error=error))
+    assert driver.wait(run) == codex.error_outcome("error")
+
+
+@pytest.mark.parametrize("kind", ["agent_message", "user_message"])
+def test_capacity_text_in_a_message_does_not_fail_the_turn(
+    setup: Setup, kind: str
+) -> None:
+    driver, run = _started(setup)
+    path = _rollout(setup, _line("task_started"), _line(kind, message=CAPACITY_MESSAGE))
+    assert driver.wait(run).state == engines.RUNNING
+    _append(
+        path, _line("task_complete", last_agent_message=CAPACITY_MESSAGE, error=None)
+    )
+    assert driver.wait(run) == engines.TurnOutcome(engines.DONE, reply=CAPACITY_MESSAGE)
+
+
+@pytest.mark.parametrize(
+    ("first", "last"),
+    [
+        ("stream disconnected", "401 Unauthorized"),
+        ("401 Unauthorized", CAPACITY_MESSAGE),
+    ],
+)
+def test_the_completion_error_is_the_last_error_of_the_turn(
+    setup: Setup, first: str, last: str
+) -> None:
+    driver, run = _started(setup)
+    path = _rollout(
+        setup,
+        _line("task_started"),
+        _line("error", message=first),
+        _line("task_complete", error={"message": last}),
+        _line("error", message="after the turn"),
+    )
+    assert driver.wait(run) == codex.error_outcome(last)
+    turns = codex.read_turns(path)
+    assert turns.errors == [first, "after the turn"]
+    assert turns.errors_at_end == [1]
+    assert turns.completion_errors == [last]
+
+
+@pytest.mark.parametrize("completion_error", [None, {"message": CAPACITY_MESSAGE}])
 def test_send_counts_from_where_the_rollout_stood(
-    setup: Setup, monkeypatch: pytest.MonkeyPatch
+    setup: Setup,
+    monkeypatch: pytest.MonkeyPatch,
+    completion_error: dict[str, str] | None,
 ) -> None:
     driver, run = _started(setup)
     path = _rollout(
         setup,
         _line("task_started"),
         _line("error", message="old failure"),
-        _line("task_complete", last_agent_message="first"),
+        _line("task_complete", last_agent_message="first", error=completion_error),
     )
     # An error in the same turn as its task_complete fails the turn.
-    assert driver.wait(run) == codex.error_outcome("old failure")
+    assert driver.wait(run) == codex.error_outcome(
+        CAPACITY_MESSAGE if completion_error else "old failure"
+    )
     run = dataclasses.replace(run, turn=2)
     with _tmux_calls(monkeypatch) as calls:
         driver.send(run, "Next step.\nWith detail.")
     assert calls == [("send_text", (RUN_ID, "Next step.\nWith detail."))]
+    state = json.loads((run.folder / codex.STATE_NAME).read_text())
+    assert state["turns"]["2"] == {"ended": 1, "errors": 1}
     assert driver.wait(run).state == engines.RUNNING
     _append(path, _line("task_started"))
     assert driver.idle_state(run).state == engines.BUSY
     _append(path, _line("task_complete", last_agent_message="second"))
     assert driver.wait(run) == engines.TurnOutcome(engines.DONE, reply="second")
     # A turn typed later in the session does not change this turn's reply.
-    _append(path, _line("task_started"), _line("task_complete", last_agent_message="x"))
+    _append(path, _line("task_started"), CAPACITY_COMPLETE)
     assert driver.wait(run).reply == "second"
+
+
+def test_an_error_after_send_is_not_hidden_by_a_completion_error(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    driver, run = _started(setup)
+    path = _rollout(setup, _line("task_started"), CAPACITY_COMPLETE)
+    assert driver.wait(run).provider_error
+    run = dataclasses.replace(run, turn=2)
+    with _tmux_calls(monkeypatch):
+        driver.send(run, "Try again.")
+    assert driver.wait(run).state == engines.RUNNING
+    _append(path, _line("task_started"), _line("error", message="stream disconnected"))
+    assert driver.wait(run) == codex.error_outcome("stream disconnected")
 
 
 def test_an_error_after_the_turn_ended_does_not_fail_it(setup: Setup) -> None:
