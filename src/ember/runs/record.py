@@ -44,6 +44,7 @@ TURN_STATES = (SENT, COLLECTED, COMMITTED)
 SANDBOXES = ("codex", "bubblewrap", "none")
 """The values of `sandbox`: who provides the run's sandbox."""
 
+_FLOW_ID = re.compile(r"flow-\d{8}-\d{6}-[0-9a-f]{6}")
 _ID = re.compile(r"[a-z0-9][a-z0-9-]{5,63}")
 
 
@@ -457,7 +458,7 @@ def update(
 def list_runs(
     env: Mapping[str, str] | None = None,
 ) -> tuple[list[Run], list[RecordError]]:
-    """Read every run's record.
+    """Read every run's record, skipping flow folders.
 
     Args:
         env: The environment; `None` reads `os.environ`.
@@ -474,6 +475,8 @@ def list_runs(
     runs: list[Run] = []
     errors: list[RecordError] = []
     for name in names:
+        if _FLOW_ID.fullmatch(name):
+            continue
         try:
             runs.append(load(name, env))
         except RecordError as error:

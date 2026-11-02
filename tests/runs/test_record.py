@@ -176,3 +176,10 @@ def test_write_once(tmp_path: Path) -> None:
     assert path.read_text() == "first"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert [entry.name for entry in tmp_path.iterdir()] == ["turn-1.md"]
+
+
+def test_list_runs_skips_flow_folders(env: dict[str, str]) -> None:
+    run = _run(env)
+    record.save(run)
+    record.make_run_dir("flow-20260101-120000-abcdef", env)
+    assert record.list_runs(env) == ([run], [])

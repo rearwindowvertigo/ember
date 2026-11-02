@@ -1,0 +1,538 @@
+"""Private flow records, numbered event and answer logs, and watch cursors."""
+
+import fcntl
+import json
+import math
+import os
+import re
+import time
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+from ember import paths
+from ember.flows.plan import Plan, Worker
+from ember.runs import record
+
+FLOW_NAME, PLAN_NAME, EVENTS_NAME, ANSWERS_NAME, WATCH_NAME = (
+    "flow.json",
+    "plan.json",
+    "events.jsonl",
+    "answers.jsonl",
+    "watch.json",
+)
+FLOW_ID = re.compile(r"flow-\d{8}-\d{6}-[0-9a-f]{6}")
+TASK_STATUSES = (
+    "pending",
+    "writing",
+    "reviewing",
+    "fixing",
+    "accepted",
+    "merging",
+    "merged",
+    "stopped",
+    "conflict",
+    "blocked",
+    "dropped",
+)
+FLOW_STATUSES = ("starting", "running", "checking", "stopped", "failed", "done")
+ENDED = ("done", "failed")
+ANSWER_KINDS = ("send", "accept", "review", "worker", "drop")
+
+# A trailing question mark permits null; brackets require a list of that type.
+_FLOW_FIELDS = {
+    "id": "str",
+    "plan": "str",
+    "dir": "str",
+    "main": "str",
+    "base": "str",
+    "branch": "str",
+    "worktree": "str",
+    "tip": "str",
+    "writer": "worker",
+    "reviewer": "worker",
+    "rounds": "int",
+    "parallel": "int",
+    "check_timeout": "int",
+    "check": "[str]",
+    "trailers": "[str]",
+    "read": "[str]",
+    "stall_minutes": "number",
+    "claim": "str?",
+    "status": "str",
+    "reason": "str?",
+    "wave": "int",
+    "check_pending": "bool",
+    "checks": "[dict]",
+    "answers_seen": "int",
+    "halted": "str?",
+    "abandoned": "[str]",
+    "runner": "dict?",
+    "started_at": "number",
+    "updated_at": "number",
+    "ended_at": "number?",
+    "tasks": "[dict]",
+}
+_TASK_FIELDS = {
+    "id": "str",
+    "subject": "str",
+    "status": "str",
+    "reason": "str?",
+    "wave": "int?",
+    "writer": "worker?",
+    "reviewer": "worker?",
+    "writer_run": "str?",
+    "branch": "str?",
+    "worktree": "str?",
+    "task_base": "str?",
+    "head": "str?",
+    "round": "int",
+    "reviews": "[dict]",
+    "reviewer_run": "str?",
+    "findings": "[dict]",
+    "changed_files": "[str]",
+    "outside_files": "[str]",
+    "entry": "str?",
+    "answer": "int?",
+    "merge_tip": "str?",
+    "merge_commit": "str?",
+    "cleanup": "[dict]",
+}
+_WORKER_FIELDS = {"engine": "str", "model": "str", "effort": "str?", "source": "str"}
+
+
+class FlowError(Exception):
+    """A flow id or stored flow record is not usable."""
+
+    def __init__(self, flow_id: str, message: str) -> None:
+        """Keep the flow id with its diagnostic."""
+        super().__init__(f"{flow_id}: {message}")
+        self.flow_id = flow_id
+
+
+class FlowMissingError(FlowError):
+    """The flow folder or flow.json does not exist."""
+
+
+def new_id(now: float | None = None) -> str:
+    """Return a flow id with a UTC timestamp and six random hex digits."""
+    return record.new_id("flow", now)
+
+
+def is_flow_id(name: object) -> bool:
+    """Return whether a value has the complete flow id format."""
+    return isinstance(name, str) and FLOW_ID.fullmatch(name) is not None
+
+
+def folder(flow_id: str, env: Mapping[str, str] | None = None) -> Path:
+    """Return the flow folder, refusing ids outside the flow namespace."""
+    if not is_flow_id(flow_id):
+        raise FlowError(flow_id, "not a valid flow id")
+    return record.run_dir(flow_id, env)
+
+
+def _new_task(task_id: str, subject: str) -> dict[str, Any]:
+    """Initialize every task field with independent lists."""
+    task: dict[str, Any] = dict.fromkeys(_TASK_FIELDS)
+    task.update(id=task_id, subject=subject, status="pending", round=0)
+    for key in ("reviews", "findings", "changed_files", "outside_files", "cleanup"):
+        task[key] = []
+    return task
+
+
+def new_flow(
+    flow_id: str,
+    plan: Plan,
+    *,
+    top: str,
+    main: str,
+    base: str,
+    writer: Worker,
+    reviewer: Worker,
+    stall_minutes: float,
+    claim: str | None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Build the initial flow record without creating any files."""
+    if not is_flow_id(flow_id):
+        raise FlowError(flow_id, "not a valid flow id")
+    at = time.time() if now is None else now
+    return {
+        "id": flow_id,
+        "plan": str(plan.path),
+        "dir": top,
+        "main": main,
+        "base": base,
+        "branch": f"ember/flow/{flow_id}",
+        "worktree": str(Path(main) / ".ember" / "worktrees" / flow_id),
+        "tip": base,
+        "writer": writer.to_json(),
+        "reviewer": reviewer.to_json(),
+        "rounds": plan.rounds,
+        "parallel": plan.parallel,
+        "check_timeout": plan.check_timeout,
+        "check": list(plan.check),
+        "trailers": list(plan.trailers),
+        "read": list(plan.read),
+        "stall_minutes": stall_minutes,
+        "claim": claim,
+        "status": "starting",
+        "reason": None,
+        "wave": 0,
+        "check_pending": False,
+        "checks": [],
+        "answers_seen": 0,
+        "halted": None,
+        "abandoned": [],
+        "runner": None,
+        "started_at": at,
+        "updated_at": at,
+        "ended_at": None,
+        "tasks": [_new_task(task.id, task.subject) for task in plan.tasks],
+    }
+
+
+def _matches(value: object, kind: str) -> bool:
+    """Check one stored field's JSON type, excluding booleans from numbers."""
+    if kind.endswith("?"):
+        return value is None or _matches(value, kind[:-1])
+    if kind.startswith("["):
+        return isinstance(value, list) and all(
+            _matches(item, kind[1:-1]) for item in value
+        )
+    if kind == "number":
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+        )
+    if kind == "worker":
+        return isinstance(value, dict) and all(
+            key in value and _matches(value[key], field)
+            for key, field in _WORKER_FIELDS.items()
+        )
+    return type(value) is {"str": str, "int": int, "bool": bool, "dict": dict}[kind]
+
+
+def _fields(flow_id: str, value: object, fields: Mapping[str, str], label: str) -> None:
+    """Require every declared field while permitting future recovery metadata."""
+    if not isinstance(value, dict):
+        raise FlowError(flow_id, f"{label} is not an object")
+    for key, kind in fields.items():
+        if key not in value:
+            raise FlowError(flow_id, f"{label} has no {key}")
+        if not _matches(value[key], kind):
+            raise FlowError(flow_id, f"{label} has an invalid {key}")
+
+
+def _validate(flow_id: str, flow: object) -> None:
+    """Validate the flow and nested task records before returning or saving."""
+    _fields(flow_id, flow, _FLOW_FIELDS, FLOW_NAME)
+    assert isinstance(flow, dict)
+    if flow["id"] != flow_id:
+        raise FlowError(flow_id, "flow.json names another flow")
+    if flow["status"] not in FLOW_STATUSES:
+        raise FlowError(flow_id, "flow.json has an invalid status")
+    for key, low, high in (
+        ("rounds", 0, 3),
+        ("parallel", 1, 8),
+        ("check_timeout", 1, None),
+        ("wave", 0, None),
+        ("answers_seen", 0, None),
+    ):
+        if flow[key] < low or (high is not None and flow[key] > high):
+            raise FlowError(flow_id, f"flow.json has an invalid {key}")
+    if flow["stall_minutes"] <= 0:
+        raise FlowError(flow_id, "flow.json has an invalid stall_minutes")
+    if flow["runner"] is not None:
+        _fields(
+            flow_id, flow["runner"], {"pid": "int", "started_at": "number"}, "runner"
+        )
+    for check in flow["checks"]:
+        _fields(
+            flow_id,
+            check,
+            {"wave": "int", "exit": "int", "log": "str", "at": "number"},
+            "check",
+        )
+    seen: set[str] = set()
+    for task in flow["tasks"]:
+        _fields(flow_id, task, _TASK_FIELDS, "task")
+        if (
+            task["id"] in seen
+            or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", task["id"]) is None
+        ):
+            raise FlowError(flow_id, "flow.json has an invalid task id")
+        seen.add(task["id"])
+        if task["status"] not in TASK_STATUSES:
+            raise FlowError(flow_id, f"task {task['id']} has an invalid status")
+        if task["entry"] not in (None, "write", "send", "review"):
+            raise FlowError(flow_id, f"task {task['id']} has an invalid entry")
+        if task["round"] < 0:
+            raise FlowError(flow_id, f"task {task['id']} has an invalid round")
+
+
+def create(
+    flow: Mapping[str, Any], plan_text: str, env: Mapping[str, str] | None = None
+) -> Path:
+    """Create a private flow folder, its original plan, record and first event."""
+    flow = dict(flow)
+    flow_id = flow["id"]
+    directory = folder(flow_id, env)
+    _validate(flow_id, flow)
+    if directory.exists():
+        raise FlowError(flow_id, "the flow folder already exists")
+    record.make_run_dir(flow_id, env)
+    record.write_private(directory / PLAN_NAME, plan_text)
+    record.write_private(directory / FLOW_NAME, json.dumps(dict(flow), indent=2) + "\n")
+    append_event(flow_id, {"kind": "flow", "status": "starting", "reason": None}, env)
+    return directory
+
+
+def load(flow_id: str, env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Read and validate flow.json, distinguishing missing from broken records."""
+    path = folder(flow_id, env) / FLOW_NAME
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise FlowMissingError(flow_id, "no such flow") from error
+    except (OSError, ValueError) as error:
+        raise FlowError(flow_id, f"cannot read flow.json: {error}") from error
+    _validate(flow_id, value)
+    return value
+
+
+def save(flow: dict[str, Any], env: Mapping[str, str] | None = None) -> None:
+    """Atomically replace a validated record and update its timestamp."""
+    path = folder(flow["id"], env) / FLOW_NAME
+    _validate(flow["id"], flow)
+    flow["updated_at"] = time.time()
+    record.write_private(path, json.dumps(flow, indent=2) + "\n")
+
+
+def _lines(data: bytes) -> list[dict[str, Any] | None]:
+    """Decode complete object lines, keeping unreadable lines as placeholders."""
+    result: list[dict[str, Any] | None] = []
+    for line in data.split(b"\n")[:-1]:
+        try:
+            value = json.loads(line)
+        except ValueError, UnicodeError:
+            value = None
+        result.append(value if isinstance(value, dict) else None)
+    return result
+
+
+def _read_lines(path: Path) -> list[dict[str, Any] | None]:
+    """Read complete JSON lines, treating a missing log as empty."""
+    try:
+        return _lines(path.read_bytes())
+    except FileNotFoundError:
+        return []
+
+
+def _repair_tail(path: Path, fd: int, data: bytes) -> None:
+    """Preserve an incomplete tail privately, then truncate it under the lock."""
+    end = data.rfind(b"\n") + 1
+    if end == len(data):
+        return
+    backup = path.with_name(f"{path.name}.incomplete-{time.time_ns()}")
+    backup_fd = paths.open_private_file(backup, os.O_WRONLY | os.O_EXCL)
+    with os.fdopen(backup_fd, "wb") as stream:
+        stream.write(data[end:])
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.ftruncate(fd, end)
+    os.fsync(fd)
+
+
+def _append(
+    flow_id: str,
+    name: str,
+    field: str,
+    value: Mapping[str, Any],
+    env: Mapping[str, str] | None,
+) -> dict[str, Any]:
+    """Allocate a number, repair the tail and append under the log's lock."""
+    directory = folder(flow_id, env)
+    path = directory / name
+    fd = paths.open_private_file(path, os.O_RDWR | os.O_APPEND)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        with os.fdopen(os.dup(fd), "rb") as stream:
+            data = stream.read()
+        lines = _lines(data)
+        numbers = [
+            item[field]
+            for item in lines
+            if item is not None and type(item.get(field)) is int
+        ]
+        if name == ANSWERS_NAME:
+            numbers.extend(
+                int(entry.stem)
+                for entry in (directory / "answers").glob("*.md")
+                if re.fullmatch(r"[0-9]+", entry.stem)
+            )
+        number = max([len(lines), *numbers], default=0) + 1
+        item = {**value, field: number, "at": time.time()}
+        if name == ANSWERS_NAME:
+            item = {
+                "task": None,
+                "kind": None,
+                "file": None,
+                "commit": None,
+                "worker": None,
+                **item,
+            }
+            if item["kind"] not in ANSWER_KINDS or not isinstance(item["task"], str):
+                raise FlowError(flow_id, "answer needs a task and a valid kind")
+            if item["kind"] == "send":
+                source = item["file"]
+                if not isinstance(source, str):
+                    raise FlowError(flow_id, "send answer needs a file")
+                text = Path(source).read_text(encoding="utf-8")
+                if not text.strip():
+                    raise FlowError(flow_id, "send answer file is empty")
+                answers = paths.ensure_private_dir(
+                    directory / "answers", root=directory
+                )
+                target = answers / f"{number}.md"
+                correction_fd = paths.open_private_file(target, os.O_WRONLY | os.O_EXCL)
+                with os.fdopen(correction_fd, "w", encoding="utf-8") as stream:
+                    stream.write(text)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                item["file"] = str(target)
+        encoded = (json.dumps(item) + "\n").encode("utf-8")
+        _repair_tail(path, fd, data)
+        if os.write(fd, encoded) != len(encoded):
+            raise OSError(f"short write to {path}")
+        os.fsync(fd)
+        return item
+    finally:
+        os.close(fd)
+
+
+def append_event(
+    flow_id: str,
+    event: Mapping[str, Any],
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Append an event with a consecutive seq and the current time."""
+    return _append(flow_id, EVENTS_NAME, "seq", event, env)
+
+
+def read_events(
+    flow_id: str,
+    env: Mapping[str, str] | None = None,
+    *,
+    after: int = 0,
+) -> list[dict[str, Any]]:
+    """Read valid complete events after a sequence number, skipping bad lines."""
+    return [
+        item
+        for item in _read_lines(folder(flow_id, env) / EVENTS_NAME)
+        if item is not None and type(item.get("seq")) is int and item["seq"] > after
+    ]
+
+
+def append_answer(
+    flow_id: str,
+    answer: Mapping[str, Any],
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Allocate and append an answer; copy its send file while holding the lock.
+
+    For a send answer, `file` is the source filename on input and the private
+    numbered copy on output. Numbers exceed complete log lines, stored
+    numbers and existing correction filenames. Existing corrections are never
+    replaced. Callers must not allocate the copy's number.
+    """
+    return _append(flow_id, ANSWERS_NAME, "n", answer, env)
+
+
+def read_answers(
+    flow_id: str, env: Mapping[str, str] | None = None
+) -> list[dict[str, Any] | None]:
+    """Read complete answers; each unreadable line retains its place as None."""
+    return _read_lines(folder(flow_id, env) / ANSWERS_NAME)
+
+
+def read_cursor(flow_id: str, env: Mapping[str, str] | None = None) -> int:
+    """Read the watch cursor, returning zero only when no cursor exists."""
+    try:
+        value = json.loads(
+            (folder(flow_id, env) / WATCH_NAME).read_text(encoding="utf-8")
+        )
+    except FileNotFoundError:
+        return 0
+    except (OSError, ValueError) as error:
+        raise FlowError(flow_id, f"cannot read watch.json: {error}") from error
+    if (
+        not isinstance(value, dict)
+        or type(value.get("seq")) is not int
+        or value["seq"] < 0
+    ):
+        raise FlowError(flow_id, "watch.json has an invalid seq")
+    return value["seq"]
+
+
+def write_cursor(flow_id: str, seq: int, env: Mapping[str, str] | None = None) -> None:
+    """Advance the cursor atomically without regression under a cursor lock.
+
+    Watch callers also hold a separate watch.lock across selecting events,
+    printing them and calling this function.
+    """
+    if type(seq) is not int or seq < 0:
+        raise FlowError(flow_id, "cursor must be a non-negative integer")
+    directory = folder(flow_id, env)
+    fd = paths.open_private_file(directory / "cursor.lock")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        seq = max(seq, read_cursor(flow_id, env))
+        record.write_private(directory / WATCH_NAME, json.dumps({"seq": seq}) + "\n")
+    finally:
+        os.close(fd)
+
+
+def list_flows(
+    env: Mapping[str, str] | None = None,
+) -> tuple[list[dict[str, Any]], list[FlowError]]:
+    """List flows oldest first and report broken flow folders separately."""
+    try:
+        names = sorted(
+            item.name
+            for item in paths.runs_dir(env).iterdir()
+            if item.is_dir() and is_flow_id(item.name)
+        )
+    except FileNotFoundError:
+        return [], []
+    flows: list[dict[str, Any]] = []
+    errors: list[FlowError] = []
+    for name in names:
+        try:
+            flows.append(load(name, env))
+        except FlowError as error:
+            errors.append(error)
+    flows.sort(key=lambda flow: (flow["started_at"], flow["id"]))
+    return flows, errors
+
+
+def allowed_answers(task: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return the answers accepted by the task's current state."""
+    match task.get("status"):
+        case "stopped":
+            return ANSWER_KINDS if task.get("branch") else ("worker", "drop")
+        case "conflict":
+            return ("worker", "drop")
+        case "blocked":
+            return ("drop",)
+        case _:
+            return ()
+
+
+def task_entry(flow: Mapping[str, Any], task_id: str) -> dict[str, Any]:
+    """Find a mutable task record, raising KeyError for an unknown task."""
+    for task in flow["tasks"]:
+        if task["id"] == task_id:
+            return task
+    raise KeyError(task_id)
