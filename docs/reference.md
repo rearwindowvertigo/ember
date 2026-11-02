@@ -819,6 +819,77 @@ existing reply exits 66. A successful turn with no reply file exits 81.
 | 81 | Invalid reply, missing or unknown steps, or a successful run without a reply file | `next: emb gapcheck --plan <plan> --reply <reply>` after fixing the reply, or a new check |
 | Other | The run's exit from the `emb run` table | The run's line, then a gap check action |
 
+## `emb flow`
+
+A flow runs a JSON plan of tasks in waves, in a runner's own session. Each
+task has a writer run and read-only review runs with fix rounds. Accepted
+tasks merge into `ember/flow/<id>`; the plan's check runs after each wave's
+merges. Tasks that need a decision produce lead stops. Claude answers the
+stops, reviews the flow branch and merges it with `emb merge`.
+
+### Options
+
+```text
+emb flow --plan FILE --dry-run [--writer W] [--reviewer W] [--claim ID] [--json]
+emb flow --plan FILE --start [--writer W] [--reviewer W] [--claim ID] [--stall MINUTES]
+emb flow --watch FLOW [--json]
+emb flow --status [FLOW] [--json]
+emb flow --lead FLOW TASK (--send FILE | --accept [--commit SHA] | --review [--reviewer W] | --worker W | --drop)
+emb flow --resume FLOW
+```
+
+| Option | Does |
+|---|---|
+| `--plan FILE` | Read the JSON plan; required with `--dry-run` or `--start` |
+| `--dry-run` | Validate the plan and workers, then print waves and a gap check command |
+| `--start` | Create the flow branch, worktree and records, then start the runner |
+| `--writer W`, `--reviewer W` | Name a worker as `<engine>:<model>[@<effort>]`; override the plan and menu |
+| `--claim ID` | Read choices with this claim; store it on the flow without creating or finishing a claim |
+| `--stall MINUTES` | With `--start`: minutes without screen changes before a task stops waiting; default 10 |
+| `--watch FLOW` | Wait for a lead stop or terminal outcome, using the shared watch cursor |
+| `--status [FLOW]` | Read one full record, or summaries of every flow, oldest first |
+| `--lead FLOW TASK` | Queue exactly one answer for a task |
+| `--send FILE` | Copy a nonblank UTF-8 correction for the existing writer |
+| `--accept` | Accept the current task branch tip without another review |
+| `--commit SHA` | With `--accept`: use this commit instead; resolve it to a full commit hash before queueing |
+| `--review` | Collect a running writer turn and request fresh reviews with a new fix budget |
+| `--reviewer W` | Also accepted with `--lead ... --review`; change this task's reviewer |
+| `--worker W` | Replace this task's writer and run its pipeline from the flow tip |
+| `--drop` | Drop the task; its dependants remain blocked |
+| `--resume FLOW` | Start another runner attempt for an idle, unfinished flow |
+| `--json` | Print JSON with `--dry-run`, `--watch` or `--status` |
+| `--help` | Print the options |
+
+Exactly one mode is required. `--plan`, `--writer` and `--claim` are
+accepted only with `--dry-run` or `--start`. Answer options require
+`--lead`, which accepts exactly one of `--send`, `--accept`, `--review`,
+`--worker` and `--drop`. Other combinations exit 64 before reading files.
+
+Validation reads the plan, checks that its directory exists and belongs to
+a checkout, resolves the base commit, reads the claim and settings, then
+resolves and checks both workers. All plan problems print together. A
+`gone` or `unknown` claim exits 64 even with explicit workers. The command
+resolves omitted effort from a matching set menu row, then the driver's
+default. Stored workers include `effort_frozen: true`; `null` effort denotes
+an engine default. Replacement-worker answers carry the same marker.
+
+Dry runs create no flow record, branch, worktree or session. The gap check
+command uses the resolved reviewer. Starting a flow does not run or require
+a gap check. A start requires tmux and a usable private runtime folder.
+A dirty source checkout is allowed; the flow starts from the base commit.
+
+Startup commands serialize through `lifecycle.lock` in the flow folder.
+`startup.json` records a timestamp and the last event sequence before the
+attempt. A reservation allows 30 seconds for the runner to take its lifetime
+lock. Concurrent starts of the same flow are refused during that interval.
+A resume refuses a live runner or a completed flow, removes an existing
+dead session, and starts a new session. A live session without a runner
+lock gets up to 10 seconds to end. Once its pane dies or the session ends,
+startup removes any dead session and launches the replacement. A session
+still running after the wait is kept and reported with exit 75. Module
+loading uses Python's `-I` mode and the absolute package root of the
+invoking Ember installation.
+
 ### Plan
 
 A flow plan is a UTF-8 JSON object. The packaged schema is
@@ -990,6 +1061,47 @@ same wave stops the task before review. Other changed files outside the
 task's declarations are recorded in `outside_files` and included in the
 review brief for the reviewer to judge.
 
+### Lead stops
+
+A failed writer or review, an unresolved review, a lead finding or a merge
+conflict stops the task. Other tasks may continue. Claude reports each stop
+to the owner with its findings and every available choice.
+
+| Task state | Accepted answers |
+|---|---|
+| `stopped`, with a branch | `send`, `accept`, `review`, `worker`, `drop` |
+| `stopped`, without a branch | `worker`, `drop` |
+| `conflict` | `worker`, `drop` |
+| `blocked` | `drop` |
+| Other | None |
+
+`--send` copies the correction to `answers/<n>.md` under the same lock
+that allocates its number and appends its answer. Intentional commands in
+the correction remain as written. The writer receives it, then gets a
+fresh review and fix budget. An unreadable correction exits 66; a blank
+correction exits 64.
+
+`--accept` records the task branch's tip at queue time, or the full commit
+resolved from `--commit`. Invalid or ambiguous commits exit 64 before an
+answer is appended. The runner checks the tip again before applying the
+answer and preserves that approved commit through merging; a moved tip is
+refused.
+
+`--review` collects any running writer turn before a fresh review budget.
+An optional reviewer applies to this task from then on. `--worker` closes
+the old writer without force, retains its branch, and starts a new writer
+from the flow tip. `--drop` closes the writer without force and retains its
+branch. Dropped tasks leave their dependants blocked. Retained branches
+are listed in the flow's `abandoned` field.
+
+Answers are queued, then taken between waves. The runner checks each
+answer again against the task's current state. A refused answer produces
+a lead stop naming its number and reason. An answer refused at queue time
+exits 75 and lists the allowed answers. Unknown flows or tasks exit 64;
+completed flows refuse answers with 75. With no live runner or pending
+startup, `--lead` starts a runner after queueing the answer. A launch
+failure leaves the queued answer available for `--resume`.
+
 ### Flow records
 
 Flow folders share `$XDG_STATE_HOME/ember/runs/` with run folders. A flow id
@@ -1095,6 +1207,108 @@ interrupted append. Correction copies are created exclusively and never
 replace an existing file. Cursor writes
 cannot decrease `seq`; a missing cursor reads as 0, a malformed cursor is
 an error.
+
+### Output
+
+Data goes to standard output; diagnostics and action lines go to standard
+error. `--dry-run` text prints the resolved writer and reviewer with their
+sources, the base commit, the check as shell words (or `none`), numbered
+waves with each task's declared files, and `gap check: <command>`.
+Warnings print as `WARNING: <text>`. JSON has `plan`, `dir`, `base`,
+`writer`, `reviewer`, `check`, `waves` (arrays of task ids), `warnings` and
+`gapcheck` (the shell command). Empty lists and zero finding counts remain
+in JSON.
+
+`--start` prints:
+
+```text
+flow <id>
+branch ember/flow/<id>
+worktree <path>
+```
+
+Its action line is `next: emb flow --watch <id> --json`. `--resume` prints
+`flow <id>`. `--lead` prints `queued answer <n>: <kind> for <task>`, then
+`flow <id>` when it starts a runner. Both end with the same watch action.
+
+`--watch` polls files once a second. It returns on an unread lead stop or
+the current attempt's terminal outcome. A missing runner in a nonterminal
+flow gives `runner_lost` after the startup grace period. A stopped flow
+without a runner returns immediately, including when its stop events were
+already read. A completed flow returns its current terminal outcome even
+when its end event was already read. Events before the latest startup or
+`flow running` event remain history and do not end a resumed watch.
+After a startup reservation, the stored status applies only when
+`runner.started_at` is at or after the reservation timestamp. If the new
+runner never writes its record and the reservation expires, watch reports
+`runner_lost` with exit 72, even if the previous attempt failed or stopped.
+
+Watchers share `watch.json`. A separate `watch.lock` serializes event
+selection, reporting and cursor advancement; the cursor advances only
+after output is flushed. An interrupted watch exits 74 without advancing
+its cursor. Repeated reports of an idle stopped flow describe current task
+states and choices without delivering the same event again.
+
+The JSON watch report contains:
+
+| Field | Value |
+|---|---|
+| `event` | `lead_stop`, `end` or `runner_lost` |
+| `flow`, `status`, `reason` | Flow id and current state |
+| `exit` | Null at a lead stop, 0 or 82 at the end, 72 when the runner is lost |
+| `branch`, `worktree`, `tip`, `dir` | Flow branch, worktree, tip and source checkout |
+| `tasks` | Task reports in plan order |
+| `stops` | Unread lead-stop events with their sequence, task, reason and available choices |
+| `abandoned` | Retained branches of dropped or replaced writers |
+| `next` | The action line, also printed on standard error |
+
+Each task report has `id`, `status`, `reason`, `round`, `writer_run`,
+`branch`, `worktree`, `merge_commit`, `outside_files`, `cleanup` and
+`choices` (the available `emb flow --lead` command forms). `findings`
+counts `must`, `should` and `lead`; `finding_details` holds the finding
+objects. Cleanup results retain the branch and reason when cleanup keeps
+work; the task report includes its worktree.
+
+Text reports print the flow state, one line per task with its reason,
+finding objects, choices, retained cleanup details and stop events.
+Retained abandoned branches print separately.
+
+At a lead stop the action says to report every stop and choice to the
+owner, then watch again if a runner is live; otherwise an answer starts
+the runner. At a successful end it says to review the flow branch and run
+`emb merge <flow branch> --into <your branch> --verdict keep --dir <dir>`.
+An end with unmerged tasks first says to report them to the owner. A failed
+pending check says to fix the flow branch with an `emb run` and merge,
+then resume. Other failures name `--status`; runner loss names `--resume`.
+
+`--status FLOW --json` prints `flow.json` plus `runner_live`. Text prints
+every top-level field except `tasks`, then each task's state and reason.
+`--status` alone lists flows oldest first as
+`<id>  <status>  <n>/<m> merged  <dir>`, or as JSON objects containing `id`,
+`status`, `reason`, `dir`, `branch`, `runner_live`, `merged` and `tasks`
+(the task count). An unreadable flow is skipped with
+`emb flow: skipped <error>` on standard error.
+
+### Exit codes
+
+| Code | Meaning | Action line |
+|---|---|---|
+| 0 | Dry run printed, flow started, answer queued, runner resumed, lead stop reported, or every task merged | Watch reports give their next action |
+| 1 | Unexpected error or unreadable settings database | `next: emb flow --status`; database errors name an owner action |
+| 64 | Invalid option combination, plan, flow, task, worker, commit or claim | `next: emb flow --help`, a worker's owner action, the claim action or `--status` |
+| 65 | The plan directory is not in a checkout | Repeat `--dry-run` with `dir` inside a checkout |
+| 66 | Unreadable plan or correction, or missing plan directory | `next: ls -l <path>` |
+| 69 | Missing git, tmux, engine or driver, disconnected engine, or unusable runtime folder | `owner:` naming the fix |
+| 70 | Flow branch or worktree creation failed | Prune worktrees, then repeat the start |
+| 71 | Runner session failed to start | `next: emb flow --resume <id>` |
+| 72 | Runner lost before the flow ended | `next: emb flow --resume <id>` |
+| 74 | Interrupted watch; cursor unchanged | `next: emb flow --watch <id> --json` |
+| 75 | Runner live or starting, answer not allowed, or flow already done | `--status` or `--watch` |
+| 82 | Flow failed, or ended with tasks unmerged | The watch report's next action |
+
+Every nonzero exit prints an `emb flow:` diagnostic or watch report and
+one `next:` or `owner:` line. Flow folders, queued answers and unmerged
+work remain after a startup failure.
 
 ## `emb ground`
 
@@ -1833,7 +2047,7 @@ skill into Claude Code; `emb skill install` does.
 ## Exit codes
 
 These are the exit codes of `emb choices` and `emb engines`; `emb run`,
-`emb gapcheck`, `emb ground`, `emb merge`, `emb cleanup`, `emb deps`, `emb skill` and
+`emb gapcheck`, `emb flow`, `emb ground`, `emb merge`, `emb cleanup`, `emb deps`, `emb skill` and
 `emb app` have their own tables above.
 
 | Code | Meaning |
