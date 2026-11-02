@@ -210,8 +210,15 @@ and `--resume` starts another runner attempt.
 
 Target release: 0.2.0.
 
-G1. `emb panel` sends one prompt to the configured members (OpenRouter,
-Codex and Claude models) and collects each answer and a summary file.
+G1. `emb panel --question-file <file>` asks each member the same question
+in a read-only `emb run` run, in parallel, and writes `summary.md` with
+every answer.
+
+G2. Members come from repeatable `--member <engine>:<model>[@<effort>]`
+options or `panel.members`: at most eight, using Codex, OpenCode or Claude.
+
+G3. A member that fails, stalls or passes the deadline is reported and the
+other members' answers are kept. `--recover` collects late members.
 
 ## H. Supporting commands
 
