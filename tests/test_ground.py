@@ -355,3 +355,104 @@ def test_git_missing_gives_reasons(tmp_path: Path, env: dict[str, str]) -> None:
     assert "git cannot run" in result["git_reason"]
     assert result["top"] is None
     assert "git cannot run" in result["top_reason"]
+
+
+def test_status_does_not_write_the_index(repo: Path, env: dict[str, str]) -> None:
+    readme = repo / "README.md"
+    stat = readme.stat()
+    os.utime(readme, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+    index = repo / ".git" / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+    folder = ground.read(str(repo), env)["directory"]
+    assert folder["dirty"] == {"value": False, "paths": 0}
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+    assert not (repo / ".git" / "index.lock").exists()
+
+
+def test_nested_worktree_is_not_dirty(repo: Path, env: dict[str, str]) -> None:
+    nested = repo / ".claude" / "worktrees" / "x"
+    _git(repo, "worktree", "add", "-q", "-b", "x", str(nested), env=env)
+    folder = ground.read(str(repo), env)["directory"]
+    assert folder["dirty"] == {"value": False, "paths": 0}
+    (repo / "new.txt").write_text("new\n")
+    folder = ground.read(str(repo), env)["directory"]
+    assert folder["dirty"] == {"value": True, "paths": 1}
+
+
+def test_folder_beside_a_nested_worktree_is_dirty(
+    repo: Path, env: dict[str, str]
+) -> None:
+    nested = repo / ".claude" / "worktrees" / "x"
+    _git(repo, "worktree", "add", "-q", "-b", "x", str(nested), env=env)
+    (repo / ".claude" / "worktrees" / "y").mkdir()
+    (repo / ".claude" / "worktrees" / "y" / "f").write_text("f\n")
+    folder = ground.read(str(repo), env)["directory"]
+    assert folder["dirty"] == {"value": True, "paths": 1}
+
+
+def test_worktree_outside_the_top_is_not_excluded(
+    repo: Path, tmp_path: Path, env: dict[str, str]
+) -> None:
+    _git(repo, "worktree", "add", "-q", "-b", "w", str(tmp_path / "w"), env=env)
+    (repo / "new.txt").write_text("new\n")
+    folder = ground.read(str(repo), env)["directory"]
+    assert folder["dirty"] == {"value": True, "paths": 1}
+    linked = ground.read(str(tmp_path / "w"), env)["directory"]
+    assert linked["dirty"] == {"value": False, "paths": 0}
+
+
+def test_untracked_repository_is_dirty(repo: Path, env: dict[str, str]) -> None:
+    other = repo / "other"
+    other.mkdir()
+    _git(other, "init", "-q", "-b", "main", env=env)
+    folder = ground.read(str(repo), env)["directory"]
+    assert folder["dirty"] == {"value": True, "paths": 1}
+
+
+@pytest.mark.parametrize(
+    ("count", "text"),
+    [(1, "dirty: yes, 1 changed path"), (2, "dirty: yes, 2 changed paths")],
+)
+def test_dirty_text(repo: Path, env: dict[str, str], count: int, text: str) -> None:
+    for number in range(count):
+        (repo / f"new{number}.txt").write_text("new\n")
+    assert text in ground.lines(ground.read(str(repo), env))
+
+
+def test_unreadable_current_folder_exits_66(
+    tmp_path: Path,
+    env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    assert main(["ground"], env=env) == 66
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "emb ground: the current folder cannot be read" in captured.err
+    assert "next: emb ground --dir" in captured.err
+
+
+def test_claude_config_dir_moves_user_settings(
+    repo: Path, tmp_path: Path, env: dict[str, str]
+) -> None:
+    home_file = Path(env["HOME"]) / ".claude" / "settings.json"
+    _settings(home_file, {"worktree": {"baseRef": "head"}})
+    config = tmp_path / "config"
+    moved = config / "settings.json"
+    _settings(moved, {"worktree": {"baseRef": "fresh"}})
+    with_config = dict(env, CLAUDE_CONFIG_DIR=str(config))
+    assert ground.settings_files(None, with_config) == [moved]
+    assert ground.read(str(repo), with_config)["worktree_base"] == {
+        "value": "fresh",
+        "file": str(moved),
+    }
+    empty = dict(env, CLAUDE_CONFIG_DIR="")
+    assert ground.settings_files(None, empty) == [home_file]
+    assert ground.read(str(repo), empty)["worktree_base"] == {
+        "value": "head",
+        "file": str(home_file),
+    }

@@ -598,7 +598,7 @@ as `null (<reason>)`.
 | `directory.git` | Whether the folder is in a git checkout |
 | `directory.top` | The top of the checkout |
 | `directory.branch` | `name`: the checked-out branch, null on a detached `HEAD`; `commit`: the full commit id of `HEAD`, null before the first commit |
-| `directory.dirty` | `value`: whether `git status --porcelain` lists any path; `paths`: how many paths it lists. Ignored files are not counted |
+| `directory.dirty` | `value`: whether `git status --porcelain` lists any path; `paths`: how many paths it lists. Ignored files are not counted, nor are the checkout's other worktrees inside its top, as `git worktree list` lists them, so an untracked folder such as `.claude/worktrees` that holds only worktrees is not counted |
 | `directory.remote` | `name`: `origin`, or else the first remote `git remote` lists; `url`: its URL; `kind`: `github` when the URL's host is `github.com`, otherwise `other` |
 | `directory.files` | Whether `CLAUDE.md` and `AGENTS.md` are files at the top of the checkout |
 
@@ -610,14 +610,19 @@ the reason `not a git checkout`. When git cannot run, `git` is null as well.
 
 Git runs with `LC_ALL=C` and without the variables that point it at another
 repository (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`,
-`GIT_OBJECT_DIRECTORY`, `GIT_NAMESPACE` and `GIT_PREFIX`).
+`GIT_OBJECT_DIRECTORY`, `GIT_NAMESPACE` and `GIT_PREFIX`). It runs with
+`GIT_OPTIONAL_LOCKS=0`, so `git status` takes no `index.lock` and does not
+rewrite the index.
 
-`worktree.baseRef` is read from `~/.claude/settings.json`, then, in a
+`worktree.baseRef` is read from the user settings file, then, in a
 checkout, from the top's `.claude/settings.json` and
 `.claude/settings.local.json`; a later file wins. A missing file, or a file
 without the key, is skipped. When no file sets it, or a file cannot be read,
 is not a JSON object, has a `worktree` that is not an object or a `baseRef`
-that is not a non-empty string, `worktree_base` is null with the reason.
+that is not a non-empty string, `worktree_base` is null with the reason. The
+user settings file is `$CLAUDE_CONFIG_DIR/settings.json` when
+`CLAUDE_CONFIG_DIR` is set and not empty, otherwise `~/.claude/settings.json`.
+Managed settings are not read.
 
 ### Exit codes
 
@@ -625,7 +630,7 @@ that is not a non-empty string, `worktree_base` is null with the reason.
 |---|---|---|
 | 0 | Printed, whatever could not be read | |
 | 64 | Usage error | |
-| 66 | `--dir` does not exist or is not a folder | `next: emb ground --dir <an existing folder>` |
+| 66 | `--dir` does not exist or is not a folder, or, without `--dir`, the current folder cannot be read | `next: emb ground --dir <an existing folder>` |
 
 ## Exit codes
 

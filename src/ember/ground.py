@@ -3,7 +3,8 @@
 `read` returns the machine, the Claude Code surface, Claude Code's
 `worktree.baseRef` setting and the state of one folder: whether it is in a git
 checkout, the top of that checkout, the branch, whether the tree is dirty, the
-remote and which of `CLAUDE.md` and `AGENTS.md` exist at the top.
+remote and which of `CLAUDE.md` and `AGENTS.md` exist at the top. Git runs
+with optional locks off, so reading takes no lock and writes nothing.
 
 A value that cannot be read is `None` with a sibling `<field>_reason` key
 holding the reason.
@@ -26,6 +27,9 @@ GIT_TIMEOUT = 60
 
 ENTRYPOINT_VARIABLE = "CLAUDE_CODE_ENTRYPOINT"
 """The variable Claude Code sets to name its surface."""
+
+CONFIG_DIR_VARIABLE = "CLAUDE_CONFIG_DIR"
+"""The variable that moves Claude Code's user settings folder."""
 
 DESKTOP_ENTRYPOINT = "claude-desktop"
 """The value of `CLAUDE_CODE_ENTRYPOINT` in the Claude desktop app."""
@@ -64,13 +68,15 @@ def _git(
 ) -> subprocess.CompletedProcess[str]:
     """Run git in `folder` without the variables that would redirect it.
 
-    Git's messages are in English. A git that cannot run or times out gives
-    exit code 1 with the error as its standard error.
+    Git's messages are in English, and optional locks are off, so `git status`
+    does not take `index.lock` or rewrite the index. A git that cannot run or
+    times out gives exit code 1 with the error as its standard error.
     """
     clean = {
         key: value for key, value in env.items() if key not in GIT_LOCATION_VARIABLES
     }
     clean["LC_ALL"] = "C"  # Messages in English, so they can be recognised.
+    clean["GIT_OPTIONAL_LOCKS"] = "0"
     try:
         return subprocess.run(
             ["git", "-C", str(folder), *args],
@@ -140,10 +146,14 @@ def settings_files(
         env: The environment; `None` reads `os.environ`.
 
     Returns:
-        `~/.claude/settings.json`, then, with a checkout, its
-        `.claude/settings.json` and `.claude/settings.local.json`.
+        The user settings file, then, with a checkout, its
+        `.claude/settings.json` and `.claude/settings.local.json`. The user
+        settings file is `settings.json` in `CLAUDE_CONFIG_DIR` when that is
+        set and not empty, otherwise `~/.claude/settings.json`.
     """
-    files = [paths.home_dir(env) / ".claude" / "settings.json"]
+    config = _env(env).get(CONFIG_DIR_VARIABLE, "")
+    user = Path(config) if config else paths.home_dir(env) / ".claude"
+    files = [user / "settings.json"]
     if top is not None:
         files += [
             top / ".claude" / "settings.json",
@@ -245,8 +255,35 @@ def _branch(top: Path, env: Mapping[str, str]) -> dict[str, Any]:
     return {"branch": result}
 
 
+def _nested_worktrees(top: Path, env: Mapping[str, str]) -> list[str]:
+    """Return the checkout's other worktrees inside `top`, relative to it.
+
+    A `git worktree list` that fails gives an empty list.
+    """
+    listing = _git(top, env, "worktree", "list", "--porcelain", "-z")
+    if listing.returncode != 0:
+        return []
+    real_top = Path(os.path.realpath(top))
+    prefix = "worktree "
+    nested = []
+    for field in listing.stdout.split("\0"):
+        if not field.startswith(prefix):
+            continue
+        path = Path(os.path.realpath(field[len(prefix) :]))
+        if path != real_top and path.is_relative_to(real_top):
+            nested.append(path.relative_to(real_top).as_posix())
+    return nested
+
+
 def _dirty(top: Path, env: Mapping[str, str]) -> dict[str, Any]:
-    status = _git(top, env, "status", "--porcelain", "-z")
+    """Count the paths `git status` lists.
+
+    The checkout's other worktrees inside `top`, such as
+    `.claude/worktrees/<name>`, are left out of `git status`, so an untracked
+    folder that holds only worktrees is not counted.
+    """
+    excluded = [f":(exclude,top,literal){path}" for path in _nested_worktrees(top, env)]
+    status = _git(top, env, "status", "--porcelain", "-z", "--", ".", *excluded)
     if status.returncode != 0:
         return {"dirty": None, "dirty_reason": _failure(status, "git status")}
     count = 0
@@ -430,7 +467,10 @@ def lines(result: dict[str, Any]) -> list[str]:
             "dirty",
             folder,
             lambda dirty: (
-                f"yes, {dirty['paths']} changed paths" if dirty["value"] else "no"
+                f"yes, {dirty['paths']} changed "
+                f"{'path' if dirty['paths'] == 1 else 'paths'}"
+                if dirty["value"]
+                else "no"
             ),
         ),
         item("remote", folder, _remote_text),

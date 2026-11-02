@@ -6,7 +6,8 @@ database cannot be opened or read, 75 for a stale generation or a busy
 database, 77 for an owner option without a terminal and 78 for an unsupported
 database schema. `emb run` uses the table in `ember.runs.exits`. `emb ground`
 exits 0 once it has printed, 64 for a usage error and 66 when `--dir` does not
-exist or is not a folder.
+exist or is not a folder, or, without `--dir`, when the current folder cannot be
+read.
 """
 
 import argparse
