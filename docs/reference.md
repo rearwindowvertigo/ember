@@ -974,6 +974,122 @@ individual runs receive no claim. Worker resolution preserves an omitted
 effort as `null`; callers must freeze the effective effort before starting
 runs that could otherwise reread menu effort.
 
+### Runner
+
+The runner runs in a tmux session named `<flow id>` on Ember's private
+server. Attach with `tmux -S <socket> attach -t <flow id>`, using the same
+socket as `emb run`. It holds an exclusive lock at
+`$XDG_RUNTIME_DIR/ember/locks/<flow id>.lock` for its lifetime. A second
+runner exits 75. The runner releases the lock before ending its session;
+a crashed session remains available for inspection until resume replaces it.
+
+The runner shares `<flow folder>/lifecycle.lock` with command startup,
+resume and lead-answer enqueueing. It holds that lock from its final answer
+read until after releasing its lifetime lock. Every attempt outcome uses
+this handoff: completion, lead stops, provider halts, failed checks or
+merges, signals and unexpected errors. When that read finds unread answers,
+the runner takes them and continues before deciding whether to end. Valid
+answers clear a provider halt; pending checks run before further work.
+An answer queued during this handoff either reaches the runner before its
+final read or sees no live
+runner after acquiring the lifecycle lock. The runner releases the lifecycle
+lock before continuing when that read finds more answers, and never holds
+it during a wave. The command owns the `startup.json` reservation; the
+runner leaves that file unchanged.
+
+At each start the runner reloads the stored `plan.json`, refreshes the flow
+branch tip, clears the previous end time and provider halt, and records a
+new attempt. Events carry the attempt number. Worker effort is frozen
+before starting runs: the stored effort, otherwise the driver's default
+for the model. A driver without a default keeps `null`; runs do not fall
+back to the current menu's effort. Every writer and reviewer receives the
+stored model and effort, the plan's read paths, and no claim.
+
+Between waves the runner takes queued answers, recomputes dependency
+blocking, merges accepted tasks in plan order and runs the check when a
+merge is pending. It then selects the next wave of pending tasks with
+merged dependencies or an operation scheduled by a lead answer. File
+declarations select disjoint tasks in plan order. At most `parallel` jobs
+run at once; each job has its own Core and output streams. Every task
+state change is saved under the runner's record mutex. Dependencies are
+recomputed transitively after merges and before the runner ends.
+
+Each job starts a writer in a new editing run from the flow tip, checks its
+committed changes, and starts a fresh read-only review in the writer's
+worktree. The run id is saved as soon as Core prints it. Must findings
+within the round budget go back to the same writer as a fix message;
+another fresh review follows. Immediately before sending a correction the
+runner reads and saves the branch's actual tip, message file and target
+turn. It compares the resulting tip against that saved tip, including on
+recovery, and supplies it as the next review's fix base. Lead corrections
+start a fresh round budget. Brief artifact numbers increase per task across
+fresh budgets and replacement writers.
+
+An unchanged first turn stops with `the writer made no change`; an
+unchanged correction stops with `the fix made no change`. Changed paths
+include both sides of renames. A change to another task's declaration in
+the same wave stops before review with `changed <file>, which task <id> in
+this wave declares`. Other outside paths are recorded and sent to the
+reviewer. A failed run stops with Core's diagnostic and action line. An
+unlaunched captured writer stops with a worker-replacement instruction.
+Unreadable reviews, exhausted fix rounds, lead findings and fix verdicts
+without blocking findings stop as described under Reviews. Each stop
+emits a lead event with the available answer commands.
+
+Accepted heads merge one at a time through `emb merge`'s implementation.
+The branch tip must still equal the accepted or reviewed commit. A changed
+tip stops with `the branch moved from <commit> to <tip>`. Merge conflicts
+stop that task and leave the flow branch unchanged; other tasks continue.
+Other merge failures fail the flow. A completed merge is recorded even when
+its cleanup fails, with cleanup details kept separately. Equivalent changes
+already contained in the flow can have a null `merge_commit`. Cleanup
+closes writer runs without force and removes their merged branches and
+worktrees when allowed. A refused close retains the branch and worktree
+with the cleanup reason. Dropped and replaced branches stay in `abandoned`.
+
+The check runs once after a wave's merges in the flow worktree, in its own
+process group. Git, runs and checks receive the flow environment without
+`GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`,
+`GIT_OBJECT_DIRECTORY`, `GIT_NAMESPACE`, `GIT_PREFIX` or
+`EMBER_FLOW_RUNNER`. Each attempt writes a private
+`check-<wave>-<attempt>.log`; its check entry names that file, and its event
+contains the last 4000 characters. A timeout kills the process group and
+records exit 124; failure to start records 127. After a check, the runner
+resets and cleans the flow worktree. A failed check or cleanup fails the
+flow with `check_pending` retained. Resume reconciles any recorded check
+process, retries cleanup, and runs the check before further work. With no
+check command the runner clears `check_pending` and returns to `running`.
+
+Provider exit 73 stops the task and halts new runs. Active jobs finish;
+queued writers remain pending. The flow stops with
+`provider error on <engine>; new runs halted`. Resume clears that halt and
+continues pending work; the task that failed still needs a lead answer.
+Exit 124 stops with `stalled; the turn keeps running in <run>`;
+a lead review answer collects that turn before reviewing it. An explicit
+review answer reviews the branch's current tip against the task base even
+when the writer's last turn failed or left no reply. The tip must differ
+from the task base, and the usual changed-file checks still apply. The
+explicit request is persisted for recovery; automatic recovery of a failed
+writer turn still stops the task.
+
+SIGHUP and SIGTERM request shutdown without writing from the signal
+handler. The runner terminates an active check group, records `failed`
+with a resume instruction and an end event with exit 82, and releases its
+lock. Worker sessions remain. Each start aborts a recorded unfinished
+merge, resets and cleans the flow worktree, and reconciles merging tasks
+using the same containment rules as `emb merge`. Recovered merges set
+`check_pending`. Writer metadata comes from its run record; recovered
+turns receive the same change checks as uninterrupted turns. A missing
+review id starts a new review; a completed or closed review is read from
+its saved reply. Scheduled corrections reconcile the target turn before
+another send. Answer effects and their consumption marker are saved
+together, and pending closes can be repeated after a crash.
+
+A flow waiting on stopped or conflicting tasks ends `stopped`, with no
+end event. Otherwise it ends `done`, with end exit 0 when every task
+merged or 82 when some were dropped or remain blocked. Failed flows also
+emit end exit 82. Flow folders, check logs and briefs remain on disk.
+
 ### Reviews
 
 Each flow review is a fresh read-only run in the writer's worktree. The
