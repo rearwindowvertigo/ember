@@ -932,3 +932,16 @@ def test_snapshot_menu_reports_not_connected(env: dict[str, str]) -> None:
     _engine_cache(env, {"codex": False})
     row = choices.snapshot(env=env)["menu"]["single.writer"]
     assert row["state"] == "not connected"
+
+
+def test_opencode_shortlist_takes_tilde_provider_ids(tmp_path: Path) -> None:
+    env = {"HOME": str(tmp_path), "XDG_CONFIG_HOME": str(tmp_path / "config")}
+    choices.set_settings(
+        {
+            "shortlist.opencode": ["~anthropic/claude-opus-latest@high"],
+            "single.writer": "opencode:~anthropic/claude-opus-latest",
+        },
+        env=env,
+    )
+    answers = choices.read(env=env)["answers"]
+    assert answers["single.writer"]["value"] == "opencode:~anthropic/claude-opus-latest"

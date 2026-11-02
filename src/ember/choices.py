@@ -43,19 +43,20 @@ MENU_KEYS = ("single.writer", "single.reviewer")
 
 _ID = re.compile(r"[a-z0-9][a-z0-9-]{5,63}")
 _NAME = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+_OPENCODE_PROVIDER = r"~?[A-Za-z0-9][A-Za-z0-9._-]*"
 _OPENCODE_MODEL = r"[A-Za-z0-9][A-Za-z0-9._:-]*"
 _EFFORT = r"[a-z]+"
 _SHORTLIST_ENTRY = {
     "claude": re.compile(rf"(?P<model>{_NAME})@(?P<effort>{_EFFORT})"),
     "codex": re.compile(rf"(?P<model>{_NAME})@(?P<effort>{_EFFORT})"),
     "opencode": re.compile(
-        rf"(?P<model>{_NAME}/{_OPENCODE_MODEL})(?:@(?P<effort>{_EFFORT}))?"
+        rf"(?P<model>{_OPENCODE_PROVIDER}/{_OPENCODE_MODEL})(?:@(?P<effort>{_EFFORT}))?"
     ),
 }
 _MENU_MODEL = {
     "claude": re.compile(_NAME),
     "codex": re.compile(_NAME),
-    "opencode": re.compile(rf"{_NAME}/{_OPENCODE_MODEL}"),
+    "opencode": re.compile(rf"{_OPENCODE_PROVIDER}/{_OPENCODE_MODEL}"),
 }
 
 

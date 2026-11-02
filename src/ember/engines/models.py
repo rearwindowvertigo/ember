@@ -56,7 +56,7 @@ CACHE = "cache"
 SOURCES = (CLI, OPENROUTER, CACHE)
 """Where a model list came from."""
 
-_OPENROUTER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:-]*")
+_OPENROUTER_ID = re.compile(r"~?[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:-]*")
 
 Fetch = Callable[[str, float], Any]
 

@@ -412,3 +412,8 @@ def test_truncated_openrouter_response_falls_back_to_cache_reason(
     assert result.models == ()
     assert result.reason is not None
     assert result.reason.startswith("OpenRouter model list:")
+
+
+def test_openrouter_tilde_ids_are_kept() -> None:
+    reply = {"data": [{"id": "~openai/gpt-sol-latest", "name": "GPT Sol latest"}]}
+    assert [m.id for m in models.parse_openrouter(reply)] == ["~openai/gpt-sol-latest"]

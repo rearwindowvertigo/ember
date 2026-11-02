@@ -46,7 +46,7 @@ empty list.
 | `worker.network` | `on`, `off` | `off` | standing |
 | `engine.claude`, `engine.codex`, `engine.opencode` | `on`, `off` | `on` | standing |
 | `shortlist.claude`, `shortlist.codex` | List of `<model>@<effort>`; model `[A-Za-z0-9][A-Za-z0-9._-]*`, effort `[a-z]+` | `[]` | standing |
-| `shortlist.opencode` | List of `<provider>/<model>`, with optional `@<effort>`; each part `[A-Za-z0-9][A-Za-z0-9._-]*`, the model part may also contain `:` | `[]` | standing |
+| `shortlist.opencode` | List of `<provider>/<model>`, with optional `@<effort>`; each part `[A-Za-z0-9][A-Za-z0-9._-]*`, the provider part may start with `~` and the model part may also contain `:` | `[]` | standing |
 | `single.writer`, `single.reviewer` | `ask`, or `<engine>:<model>` with the model on that engine's shortlist when saved | `ask` | request, one-time, standing |
 | `single.writer_as`, `single.reviewer_as` | `cli`, `subagent` | `cli` | request, one-time, standing |
 | `sandbox.codex` | `bubblewrap`, `codex-bundled`, `none` | `bubblewrap` when `bwrap` is on `PATH`, else `none` | standing |
