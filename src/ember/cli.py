@@ -9,7 +9,9 @@ and `emb cleanup` use the codes in `ember.branches`. `emb ground` exits 0 once
 it has printed, 64 for a usage error and 66 when `--dir` does not exist or is
 not a folder, or, without `--dir`, when the current folder cannot be read.
 `emb deps` exits 0 whatever the statuses, 64 for a usage error and 70 when
-the packaged component list cannot be read or is not valid.
+the packaged component list cannot be read or is not valid. `emb app` exits 0
+after Quit Ember or when the running app takes over, 64 for a usage error and
+69 without a graphical session.
 """
 
 import argparse
@@ -255,6 +257,14 @@ def _add_deps(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="print JSON")
 
 
+def _add_app(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--hidden",
+        action="store_true",
+        help="start in the tray, with the window hidden",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the parser for `emb` and its subcommands.
 
@@ -343,6 +353,17 @@ def build_parser() -> argparse.ArgumentParser:
                 "command that updates or installs it. Newest versions are read "
                 "when the cached ones are six hours old or more, or with "
                 "--refresh."
+            ),
+        )
+    )
+    _add_app(
+        subparsers.add_parser(
+            "app",
+            help="start the desktop app, or bring it forward",
+            description=(
+                "Start Ember's desktop app, or bring the running one forward. "
+                "With --hidden it starts in the tray; without a tray the "
+                "window shows."
             ),
         )
     )
@@ -654,6 +675,10 @@ def main(
         return _run_ground(args, env)
     if args.command == "deps":
         return _run_deps(args, env)
+    if args.command == "app":
+        from ember.app import main as app_main  # Qt is imported only for `emb app`
+
+        return app_main.run(["--hidden"] if args.hidden else [], env)
     if args.command == "merge":
         return branches.merge(
             args.branch,

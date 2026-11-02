@@ -1,7 +1,10 @@
+import gc
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import QCoreApplication, QThreadPool
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -27,3 +30,16 @@ def env(tmp_path: Path) -> dict[str, str]:
         "XDG_RUNTIME_DIR": str(runtime),
         "PATH": f"{bin_dir}:/usr/bin:/bin",
     }
+
+
+@pytest.fixture(autouse=True)
+def _collect_on_gui_thread() -> Iterator[None]:
+    """Wait for pool tasks, deliver their events, then collect garbage.
+
+    Qt objects left in reference cycles must be freed on the GUI thread, not
+    by a garbage collection that happens to run on a pool thread.
+    """
+    yield
+    QThreadPool.globalInstance().waitForDone(10_000)
+    QCoreApplication.processEvents()
+    gc.collect()

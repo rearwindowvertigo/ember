@@ -940,11 +940,159 @@ is a command.
 | `newest_read_oldest` | The oldest `newest_read_at` among components that are not missing; null when there is none |
 | `newest_read_complete` | Whether every component that is not missing has a newest version read |
 
+## `emb app`
+
+```
+emb app [--hidden]
+```
+
+Starts the desktop app, or brings the running one forward. One instance runs
+at a time.
+
+| Option | Does |
+|---|---|
+| `--hidden` | Start in the tray with the window hidden; without a tray the window shows. Given to a running app, it changes nothing |
+
+Without `WAYLAND_DISPLAY`, `DISPLAY` and `QT_QPA_PLATFORM` it prints
+`emb app: no graphical session (WAYLAND_DISPLAY and DISPLAY are unset)` to
+standard error.
+
+| Code | Meaning |
+|---|---|
+| 0 | Quit Ember was chosen, or the running app took over |
+| 64 | Usage error |
+| 69 | No graphical session, or no runtime folder for the single-instance socket |
+
+`emb` imports Qt only for `emb app`.
+
+## Desktop app
+
+### Start
+
+The app listens on `$XDG_RUNTIME_DIR/ember/app.sock`. A second start
+connects to it, sends `show` (nothing with `--hidden`) and exits 0; the
+running app then shows, raises and activates its window. A socket file with
+no app listening is removed and the start goes on.
+
+At start the app:
+
+- shows the window, unless `--hidden` was given and a tray is available;
+- applies the Fusion style with the colours of the desktop's light or dark
+  scheme;
+- reads the settings, the engine status (checking every engine), the
+  dependency report (installed versions now, newest versions when due) and
+  the run records, each off the window's thread;
+- once the settings are read, applies `app.theme` and writes or removes the
+  autostart entry to match `app.autostart`; it does so again each time
+  either setting changes.
+
+Until the settings are read the content area shows "Reading settings"; when
+they cannot be read it shows the reason and Try again.
+
+### Window
+
+The window opens at 1100 by 720 pixels and is never smaller than 900 by 600.
+Its size and last screen are kept between starts. The sidebar shows the Ember
+mark and name, one row per screen (Overview, Menu, Engines, Dependencies,
+Settings) and `Ember <version>` at the bottom. Overview's row shows the
+number of live runs and Dependencies' row the number of components with an
+update available or missing, each only above zero. A screen is created the
+first time it is shown.
+
+A save refused because the settings changed elsewhere reloads them and shows
+"Settings changed elsewhere. This screen now shows the new values. Make your
+change again." above the screen. Other failures of a save or command show
+what happened and what to do there, with Dismiss.
+
+With `app.theme` set to `system`, the app follows the desktop when it
+switches between light and dark.
+
+### Keyboard
+
+| Keys | Do |
+|---|---|
+| Ctrl+1 to Ctrl+5 | Open Overview, Menu, Engines, Dependencies, Settings |
+| Ctrl+W | Hide the window to the tray; quit when there is no tray |
+| Ctrl+Q | Quit |
+
+### Tray
+
+The tray icon shows whether any run is live, always in the drawings for a
+dark top bar. Its tooltip is `Ember · 2 runs live` or `Ember · No runs live`.
+The menu holds:
+
+- a status line: `No runs live`, `1 run live` or `2 runs live`;
+- one line per live run, `<Engine> · <repository folder> · <HH:MM>` with the
+  local start time, which opens a terminal window on the run as
+  `emb run --attach` does;
+- Open Ember and Quit Ember.
+
+Clicking the icon also shows the window. Closing the window hides it to the
+tray. When the desktop has no tray, the window shows at start and closing it
+quits.
+
+While the menu is open it keeps its lines; a change to the live runs
+redraws it after it closes. Quit Ember hides the window and the tray icon at
+once, then waits up to 12 seconds for running background tasks to end before
+the app exits.
+
+### Run records
+
+The app reads every run record off the window's thread. It watches the runs
+folder (created at mode 700 when missing), each run's folder and each run's
+`run.json`, and reads again after a change; it also reads every sixty
+seconds, while the window is hidden too. At most one read runs at a time and
+one more follows it when a change came in meanwhile. Live runs are those
+`starting`, `running` or `waiting`, oldest first; finished runs are the last
+twenty `closed` or `failed`, newest `ended_at` first. A record that cannot be
+read is skipped and counted. A run whose turn failed since the last read
+makes the app check the engines again.
+
+### Commands
+
+An update, install or sign-in command runs only after the "Run this
+command?" dialog and Run in terminal. It starts detached in a new window of
+the `terminal` setting's terminal:
+
+```
+<terminal> sh -c 'sh -c "$1"; code=$?; printf "\nExit code %s. Press Enter to close.\n" "$code"; read -r _' ember-command <command>
+```
+
+The command is passed as an argument, never written into the script. When
+the terminal cannot start, the app names the terminal command and says to
+pick another terminal in Settings.
+
+Known terminals, in the order Settings offers them; Other command takes any
+command line:
+
+| Terminal | `terminal` value |
+|---|---|
+| System default | `xdg-terminal-exec` |
+| GNOME Terminal | `gnome-terminal --` |
+| Ptyxis | `ptyxis --new-window --` |
+| Console | `kgx --` |
+| kitty | `kitty` |
+| Alacritty | `alacritty -e` |
+| foot | `foot` |
+| WezTerm | `wezterm start --` |
+| Ghostty | `ghostty -e` |
+| Konsole | `konsole -e` |
+| Xfce Terminal | `xfce4-terminal -x` |
+| XTerm | `xterm -e` |
+
+### Files
+
+| File | Holds |
+|---|---|
+| `$XDG_STATE_HOME/ember/app.json` | The window's `width`, `height` and last `screen`, mode 600; content that cannot be read gives the defaults |
+| `$XDG_RUNTIME_DIR/ember/app.sock` | The single-instance socket |
+| `$XDG_CONFIG_HOME/autostart/io.github.rearwindowvertigo.Ember.desktop` | The autostart entry while `app.autostart` is on, mode 600: `Exec=<absolute path of emb> app --hidden`. When `emb` is not on `PATH` nothing is written and the app prints the reason to standard error |
+
 ## Exit codes
 
 These are the exit codes of `emb choices` and `emb engines`; `emb run`,
-`emb ground`, `emb merge`, `emb cleanup` and `emb deps` have their own
-tables above.
+`emb ground`, `emb merge`, `emb cleanup`, `emb deps` and `emb app` have their
+own tables above.
 
 | Code | Meaning |
 |---|---|
