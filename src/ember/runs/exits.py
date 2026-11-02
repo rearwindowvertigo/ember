@@ -56,11 +56,15 @@ LINES: dict[int, str | Mapping[str, str]] = {
         "bundled": "owner: reinstall Codex, or set sandbox.codex to bubblewrap or none",
         "tmux": "owner: install tmux",
         "git": "owner: install git",
+        "driver": "owner: this Ember build has no driver for {engine}; update Ember",
+        "runtime": "owner: set XDG_RUNTIME_DIR to a private folder of this user "
+        "(the message names the problem)",
     },
     WORKTREE_FAILED: "next: git -C {dir} worktree prune, then " + START,
     ENGINE_FAILED: {
         "*": "next: emb run --status {run}",
         "starting": "next: emb run --close {run}, then " + START,
+        "send": "next: " + SEND + " (the message was not sent)",
     },
     SESSION_GONE: {
         "*": "next: emb run --status {run}",
@@ -70,13 +74,16 @@ LINES: dict[int, str | Mapping[str, str]] = {
     INTERRUPTED: {
         "*": RECOVER + " (the turn keeps running in its session)",
         "starting": "next: emb run --close {run}, then " + START,
-        "sent": "next: emb run --screen {run}, then " + SEND,
+        "send": "next: " + SEND + " (the message was not sent)",
+        "complete": RECOVER + " (finishes the saved turn)",
     },
     REFUSED: {
         "*": "next: emb run --status {run} (another emb run command is waiting on it)",
         "busy": RECOVER + " (waits for the turn, then collects it)",
         "close": RECOVER + ", then emb run --close {run}; "
         "or emb run --close {run} --force",
+        "collected": RECOVER + " (commits the collected turn), "
+        "then emb run --close {run}",
     },
     MOVED: "next: git -C {worktree} log --oneline -3 "
     "(the branch or HEAD moved; nothing was committed)",

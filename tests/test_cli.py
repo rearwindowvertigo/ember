@@ -578,5 +578,5 @@ def test_run_without_driver_exits_69(
     assert captured.out == ""
     assert "emb run: Ember has no driver for codex\n" in captured.err
     assert captured.err.splitlines()[-1] == (
-        "owner: install or connect codex; emb engines shows what is missing"
+        "owner: this Ember build has no driver for codex; update Ember"
     )

@@ -127,7 +127,16 @@ class Driver(ABC):
         """Return how to start the engine's interactive session for a run.
 
         The model, effort, read-only mode and sandbox method come from `run`.
-        The core wraps the command in the run's sandbox afterwards.
+        The core wraps the command in the run's sandbox afterwards and relies
+        on these placements:
+
+        - Codex: `argv[0]` is the `codex` executable itself, not a wrapper or
+          a shell. The core inserts the sandbox's `-c` options right after
+          `argv[0]` and finds the bundled `bwrap` from that executable.
+        - OpenCode: `ember.sandbox.opencode_wrap` wraps the whole `argv` in
+          `bwrap`; `argv[0]` is the `opencode` executable, whose folder is
+          kept in the sandbox when it is in the home folder.
+        - Claude: the command runs as returned, with no wrapping.
 
         Args:
             run: The run, with status `starting`.

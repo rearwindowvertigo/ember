@@ -40,6 +40,9 @@ stops with exit 124."""
 SUBJECT_LIMIT = 72
 """The longest commit subject taken from the brief, before ` (turn <n>)`."""
 
+INCOMPLETE_REASONS = ("sign-in failure", "engine failure", "provider error", "no reply")
+"""The reasons in the subject of a commit of an incomplete turn."""
+
 GIT_TIMEOUT = 120
 """Seconds each git command may take."""
 
@@ -138,18 +141,42 @@ def brief_subject(brief: str) -> str:
     return ""
 
 
-def commit_subject(subject: str, turn: int) -> str:
+def commit_subject(subject: str, turn: int, incomplete: str | None = None) -> str:
     """Return the commit subject of a turn.
 
     Args:
         subject: The brief's first line.
         turn: The turn number.
+        incomplete: Why the turn did not end with a reply, one of
+            `INCOMPLETE_REASONS`; `None` for a turn that did.
 
     Returns:
-        The subject cut to 72 characters, with ` (turn <n>)` after turn 1.
+        The subject cut to 72 characters, with ` (turn <n>)` after turn 1, or
+        with ` (turn <n>, incomplete: <reason>)` for an incomplete turn.
     """
     text = subject[:SUBJECT_LIMIT]
+    if incomplete:
+        return f"{text} (turn {turn}, incomplete: {incomplete})"
     return text if turn <= 1 else f"{text} (turn {turn})"
+
+
+def incomplete_reason(outcome: TurnOutcome) -> str | None:
+    """Return why an ended turn is incomplete.
+
+    Args:
+        outcome: The turn's outcome, `done` or `failed`.
+
+    Returns:
+        `provider error` (exit 73), `sign-in failure` (69), `engine failure`
+        (71) or `no reply` (80); `None` for a turn that ended with a reply.
+    """
+    if outcome.state == engines.FAILED:
+        if outcome.provider_error:
+            return "provider error"
+        if outcome.signed_out:
+            return "sign-in failure"
+        return "engine failure"
+    return None if outcome.reply else "no reply"
 
 
 def first_message(run_id: str, brief: str) -> str:
@@ -283,7 +310,13 @@ class Core:
             root = paths.runtime_dir(self.env)
             folder = paths.ensure_private_dir(root / "locks", root=root)
             fd = paths.open_private_file(folder / f"{run_id}.lock")
-        except (OSError, paths.RuntimeDirError) as error:
+        except paths.RuntimeDirError as error:
+            raise RunError(
+                exits.UNAVAILABLE,
+                f"cannot open the lock of {run_id}: {error}",
+                "runtime",
+            ) from error
+        except OSError as error:
             raise RunError(
                 exits.UNEXPECTED, f"cannot open the lock of {run_id}: {error}"
             ) from error
@@ -313,18 +346,24 @@ class Core:
         try:
             return self.load_driver(engine)
         except engines.DriverMissingError as error:
-            raise RunError(exits.UNAVAILABLE, str(error), engine=engine) from error
+            raise RunError(
+                exits.UNAVAILABLE, str(error), "driver", engine=engine
+            ) from error
 
     @contextlib.contextmanager
     def _engine_calls(self, run: Run, variant: str | None = None) -> Iterator[None]:
-        """Turn driver and tmux failures into exits 71 and 72."""
+        """Turn driver, tmux and runtime folder failures into exits 71, 72, 69."""
         try:
             yield
         except engines.DriverError as error:
             raise RunError(
                 exits.ENGINE_FAILED, f"{run.id}: {error}", variant, run=run.id
             ) from error
-        except (tmux.TmuxError, paths.RuntimeDirError) as error:
+        except paths.RuntimeDirError as error:
+            raise RunError(
+                exits.UNAVAILABLE, f"{run.id}: {error}", "runtime", run=run.id
+            ) from error
+        except tmux.TmuxError as error:
             raise RunError(
                 exits.SESSION_GONE, f"{run.id}: {error}", variant, run=run.id
             ) from error
@@ -399,6 +438,14 @@ class Core:
         menu = settings["menu"]
         row: Mapping[str, Any] | None = None if menu is None else menu[name]
         model = options.model
+        if (
+            model is not None
+            and row is not None
+            and row.get("engine") == "claude"
+            and row.get("run_as") == "subagent"
+        ):
+            # A subagent row is never read by emb run.
+            row = None
         if model is None:
             if row is None:
                 errors = "; ".join(settings["errors"]) or "not valid"
@@ -662,16 +709,7 @@ class Core:
             worktree = str(main / ".ember" / "worktrees" / run_id)
             branch = f"ember/{engine}/{run_id}"
         method = self._sandbox_method(engine)
-        if engine == "codex" and method not in (None, "none"):
-            conflicts = sandbox.codex_config_conflicts(Path(worktree), common, self.env)
-            if conflicts:
-                files = ", ".join(str(path) for path in conflicts)
-                raise RunError(
-                    exits.UNAVAILABLE,
-                    f"a sandbox_mode key would turn off the codex sandbox: {files}",
-                    "sandbox",
-                    files=files,
-                )
+        self._check_codex_config(engine, method, worktree, common)
         now = time.time()
         with self._turn_lock(run_id):
             run = Run(
@@ -703,11 +741,11 @@ class Core:
                 folder=record.make_run_dir(run_id, self.env),
                 env=self.env,
             )
-            record.write_private(run.folder / record.BRIEF_NAME, brief)
-            record.save(run)
-            self._say(f"run {run_id}")
             started = time.monotonic()
             try:
+                record.write_private(run.folder / record.BRIEF_NAME, brief)
+                record.save(run)
+                self._say(f"run {run_id}")
                 run, window = self._launch(
                     run, driver, brief, options, settings, common, main
                 )
@@ -724,7 +762,27 @@ class Core:
                     "starting",
                     run=run_id,
                 ) from error
+            except Exception as error:
+                failure = _start_failure(run, error)
+                self._record_exit(run, failure.code, str(failure), status=record.FAILED)
+                raise failure from error
             return self._turn(run, driver, started, window)
+
+    def _check_codex_config(
+        self, engine: str, method: str | None, worktree: str, common: Path
+    ) -> None:
+        """Refuse a sandboxed Codex run that a `sandbox_mode` key would undo."""
+        if engine != "codex" or method in (None, "none"):
+            return
+        conflicts = sandbox.codex_config_conflicts(Path(worktree), common, self.env)
+        if conflicts:
+            files = ", ".join(str(path) for path in conflicts)
+            raise RunError(
+                exits.UNAVAILABLE,
+                f"a sandbox_mode key would turn off the codex sandbox: {files}",
+                "sandbox",
+                files=files,
+            )
 
     def _launch(
         self,
@@ -739,6 +797,8 @@ class Core:
         """Create the worktree and session and send the first message."""
         if main is not None:
             self._create_worktree(run, main, common)
+            # The new worktree can hold a tracked .codex/config.toml.
+            self._check_codex_config(run.engine, run.sandbox, run.worktree, common)
         if run.sandbox == "none":
             self._warn(sandbox.none_warning(run.engine))
         with self._engine_calls(run, "starting"):
@@ -756,7 +816,14 @@ class Core:
                 env_vars=spec.env,
                 env=self.env,
             )
-        except (tmux.TmuxError, paths.RuntimeDirError) as error:
+        except paths.RuntimeDirError as error:
+            raise RunError(
+                exits.UNAVAILABLE,
+                f"cannot start the session of {run.id}: {error}",
+                "runtime",
+                run=run.id,
+            ) from error
+        except tmux.TmuxError as error:
             raise RunError(
                 exits.ENGINE_FAILED,
                 f"cannot start the session of {run.id}: {error}",
@@ -795,11 +862,16 @@ class Core:
         last_screen: str | None = None
         last_change = time.monotonic()
         while True:
-            with self._engine_calls(run, "starting"):
-                if driver.ready(run):
-                    return
+            try:
+                with self._engine_calls(run, "starting"):
+                    if driver.ready(run):
+                        return
+            except RunError:
+                self._stop_if_closed(run)
+                raise
             state = self._session_state(run.id)
             if state != LIVE:
+                self._stop_if_closed(run)
                 raise RunError(
                     exits.ENGINE_FAILED,
                     f"the engine of {run.id} exited before it took its brief",
@@ -839,13 +911,44 @@ class Core:
                 f"stopped waiting; turn {run.turn} of {run.id} keeps running",
                 run=run.id,
             ) from error
-        return self._complete(run, driver, outcome, started, window)
+        return self._finish(run, driver, outcome, started, window)
+
+    def _finish(
+        self,
+        run: Run,
+        driver: Driver,
+        outcome: TurnOutcome,
+        started: float,
+        window: str | None,
+    ) -> int:
+        """Collect and commit an ended turn; Ctrl-C leaves it to `--recover`."""
+        try:
+            return self._complete(run, driver, outcome, started, window)
+        except KeyboardInterrupt as error:
+            message = (
+                f"interrupted while collecting turn {run.turn} of {run.id}; "
+                "its saved state is kept"
+            )
+            self._record_exit(run, exits.INTERRUPTED, message)
+            raise RunError(
+                exits.INTERRUPTED, message, "complete", run=run.id
+            ) from error
+
+    def _stop_if_closed(self, run: Run) -> None:
+        """Stop with 72 when the stored record is closed."""
+        try:
+            stored = record.load(run.id, self.env)
+        except record.RecordError:
+            return
+        if stored.status == record.CLOSED:
+            raise RunError(exits.SESSION_GONE, f"{run.id} was closed", run=run.id)
 
     def _observe(self, run: Run, driver: Driver) -> TurnOutcome:
         try:
             with self._engine_calls(run):
                 return driver.wait(run)
         except RunError as error:
+            self._stop_if_closed(run)
             self._record_exit(run, error.code, str(error), status=record.FAILED)
             raise
 
@@ -861,19 +964,30 @@ class Core:
                 raise RunError(exits.SESSION_GONE, f"{run.id} was closed", run=run.id)
             state = self._session_state(run.id)
             if state != LIVE:
+                self._stop_if_closed(run)
                 outcome = self._observe(run, driver)
                 if outcome.state != engines.RUNNING:
                     return outcome
                 if state == DEAD:
-                    code = exits.ENGINE_FAILED
+                    # A failed turn: its edits are collected and committed.
                     message = f"the engine of {run.id} exited before the turn ended"
-                else:
-                    code = exits.SESSION_GONE
-                    message = f"the session of {run.id} is gone"
+                    self._record_exit(
+                        run,
+                        exits.ENGINE_FAILED,
+                        message,
+                        status=record.FAILED,
+                        ended_at=time.time(),
+                    )
+                    return TurnOutcome(engines.FAILED, reason=message)
+                message = f"the session of {run.id} is gone"
                 self._record_exit(
-                    run, code, message, status=record.FAILED, ended_at=time.time()
+                    run,
+                    exits.SESSION_GONE,
+                    message,
+                    status=record.FAILED,
+                    ended_at=time.time(),
                 )
-                raise RunError(code, message, run=run.id)
+                raise RunError(exits.SESSION_GONE, message, run=run.id)
             screen = self._screen_text(run.id, last_screen)
             if screen != last_screen:
                 last_screen, last_change = screen, time.monotonic()
@@ -898,6 +1012,7 @@ class Core:
         """Collect an ended turn, commit it and print its summary."""
         reply = outcome.reply if outcome.state == engines.DONE else None
         if run.turn_state == record.SENT:
+            self._save_outcome(run, outcome)
             reply_path = None
             if reply:
                 path = run.folder / f"turn-{run.turn}.md"
@@ -966,9 +1081,35 @@ class Core:
             return False
         parent = self._git_out(run.worktree, "rev-parse", "-q", "--verify", f"{head}^")
         subject = self._git_out(run.worktree, "log", "-1", "--format=%s", head)
-        return parent == run.expected_head and subject == commit_subject(
-            run.subject, run.turn
-        )
+        return parent == run.expected_head and subject == self._subject(run)
+
+    def _outcome_path(self, run: Run) -> Path:
+        return run.folder / f"turn-{run.turn}.outcome.json"
+
+    def _save_outcome(self, run: Run, outcome: TurnOutcome) -> None:
+        """Save how the current turn ended, for its commit and `--recover`."""
+        data = {
+            "state": outcome.state,
+            "reason": outcome.reason,
+            "provider_error": outcome.provider_error,
+            "signed_out": outcome.signed_out,
+            "incomplete": incomplete_reason(outcome),
+        }
+        record.write_private(self._outcome_path(run), json.dumps(data))
+
+    def _saved_outcome(self, run: Run) -> dict[str, Any]:
+        try:
+            data = json.loads(self._outcome_path(run).read_text(encoding="utf-8"))
+        except OSError, ValueError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _subject(self, run: Run) -> str:
+        """Return the commit subject of the current turn."""
+        incomplete = self._saved_outcome(run).get("incomplete")
+        if incomplete not in INCOMPLETE_REASONS:
+            incomplete = None
+        return commit_subject(run.subject, run.turn, incomplete)
 
     def _files(self, run: Run, commit: str) -> int:
         names = self._git_out(run.worktree, "diff", "--name-only", f"{commit}^", commit)
@@ -1010,7 +1151,7 @@ class Core:
         if not names:
             run = self._update(run, turn_state=record.COMMITTED)
             return run, None, 0, exits.OK, None
-        args = ["commit", "-q", "-m", commit_subject(run.subject, run.turn)]
+        args = ["commit", "-q", "-m", self._subject(run)]
         if run.trailers:
             args += ["-m", "\n".join(run.trailers)]
         result = self._git(worktree, *args)
@@ -1127,19 +1268,28 @@ class Core:
             turn = run.turn + 1
             if run.read_only:
                 self._save_snapshot(run, turn)
+            previous = {
+                "status": run.status,
+                "turn": run.turn,
+                "turn_state": run.turn_state,
+                "reply": run.reply,
+                "expected_head": run.expected_head,
+            }
             run = self._turn_sent(run, turn)
             try:
-                with self._engine_calls(run):
+                with self._engine_calls(run, "send"):
                     driver.send(run, text)
             except RunError as error:
-                self._record_exit(run, error.code, str(error), status=record.FAILED)
+                # The message is not known to be delivered: the turn did not
+                # start, and --send can be tried again.
+                self._record_exit(run, error.code, str(error), **previous)
+                error.context.setdefault("run", run_id)
                 raise
             except KeyboardInterrupt as error:
+                message = f"interrupted while sending to {run_id}"
+                self._record_exit(run, exits.INTERRUPTED, message, **previous)
                 raise RunError(
-                    exits.INTERRUPTED,
-                    f"interrupted while sending to {run_id}",
-                    "sent",
-                    run=run_id,
+                    exits.INTERRUPTED, message, "send", run=run_id
                 ) from error
             return self._turn(run, driver, started, None)
 
@@ -1173,16 +1323,30 @@ class Core:
                         reply = Path(run.reply).read_text(encoding="utf-8")
                     except OSError:
                         reply = None
-                if run.status == record.FAILED:
-                    outcome = TurnOutcome(engines.FAILED, reason=run.last_reason)
-                else:
-                    outcome = TurnOutcome(engines.DONE, reply=reply)
-                return self._complete(run, driver, outcome, started, None)
+                outcome = self._recovered_outcome(run, reply)
+                return self._finish(run, driver, outcome, started, None)
             self._warn(
                 f"emb run: nothing to recover in {run_id}: "
                 f"turn {run.turn} is {run.turn_state or 'not started'}"
             )
             return exits.OK
+
+    def _recovered_outcome(self, run: Run, reply: str | None) -> TurnOutcome:
+        """Return the outcome of a collected turn, as saved when collected."""
+        saved = self._saved_outcome(run)
+        state = saved.get("state")
+        if state in (engines.DONE, engines.FAILED):
+            reason = saved.get("reason")
+            return TurnOutcome(
+                state,
+                reply=reply if state == engines.DONE else None,
+                reason=reason if isinstance(reason, str) else None,
+                provider_error=saved.get("provider_error") is True,
+                signed_out=saved.get("signed_out") is True,
+            )
+        if run.status == record.FAILED:
+            return TurnOutcome(engines.FAILED, reason=run.last_reason)
+        return TurnOutcome(engines.DONE, reply=reply)
 
     def screen(self, run_id: str) -> int:
         """Print the text of a run's session.
@@ -1265,6 +1429,13 @@ class Core:
             return exits.OK
         with self._turn_lock(run_id, "close"):
             run = self._load(run_id)
+            if run.turn_state == record.COLLECTED and not run.read_only:
+                raise RunError(
+                    exits.REFUSED,
+                    f"turn {run.turn} of {run_id} is collected but not committed",
+                    "collected",
+                    run=run_id,
+                )
             if self._session_state(run_id) == LIVE:
                 if run.turn_state == record.SENT:
                     raise RunError(
@@ -1366,6 +1537,25 @@ class _SessionOnly(Driver):
 
     def default_effort(self, model: str) -> str | None:
         return None
+
+
+def _start_failure(run: Run, error: Exception) -> RunError:
+    """Return the exit of an unexpected failure while a run starts.
+
+    A runtime folder or sandbox problem is 69; anything else is 1.
+    """
+    context: dict[str, object] = {"run": run.id, "engine": run.engine}
+    if isinstance(error, (paths.RuntimeDirError, sandbox.SandboxError)):
+        variant = "runtime" if isinstance(error, paths.RuntimeDirError) else None
+        return RunError(exits.UNAVAILABLE, f"{run.id}: {error}", variant, **context)
+    if isinstance(error, OSError):
+        return RunError(exits.UNEXPECTED, f"{run.id}: {error}", None, **context)
+    return RunError(
+        exits.UNEXPECTED,
+        f"{run.id}: unexpected error: {type(error).__name__}: {error}",
+        None,
+        **context,
+    )
 
 
 def _hash(path: Path) -> str | None:

@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from ember import choices, engines, paths
+from ember import choices, engines, paths, sandbox
 from ember.engines import Driver, LaunchSpec
 from ember.runs import core, exits, record
 from ember.runs.core import Core, RunError, StartOptions
@@ -384,11 +384,11 @@ def test_screen_changes_keep_a_turn_waiting(
 
 
 @pytest.mark.parametrize(
-    ("line", "code", "state"),
+    ("line", "code", "state", "reason"),
     [
-        ("@provider rate limited", 73, record.FAILED),
-        ("@fail model crashed", 71, record.FAILED),
-        ("@empty", 80, record.WAITING),
+        ("@provider rate limited", 73, record.FAILED, "provider error"),
+        ("@fail model crashed", 71, record.FAILED, "engine failure"),
+        ("@empty", 80, record.WAITING, "no reply"),
     ],
 )
 def test_turn_outcomes(
@@ -399,6 +399,7 @@ def test_turn_outcomes(
     line: str,
     code: int,
     state: str,
+    reason: str,
 ) -> None:
     brief = _brief(tmp_path, f"Task\n@write work.txt w\n{line}\n")
     result = _start(_core(env), repo, brief)
@@ -410,6 +411,50 @@ def test_turn_outcomes(
     assert f" · exit {code} · 1 files · turn 1" in out
     assert len(run.commits) == 1
     assert err.splitlines()[-1] == exits.line(code, run=run.id)
+    subject = git(Path(run.worktree), "log", "-1", "--format=%s", env=env)
+    assert subject == f"Task (turn 1, incomplete: {reason})"
+
+
+def test_incomplete_later_turn_and_long_subject(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_id = _started(tmp_path, env, repo, capsys, text="y" * 80 + "\n")
+    message = _brief(tmp_path, "@write m.txt m\n@fail broke\n", "m.md")
+    core_ = _core(env)
+    assert core_.execute(lambda: core_.send(run_id, message)) == 71
+    run = record.load(run_id, env)
+    subject = git(Path(run.worktree), "log", "-1", "--format=%s", env=env)
+    assert subject == "y" * 72 + " (turn 2, incomplete: engine failure)"
+
+
+def test_recover_commits_a_collected_failed_turn_with_its_reason(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    brief = _brief(tmp_path, "Task\n@write p.txt p\n@provider rate limited\n")
+    code = _start(_core(env), repo, brief)
+    out, err = capsys.readouterr()
+    assert code == 73
+    assert "also exit 77" in err
+    run_id = _run_id(out)
+    run = record.load(run_id, env)
+    assert run.turn_state == record.COLLECTED
+    assert run.commits == ()
+    hook.unlink()
+    core_ = _core(env)
+    assert core_.execute(lambda: core_.recover(run_id)) == 73
+    run = record.load(run_id, env)
+    assert run.turn_state == record.COMMITTED
+    subject = git(Path(run.worktree), "log", "-1", "--format=%s", env=env)
+    assert subject == "Task (turn 1, incomplete: provider error)"
 
 
 def test_signed_out_turn_refreshes_status_and_exits_69(
@@ -423,11 +468,16 @@ def test_signed_out_turn_refreshes_status_and_exits_69(
         (bin_dir / name).write_text("#!/bin/sh\nexit 1\n")
         (bin_dir / name).chmod(0o755)
     code = _start(
-        _core(env), repo, _brief(tmp_path, "Task\n@signedout not logged in\n")
+        _core(env),
+        repo,
+        _brief(tmp_path, "Task\n@write s.txt s\n@signedout not logged in\n"),
     )
     out, err = capsys.readouterr()
     assert code == 69
     assert "emb run: not logged in" in err
+    worktree = Path(record.load(_run_id(out), env).worktree)
+    subject = git(worktree, "log", "-1", "--format=%s", env=env)
+    assert subject == "Task (turn 1, incomplete: sign-in failure)"
     held = json.loads(Path(env["XDG_CACHE_HOME"], "ember", "engines.json").read_text())
     assert held["engines"]["claude"]["checked_at"] != 1.0
     assert err.splitlines()[-1].startswith("owner: ")
@@ -440,13 +490,28 @@ def test_engine_that_exits_mid_turn_is_71(
     repo: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    code = _start(_core(env), repo, _brief(tmp_path, "Task\n@exit\n"))
+    brief = _brief(tmp_path, "Task\n@write e.txt e\n@exit\n")
+    code = _start(_core(env), repo, brief)
     out, err = capsys.readouterr()
     assert code == 71
     assert "exited before the turn ended" in err
     run = record.load(_run_id(out), env)
     assert run.status == record.FAILED
     assert run.ended_at is not None
+    assert run.turn_state == record.COMMITTED
+    subject = git(Path(run.worktree), "log", "-1", "--format=%s", env=env)
+    assert subject == "Task (turn 1, incomplete: engine failure)"
+
+
+def test_read_only_failed_turn_commits_nothing(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    brief = _brief(tmp_path, "Review\n@write r.txt r\n@fail broke\n")
+    assert _start(_core(env), repo, brief, read_only=True) == 71
+    assert git(repo, "log", "--format=%s", env=env) == "first"
 
 
 def test_moved_head_is_76(
@@ -506,6 +571,56 @@ def test_ctrl_c_while_waiting_is_74_and_turn_keeps_running(
     run = record.load(run_id, env)
     assert run.status == record.RUNNING
     assert run.last_exit == 74
+
+
+def test_ctrl_c_while_committing_is_74_and_recover_finishes(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def stop(run: record.Run) -> object:
+        raise KeyboardInterrupt
+
+    core_ = _core(env)
+    monkeypatch.setattr(core_, "_commit", stop)
+    code = _start(core_, repo, _brief(tmp_path, "Task\n@write k.txt k\n"))
+    out, err = capsys.readouterr()
+    assert code == 74
+    run_id = _run_id(out)
+    assert err.splitlines()[-1] == (
+        f"next: emb run --recover {run_id} (finishes the saved turn)"
+    )
+    run = record.load(run_id, env)
+    assert run.turn_state == record.COLLECTED
+    assert run.last_exit == 74
+    assert _core(env).execute(lambda: _core(env).recover(run_id)) == 0
+    run = record.load(run_id, env)
+    assert run.turn_state == record.COMMITTED
+    assert len(run.commits) == 1
+
+
+def test_driver_error_after_forced_close_is_72(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[int] = []
+
+    def close_then_fail(run: record.Run) -> None:
+        calls.append(1)
+        if len(calls) == 2:
+            _core(env).close(run.id, force=True)
+            raise engines.DriverError("the session's files are gone")
+
+    driver = _driver(env, on_wait=close_then_fail)
+    code = _start(_core(env, driver), repo, _brief(tmp_path, "Task\n@hang\n"))
+    out, err = capsys.readouterr()
+    assert code == 72
+    assert "was closed" in err
+    assert record.load(_run_id(out), env).status == record.CLOSED
 
 
 def test_close_while_waiting_stops_the_waiting_command_with_72(
@@ -643,7 +758,64 @@ def test_missing_driver_is_69(
 
     core_ = Core(env, load_driver=missing)
     assert _start(core_, repo, _brief(tmp_path, "Task\n")) == 69
-    assert "Ember has no driver for claude" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "Ember has no driver for claude" in err
+    assert err.splitlines()[-1] == (
+        "owner: this Ember build has no driver for claude; update Ember"
+    )
+
+
+def test_subagent_row_is_ignored_with_explicit_model(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    choices.set_settings({"single.writer_as": "subagent"}, env=env)
+    code = _start(_core(env), repo, _brief(tmp_path, "Task\n"), model="opus")
+    out, err = capsys.readouterr()
+    assert code == 0, err
+    run = record.load(_run_id(out), env)
+    # The row's effort is high; the driver's default is medium.
+    assert (run.model, run.effort) == ("opus", "medium")
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "last"),
+    [
+        (
+            paths.RuntimeDirError("XDG_RUNTIME_DIR is unset"),
+            69,
+            "owner: set XDG_RUNTIME_DIR to a private folder of this user "
+            "(the message names the problem)",
+        ),
+        (
+            sandbox.SandboxError("no bwrap"),
+            69,
+            "owner: install or connect claude; emb engines shows what is missing",
+        ),
+        (OSError("disk full"), 1, "next: emb run --status"),
+        (ValueError("bad"), 1, "next: emb run --status"),
+    ],
+)
+def test_start_failure_after_the_run_folder_exists_is_recorded(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    error: Exception,
+    code: int,
+    last: str,
+) -> None:
+    class Raising(StubDriver):
+        def command(self, run: record.Run, first_message: str) -> LaunchSpec:
+            raise error
+
+    driver = Raising("claude", script_path(env))
+    assert _start(_core(env, driver), repo, _brief(tmp_path, "Task\n")) == code
+    out, err = capsys.readouterr()
+    assert err.splitlines()[-1] == last
+    run = record.load(_run_id(out), env)
+    assert run.status == record.FAILED
+    assert run.last_exit == code
+    assert str(error) in (run.last_reason or "")
 
 
 def test_settings_database_error_is_1(
@@ -744,6 +916,31 @@ def test_codex_sandbox_conflict_is_69(
     assert str(repo / ".codex" / "config.toml") in err
     assert err.splitlines()[-1].startswith("owner: remove the sandbox_mode key from ")
     assert not paths.runs_dir(env).exists()
+
+
+def test_codex_sandbox_conflict_in_the_new_worktree_is_69(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    choices.set_settings({"sandbox.codex": "bubblewrap"}, env=env)
+    (repo / ".codex").mkdir()
+    (repo / ".codex" / "config.toml").write_text('sandbox_mode = "danger"\n')
+    git(repo, "add", "-A", env=env)
+    git(repo, "commit", "-q", "-m", "codex config", env=env)
+    # The main checkout no longer has the file; the commit still does.
+    (repo / ".codex" / "config.toml").unlink()
+    core_ = _core(env, _driver(env, "codex"))
+    code = _start(
+        core_, repo, _brief(tmp_path, "Task\n"), engine="codex", model="gpt-5"
+    )
+    out, err = capsys.readouterr()
+    assert code == 69
+    run = record.load(_run_id(out), env)
+    conflict = Path(run.worktree) / ".codex" / "config.toml"
+    assert str(conflict) in err
+    assert err.splitlines()[-1].startswith("owner: remove the sandbox_mode key from ")
+    assert run.status == record.FAILED
+    assert conflict.exists()
+    assert git(repo, "branch", "--list", run.branch or "", env=env)
 
 
 def _bare_run(
@@ -888,6 +1085,55 @@ def test_send_to_dead_session_is_72(
     assert status_out["session_state"] == "dead"
 
 
+class _SendFails(StubDriver):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        super().__init__(*args, **kwargs)
+        self.failure: BaseException | None = None
+
+    def send(self, run: record.Run, text: str) -> None:
+        if self.failure is not None:
+            raise self.failure
+        super().send(run, text)
+
+
+@pytest.mark.parametrize(
+    ("failure", "code"),
+    [(engines.DriverError("paste failed"), 71), (KeyboardInterrupt(), 74)],
+)
+def test_send_that_fails_before_delivery_restores_the_turn(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    failure: BaseException,
+    code: int,
+) -> None:
+    driver = _SendFails("claude", script_path(env))
+    run_id = _started(tmp_path, env, repo, capsys, driver=driver)
+    before = record.load(run_id, env)
+    driver.failure = failure
+    message = _brief(tmp_path, "@write n.txt n\n", "m.md")
+    core_ = _core(env, driver)
+    assert core_.execute(lambda: core_.send(run_id, message)) == code
+    err = capsys.readouterr().err
+    assert err.splitlines()[-1] == (
+        f"next: emb run --send {run_id} --message-file <file> "
+        "(the message was not sent)"
+    )
+    run = record.load(run_id, env)
+    assert (run.status, run.turn, run.turn_state, run.reply, run.expected_head) == (
+        before.status,
+        before.turn,
+        before.turn_state,
+        before.reply,
+        before.expected_head,
+    )
+    assert run.last_exit == code
+    driver.failure = None
+    assert core_.execute(lambda: core_.send(run_id, message)) == 0
+    assert record.load(run_id, env).turn == 2
+
+
 def test_send_first_commits_a_collected_turn(
     tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -977,6 +1223,25 @@ def test_close_keeps_worktree_and_branch(
     assert core_.execute(lambda: core_.send(run_id, message)) == 72
 
 
+def test_close_refused_while_a_turn_is_collected_but_not_committed(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_id = _started(tmp_path, env, repo, capsys)
+    run = record.update(record.load(run_id, env), {"turn_state": record.COLLECTED})
+    Path(run.worktree, "late.txt").write_text("late\n")
+    core_ = _core(env)
+    assert core_.execute(lambda: core_.close(run_id)) == 75
+    err = capsys.readouterr().err
+    assert err.splitlines()[-1] == (
+        f"next: emb run --recover {run_id} (commits the collected turn), "
+        f"then emb run --close {run_id}"
+    )
+    assert core_.execute(lambda: core_.recover(run_id)) == 0
+    assert len(record.load(run_id, env).commits) == 1
+    assert core_.execute(lambda: core_.close(run_id)) == 0
+    assert record.load(run_id, env).status == record.CLOSED
+
+
 def test_close_refused_while_turn_runs_unless_forced(
     tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1050,6 +1315,14 @@ def test_subject_helpers() -> None:
     assert core.brief_subject("") == ""
     assert core.commit_subject("a" * 80, 1) == "a" * 72
     assert core.commit_subject("abc", 3) == "abc (turn 3)"
+    assert core.commit_subject("a" * 80, 1, "no reply") == (
+        "a" * 72 + " (turn 1, incomplete: no reply)"
+    )
+    done = engines.TurnOutcome(engines.DONE, reply="ok")
+    assert core.incomplete_reason(done) is None
+    assert core.incomplete_reason(replace(done, reply="")) == "no reply"
+    failed = engines.TurnOutcome(engines.FAILED, signed_out=True)
+    assert core.incomplete_reason(failed) == "sign-in failure"
     assert core.first_message("r", "brief") == (
         "Brief from Claude, the lead, for Ember run r.\n\nbrief"
     )
