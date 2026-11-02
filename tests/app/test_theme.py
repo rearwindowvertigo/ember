@@ -3,73 +3,17 @@ from typing import cast
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPixmap
+from PySide6.QtGui import QColor, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QLabel,
-    QProxyStyle,
-    QStyle,
-    QStyleOption,
-    QStyleOptionFocusRect,
     QVBoxLayout,
     QWidget,
 )
 from pytestqt.qtbot import QtBot
 
 from ember.app import theme
-
-
-@pytest.mark.parametrize("mode", theme.MODES)
-def test_click_focus_labels_skip_the_native_focus_frame(
-    qapp: QApplication, qtbot: QtBot, mode: str
-) -> None:
-    class FocusStyle(QProxyStyle):
-        def __init__(self) -> None:
-            super().__init__("Fusion")
-            self.focus_frames: list[QWidget | None] = []
-
-        def drawPrimitive(  # noqa: N802
-            self,
-            element: QStyle.PrimitiveElement,
-            option: QStyleOption,
-            painter: QPainter,
-            widget: QWidget | None = None,
-        ) -> None:
-            if element == QStyle.PrimitiveElement.PE_FrameFocusRect:
-                self.focus_frames.append(widget)
-            super().drawPrimitive(element, option, painter, widget)
-
-    previous = theme.current_mode()
-    sheet = qapp.styleSheet()
-    try:
-        theme.apply(qapp, mode)
-        style = FocusStyle()
-        qapp.setStyle(style)
-        for policy in (Qt.FocusPolicy.ClickFocus, Qt.FocusPolicy.StrongFocus):
-            name = QLabel("Selectable text")
-            qtbot.addWidget(name)
-            name.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            name.setFocusPolicy(policy)
-            name.resize(200, 40)
-            name.ensurePolished()
-            image = QPixmap(200, 40)
-            image.fill(Qt.GlobalColor.transparent)
-            option = QStyleOptionFocusRect()
-            option.initFrom(name)
-            painter = QPainter(image)
-            try:
-                name.style().drawPrimitive(
-                    QStyle.PrimitiveElement.PE_FrameFocusRect, option, painter, name
-                )
-            finally:
-                painter.end()
-            assert (name in style.focus_frames) == (
-                policy == Qt.FocusPolicy.StrongFocus
-            )
-    finally:
-        theme.apply(qapp, previous)
-        qapp.setStyleSheet(sheet)
 
 
 @pytest.mark.parametrize("mode", theme.MODES)

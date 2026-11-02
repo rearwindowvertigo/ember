@@ -1,11 +1,19 @@
+import json
+import math
+import os
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from pytestqt.qtbot import QtBot
 
@@ -150,6 +158,144 @@ def _shown(screen: EnginesScreen, context: AppContext, qtbot: QtBot) -> None:
 def _save(context: AppContext, qtbot: QtBot, action: Callable[[], None]) -> None:
     with qtbot.waitSignal(context.settings_changed, timeout=5000):
         action()
+
+
+def _physical_rect(rect: QRect, ratio: float) -> QRect:
+    """Enclose a logical rectangle in device pixels."""
+    left = math.floor(rect.x() * ratio)
+    top = math.floor(rect.y() * ratio)
+    right = math.ceil((rect.x() + rect.width()) * ratio)
+    bottom = math.ceil((rect.y() + rect.height()) * ratio)
+    return QRect(left, top, right - left, bottom - top)
+
+
+def _assert_label_background(image: QImage, screen: QWidget, name: QLabel) -> None:
+    """Assert the card background outside a label's tight text bounds."""
+    origin = name.mapTo(screen, QPoint())
+    metrics = name.fontMetrics()
+    line = metrics.boundingRect(name.contentsRect(), int(name.alignment()), name.text())
+    text = metrics.tightBoundingRect(name.text()).translated(
+        origin.x() + line.x(), origin.y() + line.y() + metrics.ascent()
+    )
+    ratio = image.devicePixelRatio()
+    text_pixels = _physical_rect(text, ratio)
+    region = _physical_rect(QRect(origin, name.size()).adjusted(-3, -3, 3, 3), ratio)
+    background = theme.color("bg-card")
+    checked = 0
+    for y in range(region.top(), region.bottom() + 1):
+        for x in range(region.left(), region.right() + 1):
+            if text_pixels.contains(x, y):
+                continue
+            checked += 1
+            assert image.pixelColor(x, y) == background, (
+                name.text(),
+                x,
+                y,
+                image.pixelColor(x, y).name(),
+                background.name(),
+            )
+    assert checked > 0
+
+
+def _capture_label_backgrounds(
+    env: dict[str, str], mode: str, ratio: float, captures: Path
+) -> None:
+    """Show Engines and check captures with mouse selection on, off and on."""
+    app = QApplication([])
+    theme.apply(app, mode)
+    captures.mkdir()
+    choices.set_settings(
+        {f"sandbox.{engine}": "on" for engine in status.ENGINES}, env=env
+    )
+    context = AppContext(env)
+    context.reload_settings()
+    assert context.tasks.wait(5000)
+    app.processEvents()
+    with (
+        patch.object(status, "read", return_value=_all()),
+        patch.object(models, "list_models", return_value=_router_list()),
+    ):
+        screen = EnginesScreen(context)
+        try:
+            screen.resize(1100, 900)
+            screen.show()
+            screen.activateWindow()
+            app.processEvents()
+            handle = screen.windowHandle()
+            assert handle is not None and handle.isExposed()
+            screen.shown()
+            assert context.tasks.wait(5000)
+            app.processEvents()
+            screen.toggle_models("opencode")
+            assert context.tasks.wait(5000)
+            app.processEvents()
+            panel = screen.panel
+            assert panel is not None
+            assert panel.tools_switch is not None
+            panel.tools_switch.setChecked(False)
+            panel.apply_filters()
+            app.processEvents()
+            labels = [row.name for row in panel.rows]
+            labels += [card.check_label for card in screen.cards.values()]
+            assert len(labels) == 6
+            for step, selectable in enumerate((True, False, True)):
+                for name in labels:
+                    name.setTextInteractionFlags(
+                        Qt.TextInteractionFlag.TextSelectableByMouse
+                        if selectable
+                        else Qt.TextInteractionFlag.NoTextInteraction
+                    )
+                screen.check_button.setFocus()
+                app.processEvents()
+                image = screen.grab().toImage()
+                assert image.devicePixelRatio() == ratio
+                assert image.save(str(captures / f"{step}-screen.png"))
+                for index, name in enumerate(labels):
+                    assert name.isVisible()
+                    assert not name.hasFocus()
+                    area = QRect(name.mapTo(screen, QPoint()), name.size())
+                    pixels = _physical_rect(area.adjusted(-3, -3, 3, 3), ratio)
+                    assert image.copy(pixels).save(
+                        str(captures / f"{step}-label-{index}.png")
+                    )
+                    _assert_label_background(image, screen, name)
+        finally:
+            screen.close()
+            assert context.tasks.wait(5000)
+            app.processEvents()
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+@pytest.mark.parametrize("ratio", (1, 1.25))
+def test_shown_selectable_labels_have_only_text_pixels(
+    env: dict[str, str], tmp_path: Path, mode: str, ratio: float
+) -> None:
+    test_file = Path(__file__).resolve()
+    process = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json, runpy, sys; from pathlib import Path; "
+            "runpy.run_path(sys.argv[1])['_capture_label_backgrounds']("
+            "json.loads(sys.argv[2]), sys.argv[3], float(sys.argv[4]), "
+            "Path(sys.argv[5]))",
+            str(test_file),
+            json.dumps(env),
+            mode,
+            str(ratio),
+            str(tmp_path / "captures"),
+        ],
+        env={
+            **os.environ,
+            "PYTHONPATH": str(test_file.parents[3] / "src"),
+            "QT_QPA_PLATFORM": "offscreen",
+            "QT_SCALE_FACTOR": str(ratio),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert process.returncode == 0, process.stdout + process.stderr
 
 
 # Pure functions
