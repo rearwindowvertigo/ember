@@ -465,8 +465,8 @@ session and keeps the worktree and branch. A command waiting on a run that is
 closed stops with 72, also when the driver fails or the session is missing
 after the close.
 
-Ember never pushes, merges, rebases or deletes a branch, and never removes a
-worktree.
+`emb run` never pushes, merges, rebases or deletes a branch, and never removes
+a worktree.
 
 ### Locks
 
@@ -574,10 +574,225 @@ the run's read paths are added with `--add-dir` and edits to them are
 refused. While a tool call or a model message runs, Claude's pane prints a
 line such as `· running Bash for 3 min` at least once a minute.
 
+## `emb ground`
+
+Prints, in one call, what Claude reads before choosing a worker: the machine,
+the Claude Code surface, Claude Code's `worktree.baseRef` setting and the
+state of one folder. It changes nothing.
+
+| Option | Does |
+|---|---|
+| `--dir DIR` | The folder to read; default the current folder |
+| `--json` | Print one JSON object, indented by two spaces |
+
+Without `--json` it prints one `<item>: <value>` line per item on standard
+output, in the order of the table below; a value that cannot be read prints
+as `null (<reason>)`.
+
+| Item | Value |
+|---|---|
+| `machine` | The host name |
+| `surface` | `entrypoint`: the value of `CLAUDE_CODE_ENTRYPOINT`, or null when it is unset or empty; `desktop`: true when it is `claude-desktop` |
+| `worktree_base` | `value`: Claude Code's `worktree.baseRef` setting; `file`: the settings file it came from |
+| `directory.path` | The folder, as an absolute path |
+| `directory.git` | Whether the folder is in a git checkout |
+| `directory.top` | The top of the checkout |
+| `directory.branch` | `name`: the checked-out branch, null on a detached `HEAD`; `commit`: the full commit id of `HEAD`, null before the first commit |
+| `directory.dirty` | `value`: whether `git status --porcelain` lists any path; `paths`: how many paths it lists. Ignored files are not counted, nor are the checkout's other worktrees inside its top, as `git worktree list` lists them, so an untracked folder such as `.claude/worktrees` that holds only worktrees is not counted |
+| `directory.remote` | `name`: `origin`, or else the first remote `git remote` lists; `url`: its URL; `kind`: `github` when the URL's host is `github.com`, otherwise `other` |
+| `directory.files` | Whether `CLAUDE.md` and `AGENTS.md` are files at the top of the checkout |
+
+A value that cannot be read is null, and in JSON a sibling key
+`<field>_reason` holds the reason: for example `"remote": null` with
+`"remote_reason": "the repository has no remote"`. Outside a git checkout
+`git` is false and `top`, `branch`, `dirty`, `remote` and `files` are null with
+the reason `not a git checkout`. When git cannot run, `git` is null as well.
+
+Git runs with `LC_ALL=C` and without the variables that point it at another
+repository (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`,
+`GIT_OBJECT_DIRECTORY`, `GIT_NAMESPACE` and `GIT_PREFIX`). It runs with
+`GIT_OPTIONAL_LOCKS=0`, so `git status` takes no `index.lock` and does not
+rewrite the index.
+
+`worktree.baseRef` is read from the user settings file, then, in a
+checkout, from the top's `.claude/settings.json` and
+`.claude/settings.local.json`; a later file wins. A missing file, or a file
+without the key, is skipped. When no file sets it, or a file cannot be read,
+is not a JSON object, has a `worktree` that is not an object or a `baseRef`
+that is not a non-empty string, `worktree_base` is null with the reason. The
+user settings file is `$CLAUDE_CONFIG_DIR/settings.json` when
+`CLAUDE_CONFIG_DIR` is set and not empty, otherwise `~/.claude/settings.json`.
+Managed settings are not read.
+
+### Exit codes
+
+| Code | Meaning | Line |
+|---|---|---|
+| 0 | Printed, whatever could not be read | |
+| 64 | Usage error | |
+| 66 | `--dir` does not exist or is not a folder, or, without `--dir`, the current folder cannot be read | `next: emb ground --dir <an existing folder>` |
+
+## `emb merge`
+
+```
+emb merge BRANCH --into TARGET --verdict keep [--dir DIR] [--json]
+```
+
+Merges a reviewed branch into a local branch, then cleans it up as
+`emb cleanup --merged-into TARGET --branch BRANCH` does. `DIR` is a folder in
+the git checkout; the default is the current folder.
+
+- Without `--verdict keep` it changes nothing and exits 64.
+- `BRANCH` and `TARGET` must be existing local branches (65), and different
+  (64).
+- The merge happens in the worktree that has `TARGET` checked out, from
+  `git worktree list`. It exits 75 when no worktree has it checked out.
+- A branch already contained in `TARGET` (see `emb cleanup`) is not merged
+  again; the first line is `already contained: BRANCH at <commit> in TARGET at
+  <commit>`.
+- Otherwise the target's worktree must have no unfinished merge, rebase,
+  cherry-pick or revert (`MERGE_HEAD`, `REBASE_HEAD`, `rebase-merge`,
+  `rebase-apply`, `CHERRY_PICK_HEAD` or `REVERT_HEAD` in its git folder) (75),
+  and its tree must have no changes to tracked files and no untracked files
+  that are not ignored (75); other worktrees of the repository inside it are
+  not counted.
+- Ember then runs `git merge --no-ff --no-edit -m <message> refs/heads/BRANCH`
+  there, so a tag named `BRANCH` is never merged instead. `<message>` is git's
+  default message for merging `BRANCH` by its short name, from
+  `git fmt-merge-msg --no-log`: `Merge branch 'BRANCH' into TARGET`, without
+  ` into TARGET` for a target that git's `merge.suppressDest` setting covers
+  (`main` and `master` when it is not set). It prints `merged BRANCH at
+  <commit> into TARGET: <merge commit>`.
+- On a conflict it runs `git merge --abort`, which undoes only that merge,
+  leaves `TARGET` as it was and exits 75. Any other merge failure exits 70.
+- It never pushes.
+
+The cleanup's lines follow the first line. A branch that is not an Ember run
+branch is kept with `not an Ember run branch; next: git branch -d BRANCH`.
+
+`--json` prints one object:
+
+| Field | Value |
+|---|---|
+| `branch` | `BRANCH` |
+| `target` | `TARGET` |
+| `merge_commit` | The merge commit; null when the branch was already contained |
+| `contained_before` | Whether the branch was already contained |
+| `cleanup` | The cleanup's list, as `emb cleanup --json` prints it |
+
+## `emb cleanup`
+
+```
+emb cleanup --merged-into TARGET [--branch BRANCH] [--dir DIR] [--dry-run] [--json]
+```
+
+Removes the Ember run branches `TARGET` contains, with their run's worktree
+and session. `DIR` is a folder in the git checkout; the default is the current
+folder.
+
+A run branch is `ember/<engine>/<run id>`; its worktree is
+`.ember/worktrees/<run id>` in the repository's main checkout (the first entry
+of `git worktree list`), also when `DIR` is in a linked worktree. No other
+branch is ever removed, and a read-only run, which has no branch, is never
+touched. Without `--branch` every run branch is handled; with it, only
+`BRANCH`.
+
+A branch is contained in `TARGET` when it is an ancestor of `TARGET`, or when
+merging it into `TARGET` gives no conflict and `TARGET`'s own tree, as after a
+squash merge. The check changes no index, worktree or ref; with `--dry-run`
+the objects of the trial merge go to a temporary folder.
+
+For each contained run branch, in order:
+
+1. The run record must belong to the branch: same engine, same branch, its
+   worktree is the branch's worktree in this repository, and its checkout is
+   in this repository (when that checkout still exists).
+2. The branch must not be checked out in a worktree other than its run's, and
+   the run's worktree, when it exists, must have the branch checked out, be
+   unlocked, and have no changes to tracked files and no untracked files that
+   are not ignored. Ignored files do not count.
+3. A run that is not closed is closed through `emb run --close` without
+   `--force`; the close's messages go to standard error.
+4. Both tips are read again and containment is checked again.
+5. The run's worktree is removed with `git worktree remove` (without
+   `--force`), then `git worktree prune` runs, which also clears a worktree
+   whose folder was deleted by hand.
+6. The branch is deleted at the commit checked in step 4
+   (`git update-ref -d refs/heads/BRANCH <commit>`).
+
+A branch with no run record follows the same steps without a session to
+close. Run records are kept. `--dry-run` reports what each branch would get
+and changes nothing; it does not ask the run's session whether it would close.
+It reports a branch as kept, with the reason and line a close would give,
+when the run record shows a turn that is sent (`turn <n> of <run> is
+running`) or, on a run that writes, collected (`turn <n> of <run> is collected
+but not committed`).
+
+Everything else is kept, with a reason and what resolves it:
+
+| Kept | Reason | Then |
+|---|---|---|
+| `TARGET` itself | `the merge target` | `next: emb cleanup --merged-into <the branch it was merged into>` |
+| A branch that is not a run branch (with `--branch`) | `not an Ember run branch` | `next: git branch -d BRANCH` |
+| A branch not contained | `not contained in TARGET` | `next: emb merge BRANCH --into TARGET --verdict keep (after a Keep verdict)` |
+| A run record that is not this branch's | `the run record <run> is not this branch's: ...` | `next: emb run --status <run>` |
+| A run record that cannot be read | `cannot read the run record: ...` | `owner: repair or remove <the run.json file>` |
+| A branch checked out in another worktree | `checked out in <path>` | `next: git -C <path> switch --detach, then <the cleanup>` |
+| A run worktree with another branch checked out | `the run's worktree <path> has <branch> checked out` | `next: git -C <path> status` |
+| A locked run worktree | `the worktree <path> is locked` | `next: git worktree unlock <path>, then <the cleanup>` |
+| A run worktree with changes | `the worktree <path> has changes` | `next: git -C <path> status --short` |
+| A run whose close is refused | The close's message: a running or collected turn, a busy session, another command on the run, or messages Ember did not send | The close's `next:` line |
+| A run whose close fails otherwise | The close's message | The close's `owner:` line, or `owner: repair what the message names (emb run --status <run>), then <the cleanup>` |
+| A branch or target that moved | `<branch> moved` | `next: <the cleanup>` |
+
+Each act and keep is one line on standard output:
+`removed BRANCH: <what was done>`, `would remove BRANCH: <what would be done>`,
+or `kept BRANCH: <reason>; next: <command>` (`; owner: <step>` for something
+only the owner does). With nothing to handle it prints nothing on standard
+output and a message on standard error.
+
+`--json` prints a list of objects:
+
+| Field | Value |
+|---|---|
+| `branch` | The branch |
+| `run` | The run id in the branch name, or null |
+| `action` | `removed`, `kept` or `would remove` |
+| `reason` | What was done, or why it was kept |
+| `next` | For a keep, the line that resolves it, `next: <command>` or `owner: <step>`, the same text as the printed line ends with; null otherwise |
+
+A git command that fails (worktree removal, `git worktree prune`, branch
+deletion, or a git command that reads the repository) stops the cleanup at
+once with exit 70. Everything done before it is already printed, or with
+`--json` is in the list. The branch it failed on follows as kept; its reason
+lists the steps already done to that branch (for example `closed <run>`,
+`removed worktree <path>`) and the failed step with git's message, and its
+`next` is the line printed on standard error. With `emb merge`, a merge
+already made stays.
+
+A git command that changes the repository (the merge, `git merge --abort`,
+worktree removal, `git worktree prune`, branch deletion) runs without a time
+limit. Every other git command may take 120 seconds; one that takes
+longer fails.
+
+### Exit codes of `emb merge` and `emb cleanup`
+
+Messages go to standard error as `emb merge: <message>` or
+`emb cleanup: <message>`; each non-zero exit then prints one `next:` or
+`owner:` line.
+
+| Code | Meaning |
+|---|---|
+| 0 | Done, whatever was kept |
+| 64 | Usage error, or no Keep verdict |
+| 65 | The folder is not in a git checkout, or a named branch or target does not exist |
+| 70 | A git command failed: the merge, making the merge message, finding the target's git folder, listing worktrees, `git status`, worktree removal, prune or branch deletion |
+| 75 | Refused: the target is checked out nowhere, its worktree has an unfinished merge, rebase, cherry-pick or revert, or its tree is not clean, or a merge conflict was aborted |
+
 ## Exit codes
 
-These are the exit codes of `emb choices` and `emb engines`; `emb run` has its
-own table above.
+These are the exit codes of `emb choices` and `emb engines`; `emb run`,
+`emb ground`, `emb merge` and `emb cleanup` have their own tables above.
 
 | Code | Meaning |
 |---|---|
