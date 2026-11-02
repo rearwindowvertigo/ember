@@ -494,7 +494,7 @@ def test_run_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
         (["--screen", "r", "--model", "m"], "--model cannot be used with --screen"),
         (["--send", "r"], "--send and --message-file go together"),
         (["--status", "--message-file", "f"], "--send and --message-file go together"),
-        (["--status", "--force"], "--force needs --close"),
+        (["--status", "--force"], "--force needs --close or --send"),
         (["--close", "r", "--json"], "--json needs --status"),
     ],
 )

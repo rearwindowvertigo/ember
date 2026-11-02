@@ -32,7 +32,9 @@ def _run(env: dict[str, str], run_id: str = "codex-20260101-120000-abcdef") -> R
         branch=f"ember/codex/{run_id}",
         base="a" * 40,
         sandbox="bubblewrap",
+        network=False,
         read=("/data",),
+        read_effective=("/opt/shared", "/data"),
         trailers=("Co-Authored-By: X <x@y>",),
         claim=None,
         status=record.STARTING,
@@ -80,7 +82,8 @@ def test_save_and_load_round_trip(env: dict[str, str]) -> None:
     assert stored["commits"] == []
     assert set(stored) == {
         "id", "engine", "model", "effort", "read_only", "repo", "worktree",
-        "branch", "base", "sandbox", "read", "trailers", "claim", "status",
+        "branch", "base", "sandbox", "network", "read", "read_effective",
+        "trailers", "claim", "status",
         "turn", "turn_state", "reply", "expected_head", "started_at",
         "updated_at", "ended_at", "last_exit", "last_reason", "commits",
         "subject",
@@ -102,6 +105,10 @@ def test_missing_run(env: dict[str, str]) -> None:
         ({"turn": "1"}, "invalid turn"),
         ({"read": ["/a", 1]}, "invalid read"),
         ({"model": None}, "invalid model"),
+        ({"sandbox": None}, "invalid sandbox"),
+        ({"sandbox": "codex-bundled"}, "invalid sandbox"),
+        ({"network": "on"}, "invalid network"),
+        ({"read_effective": ["/a", 2]}, "invalid read_effective"),
         ({"id": "codex-20260101-120000-ffffff"}, "names another run"),
     ],
 )

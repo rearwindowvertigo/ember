@@ -17,7 +17,8 @@ each part, writes each worker a brief, reviews what comes back and merges
 what passes. Workers are:
 
 - Codex, through the Codex CLI on the owner's ChatGPT seat;
-- OpenCode, through `opencode serve` with OpenRouter models;
+- OpenCode, through its interactive view with its built-in server, with
+  OpenRouter models;
 - Claude, through the Claude Code CLI;
 - Claude subagents and Claude workflows, inside Claude Code itself.
 
@@ -41,7 +42,7 @@ The owner sees and configures all of this in the desktop app.
 | E6 | Repository | `~/Repos/ember`, remote `github.com/rearwindowvertigo/ember`, private. |
 | E7 | Start at login | A Settings switch, on by default, starting into the tray. |
 | E8 | Run changes | Found by file watching (inotify) with a slow backstop check. |
-| E9 | Sandbox | Optional. Default bubblewrap when installed, none when not. Codex: system bubblewrap, Codex's bundled bubblewrap, or none. OpenCode: bubblewrap or none. Clear controls and as much feedback as each method allows. |
+| E9 | Sandbox | Optional, one on/off switch per engine. Each engine uses its own operating-system sandbox where it has one that works, and Ember's bubblewrap where it does not: Codex its own sandbox, configured by Ember; OpenCode and Claude Ember's bubblewrap around the engine. On by default when the engine's sandbox can work, off when it cannot. Clear controls and as much feedback as each sandbox allows. |
 | E10 | Packaging | `.deb` first. |
 | E11 | MCP server | None. Claude uses `emb choices`. |
 | E12 | Seat usage | Not read or shown. |
@@ -95,8 +96,8 @@ C1. Standing settings: the worker menu (which engine, model and effort writes
 single tasks, which reviews; in 0.2.0 also how multi-task work runs and
 panel members),
 per-engine on or off, model shortlists with efforts, worker network access,
-sandbox method per engine, the terminal that shows worker sessions, start at
-login and notification switches.
+a sandbox switch per engine, the terminal that shows worker sessions, start
+at login and notification switches.
 
 C2. One-time choices: the owner sets an answer for the next run only, at the
 terminal (`emb choices --once`). A run claims it with a unique id
@@ -154,6 +155,19 @@ through tmux `send-keys`), `--screen` (tmux `capture-pane`), `--interrupt`,
 
 E4. Workers never push, merge, rebase, delete branches or touch `main`.
 
+E5. A run's record stores at start who provides its sandbox (`codex`,
+`bubblewrap` or `none`), whether `worker.network` is on (`network`), and its
+read paths: the `sandbox.read` setting followed by the `--read` paths. Every
+turn of the run uses the stored values.
+
+E6. The owner can type into a worker's session through a terminal window.
+When a session holds messages Ember did not send, or its history cannot be
+checked, `--send` and `--close` refuse with exit 75 and a line saying that
+Claude asks the owner; `--force` goes on. Codex's driver compares the
+session's user messages with the messages Ember pasted, OpenCode's driver
+the ids of the session's user messages with the ids Ember sent, and a Claude
+session takes no typed messages.
+
 ## F. Flows
 
 Target release: 0.2.0.
@@ -199,22 +213,41 @@ their worktrees and tmux sessions, and keeps unmerged work.
 
 ## I. Sandbox
 
-I1. Settings `sandbox.codex` (`bubblewrap`, `codex-bundled`, `none`) and
-`sandbox.opencode` (`bubblewrap`, `none`). Unset means `bubblewrap` when
-`bwrap` is on PATH and `none` when it is not.
+I1. Settings `sandbox.codex`, `sandbox.opencode` and `sandbox.claude`, each
+`on` or `off`. Unset means `on` when the engine's sandbox can work (Codex: a
+`bwrap` on `PATH` or Codex's bundled `bwrap`; OpenCode and Claude: a `bwrap`
+on `PATH`) and `off` otherwise. Who provides each engine's sandbox:
+
+| Engine | Provider | How |
+|---|---|---|
+| Codex | `codex` | Codex's own sandbox, configured by Ember (I2, I4) |
+| OpenCode | `bubblewrap` | Ember's `bwrap` around the whole program |
+| Claude | `bubblewrap` | Ember's `bwrap` around each turn's `claude -p` |
+
+Claude Code's own sandbox covers only its shell commands and does not start
+on the owner's machine ("nested userns is capability-restricted"), so Claude
+runs in Ember's `bwrap`. A switch that is `on` while no working `bwrap` is
+found refuses the run with exit 69. Codex with `off` runs with
+`--sandbox danger-full-access`.
 
 I2. With a sandbox, each worker gets a deny list built at launch: every
 entry in the home folder except the worktree, the repository's git folder,
-`~/.local/bin`, `~/.local/lib`, git's config, the paths in the
-`sandbox.read` setting and the run's `--read` paths; and all of `$XDG_RUNTIME_DIR`, which holds Ember's
-tmux socket. Git writes are blocked. Codex receives the list as a
-permission profile in `-c` options and applies it with its own `bwrap`
-(I4). Ember runs OpenCode inside `bwrap` with the same list. Codex gets
-network only when `worker.network` is on; OpenCode keeps network for
-OpenRouter.
+`~/.local/bin`, `~/.local/lib`, git's config, the engine's own folders and
+the run's read paths (the `sandbox.read` setting and the run's `--read`
+paths); and all of `$XDG_RUNTIME_DIR`, which holds Ember's tmux socket, and
+Ember's own configuration and state folders. The worktree is writable, or
+read-only for a read-only run. Git writes are blocked. Codex receives the
+list as a permission profile in `-c` options and applies it with a `bwrap`
+(I4). Ember runs OpenCode, and each Claude turn, inside `bwrap` with the
+same list; the program in a Claude run's pane that starts each turn runs
+outside the sandbox. Codex gets network only when `worker.network` is on;
+Codex's web search stays on. OpenCode keeps network for OpenRouter. Claude
+keeps network for its API, and `worker.network` controls only its web
+tools.
 
-I3. With `none`, each run prints a `WARNING:` line, its record notes the
-method, and the app shows a notice on Overview and Engines.
+I3. A run's record names who provides its sandbox: `codex`, `bubblewrap` or
+`none`. With `none`, each run of any engine prints a `WARNING:` line, and
+the app shows a notice on Overview and Engines.
 
 I4. Codex 0.164.0 (traced on 2026-11-01) ships its own `bwrap` at
 `codex-resources/bwrap` inside its platform package. It looks for `bwrap` in
@@ -225,22 +258,24 @@ flag selects the bundled one; `codex features list` shows
 `use_linux_sandbox_bwrap` as removed and `use_legacy_landlock` as
 deprecated.
 
-- `codex-bundled`: Ember puts a folder first on the worker's `PATH` holding
-  a `bwrap` symlink to Codex's `codex-resources/bwrap`. With it, every
-  `bwrap` that Codex ran was the bundled one.
-- `bubblewrap`: Ember leaves `PATH` as it is, and Codex uses the first
-  `bwrap` on it.
+Ember chooses the `bwrap` without a setting:
+
+- With a `bwrap` on `PATH`, Ember leaves `PATH` as it is, and Codex uses
+  the first `bwrap` on it.
+- Without one, Ember puts a folder first on the worker's `PATH` holding a
+  `bwrap` symlink to Codex's `codex-resources/bwrap`. With it, every `bwrap`
+  that Codex ran was the bundled one.
 
 The sandbox check (I5) records which `bwrap` Codex ran.
 
-I5. The Engines screen shows per engine: the method in use, whether `bwrap`
-was found and its version, the last sandbox check and its result, and known
-blocking causes when detected (Ubuntu's `bwrap-userns-restrict` AppArmor
-profile; a Codex install under a path the sandbox does not mount; a
-`sandbox_mode` key in a Codex `config.toml`, which makes Codex ignore the
-permission profile). Ember refuses to start a sandboxed Codex run while
-that key is present. The check runs on Check now and when the method
-changes.
+I5. The Engines screen shows per engine: the switch and who provides the
+sandbox, whether `bwrap` was found and its version, the last sandbox check
+and its result, and known blocking causes when detected (Ubuntu's
+`bwrap-userns-restrict` AppArmor profile; a Codex install under a path the
+sandbox does not mount; a `sandbox_mode` key in a Codex `config.toml`,
+which makes Codex ignore the permission profile). Ember refuses to start a
+sandboxed Codex run while that key is present. The check runs on Check now
+and when the switch changes.
 
 ## J. Desktop app
 
@@ -253,7 +288,7 @@ J2. Screens:
 |---|---|
 | Overview | Live runs; the last twenty finished runs. In 0.2.0 also flows with their tasks and steps |
 | Menu | The worker menu (C1) |
-| Engines | One card per engine: logo, status, Use switch, sandbox method and checks; open for models, efforts and shortlists; OpenCode's OpenRouter model browser and filters; setup steps with copyable commands when not connected |
+| Engines | One card per engine: logo, status, Use switch, sandbox switch, provider and checks; open for models, efforts and shortlists; OpenCode's OpenRouter model browser and filters; setup steps with copyable commands when not connected |
 | Dependencies | One tile per component, grouped (engines and apps, system tools, Ember's libraries): installed and newest version, status, and the update or install command |
 | Settings | Start at login, notifications, worker network, sandbox read paths, terminal, theme |
 

@@ -52,8 +52,9 @@ LINES: dict[int, str | Mapping[str, str]] = {
         "*": "owner: install or connect {engine}; emb engines shows what is missing",
         "fix": "owner: {fix}",
         "sandbox": "owner: remove the sandbox_mode key from {files}, "
-        "or set sandbox.codex to none",
-        "bundled": "owner: reinstall Codex, or set sandbox.codex to bubblewrap or none",
+        "or set sandbox.codex to off",
+        "bwrap": "owner: install bubblewrap (the bwrap command) or make it work, "
+        "or set sandbox.{engine} to off",
         "tmux": "owner: install tmux",
         "git": "owner: install git",
         "driver": "owner: this Ember build has no driver for {engine}; update Ember",
@@ -84,6 +85,8 @@ LINES: dict[int, str | Mapping[str, str]] = {
         "or emb run --close {run} --force",
         "collected": RECOVER + " (commits the collected turn), "
         "then emb run --close {run}",
+        "foreign": "next: ask the owner about the messages in the session of {run}; "
+        "with their go-ahead, repeat the command with --force",
     },
     MOVED: "next: git -C {worktree} log --oneline -3 "
     "(the branch or HEAD moved; nothing was committed)",

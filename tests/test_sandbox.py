@@ -54,21 +54,77 @@ def _bin(env: dict[str, str]) -> Path:
 
 
 def test_method_default_follows_bwrap_on_path(env: dict[str, str]) -> None:
-    assert sandbox.method("codex", env) == "none"
-    assert sandbox.method("opencode", env) == "none"
+    for engine in ("codex", "opencode", "claude"):
+        assert sandbox.method(engine, env) == "none"
     _tool(_bin(env), "bwrap")
-    assert sandbox.method("codex", env) == "bubblewrap"
+    assert sandbox.method("codex", env) == "codex"
     assert sandbox.method("opencode", env) == "bubblewrap"
+    assert sandbox.method("claude", env) == "bubblewrap"
 
 
 def test_method_reads_setting(env: dict[str, str]) -> None:
-    choices.set_settings({"sandbox.codex": "codex-bundled"}, env=env)
-    assert sandbox.method("codex", env) == "codex-bundled"
+    _tool(_bin(env), "bwrap")
+    choices.set_settings({"sandbox.codex": "off", "sandbox.claude": "off"}, env=env)
+    assert sandbox.method("codex", env) == "none"
+    assert sandbox.method("claude", env) == "none"
+    assert sandbox.method("opencode", env) == "bubblewrap"
 
 
 def test_method_rejects_other_engines(env: dict[str, str]) -> None:
     with pytest.raises(ValueError):
-        sandbox.method("claude", env)
+        sandbox.method("gemini", env)
+
+
+def test_provider_of() -> None:
+    assert sandbox.provider_of("codex", "on") == "codex"
+    assert sandbox.provider_of("opencode", "on") == "bubblewrap"
+    assert sandbox.provider_of("claude", "on") == "bubblewrap"
+    for engine in sandbox.ENGINES:
+        assert sandbox.provider_of(engine, "off") == "none"
+
+
+# require
+
+
+def test_require_needs_bwrap(env: dict[str, str]) -> None:
+    for engine in ("opencode", "claude"):
+        with pytest.raises(sandbox.SandboxError, match="bwrap is not installed"):
+            sandbox.require(engine, env, run=FakeRun())
+    with pytest.raises(sandbox.SandboxError, match="codex is not installed"):
+        sandbox.require("codex", env, run=FakeRun())
+
+
+def test_require_runs_bwrap(env: dict[str, str]) -> None:
+    bwrap = _tool(_bin(env), "bwrap")
+    run = FakeRun()
+    assert sandbox.require("claude", env, run=run) is None
+    ((argv, kwargs),) = run.calls
+    assert argv[0] == str(bwrap)
+    assert argv[-1] == "/bin/true"
+    assert "--unshare-pid" in argv
+    assert kwargs["timeout"] == sandbox.TIMEOUT
+    assert sandbox.require("codex", env, run=FakeRun()) is None
+
+
+def test_require_reports_a_blocked_bwrap(env: dict[str, str]) -> None:
+    _tool(_bin(env), "bwrap")
+    run = FakeRun(code=1, stderr="bwrap: setting up uid map: Permission denied\n")
+    with pytest.raises(sandbox.SandboxError, match="uid map: Permission denied"):
+        sandbox.require("opencode", env, run=run)
+
+
+def test_require_uses_codex_s_bundled_bwrap(
+    env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    codex, bundled = _npm_install(tmp_path / "local", monkeypatch)
+    (_bin(env) / "codex").symlink_to(codex)
+    run = FakeRun()
+    folder = sandbox.require("codex", env, run=run)
+    shim = Path(env["XDG_RUNTIME_DIR"]) / "ember/bin"
+    assert folder == shim
+    ((argv, _),) = run.calls
+    assert argv[0] == str(shim / "bwrap")
+    assert (shim / "bwrap").resolve() == bundled.resolve()
 
 
 def test_none_warning() -> None:
@@ -458,6 +514,64 @@ def test_opencode_wrap_keeps_binary_folder(env: dict[str, str], home: Path) -> N
     assert (str(home / ".opencode/bin"),) * 2 in _pairs(args, "--ro-bind")
 
 
+# claude_wrap
+
+
+def test_claude_wrap(env: dict[str, str], home: Path, tmp_path: Path) -> None:
+    (home / ".claude").mkdir()
+    (home / ".claude.json").write_text("{}")
+    (home / ".cache/claude-cli-nodejs").mkdir(parents=True)
+    (home / ".config/opencode").mkdir(parents=True)
+    install = home / ".local/share/claude/versions"
+    install.mkdir(parents=True)
+    binary = install / "2.1.0"
+    binary.write_text("")
+    (home / ".local/bin").mkdir(parents=True)
+    (home / ".local/bin/claude").symlink_to(binary)
+    worktree = home / "repo"
+    (worktree / ".git").mkdir(parents=True)
+    data = tmp_path / "data"
+    data.mkdir()
+    args = sandbox.claude_wrap(
+        [str(home / ".local/bin/claude"), "-p"],
+        worktree=worktree,
+        common=worktree / ".git",
+        read=[data],
+        network=False,
+        env=env,
+    )
+    assert args[0] == "bwrap"
+    assert args[-2:] == [str(home / ".local/bin/claude"), "-p"]
+    binds = _pairs(args, "--bind")
+    for path in (home / ".claude", home / ".claude.json", worktree):
+        assert (str(path),) * 2 in binds
+    assert (str(home / ".cache/claude-cli-nodejs"),) * 2 in binds
+    read_only = _pairs(args, "--ro-bind")
+    assert (str(install),) * 2 in read_only
+    assert (str(data),) * 2 in read_only
+    assert not any("opencode" in pair[0] for pair in [*binds, *read_only])
+    assert "--unshare-net" not in args
+    assert ("--tmpfs", str(home)) in zip(args, args[1:], strict=False)
+
+
+def test_claude_wrap_read_only_and_config_dir(
+    env: dict[str, str], home: Path, tmp_path: Path
+) -> None:
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    env = {**env, "CLAUDE_CONFIG_DIR": str(config)}
+    args = sandbox.claude_wrap(
+        ["claude"],
+        worktree=home / "wt",
+        common=home / "wt/.git",
+        read_only=True,
+        env=env,
+    )
+    assert (str(config),) * 2 in _pairs(args, "--bind")
+    assert (str(home / "wt"),) * 2 in _pairs(args, "--ro-bind")
+    assert (str(home / "wt"),) * 2 not in _pairs(args, "--bind")
+
+
 # check
 
 
@@ -482,7 +596,8 @@ class FakeRun:
 def test_check_none(env: dict[str, str]) -> None:
     run = FakeRun()
     result = sandbox.check("codex", env, run=run)
-    assert result.method == "none"
+    assert result.provider == "none"
+    assert result.to_json()["provider"] == "none"
     assert result.ok is True
     assert result.detail == "no sandbox"
     assert result.bwrap_path is None
@@ -497,7 +612,8 @@ def test_check_codex_bubblewrap(env: dict[str, str]) -> None:
     run = FakeRun()
     result = sandbox.check("codex", env, run=run)
     assert result.ok is True, result.detail
-    assert result.method == "bubblewrap"
+    assert result.provider == "codex"
+    assert result.detail == "/bin/true ran under Codex's sandbox"
     assert result.bwrap_path == str(bwrap)
     assert result.bwrap_version == "0.11.1"
     ((argv, kwargs),) = run.probes()
@@ -516,10 +632,10 @@ def test_check_codex_bundled(
 ) -> None:
     codex, _ = _npm_install(tmp_path / "local", monkeypatch)
     (_bin(env) / "codex").symlink_to(codex)
-    choices.set_settings({"sandbox.codex": "codex-bundled"}, env=env)
     run = FakeRun()
     result = sandbox.check("codex", env, run=run)
     assert result.ok is True, result.detail
+    assert result.provider == "codex"
     shim = Path(env["XDG_RUNTIME_DIR"]) / "ember/bin"
     assert result.bwrap_path == str(shim / "bwrap")
     ((_, kwargs),) = run.probes()
@@ -528,7 +644,7 @@ def test_check_codex_bundled(
 
 def test_check_codex_bundled_missing(env: dict[str, str]) -> None:
     _tool(_bin(env), "codex")
-    choices.set_settings({"sandbox.codex": "codex-bundled"}, env=env)
+    choices.set_settings({"sandbox.codex": "on"}, env=env)
     run = FakeRun()
     result = sandbox.check("codex", env, run=run)
     assert result.ok is False
@@ -608,8 +724,22 @@ def test_check_opencode(env: dict[str, str]) -> None:
     assert result.bwrap_version == "0.11.1"
 
 
+def test_check_claude(env: dict[str, str], home: Path) -> None:
+    bwrap = _tool(_bin(env), "bwrap")
+    (home / ".claude").mkdir()
+    run = FakeRun()
+    result = sandbox.check("claude", env, run=run)
+    assert result.ok is True, result.detail
+    assert result.provider == "bubblewrap"
+    assert result.detail == "/bin/true ran under bubblewrap"
+    ((argv, kwargs),) = run.probes()
+    assert argv[0] == str(bwrap)
+    assert argv[-1] == "/bin/true"
+    assert (str(home / ".claude"),) * 2 in _pairs(argv, "--bind")
+
+
 def test_check_opencode_without_bwrap(env: dict[str, str]) -> None:
-    choices.set_settings({"sandbox.opencode": "bubblewrap"}, env=env)
+    choices.set_settings({"sandbox.opencode": "on"}, env=env)
     result = sandbox.check("opencode", env, run=FakeRun())
     assert result.ok is False
     assert "bwrap is not installed" in result.detail
@@ -630,4 +760,4 @@ def test_check_bad_version_output(env: dict[str, str]) -> None:
 
 def test_check_rejects_other_engines(env: dict[str, str]) -> None:
     with pytest.raises(ValueError):
-        sandbox.check("claude", env, run=FakeRun())
+        sandbox.check("gemini", env, run=FakeRun())

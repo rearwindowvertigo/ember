@@ -49,8 +49,8 @@ empty list.
 | `shortlist.opencode` | List of `<provider>/<model>`, with optional `@<effort>`; each part `[A-Za-z0-9][A-Za-z0-9._-]*`, the provider part may start with `~` and the model part may also contain `:` | `[]` | standing |
 | `single.writer`, `single.reviewer` | `ask`, or `<engine>:<model>` with the model on that engine's shortlist when saved | `ask` | request, one-time, standing |
 | `single.writer_as`, `single.reviewer_as` | `cli`, `subagent` | `cli` | request, one-time, standing |
-| `sandbox.codex` | `bubblewrap`, `codex-bundled`, `none` | `bubblewrap` when `bwrap` is on `PATH`, else `none` | standing |
-| `sandbox.opencode` | `bubblewrap`, `none` | `bubblewrap` when `bwrap` is on `PATH`, else `none` | standing |
+| `sandbox.codex` | `on`, `off` | `on` when `bwrap` is on `PATH` or the `codex` on `PATH` has a bundled `bwrap`, else `off` | standing |
+| `sandbox.opencode`, `sandbox.claude` | `on`, `off` | `on` when `bwrap` is on `PATH`, else `off` | standing |
 | `sandbox.read` | List of absolute paths, no duplicates | `[]` | standing |
 | `terminal` | A non-empty command line in shell syntax | `xdg-terminal-exec` | standing |
 | `app.autostart` | `on`, `off` | `on` | standing |
@@ -292,10 +292,10 @@ line from the exit table below.
 | `--window` | With a start: also open a terminal window on the session |
 | `--send RUN --message-file FILE` | Send `FILE` as the next message and wait for its turn |
 | `--screen RUN` | Print the text of the session's pane |
-| `--interrupt RUN` | Send Ctrl+C to the session |
+| `--interrupt RUN` | Interrupt the current turn, as the engine's driver does it (see Engine drivers) |
 | `--attach RUN` | Open a new terminal window on the session; prints `window <pid>` |
 | `--close RUN` | End the session and record the run closed |
-| `--force` | With `--close`: close even while a turn runs or another command waits on the run |
+| `--force` | With `--close`: close even while a turn runs, another command waits on the run, or the session holds messages Ember did not send. With `--send`: send even when the session holds messages Ember did not send |
 | `--recover RUN` | Collect and commit a turn that ended while no command waited, or wait for it |
 | `--status [RUN]` | Print one run's record, or every run's |
 | `--json` | With `--status`: print JSON |
@@ -314,8 +314,12 @@ the engine is on (64, also when named by `--engine`); the engine is connected
 in the status cache of `emb engines`, which is checked once first when there
 is no cache (69, naming the fix command); the driver exists (69); the model
 and effort (64); for an editing run, the repository has a main checkout and
-a commit (70); and, for a sandboxed Codex run, no `sandbox_mode` key (69).
-No run folder, worktree or branch is created before these checks pass.
+a commit (70); for a sandboxed Codex run, no `sandbox_mode` key (69); and,
+for a sandboxed run, a `bwrap` that runs `/bin/true` in a minimal sandbox
+within 10 seconds (69, with `owner: install bubblewrap (the bwrap command)
+or make it work, or set sandbox.<engine> to off`). For Codex the `bwrap` is
+the one on `PATH`, else the one bundled with Codex. No run folder, worktree
+or branch is created before these checks pass.
 
 A failure after the run folder exists records `status: failed` with its
 reason in `last_reason` and exits 69 for a sandbox or runtime folder problem,
@@ -338,13 +342,38 @@ repository's main checkout, as `git worktree list` reports it. `.ember/` is
 added to `info/exclude` in the repository's git folder when it is not there.
 A read-only run works in the checkout itself and has no branch.
 
-Codex and OpenCode runs use the sandbox method of `sandbox.codex` or
-`sandbox.opencode`, with the run's `--read` paths kept. A sandboxed Codex run
-with a `sandbox_mode` key in a Codex configuration file exits 69 naming the
-files. The check runs again on the new worktree once it is created, for a
-tracked `.codex/config.toml`; a conflict there records the run failed and
-exits 69, and the worktree and branch stay. With method `none`, the run prints the `WARNING:` line of the sandbox
-and records `none`. Claude runs have no sandbox.
+Each run's sandbox follows the engine's switch, `sandbox.codex`,
+`sandbox.opencode` or `sandbox.claude`. The run records who provides it in
+`sandbox`: `codex` for Codex switched on (Codex's own sandbox with Ember's
+permission profile), `bubblewrap` for OpenCode or Claude switched on
+(Ember's `bwrap` command line), and `none` for a switch that is `off`. The
+run also records `worker.network` in `network` and its read paths in
+`read_effective`: the `sandbox.read` setting, then the `--read` paths. Every
+turn uses the recorded values, whatever the settings say later.
+
+A sandboxed worker sees the machine read-only. The home folder is hidden
+except `~/.local/bin`, `~/.local/lib`, git's configuration, the worktree,
+the repository's git folder, the read paths and the engine's own folders;
+`$XDG_RUNTIME_DIR` and Ember's configuration and state folders are hidden.
+The worktree is writable, or read-only for a read-only run. The engine's
+own folders are:
+
+| Engine | Writable | Read-only |
+|---|---|---|
+| `codex` | Those of Codex's `:workspace` profile | |
+| `opencode` | `opencode` in `$XDG_DATA_HOME`, `$XDG_CACHE_HOME` and `$XDG_STATE_HOME` | `opencode` in `$XDG_CONFIG_HOME`; the folder of the `opencode` binary in the home folder |
+| `claude` | `$CLAUDE_CONFIG_DIR` or `~/.claude`, `~/.claude.json`, `~/.claude.json.backup`, `claude` and `claude-cli-nodejs` in `$XDG_CACHE_HOME` | The folder the `claude` command resolves to, in the home folder |
+
+Network: Codex has network only when `network` is true; its web search is
+always on. OpenCode keeps network for OpenRouter. Claude keeps network for
+its API, so its `Bash` commands keep network too; `network` controls only
+its `WebSearch` and `WebFetch` tools.
+
+A sandboxed Codex run with a `sandbox_mode` key in a Codex configuration
+file exits 69 naming the files. The check runs again on the new worktree
+once it is created, for a tracked `.codex/config.toml`; a conflict there
+records the run failed and exits 69, and the worktree and branch stay. With
+`none`, a run of any engine prints the `WARNING:` line of the sandbox.
 
 The session is a tmux session named by the run id. Its first message is the
 line `Brief from Claude, the lead, for Ember run <id>.`, a blank line and the
@@ -404,9 +433,17 @@ A missing value prints as `-`, and an effort that is not set as `default`.
 `window` is the terminal's process id of a start. `--quiet` prints the summary
 line only.
 
-`--send` first commits a turn that was collected but not committed. It sends
-only when the driver reports the session idle; a turn that has not been
-collected, or a busy or unknown session, exits 75. The message is sent as
+`--send` refuses with 75 a turn that has not been collected. Without
+`--force` it then asks the driver whether the session holds messages Ember
+did not send, before it commits, saves a snapshot or changes the turn's
+state; when it does, or when its history cannot be checked, the command
+exits 75 with `emb run: the session of <run> holds messages Ember did not
+send (<what the driver found>); Claude asks the owner before going on` and
+`next: ask the owner about the messages in the session of <run>; with their
+go-ahead, repeat the command with --force`. `--force` skips only this
+check. `--send` then commits a turn that was collected but not committed.
+It sends only when the driver reports the session idle; a busy or unknown
+session exits 75. The message is sent as
 written. When the driver fails (71) or Ctrl+C (74) stops the command before
 the message is known to be delivered, the run's previous turn state is
 restored and the line is `next: emb run --send <run> --message-file <file>
@@ -420,7 +457,9 @@ made again.
 `--close` refuses with 75 while a turn runs or another command waits on the
 run, unless `--force`. Without `--force` it also refuses with 75 an editing
 run whose turn is collected but not committed, with `next: emb run --recover
-<run> (commits the collected turn), then emb run --close <run>`. It ends the
+<run> (commits the collected turn), then emb run --close <run>`, and a live
+session that holds messages Ember did not send or whose history cannot be
+checked, with the line `--send` prints. It ends the
 session and keeps the worktree and branch. A command waiting on a run that is
 closed stops with 72, also when the driver fails or the session is missing
 after the close.
@@ -465,8 +504,10 @@ UTC. It is also the tmux session's name.
 | `worktree` | string | The worker's working folder: its worktree, or the checkout for a read-only run |
 | `branch` | string or null | `ember/<engine>/<id>`; null for a read-only run |
 | `base` | string or null | The commit the run started from |
-| `sandbox` | string or null | The sandbox method; null for `claude` |
+| `sandbox` | string | Who provides the sandbox: `codex`, `bubblewrap` or `none` |
+| `network` | boolean | Whether `worker.network` was `on` at the start |
 | `read` | list of strings | The `--read` paths |
+| `read_effective` | list of strings | Every path the run may read: the `sandbox.read` setting at the start, then the `--read` paths |
 | `trailers` | list of strings | The `--trailer` lines |
 | `claim` | string or null | The `--claim` id |
 | `status` | string | `starting`; `running` while a turn is active, also after exit 124 or 74; `waiting` once a turn's reply is collected; `failed` when the launch or a turn failed; `closed` |
@@ -502,17 +543,35 @@ prints one `<field>: <value>` line per field, and `--status` one line per run:
 | 64 | Usage error, unanswerable menu row, switched-off engine or invalid claim | `next: emb run --help`, or `owner:` naming the setting |
 | 65 | Not a git checkout | `next:` a start inside a checkout |
 | 66 | Missing file or path | `next:` a start with existing paths |
-| 69 | Engine, driver, `git` or `tmux` missing, engine not signed in, a sandbox conflict, or no usable runtime folder | `owner:` naming the fix |
+| 69 | Engine, driver, `git` or `tmux` missing, engine not signed in, a sandbox conflict, a switched-on sandbox without a working `bwrap`, or no usable runtime folder | `owner:` naming the fix |
 | 70 | Worktree creation failed, or no main checkout or commit | `next: git -C <dir> worktree prune, then ...` |
 | 71 | Engine or session failed | `next: emb run --status <run>`; for a failed send, `next: emb run --send <run> ...` |
 | 72 | Session or window unavailable, or the run was closed | `next: emb run --status <run>`, or a new start |
 | 73 | Provider limit or outage | `next: emb run --send <run> ...` |
 | 74 | Interrupted | `next: emb run --recover <run>`; for an interrupted send, `next: emb run --send <run> ...` |
-| 75 | Close refused while a turn runs or is collected but not committed, a busy session, or another command on the run | `next: emb run --recover <run>` or `--status` |
+| 75 | Close refused while a turn runs or is collected but not committed, a busy session, another command on the run, or a session holding messages Ember did not send | `next: emb run --recover <run>` or `--status`; for messages Ember did not send, `next: ask the owner ...` |
 | 76 | Branch or `HEAD` moved; nothing committed | `next: git -C <worktree> log --oneline -3` |
 | 77 | A hook refused the commit | `next: git -C <worktree> status` |
 | 80 | The turn ended with no reply | `next: emb run --screen <run>, then emb run --send <run> ...` |
 | 124 | Stall; the turn may still be running | `next: emb run --recover <run>` |
+
+### Engine drivers
+
+| | Codex | OpenCode | Claude |
+|---|---|---|---|
+| Starts | Codex's interactive session in the pane: `codex -C <worktree> -m <model> -c check_for_update_on_startup=false [-c model_reasoning_effort=<effort>] -a never --search`, with Ember's permission profile in `-c` options, or `--sandbox danger-full-access` when the sandbox is off | OpenCode's interactive view in the pane, with its built-in server on a free port of `127.0.0.1` protected by a password, OpenRouter as the provider and the agent `ember-worker`, inside `bwrap` when the sandbox is on | A program of Ember's in the pane that runs one `claude -p --output-format stream-json` per turn in the worktree, inside `bwrap` when the sandbox is on, and shows its progress; the program itself runs outside the sandbox |
+| Brief | Pasted once Codex's composer shows `? for shortcuts` | Sent through the server's session API once the server answers and the view has drawn its screen | Written as turn 1's request before the pane starts; given to the CLI on standard input |
+| Turn end and reply | Read from Codex's rollout file: `task_complete` with its last message, or `turn_aborted`; an `error` event during the turn fails it | Read from the session status and messages: the turn's last assistant message, once the session is idle; its text parts are the reply | The CLI's exit; the reply is the assistant text after the turn's last tool result |
+| Later messages | Pasted | Sent through the session API | A new `claude -p` that resumes the previous turn's CLI session |
+| Read-only run | Ember's profile extends Codex's `:read-only` profile | The agent may not edit, write or patch files or reach folders outside the checkout, and the worktree is mounted read-only | The tools are `Read`, `Glob` and `Grep`, and the worktree is mounted read-only |
+| Sandbox provider | `codex` | `bubblewrap` | `bubblewrap` |
+| `--interrupt` | Presses Escape in the session | Aborts the turn through the session API | Sends `SIGINT` to the process group of the turn's CLI, as Ctrl+C in the pane does; the program takes the next turn |
+| Messages Ember did not send | Each `user_message` in the rollout that does not match, in order, a message Ember pasted | Each user message whose id Ember did not send | None; the pane takes no typed messages |
+
+Claude's turns use `--restricted`, `--safe-mode` and `--strict-mcp-config`;
+the run's read paths are added with `--add-dir` and edits to them are
+refused. While a tool call or a model message runs, Claude's pane prints a
+line such as `· running Bash for 3 min` at least once a minute.
 
 ## Exit codes
 

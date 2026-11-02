@@ -116,7 +116,9 @@ def make_run(
         branch=None if read_only else f"ember/opencode/{RUN_ID}",
         base="a" * 40,
         sandbox="bubblewrap",
+        network=False,
         read=(),
+        read_effective=(),
         trailers=(),
         claim=None,
         status=record.STARTING,
@@ -151,6 +153,7 @@ class Server:
         self.run = run
         self.folder = folder
         self.process: subprocess.Popen[bytes] | None = None
+        self.screen = "OpenCode's view\n"
 
     @property
     def port(self) -> int:
@@ -204,7 +207,12 @@ def server(
         assert name == RUN_ID
         return None if stub.process is None else stub.process.pid
 
+    def capture(name: str, *, lines: int | None = None, env: object = None) -> str:
+        assert name == RUN_ID
+        return stub.screen
+
     monkeypatch.setattr(tmux, "pane_pid", pane_pid)
+    monkeypatch.setattr(tmux, "capture", capture)
     yield stub
     stub.stop()
 
@@ -344,6 +352,23 @@ def test_ready_records_the_server_and_creates_one_session(
     assert paths.count("/session") == 1
     selects = [r for r in server.requests() if r["path"] == "/tui/select-session"]
     assert selects[0]["body"] == {"sessionID": "ses_test"}
+
+
+def test_ready_waits_for_the_view_before_showing_the_session(
+    driver: OpenCodeDriver, run: Run, server: Server
+) -> None:
+    driver.command(run, "brief")
+    server.start()
+    server.screen = "  \n"
+    assert not driver.ready(run)
+    state = json.loads((run.folder / opencode.STATE_NAME).read_text())
+    assert state["session"] == "ses_test"
+    assert not [r for r in server.requests() if r["path"] == "/tui/select-session"]
+    server.screen = "OpenCode's view\n"
+    assert driver.ready(run)
+    selects = [r for r in server.requests() if r["path"] == "/tui/select-session"]
+    assert len(selects) == 1
+    assert [r["path"] for r in server.requests()].count("/session") == 1
 
 
 def test_ready_refuses_a_wrong_password(
@@ -527,6 +552,27 @@ def test_wait_fails_the_turn_when_the_server_stops(
     assert outcome.reason == "the OpenCode server stopped before turn 1 ended"
 
 
+def test_wait_reads_the_messages_again_after_a_failed_read(
+    driver: OpenCodeDriver, run: Run, server: Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = started(driver, run, server)
+    server.write("messages.json", [assistant(prompt_id(server), [text("ok")])])
+    reads: list[str] = []
+    real_get = driver._get
+
+    def flaky_get(run_: Run, path: str, expected: type) -> Any:  # noqa: ANN401
+        if path.endswith("/message"):
+            reads.append(path)
+            if len(reads) == 1:
+                return None
+        return real_get(run_, path, expected)
+
+    monkeypatch.setattr(driver, "_get", flaky_get)
+    outcome = driver.wait(run)
+    assert (outcome.state, outcome.reply) == (engines.DONE, "ok")
+    assert len(reads) == 2
+
+
 def test_wait_raises_when_a_live_server_cannot_be_read(
     driver: OpenCodeDriver, run: Run, server: Server
 ) -> None:
@@ -542,6 +588,53 @@ def test_wait_needs_the_turn_s_message(
     run = started(driver, run, server)
     with pytest.raises(DriverError, match="turn 2"):
         driver.wait(dataclasses.replace(run, turn=2))
+
+
+# Messages Ember did not send
+
+
+def user(message_id: str) -> dict[str, Any]:
+    return {"info": {"id": message_id, "role": "user"}, "parts": [text("hi")]}
+
+
+def test_foreign_input_is_none_when_ember_sent_every_message(
+    driver: OpenCodeDriver, run: Run, server: Server
+) -> None:
+    run = started(driver, run, server)
+    first = prompt_id(server)
+    server.write("messages.json", [user(first), assistant(first, [text("ok")])])
+    assert driver.foreign_input(run) is None
+
+
+def test_foreign_input_counts_messages_the_owner_typed(
+    driver: OpenCodeDriver, run: Run, server: Server
+) -> None:
+    run = started(driver, run, server)
+    first = prompt_id(server)
+    server.write(
+        "messages.json",
+        [user(first), assistant(first, [text("ok")]), user("msg_owner")],
+    )
+    assert driver.foreign_input(run) == (
+        "1 message(s) in the OpenCode session were not sent by Ember"
+    )
+
+
+def test_foreign_input_reports_an_unreadable_session(
+    driver: OpenCodeDriver, run: Run, server: Server
+) -> None:
+    run = started(driver, run, server)
+    server.write("messages-code", 500)
+    found = driver.foreign_input(run)
+    assert found is not None
+    assert found.startswith("the session history could not be checked")
+
+
+def test_foreign_input_without_a_session(driver: OpenCodeDriver, run: Run) -> None:
+    driver.command(run, "brief")
+    found = driver.foreign_input(run)
+    assert found is not None
+    assert found.startswith("the session history could not be checked")
 
 
 # Idle state, interrupt and close

@@ -20,6 +20,7 @@ import sqlite3
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ember import db
@@ -39,6 +40,8 @@ SETTING = "setting"
 DEFAULT = "default"
 
 ENGINES = ("claude", "codex", "opencode")
+SANDBOXED = ("codex", "opencode", "claude")
+"""The engines with a `sandbox.<engine>` switch, in display order."""
 MENU_KEYS = ("single.writer", "single.reviewer")
 
 _ID = re.compile(r"[a-z0-9][a-z0-9-]{5,63}")
@@ -188,9 +191,30 @@ def _constant(value: object) -> Default:
     return lambda env: value
 
 
-def _sandbox_default(env: Mapping[str, str] | None) -> str:
-    search = (os.environ if env is None else env).get("PATH", os.defpath)
-    return "bubblewrap" if shutil.which("bwrap", path=search) else "none"
+def _sandbox_default(engine: str) -> Default:
+    """Return the default of `sandbox.<engine>`.
+
+    The default is `on` when the engine's sandbox can work: a `bwrap` on
+    `PATH`, or for Codex also the `bwrap` bundled with Codex.
+    """
+
+    def default(env: Mapping[str, str] | None) -> str:
+        search = (os.environ if env is None else env).get("PATH", os.defpath)
+        if shutil.which("bwrap", path=search):
+            return "on"
+        if engine == "codex":
+            codex = shutil.which("codex", path=search)
+            # ember.sandbox reads this module, so it is imported here.
+            from ember import sandbox
+
+            if (
+                codex is not None
+                and sandbox.codex_bundled_bwrap(Path(codex)) is not None
+            ):
+                return "on"
+        return "off"
+
+    return default
 
 
 _STANDING = frozenset({SETTING})
@@ -239,17 +263,14 @@ def _keys() -> dict[str, Key]:
                 allowed=("cli", "subagent"),
             )
         )
-    for engine, methods in (
-        ("codex", ("bubblewrap", "codex-bundled", "none")),
-        ("opencode", ("bubblewrap", "none")),
-    ):
+    for engine in SANDBOXED:
         keys.append(
             Key(
                 f"sandbox.{engine}",
                 _STANDING,
-                _enum(*methods),
-                _sandbox_default,
-                allowed=methods,
+                _enum(*_ON_OFF),
+                _sandbox_default(engine),
+                allowed=_ON_OFF,
             )
         )
     keys.append(

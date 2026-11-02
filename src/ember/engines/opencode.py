@@ -4,9 +4,11 @@ The run's pane runs OpenCode's interactive view with its built-in server
 listening on a free port of `127.0.0.1`, protected by a password. The core
 wraps that one command in the run's sandbox. The driver talks to the server's
 session API: once the server answers it creates the run's session and shows
-it in the interactive view, sends each message with `prompt_async`, reads the
-turn's end and reply from the session's messages and the session status, and
-aborts a turn through the API.
+it in the interactive view once the view has drawn its screen, sends each
+message with `prompt_async`, reads the turn's end and reply from the
+session's messages and the session status, and aborts a turn through the
+API. A user message in the session whose id the driver did not record was
+typed by someone else, such as the owner in a terminal window.
 
 Every run uses OpenRouter as the provider, with zero data retention required
 for every request, and the agent `ember-worker`, defined in the configuration
@@ -359,7 +361,20 @@ class OpenCodeDriver(Driver):
         return value
 
     def _messages(self, run: Run, session: str) -> list[Any] | None:
-        return self._get(run, f"/session/{quote(session, safe='')}/message", list)
+        """Return the session's messages, read a second time after a failure."""
+        path = f"/session/{quote(session, safe='')}/message"
+        messages = self._get(run, path, list)
+        if messages is None:
+            time.sleep(self.poll_seconds)
+            messages = self._get(run, path, list)
+        return messages
+
+    def _view_drawn(self, run: Run) -> bool:
+        """Return whether the interactive view has drawn anything in the pane."""
+        try:
+            return bool(tmux.capture(run.id, env=run.env).strip())
+        except tmux.TmuxError:
+            return False
 
     def _select(self, run: Run, session: str) -> None:
         """Show the session in the interactive view; a failure changes nothing."""
@@ -484,14 +499,15 @@ class OpenCodeDriver(Driver):
         """Return whether the server answers, creating the run's session.
 
         The first time the server answers, the driver records the identity
-        of the pane's process, which runs the server, creates the session
-        and shows it in the interactive view.
+        of the pane's process, which runs the server, and creates the
+        session. Once the interactive view has drawn its screen, so that it
+        is connected to the server, the driver shows the session in it.
 
         Args:
             run: The run.
 
         Returns:
-            `True` once the session exists.
+            `True` once the session exists and the view has drawn its screen.
 
         Raises:
             DriverError: The server refuses the password, or cannot create
@@ -527,6 +543,8 @@ class OpenCodeDriver(Driver):
             if code != 200 or not isinstance(session, str) or not session:
                 raise DriverError(f"OpenCode could not create a session: HTTP {code}")
             self._save(run, session=session)
+        if not self._view_drawn(run):
+            return False
         self._select(run, session)
         return True
 
@@ -682,6 +700,42 @@ class OpenCodeDriver(Driver):
         if isinstance(current, dict) and current["type"] != "idle":
             return IdleState(engines.BUSY, "a turn is running")
         return IdleState(engines.IDLE)
+
+    def foreign_input(self, run: Run) -> str | None:
+        """Look for user messages in the session that the driver did not send.
+
+        Args:
+            run: The run.
+
+        Returns:
+            `None` when every user message in the session has an id the
+            driver recorded when it sent it; otherwise how many do not, or
+            why the session could not be read.
+        """
+        unchecked = "the session history could not be checked"
+        try:
+            state = self._state(run)
+            session = self._session(state)
+        except DriverError as error:
+            return f"{unchecked}: {error}"
+        sent = state.get("sent")
+        if not isinstance(sent, list):
+            return f"{unchecked}: the sent message ids were not recorded"
+        messages = self._messages(run, session)
+        if messages is None:
+            return f"{unchecked}: cannot read the OpenCode session's messages"
+        foreign = 0
+        for message in messages:
+            info = message.get("info") if isinstance(message, dict) else None
+            if not isinstance(info, dict) or not isinstance(info.get("role"), str):
+                return f"{unchecked}: a message in the session has no role"
+            if info["role"] == "user" and info.get("id") not in sent:
+                foreign += 1
+        if foreign:
+            return (
+                f"{foreign} message(s) in the OpenCode session were not sent by Ember"
+            )
+        return None
 
     def interrupt(self, run: Run) -> None:
         """Abort the session's current turn through the server.

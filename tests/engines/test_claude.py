@@ -80,6 +80,9 @@ def make_run(
     read_only: bool = False,
     effort: str | None = "high",
     turn: int = 0,
+    network: bool = False,
+    sandbox: str = "none",
+    read_effective: tuple[str, ...] = (),
 ) -> Run:
     worktree = tmp_path / "worktree"
     worktree.mkdir(exist_ok=True)
@@ -95,8 +98,10 @@ def make_run(
         worktree=str(worktree),
         branch=None if read_only else "ember/claude/claude-20261101-000000-abcdef",
         base=None,
-        sandbox=None,
+        sandbox=sandbox,
+        network=network,
         read=(),
+        read_effective=read_effective,
         trailers=(),
         claim=None,
         status="starting",
@@ -258,13 +263,76 @@ def test_read_only_run_gets_only_the_read_tools(
     assert "--effort" not in argv
 
 
-def test_network_setting_adds_the_web_tools(
-    tmp_path: Path, env: dict[str, str]
-) -> None:
-    choices.set_settings({"worker.network": "on"}, env=env)
-    run = make_run(tmp_path, env)
+def test_stored_network_adds_the_web_tools(tmp_path: Path, env: dict[str, str]) -> None:
+    # The setting changed after the start; the run keeps its stored value.
+    choices.set_settings({"worker.network": "off"}, env=env)
+    run = make_run(tmp_path, env, network=True)
     claude.driver(env).command(run, "Brief")
     assert option(request_argv(run, 1), "--tools").endswith(",WebSearch,WebFetch")
+
+
+def test_read_paths_are_added_and_kept_from_edits(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    notes = tmp_path / "notes" / "plan.md"
+    notes.parent.mkdir()
+    notes.write_text("plan\n")
+    run = make_run(tmp_path, env)
+    inside = Path(run.worktree) / "docs"
+    run = dataclasses.replace(
+        run, read_effective=(str(shared), str(notes), str(inside), str(tmp_path))
+    )
+    claude.driver(env).command(run, "Brief")
+    argv = request_argv(run, 1)
+    added = [argv[index + 1] for index, item in enumerate(argv) if item == "--add-dir"]
+    assert added == [str(shared), str(notes.parent)]
+    disallowed = option(argv, "--disallowedTools").split(",")
+    assert f"Edit(/{shared}/**)" in disallowed
+    assert f"Edit(/{notes})" in disallowed
+    assert not any(str(inside) in rule for rule in disallowed)
+
+
+def test_request_names_no_sandbox_without_bubblewrap(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    run = make_run(tmp_path, env)
+    claude.driver(env).command(run, "Brief")
+    request = json.loads(turn_files(claude.folder(run), 1)["json"].read_text())
+    assert request["sandbox"] is None
+
+
+def test_request_names_the_sandbox_with_bubblewrap(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    run = make_run(
+        tmp_path,
+        env,
+        sandbox="bubblewrap",
+        network=True,
+        read_effective=("/opt/data",),
+    )
+    subprocess.run(
+        ["git", "init", "-q"], cwd=run.worktree, check=True, capture_output=True
+    )
+    claude.driver(env).command(run, "Brief")
+    request = json.loads(turn_files(claude.folder(run), 1)["json"].read_text())
+    assert request["sandbox"] == {
+        "worktree": run.worktree,
+        "common": str(Path(run.worktree).resolve() / ".git"),
+        "read": ["/opt/data"],
+        "read_only": False,
+        "network": True,
+    }
+
+
+def test_sandboxed_request_outside_a_repository_is_a_driver_error(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    run = make_run(tmp_path, env, sandbox="bubblewrap")
+    with pytest.raises(DriverError, match="not a git repository"):
+        claude.driver(env).command(run, "Brief")
 
 
 def test_missing_cli_is_a_driver_error(tmp_path: Path, env: dict[str, str]) -> None:
@@ -528,8 +596,20 @@ def test_interrupt_without_a_process_is_a_driver_error(
 ) -> None:
     run = with_turn(make_run(tmp_path, env), 1)
     write_turn(run, 1, [], None)
-    with pytest.raises(DriverError, match="cannot signal turn 1"):
+    with pytest.raises(DriverError, match="cannot read the process of turn 1"):
         claude.driver(env).interrupt(run)
+    assert not turn_files(claude.folder(run), 1)["interrupt"].exists()
+
+
+def test_interrupt_with_a_damaged_pid_file_marks_nothing(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    run = with_turn(make_run(tmp_path, env), 1)
+    write_turn(run, 1, [], None)
+    turn_files(claude.folder(run), 1)["pid"].write_text("not a pid")
+    with pytest.raises(DriverError, match="cannot read the process of turn 1"):
+        claude.driver(env).interrupt(run)
+    assert not turn_files(claude.folder(run), 1)["interrupt"].exists()
 
 
 # The host program, with the stub CLI
@@ -686,6 +766,82 @@ def test_host_with_an_unreadable_request(tmp_path: Path) -> None:
     assert host.run_turn(1) == 127
     assert json.loads((tmp_path / "turn-1.exit").read_text()) == {"code": 127}
     assert "cannot read the request" in (tmp_path / "turn-1.stderr").read_text()
+
+
+def test_host_wraps_a_sandboxed_turn(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    worktree = tmp_path / "repo"
+    (worktree / ".git").mkdir(parents=True)
+    outer = {
+        "HOME": str(home),
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+        "CLAUDECODE": "1",
+    }
+    host = claude_host.Host(tmp_path, str(worktree), outer)
+    argv = ["/usr/bin/claude", "-p"]
+    assert host.wrap(argv, None) == argv
+    box = {
+        "worktree": str(worktree),
+        "common": str(worktree / ".git"),
+        "read": [],
+        "read_only": True,
+        "network": False,
+    }
+    wrapped = host.wrap(argv, box)
+    assert wrapped[0] == "bwrap"
+    assert wrapped[-2:] == argv
+    triples = list(zip(wrapped, wrapped[1:], wrapped[2:], strict=False))
+    assert ("--bind", str(home / ".claude"), str(home / ".claude")) in triples
+    assert ("--ro-bind", str(worktree), str(worktree)) in triples
+    assert "--unshare-net" not in wrapped
+
+
+def test_host_with_a_damaged_sandbox_request(tmp_path: Path) -> None:
+    host = claude_host.Host(tmp_path, str(tmp_path), {"HOME": str(tmp_path)})
+    request = {"turn": 1, "prompt": "p", "argv": ["claude"], "sandbox": {"read": []}}
+    (tmp_path / "turn-1.json").write_text(json.dumps(request))
+    assert host.run_turn(1) == 127
+    assert "cannot build the sandbox" in (tmp_path / "turn-1.stderr").read_text()
+
+
+def test_host_prints_a_status_line_during_a_long_tool_call(
+    tmp_path: Path, env: dict[str, str], host_env: dict[str, str], host: list
+) -> None:
+    run = make_run(tmp_path, env)
+    driver = claude.driver(env)
+    spec = driver.command(run, "@sleep")
+    folder, worktree, turn = spec.argv[-3:]
+    code = (
+        "import sys; from pathlib import Path; from ember.engines import claude_host;"
+        f"claude_host.Host(Path({folder!r}), {worktree!r}, __import__('os').environ,"
+        " status_seconds=0.2).serve(1)"
+    )
+    start_host(run, (sys.executable, "-c", code), host_env, host)
+    run = with_turn(run, 1)
+    until(lambda: Path(env["STUB_LOG"] + ".sleeping").exists())
+    screen = run.folder / "screen.txt"
+    until(lambda: "· waiting for the model for " in screen.read_text())
+    driver.interrupt(run)
+    until(lambda: driver.wait(run).state != engines.RUNNING)
+
+
+def test_progress_follows_tool_calls() -> None:
+    progress = claude_host.Progress(0.0, every=60.0)
+    assert progress.line(59.0) is None
+    assert progress.line(60.0) == "· waiting for the model for 1 min"
+    progress.event(assistant({"type": "tool_use", "name": "Bash", "input": {}}), 70.0)
+    assert progress.line(119.0) is None
+    progress.shown(100.0)
+    assert progress.line(159.0) is None
+    assert progress.line(250.0) == "· running Bash for 3 min"
+    progress.event(user({"type": "tool_result", "content": "ok"}), 260.0)
+    assert progress.line(310.0) == "· waiting for the model for 50 s"
+    progress.event(assistant(text("thinking")), 315.0)
+    assert progress.line(400.0) == "· waiting for the model for 2 min"
+    sub = assistant({"type": "tool_use", "name": "Grep", "input": {}}, parent="t1")
+    progress.event(sub, 401.0)
+    assert progress.line(500.0) == "· waiting for the model for 4 min"
 
 
 def test_host_usage(capsys: pytest.CaptureFixture[str]) -> None:
