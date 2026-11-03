@@ -5,9 +5,34 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QThreadPool
+from PySide6.QtGui import QFont, QPalette
 from PySide6.QtWidgets import QApplication, QWidget
 
+from ember.app import theme
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+@pytest.fixture(autouse=True)
+def _restore_appearance(qapp: QApplication) -> Iterator[None]:
+    """Restore the shared application's appearance after each test.
+
+    Reapplying a theme restores its mode, but also changes the application
+    font, palette and style. Keep their original values as well as the sheet.
+    """
+    mode = theme.current_mode()
+    font = QFont(qapp.font())
+    palette = QPalette(qapp.palette())
+    style = qapp.style().objectName()
+    sheet = qapp.styleSheet()
+    yield
+    if theme.current_mode() != mode:
+        theme.apply(qapp, mode)
+    qapp.setStyleSheet(sheet)
+    if qapp.style().objectName() != style:
+        qapp.setStyle(style)
+    qapp.setPalette(palette)
+    qapp.setFont(font)
 
 
 @pytest.fixture

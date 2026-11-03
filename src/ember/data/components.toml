@@ -1,6 +1,6 @@
 # The software Ember depends on, as `emb deps` and the Dependencies screen
 # show it. Each entry says how its installed version and its newest version
-# are read, and the commands shown while an update is available (`update`) or
+# are read, and commands shown for an update (`update` or `methods`) or
 # while it is missing (`install`). Ember shows these commands; it runs one only
 # after the owner confirms it. `update_note` and `install_note` are shown in
 # place of a command that is absent.
@@ -11,8 +11,28 @@ label = "Codex"
 group = "apps"
 installed = { kind = "command", engine = "codex", pattern = 'codex-cli (\S+)' }
 newest = { kind = "json", url = "https://registry.npmjs.org/@openai/codex/latest", field = "version" }
-update = "codex update"
+updater = "codex update"
 install = "npm install -g @openai/codex"
+
+[[components.methods]]
+path = "{prefix}/lib/node_modules/{package}"
+update = "npm install -g --prefix {prefix} {package}@latest"
+
+[[components.methods]]
+path = "{prefix}/global/*/node_modules/{package}"
+update = "pnpm add -g {package}@latest"
+
+[[components.methods]]
+path = "{prefix}/install/global/node_modules/{package}"
+update = "bun add -g {package}@latest"
+
+[[components.methods]]
+path = "{prefix}/Cellar/{formula}"
+update = "brew upgrade {formula}"
+
+[[components.methods]]
+kind = "dpkg"
+update = "sudo apt install --only-upgrade {package}"
 
 [[components]]
 id = "opencode"
@@ -20,8 +40,32 @@ label = "OpenCode"
 group = "apps"
 installed = { kind = "command", engine = "opencode", pattern = '^(\S+)$' }
 newest = { kind = "json", url = "https://registry.npmjs.org/opencode-ai/latest", field = "version" }
-update = "opencode upgrade"
+updater = "opencode upgrade"
 install = "curl -fsSL https://opencode.ai/install | bash"
+
+[[components.methods]]
+path = "{prefix}/lib/node_modules/{package}"
+update = "npm install -g --prefix {prefix} {package}@latest"
+
+[[components.methods]]
+path = "{prefix}/global/*/node_modules/{package}"
+update = "pnpm add -g {package}@latest"
+
+[[components.methods]]
+path = "{prefix}/install/global/node_modules/{package}"
+update = "bun add -g {package}@latest"
+
+[[components.methods]]
+path = "{prefix}/Cellar/{formula}"
+update = "brew upgrade {formula}"
+
+[[components.methods]]
+path = "~/.opencode/bin/opencode"
+update = "{launcher} upgrade"
+
+[[components.methods]]
+kind = "dpkg"
+update = "sudo apt install --only-upgrade {package}"
 
 [[components]]
 id = "claude"
@@ -29,8 +73,32 @@ label = "Claude Code"
 group = "apps"
 installed = { kind = "command", engine = "claude", pattern = '^(\S+) \(Claude Code\)$' }
 newest = { kind = "text", url = "https://downloads.claude.ai/claude-code-releases/latest" }
-update = "claude update"
+updater = "claude update"
 install = "curl -fsSL https://claude.ai/install.sh | bash"
+
+[[components.methods]]
+path = "{prefix}/lib/node_modules/{package}"
+update = "npm install -g --prefix {prefix} {package}@latest"
+
+[[components.methods]]
+path = "{prefix}/global/*/node_modules/{package}"
+update = "pnpm add -g {package}@latest"
+
+[[components.methods]]
+path = "{prefix}/install/global/node_modules/{package}"
+update = "bun add -g {package}@latest"
+
+[[components.methods]]
+path = "{prefix}/Cellar/{formula}"
+update = "brew upgrade {formula}"
+
+[[components.methods]]
+path = "~/.local/share/claude/versions/*"
+update = "{launcher} update"
+
+[[components.methods]]
+kind = "dpkg"
+update = "sudo apt install --only-upgrade {package}"
 
 [[components]]
 id = "claude-desktop"
@@ -40,6 +108,13 @@ installed = { kind = "apt", package = "claude-desktop" }
 newest = { kind = "apt", package = "claude-desktop" }
 update = "sudo apt install --only-upgrade claude-desktop"
 install_note = "Not installed."
+
+[[components]]
+id = "ember-skill"
+label = "ember skill"
+group = "apps"
+installed = { kind = "skill", commands = { missing = "emb skill install", "broken link" = "emb skill install", "other link" = "emb skill install --force" } }
+newest = { kind = "none" }
 
 [[components]]
 id = "tmux"

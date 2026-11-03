@@ -1,21 +1,20 @@
-"""Read flow and panel records while Overview is visible, without taking locks."""
+"""Read flow and panel records while the app runs, without taking locks."""
 
 import os
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal
 
-from ember import paths
+from ember import paths, prune
 from ember.app.tasks import TaskRunner
 from ember.flows import record as flow_record
 from ember.panels import record as panel_record
 
 BACKSTOP_MS = 60_000
-ENDED_LIMIT = 5
 GONE_AFTER = 60.0
 ACTIVE_FLOW = ("starting", "running", "checking", "stopped")
 ACTIVE_TASK = (
@@ -29,7 +28,7 @@ ACTIVE_TASK = (
     "blocked",
 )
 RUNNER_FLOW = ("starting", "running", "checking")
-ENDED_FLOW = ("done", "failed")
+ENDED_FLOW = flow_record.ENDED
 ENDED_PANEL = ("done", "incomplete")
 PROC_LOCKS = Path("/proc/locks")
 
@@ -41,6 +40,7 @@ class FlowItem:
     record: dict[str, Any]
     held: bool | None
     gone: bool
+    run_ids: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True)
@@ -51,6 +51,7 @@ class PanelItem:
     question: str
     held: bool | None
     gone: bool
+    run_ids: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True)
@@ -105,7 +106,7 @@ def lock_held(path: Path, held: set[tuple[int, int, int]] | None) -> bool | None
 def _selected(
     records: list[dict[str, Any]], active: tuple[str, ...], ended: tuple[str, ...]
 ) -> list[dict[str, Any]]:
-    """Order active records first and keep the most recent ended records."""
+    """Order active records first, followed by every ended record."""
     live = sorted(
         (item for item in records if item["status"] in active),
         key=lambda item: (item["started_at"], item["id"]),
@@ -114,11 +115,12 @@ def _selected(
         (item for item in records if item["status"] in ended),
         key=lambda item: (
             item["updated_at"] if item["ended_at"] is None else item["ended_at"],
+            item["updated_at"],
             item["id"],
         ),
         reverse=True,
     )
-    return live + done[:ENDED_LIMIT]
+    return live + done
 
 
 def _question(path: Path) -> str:
@@ -158,10 +160,21 @@ def read(
         )
         return locked, gone
 
-    flow_items = [
-        FlowItem(item, *state(item, item["status"] in RUNNER_FLOW))
-        for item in _selected(flows, ACTIVE_FLOW, ENDED_FLOW)
-    ]
+    flow_items = []
+    unreadable_flows = len(flow_errors)
+    for item in _selected(flows, ACTIVE_FLOW, ENDED_FLOW):
+        try:
+            events = flow_record.read_events(item["id"], env)
+        except OSError:
+            unreadable_flows += 1
+            continue
+        flow_items.append(
+            FlowItem(
+                item,
+                *state(item, item["status"] in RUNNER_FLOW),
+                frozenset(prune._run_ids(item) | prune._run_ids(events)),
+            )
+        )
     panel_items = [
         PanelItem(
             item,
@@ -169,6 +182,7 @@ def read(
                 panel_record.folder(item["id"], env) / panel_record.QUESTION_NAME
             ),
             *state(item, item["status"] == "running"),
+            frozenset(prune._run_ids(item)),
         )
         for item in _selected(panels, ("running",), ENDED_PANEL)
     ]
@@ -182,21 +196,23 @@ def read(
         if not folder.is_dir():
             continue
         if flow_record.is_flow_id(folder.name):
-            name = flow_record.FLOW_NAME
+            names = (flow_record.FLOW_NAME, flow_record.EVENTS_NAME)
         elif panel_record.is_panel_id(folder.name):
-            name = panel_record.PANEL_NAME
+            names = (panel_record.PANEL_NAME,)
         else:
             continue
         watch.append(str(folder))
-        if (folder / name).exists():
-            watch.append(str(folder / name))
-    return Snapshot(flow_items, panel_items, len(flow_errors), len(panel_errors), watch)
+        for name in names:
+            if (folder / name).exists():
+                watch.append(str(folder / name))
+    return Snapshot(flow_items, panel_items, unreadable_flows, len(panel_errors), watch)
 
 
 class FlowsModel(QObject):
     """Keep flow and panel records current through coalesced background reads."""
 
     changed = Signal()
+    reloaded = Signal()
     failed = Signal(str)
 
     def __init__(
@@ -228,7 +244,7 @@ class FlowsModel(QObject):
         self._timer.timeout.connect(self.reload)
 
     def set_active(self, active: bool) -> None:
-        """Start reads and watches when activated, removing them when hidden."""
+        """Start reads and watches when activated, removing them when stopped."""
         if active == self._active:
             return
         self._active = active
@@ -255,11 +271,11 @@ class FlowsModel(QObject):
         return self._error
 
     def flows(self) -> list[FlowItem]:
-        """Return active flows followed by the last five ended flows."""
+        """Return active flows followed by every ended flow."""
         return list(self._snapshot.flows)
 
     def panels(self) -> list[PanelItem]:
-        """Return running panels followed by the last five ended panels."""
+        """Return running panels followed by every ended panel."""
         return list(self._snapshot.panels)
 
     def unreadable_flows(self) -> int:
@@ -310,7 +326,7 @@ class FlowsModel(QObject):
         self.failed.emit(self._error)
 
     def _loaded_records(self, snapshot: Snapshot) -> None:
-        """Store the snapshot and emit only when a shown value changed."""
+        """Store the snapshot and signal reloads and changed shown values."""
         keys: list[tuple[object, ...]] = [
             (
                 item.record["id"],
@@ -318,6 +334,7 @@ class FlowsModel(QObject):
                 item.record["updated_at"],
                 item.held,
                 item.gone,
+                item.run_ids,
                 item.question if isinstance(item, PanelItem) else None,
             )
             for item in [*snapshot.flows, *snapshot.panels]
@@ -338,6 +355,7 @@ class FlowsModel(QObject):
         self._finish_read()
         if differs:
             self.changed.emit()
+        self.reloaded.emit()
 
     def _watch(self, wanted: list[str]) -> None:
         """Remove obsolete watches and re-add existing paths after a read."""

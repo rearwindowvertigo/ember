@@ -1,12 +1,15 @@
 import datetime
 import threading
 import time
+from dataclasses import replace
 
 import pytest
-from PySide6.QtWidgets import QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QWidget
 from pytestqt.qtbot import QtBot
 
 from ember import deps
+from ember.app import theme
 from ember.app.context import AppContext
 from ember.app.screens import dependencies as screen_module
 from ember.app.screens.dependencies import DependenciesScreen, subtitle
@@ -388,6 +391,16 @@ def test_sidebar_count_follows_deps_changed(
         "2 updates available, 2 items missing and 1 check failed."
     )
     assert screen_module.ordered(report)[0][0] == "apps"
+    failed_skill = replace(
+        _component("ember-skill", deps.CHECK_FAILED, group="apps"),
+        installed_kind="skill",
+        newest_kind="none",
+        link_state="broken link",
+    )
+    report = _report(*SAMPLE, failed_skill)
+    context._deps = report
+    context.deps_changed.emit(report)
+    assert window.nav["dependencies"].count() == report.counts() == 5
 
 
 def test_check_now_without_a_report_shows_one_spinner(
@@ -433,3 +446,222 @@ def test_an_earlier_read_keeps_the_check_spinner(
     assert widget.spinner.isHidden()
     assert widget.checking_label.isHidden()
     assert widget.order() == [("system", ["tmux"])]
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_unidentified_install_shows_path_command_and_note(
+    env: dict[str, str],
+    qtbot: QtBot,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    theme.apply(qapp, mode)
+    item = replace(
+        _component(
+            "codex",
+            deps.UPDATE_AVAILABLE,
+            group="apps",
+            newest="2.0",
+            command="/tools/bin/codex update",
+            command_kind="update",
+            note="Ember could not tell how the tool was installed.",
+        ),
+        resolved_path="/tools/unknown/codex",
+    )
+    widget, _context, calls = _screen(env, qtbot, monkeypatch, _report(item))
+    tile = widget.tiles["codex"]
+    assert tile.badge.text() == "Update"
+    assert tile.resolved_path.text() == item.resolved_path
+    assert not tile.resolved_path.isHidden()
+    assert (
+        tile.resolved_path.textInteractionFlags()
+        & Qt.TextInteractionFlag.TextSelectableByMouse
+    )
+    assert tile.note is not None and tile.note.text() == item.note
+    assert not tile.note.isHidden()
+    assert tile.command is not None and tile.command.command() == item.command
+    tile.command.run_button.click()
+    assert calls.commands == [item.command]
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+@pytest.mark.parametrize(
+    ("state", "status", "command", "note"),
+    [
+        ("installed", deps.CURRENT, None, None),
+        ("missing", deps.MISSING, "emb skill install", None),
+        ("broken link", deps.CHECK_FAILED, "emb skill install", None),
+        ("other link", deps.CHECK_FAILED, "emb skill install --force", None),
+        ("folder", deps.CHECK_FAILED, None, "Move /skill, then run emb skill install."),
+        ("file", deps.CHECK_FAILED, None, "Move /skill, then run emb skill install."),
+        ("missing", deps.MISSING, None, "Reinstall Ember."),
+    ],
+)
+def test_skill_tile(
+    env: dict[str, str],
+    qtbot: QtBot,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    state: str,
+    status: str,
+    command: str | None,
+    note: str | None,
+) -> None:
+    theme.apply(qapp, mode)
+    item = replace(
+        _component(
+            "ember-skill",
+            status,
+            group="apps",
+            label="ember skill",
+            installed=None,
+            newest=None,
+            error=state if status == deps.CHECK_FAILED else None,
+            command=command,
+            command_kind="install" if command else None,
+            note=note,
+        ),
+        installed_kind="skill",
+        newest_kind="none",
+        link_state=state,
+    )
+    report = _report(item)
+    assert "Newest versions" not in subtitle(report)
+    widget, _context, calls = _screen(env, qtbot, monkeypatch, report)
+    assert widget.order() == [("apps", ["ember-skill"])]
+    tile = widget.tiles[item.id]
+    assert tile.versions.text() == state
+    assert tile.versions.isVisible()
+    assert tile.error.isHidden()
+    assert tile.badge.text() == screen_module.BADGES[status][0]
+    if command:
+        assert tile.command is not None
+        assert tile.command.command() == command
+        tile.command.run_button.click()
+        assert calls.commands == [command]
+    else:
+        assert tile.command is None
+    if note:
+        assert tile.note is not None and tile.note.text() == note
+    else:
+        assert tile.note is None
+
+
+def test_skill_does_not_make_newest_summary_incomplete() -> None:
+    now = time.time()
+    item = replace(
+        _component("ember-skill", deps.CHECK_FAILED),
+        installed_kind="skill",
+        newest_kind="none",
+        link_state="broken link",
+    )
+    report = deps.DepsReport(
+        components=(_component("tool", deps.CURRENT), item),
+        installed_read_at={"tool": now, "ember-skill": now},
+        newest_read_at={"tool": now, "ember-skill": None},
+    )
+    assert "Newest versions read today" in subtitle(report, now)
+    assert "not read" not in subtitle(report, now)
+    assert report.counts() == 1
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_release_notice_above_groups_opens_release_page(
+    env: dict[str, str],
+    qtbot: QtBot,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    theme.apply(qapp, mode)
+    url = "https://github.com/rearwindowvertigo/ember/releases/tag/v0.3.0"
+    opened: list[str] = []
+    monkeypatch.setattr(
+        screen_module.QDesktopServices,
+        "openUrl",
+        lambda value: opened.append(value.toString()),
+    )
+    base = _report(*SAMPLE)
+    report = replace(base, ember_release=deps.EmberRelease("0.3.0", url))
+    widget, context, calls = _screen(env, qtbot, monkeypatch, report)
+    alert = widget.release_alert
+    assert alert is not None and alert.isVisible()
+    assert alert.tone() == "info"
+    assert alert.title_label.text() == "Ember 0.3.0 is available"
+    assert alert.geometry().bottom() < widget.scroll_area.geometry().top()
+    assert widget.subtitle.text() == subtitle(base)
+    assert report.counts() == base.counts()
+    widget.check_button.setFocus()
+    widget.focusNextChild()
+    assert widget.focusWidget() == alert.buttons[0]
+    assert alert.buttons[0].text() == "Download"
+    alert.buttons[0].click()
+    assert opened == [url]
+    assert calls.commands == []
+    context._deps = base
+    context.deps_changed.emit(base)
+    assert widget.release_alert is None
+    assert widget.alert is None
+    assert widget.order()
+
+
+@pytest.mark.parametrize(
+    ("command", "kind", "path", "shown"),
+    [
+        ("codex update", "update", "/tools/codex", True),
+        (None, "update", "/tools/codex", False),
+        ("install codex", "install", "/tools/codex", False),
+        ("codex update", None, "/tools/codex", False),
+        ("codex update", "update", None, False),
+        (None, None, "/tools/codex", False),
+    ],
+)
+def test_resolved_path_shown_only_with_update_command(
+    env: dict[str, str],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str | None,
+    kind: str | None,
+    path: str | None,
+    shown: bool,
+) -> None:
+    item = replace(
+        _component("codex", deps.CURRENT, command=command, command_kind=kind),
+        resolved_path=path,
+    )
+    widget, _context, _calls = _screen(env, qtbot, monkeypatch, _report(item))
+    assert widget.tiles["codex"].resolved_path.isVisible() is shown
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://github.com/rearwindowvertigo/ember/releases/tag/v0.3.0",
+        "https://example.com/release",
+        "https://github.com/rearwindowvertigo/ember-other/releases/tag/v0.3.0",
+        "https://github.com/other/ember/releases/tag/v0.3.0",
+        "file:///tmp/release",
+        "",
+    ],
+)
+def test_untrusted_release_url_has_no_download_button(
+    env: dict[str, str],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+) -> None:
+    opened: list[str] = []
+    monkeypatch.setattr(
+        screen_module.QDesktopServices,
+        "openUrl",
+        lambda value: opened.append(value.toString()),
+    )
+    report = replace(_report(*SAMPLE), ember_release=deps.EmberRelease("0.3.0", url))
+    widget, _context, _calls = _screen(env, qtbot, monkeypatch, report)
+    alert = widget.release_alert
+    assert alert is not None and alert.isVisible()
+    assert alert.title_label.text() == "Ember 0.3.0 is available"
+    assert alert.buttons == []
+    assert opened == []

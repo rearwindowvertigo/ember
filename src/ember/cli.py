@@ -870,6 +870,8 @@ def _run_ground(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
 
 def _deps_lines(item: deps.Component) -> list[str]:
     head = f"{item.label}: {item.status}"
+    if item.link_state is not None and item.link_state not in (item.error, item.status):
+        head += f", {item.link_state}"
     if item.installed is not None:
         head += f", installed {item.installed}"
     if item.newest is not None:
@@ -877,8 +879,18 @@ def _deps_lines(item: deps.Component) -> list[str]:
     if item.error:
         head += f": {item.error}"
     lines = [head]
+    if (
+        item.resolved_path is not None
+        and item.command is not None
+        and item.command_kind == "update"
+    ):
+        lines.append(f"  resolved path: {item.resolved_path}")
     if item.command is not None:
         lines.append(f"  {item.command_kind}: {item.command}")
+    if item.note is not None and (
+        item.command_kind == "update" or item.installed_kind == "skill"
+    ):
+        lines.append(f"  {item.note}")
     return lines
 
 
@@ -894,6 +906,9 @@ def _run_deps(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
     for item in report.components:
         for line in _deps_lines(item):
             print(line)
+    if report.ember_release is not None:
+        release = report.ember_release
+        print(f"Ember: version {release.version} available: {release.url}")
     return EX_OK
 
 

@@ -74,6 +74,9 @@ class RunsModel(QObject):
     appeared or went away, the number of unreadable records changed, or a
     read succeeded after a failed one."""
 
+    reloaded = Signal()
+    """Emitted after every successful read, including unchanged records."""
+
     turn_failed = Signal(str)
     """A run's turn failed since the last read, with the run's engine."""
 
@@ -145,7 +148,7 @@ class RunsModel(QObject):
     def finished(self) -> list[Run]:
         """Return the last twenty closed or failed runs, newest first.
 
-        Runs are ordered by `ended_at`, then `updated_at`; a run without
+        Runs are ordered by `ended_at`, `updated_at` and id; a run without
         `ended_at` counts its `updated_at`.
         """
         done = [run for run in self._runs if run.status in DONE]
@@ -153,6 +156,7 @@ class RunsModel(QObject):
             key=lambda run: (
                 run.updated_at if run.ended_at is None else run.ended_at,
                 run.updated_at,
+                run.id,
             ),
             reverse=True,
         )
@@ -219,6 +223,7 @@ class RunsModel(QObject):
         self._finish_read()
         if differs:
             self.changed.emit()
+        self.reloaded.emit()
         if not first:
             for run in failed:
                 self.turn_failed.emit(run.engine)
