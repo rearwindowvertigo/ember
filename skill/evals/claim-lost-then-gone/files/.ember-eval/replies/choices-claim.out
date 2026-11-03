@@ -71,6 +71,10 @@
     "app.theme": {
       "value": "system",
       "layer": "default"
+    },
+    "flow.review_rounds": {
+      "value": "3",
+      "layer": "default"
     }
   },
   "claim": {

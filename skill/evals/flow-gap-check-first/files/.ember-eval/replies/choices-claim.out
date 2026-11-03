@@ -51,6 +51,10 @@
       "value": "flow",
       "layer": "setting"
     },
+    "flow.review_rounds": {
+      "value": "3",
+      "layer": "default"
+    },
     "panel.members": {
       "value": [],
       "layer": "default"

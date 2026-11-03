@@ -3,11 +3,14 @@
 One instance runs at a time. It listens on a local socket,
 `<runtime dir>/app.sock`; a second start connects, sends `show` (nothing with
 `--hidden`) and exits 0, and the first instance raises its window on `show`.
+On every such connection the running instance compares its own version with
+the installed one; when they differ, its window offers a restart.
 Two starts at the same moment can both find no instance listening; both then
 run, and only the later one to listen is reachable on the socket.
 """
 
 import argparse
+import importlib.metadata
 import os
 import sys
 from collections.abc import Mapping
@@ -15,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QCoreApplication, QObject
+from PySide6.QtCore import QCoreApplication, QObject, QProcess
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication
@@ -96,6 +99,19 @@ def hand_over(path: Path, *, hidden: bool) -> bool:
     return True
 
 
+def installed_version() -> str | None:
+    """Return the installed `ember-app` version, read from disk each time."""
+    try:
+        return importlib.metadata.version("ember-app")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def restart_command() -> list[str]:
+    """Return the command that starts the installed Ember's app."""
+    return [sys.executable, "-I", "-m", "ember.cli", "app"]
+
+
 @dataclass
 class EmberApp:
     """The parts of a running app."""
@@ -106,6 +122,8 @@ class EmberApp:
     server: QLocalServer
     tray: tray_module.Tray | None
     autostart_reason: str | None = None
+    version: str | None = None
+    """The version this process started as."""
 
 
 class _Controller(QObject):
@@ -123,6 +141,7 @@ class _Controller(QObject):
 
     def _connection(self) -> None:
         server = self.parts.server
+        self._check_version()
         while server.hasPendingConnections():
             socket = server.nextPendingConnection()
             socket.readyRead.connect(lambda socket=socket: self._read(socket))
@@ -134,6 +153,13 @@ class _Controller(QObject):
         data = bytes(socket.readAll().data())
         if b"show" in data:
             self.parts.window.bring_forward()
+
+    def _check_version(self) -> None:
+        """Offer a restart when the installed version is not this one."""
+        installed = installed_version()
+        if installed is None or installed == self.parts.version:
+            return
+        self.parts.window.show_restart(installed, lambda: restart(self.parts))
 
     def _apply_theme(self) -> None:
         setting = str(self.parts.context.setting("app.theme") or "system")
@@ -240,7 +266,7 @@ def start(argv: list[str], env: Mapping[str, str] | None = None) -> EmberApp | i
         if has_tray
         else None
     )
-    parts = EmberApp(app, context, window, server, tray)
+    parts = EmberApp(app, context, window, server, tray, version=installed_version())
     _Controller(parts)
     if tray is not None:
         tray.show()
@@ -253,6 +279,17 @@ def start(argv: list[str], env: Mapping[str, str] | None = None) -> EmberApp | i
     context.runs.start()
     context.flows.set_active(True)
     return parts
+
+
+def restart(parts: EmberApp) -> None:
+    """Close the socket, start the installed Ember and quit this one.
+
+    Runs keep running in their tmux sessions; an open screen mirror closes
+    with the window.
+    """
+    parts.server.close()
+    QProcess.startDetached(restart_command()[0], restart_command()[1:])
+    parts.window.quit_app()
 
 
 def stop(parts: EmberApp) -> None:

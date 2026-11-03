@@ -51,6 +51,10 @@
       "value": "ask",
       "layer": "default"
     },
+    "flow.review_rounds": {
+      "value": "3",
+      "layer": "default"
+    },
     "panel.members": {
       "value": [],
       "layer": "default"
@@ -88,7 +92,7 @@
     "id": "{{ID}}",
     "status": "none"
   },
-  "generation": 3,
+  "generation": 2,
   "errors": [],
   "source_error": false,
   "menu": {

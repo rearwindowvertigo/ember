@@ -54,6 +54,7 @@ from ember.app.widgets import (
     StateView,
     Switch,
     button,
+    set_icon,
 )
 from ember.engines import models, status
 
@@ -999,6 +1000,7 @@ class EnginesScreen(QWidget):
 
         layout = scrolled(self)
         self.check_button = button("Check now", "secondary")
+        self.check_button.setAccessibleName("Check now")
         self.check_button.clicked.connect(self.check_now)
         self.subtitle = screen_header(layout, self.TITLE, trailing=(self.check_button,))
 
@@ -1025,6 +1027,7 @@ class EnginesScreen(QWidget):
         context.stale.connect(self._settings_changed)
         context.error.connect(self._settings_changed)
         theme.signals.changed.connect(self._theme_changed)
+        self._draw_check_icon()
         self._redraw()
         self._read_checks()
 
@@ -1085,6 +1088,12 @@ class EnginesScreen(QWidget):
     def _theme_changed(self, *_args: object) -> None:
         for card in self.cards.values():
             card.draw_logo()
+        self._draw_check_icon()
+
+    def _draw_check_icon(self) -> None:
+        set_icon(
+            self.check_button, icons.icon("refresh-cw", theme.color("text-primary"), 16)
+        )
 
     def _set_failure(self, alert: Alert | None) -> None:
         discard(self.failure, self.failure_area)

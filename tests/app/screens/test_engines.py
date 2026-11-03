@@ -1329,3 +1329,13 @@ def test_every_control_is_reached_with_tab(
             reached.append(widget)
         screen.focusNextChild()
     assert [w for w in reached if w in expected] == expected
+
+
+def test_check_now_has_the_refresh_icon(env: dict[str, str], qtbot: QtBot) -> None:
+    screen, _context = _screen(env, qtbot)
+    assert not screen.check_button.icon().isNull()
+    assert screen.check_button.text().strip() == "Check now"
+    assert screen.check_button.accessibleName() == "Check now"
+    before = screen.check_button.icon().cacheKey()
+    theme.signals.changed.emit(theme.current_mode())
+    assert screen.check_button.icon().cacheKey() != before

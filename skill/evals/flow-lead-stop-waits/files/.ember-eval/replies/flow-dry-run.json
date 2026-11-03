@@ -22,6 +22,8 @@
     "-s",
     "tests"
   ],
+  "rounds": 2,
+  "rounds_source": "setting",
   "waves": [
     [
       "parse"

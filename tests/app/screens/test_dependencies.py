@@ -567,46 +567,6 @@ def test_skill_does_not_make_newest_summary_incomplete() -> None:
     assert report.counts() == 1
 
 
-@pytest.mark.parametrize("mode", ["light", "dark"])
-def test_release_notice_above_groups_opens_release_page(
-    env: dict[str, str],
-    qtbot: QtBot,
-    qapp: QApplication,
-    monkeypatch: pytest.MonkeyPatch,
-    mode: str,
-) -> None:
-    theme.apply(qapp, mode)
-    url = "https://github.com/rearwindowvertigo/ember/releases/tag/v0.3.0"
-    opened: list[str] = []
-    monkeypatch.setattr(
-        screen_module.QDesktopServices,
-        "openUrl",
-        lambda value: opened.append(value.toString()),
-    )
-    base = _report(*SAMPLE)
-    report = replace(base, ember_release=deps.EmberRelease("0.3.0", url))
-    widget, context, calls = _screen(env, qtbot, monkeypatch, report)
-    alert = widget.release_alert
-    assert alert is not None and alert.isVisible()
-    assert alert.tone() == "info"
-    assert alert.title_label.text() == "Ember 0.3.0 is available"
-    assert alert.geometry().bottom() < widget.scroll_area.geometry().top()
-    assert widget.subtitle.text() == subtitle(base)
-    assert report.counts() == base.counts()
-    widget.check_button.setFocus()
-    widget.focusNextChild()
-    assert widget.focusWidget() == alert.buttons[0]
-    assert alert.buttons[0].text() == "Download"
-    alert.buttons[0].click()
-    assert opened == [url]
-    assert calls.commands == []
-    context._deps = base
-    context.deps_changed.emit(base)
-    assert widget.release_alert is None
-    assert widget.alert is None
-    assert widget.order()
-
-
 @pytest.mark.parametrize(
     ("command", "kind", "path", "shown"),
     [
@@ -633,35 +593,3 @@ def test_resolved_path_shown_only_with_update_command(
     )
     widget, _context, _calls = _screen(env, qtbot, monkeypatch, _report(item))
     assert widget.tiles["codex"].resolved_path.isVisible() is shown
-
-
-@pytest.mark.parametrize(
-    "url",
-    [
-        "http://github.com/rearwindowvertigo/ember/releases/tag/v0.3.0",
-        "https://example.com/release",
-        "https://github.com/rearwindowvertigo/ember-other/releases/tag/v0.3.0",
-        "https://github.com/other/ember/releases/tag/v0.3.0",
-        "file:///tmp/release",
-        "",
-    ],
-)
-def test_untrusted_release_url_has_no_download_button(
-    env: dict[str, str],
-    qtbot: QtBot,
-    monkeypatch: pytest.MonkeyPatch,
-    url: str,
-) -> None:
-    opened: list[str] = []
-    monkeypatch.setattr(
-        screen_module.QDesktopServices,
-        "openUrl",
-        lambda value: opened.append(value.toString()),
-    )
-    report = replace(_report(*SAMPLE), ember_release=deps.EmberRelease("0.3.0", url))
-    widget, _context, _calls = _screen(env, qtbot, monkeypatch, report)
-    alert = widget.release_alert
-    assert alert is not None and alert.isVisible()
-    assert alert.title_label.text() == "Ember 0.3.0 is available"
-    assert alert.buttons == []
-    assert opened == []

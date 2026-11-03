@@ -1,4 +1,5 @@
 import socket
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -276,3 +277,59 @@ def test_tray_parent_opens_overview(
         parts.tray.menu.actions()[-2].trigger()
         assert parts.window.isVisible()
         assert parts.window.current_key() == "settings"
+
+
+def test_hand_over_with_the_same_version_offers_no_restart(
+    app_env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main, "installed_version", lambda: "0.4.0")
+    for parts in _start([], app_env, qtbot):
+        assert parts.version == "0.4.0"
+        assert main.start(["--hidden"], app_env) == 0
+        qtbot.wait(200)
+        assert parts.window.restart_alert is None
+
+
+def test_hand_over_after_an_upgrade_offers_a_restart(
+    app_env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    version = {"value": "0.4.0"}
+    monkeypatch.setattr(main, "installed_version", lambda: version["value"])
+    restarts: list[main.EmberApp] = []
+    monkeypatch.setattr(main, "restart", restarts.append)
+    for parts in _start([], app_env, qtbot):
+        version["value"] = "0.5.0"
+        assert main.start(["--hidden"], app_env) == 0
+        qtbot.waitUntil(lambda parts=parts: parts.window.restart_alert is not None)
+        alert = parts.window.restart_alert
+        assert alert is not None
+        assert alert.title_label.text() == (
+            "Ember 0.5.0 is installed. Restart to use it."
+        )
+        assert [button.text() for button in alert.buttons] == ["Restart"]
+        parts.window.show_notice("info", "Another notice")
+        parts.window.clear_notice()
+        assert parts.window.restart_alert is alert
+        assert main.start([], app_env) == 0
+        qtbot.wait(200)
+        assert parts.window.restart_alert is alert
+        alert.buttons[0].click()
+        assert restarts == [parts]
+
+
+def test_restart_closes_the_socket_starts_the_app_and_quits(
+    app_env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(
+        main.QProcess,
+        "startDetached",
+        staticmethod(lambda program, args: started.append((program, args)) or True),
+    )
+    quits: list[bool] = []
+    for parts in _start([], app_env, qtbot):
+        monkeypatch.setattr(parts.window, "quit_app", lambda: quits.append(True))
+        main.restart(parts)
+        assert not parts.server.isListening()
+        assert started == [(sys.executable, ["-I", "-m", "ember.cli", "app"])]
+        assert quits == [True]
