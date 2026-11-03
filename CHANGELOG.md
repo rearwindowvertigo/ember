@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.10.0](https://github.com/rearwindowvertigo/ember/compare/v0.9.0...v0.10.0) (2026-11-03)
+
+
+### Added
+
+* **app:** name the Team limit settings as maximums ([e49e7d7](https://github.com/rearwindowvertigo/ember/commit/e49e7d76b538ffa10142a1a5497dc77a00b98482))
+* **app:** wrap tooltips and show setting tooltips on an info icon ([0ee0299](https://github.com/rearwindowvertigo/ember/commit/0ee0299dd8a2f09bfbb0bde107bf98568920ddf6)), closes [#55](https://github.com/rearwindowvertigo/ember/issues/55)
+
+
+### Fixed
+
+* **app:** keep the info tooltip open after Tab and wrap unbroken text ([df98113](https://github.com/rearwindowvertigo/ember/commit/df98113a498b5cdd26818221c8cdbf950b984241))
+
 ## [0.9.0](https://github.com/rearwindowvertigo/ember/compare/v0.8.0...v0.9.0) (2026-11-03)
 
 
