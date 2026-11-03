@@ -229,8 +229,13 @@ def start(argv: list[str], env: Mapping[str, str] | None = None) -> EmberApp | i
         app.quit()
 
     window = MainWindow(context, has_tray=has_tray, quit_app=quit_app)
+
+    def open_overview() -> None:
+        window.show_screen("overview")
+        window.bring_forward()
+
     tray = (
-        tray_module.Tray(context, window.bring_forward, window.quit_app)
+        tray_module.Tray(context, window.bring_forward, open_overview, window.quit_app)
         if has_tray
         else None
     )

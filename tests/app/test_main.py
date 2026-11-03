@@ -12,6 +12,8 @@ from ember.app import main, theme
 from ember.app import tray as tray_module
 from ember.engines import status
 
+from .test_flows import FLOW, PANEL, make_flow, make_panel  # pyrefly: ignore[missing-import]
+
 EMPTY_REPORT = deps.DepsReport(components=(), installed_read_at={}, newest_read_at={})
 
 
@@ -246,3 +248,31 @@ def test_flows_start_and_stop_with_app(app_env: dict[str, str], qtbot: QtBot) ->
     assert model is not None
     assert not model.active()
     assert not model.watched()
+
+
+@pytest.mark.parametrize("kind", ["flow", "panel"])
+def test_tray_parent_opens_overview(
+    app_env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    monkeypatch.setattr(tray_module, "available", lambda: True)
+    if kind == "flow":
+        make_flow(app_env, status="stopped")
+    else:
+        make_panel(app_env)
+    for parts in _start(["--hidden"], app_env, qtbot):
+        assert parts.tray is not None
+        qtbot.waitUntil(parts.context.flows.loaded)
+        assert parts.tray.icon.toolTip() == f"Ember · 1 {kind} live"
+        parts.window.show_screen("settings")
+        parts.window.hide()
+        parts.tray.menu.aboutToShow.emit()
+        action = parts.tray.menu.actions()[1]
+        assert (FLOW if kind == "flow" else PANEL) in action.text()
+        action.trigger()
+        assert parts.window.isVisible()
+        assert parts.window.current_key() == "overview"
+        parts.window.show_screen("settings")
+        parts.window.hide()
+        parts.tray.menu.actions()[-2].trigger()
+        assert parts.window.isVisible()
+        assert parts.window.current_key() == "settings"
