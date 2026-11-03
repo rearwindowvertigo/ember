@@ -5,6 +5,7 @@ shown.
 """
 
 import dataclasses
+import datetime
 import re
 import stat
 import time
@@ -34,10 +35,12 @@ from ember.app import icons, state, theme, tray
 from ember.app.flows import FlowItem, PanelItem, plan_wave
 from ember.app.runs import DONE, FINISHED_LIMIT, LIVE
 from ember.app.screens.common import (
+    MONTHS,
     chain_tab_order,
     discard,
     duration,
     engine_name,
+    inline,
     plural,
     screen_header,
     scrolled,
@@ -61,13 +64,13 @@ from ember.runs.record import Run
 if TYPE_CHECKING:
     from ember.app.context import AppContext
 
-CLEAR_CAPTION = "Remove shown records"
-"""The line under Clear that says what it does."""
+CLEAR_TIP = "Remove shown records"
+"""Clear's tooltip and accessible description: what it does."""
 
 FINISHED_PREVIEW = 3
 """Finished items shown while the Finished list is not open."""
 
-ELAPSED_MS = 30_000
+ELAPSED_MS = 1_000
 """How often active run, flow and panel elapsed times are redrawn while shown."""
 
 BADGES = {
@@ -198,11 +201,51 @@ def member_line(member: Mapping[str, Any]) -> str:
     )
 
 
-def item_time(started: float, ended: float | None, now: float | None = None) -> str:
-    """Return elapsed time, or end time and duration for an ended record."""
+def elapsed(seconds: float) -> str:
+    """Return a running time to the second: "45 s", "4 min 12 s", "1 h 5 min 3 s"."""
+    total = max(0, int(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours} h {minutes} min {secs} s"
+    return f"{minutes} min {secs} s" if minutes else f"{secs} s"
+
+
+def _clock(stamp: float) -> str:
+    moment = datetime.datetime.fromtimestamp(stamp)
+    return f"{moment.hour:02d}:{moment.minute:02d}"
+
+
+def span_text(started: float, ended: float | None, now: float | None = None) -> str:
+    """Return a record's times for its detail line.
+
+    An ended record reads "08:17 to 08:33 · 16 min"; a live one reads
+    "started 08:01 · 4 min 12 s". The start names its day only when it falls
+    on an earlier day than the end, or than now while live: "yesterday 23:50
+    to 00:10 · 20 min".
+    """
+    now = time.time() if now is None else now
+    last = now if ended is None else ended
+    start_day = datetime.datetime.fromtimestamp(started).date()
+    if start_day < datetime.datetime.fromtimestamp(last).date():
+        start = inline(when(started, now))
+    else:
+        start = _clock(started)
     if ended is None:
-        return duration((time.time() if now is None else now) - started)
-    return f"{when(ended, now)} · {duration(ended - started)}"
+        return f"started {start} · {elapsed(now - started)}"
+    return f"{start} to {_clock(ended)} · {duration(ended - started)}"
+
+
+def end_text(ended: float | None, now: float | None = None) -> str:
+    """Return the right column's time: the end time, or "Live"."""
+    return "Live" if ended is None else when(ended, now)
+
+
+def end_tooltip(started: float, ended: float | None) -> str:
+    """Return the right column's tooltip: "Ended at 08:33 on 3 Nov"."""
+    stamp, word = (started, "Started") if ended is None else (ended, "Ended")
+    moment = datetime.datetime.fromtimestamp(stamp)
+    return f"{word} at {_clock(stamp)} on {moment.day} {MONTHS[moment.month - 1]}"
 
 
 def worker_line(run: Run) -> str:
@@ -223,32 +266,30 @@ def run_title(run: Run) -> str:
     return f"Run · {worker_line(run)}"
 
 
-def live_detail(run: Run) -> str:
-    """Return "<repository folder> · <branch or read-only> · turn <n>"."""
-    folder = PurePosixPath(run.repo).name or run.repo
-    return f"{folder} · {branch_text(run)} · turn {run.turn}"
-
-
-def finished_detail(run: Run) -> str:
-    """Return "<subject> · <branch or read-only>"."""
-    return f"{run.subject} · {branch_text(run)}"
-
-
-def _ended_at(run: Run) -> float:
+def run_ended(run: Run) -> float | None:
+    """Return when an ended run ended, or `None` while it is live."""
+    if run.status not in DONE:
+        return None
     return run.updated_at if run.ended_at is None else run.ended_at
 
 
-def finished_time(run: Run, now: float | None = None) -> str:
-    """Return a finished run's end time and duration."""
-    end = _ended_at(run)
-    return f"{when(end, now)} · {duration(end - run.started_at)}"
+def run_result(run: Run) -> str:
+    """Return what a run produced so far, or why it failed.
+
+    Live: "turn 2 · 1 commit" or "turn 2 · read-only". Ended: "3 commits" or
+    "read-only". Failed: its last reason.
+    """
+    if run.status == record.FAILED:
+        return run.last_reason or "No reason recorded"
+    work = "read-only" if run.read_only else plural(len(run.commits), "commit")
+    return work if run.status in DONE else f"turn {run.turn} · {work}"
 
 
-def started_time(run: Run, now: float | None = None) -> str:
-    """Return a nested run's start time and its run or elapsed time."""
-    now = time.time() if now is None else now
-    end = _ended_at(run) if run.status in DONE else now
-    return f"Started {when(run.started_at, now)} · {duration(end - run.started_at)}"
+def run_detail(run: Run, now: float | None = None) -> str:
+    """Return "<repository folder> · <result> · <times>"."""
+    folder = PurePosixPath(run.repo).name or run.repo
+    times = span_text(run.started_at, run_ended(run), now)
+    return f"{folder} · {run_result(run)} · {times}"
 
 
 def record_rows(run: Run, now: float | None = None) -> list[tuple[str, str]]:
@@ -312,7 +353,8 @@ def item_ended(item: Item) -> bool:
 def item_end_key(item: Item) -> tuple[float, float, str]:
     """Return end time, update time and id for newest-first ordering."""
     if isinstance(item, Run):
-        return _ended_at(item), item.updated_at, item.id
+        end = item.updated_at if item.ended_at is None else item.ended_at
+        return end, item.updated_at, item.id
     data = item.record
     end = data["updated_at"] if data["ended_at"] is None else data["ended_at"]
     return end, data["updated_at"], data["id"]
@@ -573,18 +615,15 @@ class _Row(_ExpandableRow):
         super().__init__(run.id, "run", "details")
 
     def set_nested(self, nested: bool) -> None:
-        """Mark the row as nested under a flow or panel, and redraw its time.
-
-        A nested row shows its start time; a top-level row keeps its own
-        time text.
-        """
-        if nested != self.nested:
-            self.nested = nested
-            self.draw_time()
+        """Mark the row as nested under a flow or panel; it draws the same."""
+        self.nested = nested
 
     def draw_time(self, now: float | None = None) -> None:
-        """Draw the row's time text."""
-        raise NotImplementedError
+        """Draw the detail line and the right column's end time or "Live"."""
+        ended = run_ended(self.run)
+        self.detail_label.setText(run_detail(self.run, now))
+        self.time_label.setText(end_text(ended, now))
+        self.time_label.setToolTip(end_tooltip(self.run.started_at, ended))
 
     def set_run(self, run: Run) -> None:
         """Store the run and draw its badge."""
@@ -645,21 +684,11 @@ class _LiveRow(_Row):
     def set_run(self, run: Run) -> None:
         super().set_run(run)
         self.title_label.setText(run_title(run))
-        self.detail_label.setText(live_detail(run))
         self.update_elapsed()
         self.open_button.setAccessibleDescription(f"Open run {run.id} in a terminal")
 
     def update_elapsed(self, now: float | None = None) -> None:
         self.draw_time(now)
-
-    def draw_time(self, now: float | None = None) -> None:
-        """Draw elapsed time, or the start time when nested."""
-        now = time.time() if now is None else now
-        self.time_label.setText(
-            started_time(self.run, now)
-            if self.nested
-            else duration(now - self.run.started_at)
-        )
 
 
 class _FinishedRow(_Row):
@@ -676,8 +705,8 @@ class _FinishedRow(_Row):
         return (
             run.status,
             run_title(run),
-            finished_detail(run),
-            finished_time(run),
+            run_detail(run),
+            end_text(run_ended(run)),
             tuple(record_rows(run)),
         )
 
@@ -690,14 +719,7 @@ class _FinishedRow(_Row):
         self.shown_values = values
         super().set_run(run)
         self.title_label.setText(run_title(run))
-        self.detail_label.setText(finished_detail(run))
         self.draw_time()
-
-    def draw_time(self, now: float | None = None) -> None:
-        """Draw end time and duration, or the start time when nested."""
-        self.time_label.setText(
-            started_time(self.run, now) if self.nested else finished_time(self.run, now)
-        )
 
 
 class _RecordRow(_ExpandableRow):
@@ -716,6 +738,7 @@ class _RecordRow(_ExpandableRow):
         self.file_buttons: dict[str, QPushButton] = {}
         self.file_paths: dict[str, Path | None] = {}
         self.shown_values: tuple[object, ...] = ()
+        self.base_detail = ""
         self.nested_box = QWidget()
         self.nested = QVBoxLayout(self.nested_box)
         self.nested.setContentsMargins(theme.CONTROL_SM + 12, 0, 0, 0)
@@ -751,6 +774,7 @@ class _RecordRow(_ExpandableRow):
         if self.collapsed_runs and self.run_count:
             parts.append(plural(self.run_count, "run"))
         detail = " · ".join([*parts, detail])
+        self.base_detail = detail
         self.question_label.setText(
             item.question if isinstance(item, PanelItem) else ""
         )
@@ -772,13 +796,12 @@ class _RecordRow(_ExpandableRow):
         self.shown_values = values
         self.badge.set_tone(badge[1], badge[0])
         self.title_label.setText(title)
-        self.detail_label.setText(detail)
         if self.expanded:
             self.show_details(False)
             self.show_details(True)
 
     def update_elapsed(self, now: float | None = None) -> None:
-        """Update the time label without rebuilding the body."""
+        """Redraw the times without rebuilding the body."""
         data = self.item.record
         ended = data["ended_at"]
         if ended is None and data["status"] in (
@@ -788,7 +811,10 @@ class _RecordRow(_ExpandableRow):
             "cancelled",
         ):
             ended = data["updated_at"]
-        self.time_label.setText(item_time(data["started_at"], ended, now))
+        times = span_text(data["started_at"], ended, now)
+        self.detail_label.setText(f"{self.base_detail} · {times}")
+        self.time_label.setText(end_text(ended, now))
+        self.time_label.setToolTip(end_tooltip(data["started_at"], ended))
 
     def show_details(self, shown: bool) -> None:
         """Expand or collapse the selectable body and its file buttons."""
@@ -1010,17 +1036,11 @@ class OverviewScreen(QWidget):
             filters.addWidget(combo)
             combo.currentTextChanged.connect(self.refresh)
         filters.addStretch(1)
-        clear_column = QVBoxLayout()
-        clear_column.setSpacing(4)
         self.clear_button = button("Clear", "danger-outline", size="sm")
         self.clear_button.clicked.connect(self.clear_finished)
-        self.clear_button.setAccessibleDescription(CLEAR_CAPTION)
-        clear_column.addWidget(self.clear_button, 0, Qt.AlignmentFlag.AlignRight)
-        self.clear_caption = QLabel(CLEAR_CAPTION)
-        self.clear_caption.setFont(theme.font("caption"))
-        self.clear_caption.setProperty("role", "secondary")
-        clear_column.addWidget(self.clear_caption, 0, Qt.AlignmentFlag.AlignRight)
-        filters.addLayout(clear_column)
+        self.clear_button.setToolTip(CLEAR_TIP)
+        self.clear_button.setAccessibleDescription(CLEAR_TIP)
+        filters.addWidget(self.clear_button)
         finished_layout.insertWidget(1, self.filter_bar)
         self._draw_clear_icon()
         theme.signals.changed.connect(self._draw_clear_icon)
