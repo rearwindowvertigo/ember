@@ -198,8 +198,10 @@ class Tray(QObject):
     def _add_run(self, run: Run, *, nested: bool = False) -> None:
         action = QAction(("    " if nested else "") + run_line(run), self.menu)
         action.triggered.connect(
+            # A run closed while the menu was open cannot be attached; its
+            # error shows in the window, so the window opens with it.
             lambda _checked=False, run_id=run.id: self._context.open_run_terminal(
-                run_id
+                run_id, self._open_window
             )
         )
         self.menu.addAction(action)

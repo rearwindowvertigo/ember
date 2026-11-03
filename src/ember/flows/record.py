@@ -572,7 +572,7 @@ def allowed_answers(task: Mapping[str, Any]) -> tuple[str, ...]:
             return ANSWER_KINDS if task.get("branch") else ("worker", "drop")
         case "conflict":
             return ("worker", "drop")
-        case "blocked":
+        case "pending" | "blocked":
             return ("drop",)
         case _:
             return ()

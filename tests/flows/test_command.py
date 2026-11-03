@@ -579,7 +579,7 @@ def test_accept_resolves_short_commit(
 
 @pytest.mark.parametrize(
     ("case", "expected"),
-    [("unknown", 64), ("pending", 75), ("done", 75), ("empty", 64), ("missing", 66)],
+    [("unknown", 64), ("writing", 75), ("done", 75), ("empty", 64), ("missing", 66)],
 )
 def test_lead_refusal(
     tmp_path: Path, env: dict[str, str], flow: dict[str, Any], case: str, expected: int
@@ -589,8 +589,8 @@ def test_lead_refusal(
     options = ["--drop"]
     if case == "unknown":
         task = "unknown"
-    elif case == "pending":
-        flow["tasks"][0]["status"] = "pending"
+    elif case == "writing":
+        flow["tasks"][0]["status"] = "writing"
         record.save(flow, env)
     elif case == "done":
         end(flow, env)
@@ -602,6 +602,19 @@ def test_lead_refusal(
     code, out, err = invoke(env, "--lead", flow["id"], task, *options)
     assert code == expected and not out, err
     assert not record.read_answers(flow["id"], env)
+
+
+def test_lead_queues_a_drop_for_a_pending_task(
+    env: dict[str, str], flow: dict[str, Any]
+) -> None:
+    stopped(flow, env)
+    flow["tasks"][0]["status"] = "pending"
+    record.save(flow, env)
+    code, _out, err = invoke(env, "--lead", flow["id"], "a", "--drop")
+    assert code == 0, err
+    answers = record.read_answers(flow["id"], env)
+    assert len(answers) == 1 and answers[0] is not None
+    assert answers[0]["kind"] == "drop"
 
 
 def test_lead_starts_runner(

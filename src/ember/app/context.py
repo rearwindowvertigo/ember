@@ -418,14 +418,19 @@ class AppContext(QObject):
         self.tasks.run(start, lambda _result: None, failed)
         return True
 
-    def open_run_terminal(self, run_id: str) -> None:
+    def open_run_terminal(
+        self, run_id: str, on_failure: Callable[[], None] | None = None
+    ) -> None:
         """Open a terminal window on a run's session, as `emb run --attach`.
 
         The native process's activation token is consumed for this launch.
-        A failure emits `error` with what `emb run` reported.
+        A failure emits `error` with what `emb run` reported, then calls
+        `on_failure`.
 
         Args:
             run_id: The run.
+            on_failure: Called after a failure, such as to show the window
+                that holds the error.
         """
         env = dict(self.env)
         env.pop("XDG_ACTIVATION_TOKEN", None)
@@ -439,9 +444,13 @@ class AppContext(QObject):
             code, text = result
             if code:
                 self.error.emit(text or f"Ember could not open {run_id} (exit {code}).")
+                if on_failure is not None:
+                    on_failure()
 
         def failed(error: Exception) -> None:
             self.error.emit(f"Ember could not open {run_id}: {error}")
+            if on_failure is not None:
+                on_failure()
 
         self.tasks.run(lambda: _attach(env, run_id), opened, failed)
 

@@ -77,7 +77,7 @@ assumed list:
 | `--accept --commit <commit>` | Accept the specified reviewed commit. |
 | `--review [--reviewer W]` | Collect a running turn, then start fresh reviews and a fix budget. |
 | `--worker W` | Keep the old branch and start a new writer from the flow tip. |
-| `--drop` | Keep the branch and drop the task; its dependants stay blocked. |
+| `--drop` | Keep the branch and drop the task; its dependants stay blocked. Also accepted for a pending or blocked task. |
 
 Do not settle a flow stop yourself, edit to choose its answer, or merge a
 task branch into the session branch. Call `emb flow --lead` only after the

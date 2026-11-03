@@ -20,7 +20,7 @@ standard error as `emb choices: <message>`.
 | (none) or `--json` | Read | Read reply |
 | `--id ID` | With a read or `--claim`: use the claim for `ID` | Read reply for `ID` |
 | `--claim --id ID` | Claim the pending one-time choice for `ID` | Read reply |
-| `--finish ID` | Release the claim for `ID` | `{"claim": {"id", "status": "gone"}, "generation", "errors"}` |
+| `--finish ID` | Release the claim for `ID` | `{"claim": {"id", "status": "gone", "was"}, "generation", "errors"}` |
 | `--request KEY=VALUE` | With a read or `--claim`: a request-layer value; repeatable | |
 | `--set KEY=VALUE` | Save a standing setting; repeatable | `{"settings": {...}, "generation", "errors"}` |
 | `--clear KEY` | Remove a standing setting; repeatable | As `--set` |
@@ -93,7 +93,10 @@ names the invalid values, `menu` is `null` and the exit code is 0.
   it. A claim of a new id does not consume a pending one-time choice that is
   not valid: it records nothing, and the reply has status `unknown`.
 - A claim reads as `gone` 7 days after it was made.
-- `--finish ID` records `ID` as `gone`, also when `ID` was not known.
+- `--finish ID` records `ID` as `gone`, also when `ID` was not known. `gone`
+  is the status of every finished claim. The reply's `was` is the status
+  before the finish: `claimed`, `none`, `gone` (finished before, or
+  expired) or `unknown`.
 - Claim status is `claimed`, `none`, `gone`, or `unknown` for an id never
   claimed. With `gone` or `unknown`, every key resolves to its default and
   `--request` values are not used.
@@ -502,7 +505,12 @@ run whose turn is collected but not committed, with `next: emb run --recover
 <run> (commits the collected turn), then emb run --close <run>`, and a live
 session that holds messages Ember did not send or whose history cannot be
 checked, with the line `--send` prints. It ends the
-session and keeps the worktree and branch. A command waiting on a run that is
+session and keeps the worktree and branch. Before ending the session it
+records every process under the session's pane; after, it sends SIGTERM to
+each one still running, then SIGKILL after 2 seconds. This ends processes a
+worker's tools started in a session of their own, such as Codex's
+`codex-linux-sandbox`. A process still running after SIGKILL is named on
+standard error. A command waiting on a run that is
 closed stops with 72, also when the driver fails or the session is missing
 after the close.
 
@@ -1222,7 +1230,7 @@ to the owner with its findings and every available choice.
 | `stopped`, with a branch | `send`, `accept`, `review`, `worker`, `drop` |
 | `stopped`, without a branch | `worker`, `drop` |
 | `conflict` | `worker`, `drop` |
-| `blocked` | `drop` |
+| `pending`, `blocked` | `drop` |
 | Other | None |
 
 `--send` copies the correction to `answers/<n>.md` under the same lock
@@ -1245,7 +1253,8 @@ refused.
 An optional reviewer applies to this task from then on. `--worker` closes
 the old writer without force, retains its branch, and starts a new writer
 from the flow tip. `--drop` closes the writer without force and retains its
-branch. Dropped tasks leave their dependants blocked. Retained branches
+branch. A pending task that has not started is dropped without starting a
+writer. Dropped tasks leave their dependants blocked. Retained branches
 are listed in the flow's `abandoned` field.
 
 Answers are queued, then taken between waves. The runner checks each
@@ -2749,7 +2758,9 @@ quits.
 
 A run, flow or panel change updates the icon and tooltip at once. The menu
 keeps its lines until it next opens, when it rebuilds them. A click from a
-stale menu still triggers its action after the menu closes. Quit Ember hides
+stale menu still triggers its action after the menu closes. When a run's
+line cannot open its terminal, such as for a run closed while the menu was
+open, the window shows with the error in its alert. Quit Ember hides
 the window and the tray icon at once, then waits up to 12 seconds for running
 background tasks to end before the app exits.
 

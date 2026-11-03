@@ -115,7 +115,9 @@ def test_actions(
     run = write_run(make_run(env))
     tray, context, calls = _tray(env, qtbot)
     opened: list[str] = []
-    monkeypatch.setattr(context, "open_run_terminal", opened.append)
+    monkeypatch.setattr(
+        context, "open_run_terminal", lambda run_id, *_: opened.append(run_id)
+    )
     actions = tray.menu.actions()
     actions[1].trigger()
     assert opened == [run.id]
@@ -125,6 +127,19 @@ def test_actions(
     tray._activated(QSystemTrayIcon.ActivationReason.Trigger)
     tray._activated(QSystemTrayIcon.ActivationReason.Context)
     assert calls == ["open", "quit", "open"]
+    context.runs.stop()
+
+
+def test_failed_terminal_click_opens_the_window(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    write_run(make_run(env))
+    tray, context, calls = _tray(env, qtbot)
+    errors: list[str] = []
+    context.error.connect(errors.append)
+    tray.menu.actions()[1].trigger()
+    qtbot.waitUntil(lambda: calls == ["open"], timeout=5000)
+    assert len(errors) == 1
     context.runs.stop()
 
 
@@ -164,7 +179,9 @@ def test_stale_menu_actions_run_after_hide(
     run = write_run(make_run(env))
     tray, context, calls = _tray(env, qtbot)
     opened: list[str] = []
-    monkeypatch.setattr(context, "open_run_terminal", opened.append)
+    monkeypatch.setattr(
+        context, "open_run_terminal", lambda run_id, *_: opened.append(run_id)
+    )
     shown = tray.menu.actions()
     live_icon = tray.icon.icon().cacheKey()
     if change_after_hide:
@@ -261,7 +278,9 @@ def test_parents_and_nested_workers(
         ]
         assert tray.icon.toolTip() == "Ember · 1 run, 1 flow, 1 panel live"
         opened: list[str] = []
-        monkeypatch.setattr(context, "open_run_terminal", opened.append)
+        monkeypatch.setattr(
+            context, "open_run_terminal", lambda run_id, *_: opened.append(run_id)
+        )
         for action in tray.menu.actions()[1:6]:
             action.trigger()
         assert opened == [panel_run.id, standalone.id, flow_run.id]
@@ -358,7 +377,9 @@ def test_finished_parent_leaves_live_worker_at_tray_top_level(
         assert tray.icon.toolTip() == "Ember · 1 run live"
         assert tray._live
         opened: list[str] = []
-        monkeypatch.setattr(context, "open_run_terminal", opened.append)
+        monkeypatch.setattr(
+            context, "open_run_terminal", lambda run_id, *_: opened.append(run_id)
+        )
         tray.menu.actions()[1].trigger()
         assert opened == [worker.id]
         window = MainWindow(context, has_tray=True, quit_app=lambda: None)
@@ -419,7 +440,9 @@ def test_flow_ending_promotes_worker_without_losing_stale_terminal_action(
         tray.menu.aboutToHide.emit()
         QCoreApplication.processEvents()
         opened: list[str] = []
-        monkeypatch.setattr(context, "open_run_terminal", opened.append)
+        monkeypatch.setattr(
+            context, "open_run_terminal", lambda run_id, *_: opened.append(run_id)
+        )
         shown[1].trigger()
         shown[2].trigger()
         assert calls == ["overview"]

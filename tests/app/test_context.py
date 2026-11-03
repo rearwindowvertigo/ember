@@ -580,6 +580,19 @@ def test_open_run_terminal_reports_the_failure(
     assert "codex-20260101-120000-abcdef" in _first(blocker.args)
 
 
+def test_open_run_terminal_calls_on_failure_after_the_error(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    context = AppContext(env)
+    order: list[str] = []
+    context.error.connect(lambda _text: order.append("error"))
+    with qtbot.waitSignal(context.error, timeout=5000):
+        context.open_run_terminal(
+            "codex-20260101-120000-abcdef", lambda: order.append("failure")
+        )
+    qtbot.waitUntil(lambda: order == ["error", "failure"])
+
+
 @pytest.mark.parametrize("token", [None, "", "tray-click-token"])
 @pytest.mark.parametrize("snapshot_token", [None, "startup-token"])
 def test_open_run_terminal_consumes_the_native_token_once(
