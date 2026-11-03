@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.0](https://github.com/rearwindowvertigo/ember/compare/v0.5.0...v0.6.0) (2026-11-03)
+
+
+### Added
+
+* **app:** remove the screen mirror from Overview ([9534226](https://github.com/rearwindowvertigo/ember/commit/9534226f78a070b389a46912fc78a1ba34c94f95)), closes [#47](https://github.com/rearwindowvertigo/ember/issues/47)
+
+
+### Fixed
+
+* **app:** show the window when a tray terminal click fails ([1f62e25](https://github.com/rearwindowvertigo/ember/commit/1f62e25bd9ef61358f438b35eddd0f95907545a9)), closes [#37](https://github.com/rearwindowvertigo/ember/issues/37)
+* **choices:** say what a finished claim was before the finish ([c2e8111](https://github.com/rearwindowvertigo/ember/commit/c2e8111ca54d213b981b03222178db40e16b7dd9)), closes [#45](https://github.com/rearwindowvertigo/ember/issues/45)
+* **flow:** accept --drop for a pending task ([ee32580](https://github.com/rearwindowvertigo/ember/commit/ee32580b3cef833a4cdf47feac0389171e2388e7)), closes [#44](https://github.com/rearwindowvertigo/ember/issues/44)
+* **run:** end a worker's leftover processes when its run closes ([48cde67](https://github.com/rearwindowvertigo/ember/commit/48cde67696d82579c8d464a19bbd3d68cef02ce6)), closes [#46](https://github.com/rearwindowvertigo/ember/issues/46)
+
 ## [0.5.0](https://github.com/rearwindowvertigo/ember/compare/v0.4.0...v0.5.0) (2026-11-03)
 
 
