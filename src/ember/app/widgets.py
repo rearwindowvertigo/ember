@@ -620,33 +620,6 @@ class Badge(QLabel):
         repolish(self)
 
 
-class TypeMarker(QWidget):
-    """A grey icon and word identifying a run, flow or panel."""
-
-    def __init__(self, kind: str, parent: QWidget | None = None) -> None:
-        """Build the marker using an existing Lucide icon."""
-        super().__init__(parent)
-        self._icon_name = {"Run": "terminal", "Flow": "list-checks", "Panel": "cpu"}[
-            kind
-        ]
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 2, 0, 2)
-        layout.setSpacing(4)
-        self.icon_label = QLabel()
-        self.label = QLabel(kind)
-        self.label.setProperty("role", "secondary")
-        layout.addWidget(self.icon_label)
-        layout.addWidget(self.label)
-        self.setAccessibleName(kind)
-        theme.signals.changed.connect(self._draw_icon)
-        self._draw_icon()
-
-    def _draw_icon(self, *_args: object) -> None:
-        self.icon_label.setPixmap(
-            icons.pixmap(self._icon_name, theme.color("text-secondary"), 16)
-        )
-
-
 class Card(QFrame):
     """A flat card with a hairline border."""
 

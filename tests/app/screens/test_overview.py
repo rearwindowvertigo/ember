@@ -143,21 +143,18 @@ def test_rows_and_badges(
         "Waiting for Claude",
         "warning",
     )
-    assert first.title_label.text() == "Codex · gpt-5 · high"
-    assert second.title_label.text() == "Claude · opus"
-    assert (
-        first.detail_label.text()
-        == f"starting · project · ember/codex/{LIVE_A} · turn 1"
-    )
-    assert second.detail_label.text() == "waiting · beta · read-only · turn 3"
+    assert first.title_label.text() == "Run · Codex · gpt-5 · high"
+    assert second.title_label.text() == "Run · Claude · opus"
+    assert first.detail_label.text() == f"project · ember/codex/{LIVE_A} · turn 1"
+    assert second.detail_label.text() == "beta · read-only · turn 3"
     assert first.time_label.text().endswith(("min", "h"))
 
     assert list(screen.finished_rows) == [DONE_B, DONE_A]
     failed, closed = screen.finished_rows.values()
     assert (failed.badge.text(), failed.badge.tone()) == ("Failed", "danger")
     assert (closed.badge.text(), closed.badge.tone()) == ("Done", "success")
-    assert closed.title_label.text() == "OpenCode · openrouter/x · high"
-    assert closed.detail_label.text() == f"closed · Fix the bug · ember/codex/{DONE_A}"
+    assert closed.title_label.text() == "Run · OpenCode · openrouter/x · high"
+    assert closed.detail_label.text() == f"Fix the bug · ember/codex/{DONE_A}"
     assert closed.time_label.text().endswith("· 8 min")
     assert not screen.state_view.empty.isVisible()
 
@@ -488,7 +485,7 @@ def test_finished_row_redraws_when_its_values_change(
     # place, so wait for the record the test wrote rather than one signal.
     qtbot.waitUntil(lambda: row.run.subject == "Fix it", timeout=5000)
     assert screen.finished_rows[DONE_A] is row
-    assert row.detail_label.text().startswith("closed · Fix it · ")
+    assert row.detail_label.text().startswith("Fix it · ")
     assert row.details is not None
     assert dict(overview.record_rows(row.run))["Subject"] == "Fix it"
     texts = [label.text() for label in row.details.findChildren(QLabel)]
@@ -515,7 +512,7 @@ def labels(widget: QWidget) -> list[str]:
 
 def test_record_formatters(env: dict[str, str]) -> None:
     flow = make_flow(env, count=1)
-    assert overview.flow_title(flow) == "project · 1 task · 0/1 merged"
+    assert overview.flow_title(flow) == "Flow · project · 1 task · 0/1 merged"
     assert overview.flow_detail(flow) == f"ember/flow/{FLOW}"
     task = flow["tasks"][0]
     assert overview.task_line(flow, task) == (
@@ -541,7 +538,7 @@ def test_record_formatters(env: dict[str, str]) -> None:
     assert overview.item_time(0, None, 180) == "3 min"
     assert overview.item_time(0, 120, 180).endswith(" · 2 min")
     flow["tasks"] = []
-    assert overview.flow_title(flow) == "project · 0 tasks · 0/0 merged"
+    assert overview.flow_title(flow) == "Flow · project · 0 tasks · 0/0 merged"
     panel["members"] = []
     assert overview.panel_title(panel) == "Panel · 0 members · 0/0 answered"
 
@@ -575,9 +572,9 @@ def test_flow_details_and_nested_runs(
     assert screen.finished_empty.isVisible()
     row = screen.flow_rows[FLOW]
     assert row.badge.text() == "Waiting for Claude"
-    assert row.title_label.text() == "project · 2 tasks · 1/2 merged"
+    assert row.title_label.text() == "Flow · project · 2 tasks · 1/2 merged"
     assert row.detail_label.text() == (
-        f"stopped · 1 live run · ember/flow/{FLOW} · wave 2 of 2 · Needs an answer"
+        f"1 live run · ember/flow/{FLOW} · wave 2 of 2 · Needs an answer"
     )
     qtbot.mouseClick(row.expand_button, Qt.MouseButton.LeftButton)
     assert row.details is not None
@@ -627,7 +624,7 @@ def test_panel_details(env: dict[str, str], context: AppContext, qtbot: QtBot) -
     row = screen.panel_rows[PANEL]
     assert row.badge.text() == "Incomplete"
     assert row.title_label.text() == "Panel · 3 members · 1/3 answered"
-    assert row.detail_label.text() == "incomplete · project"
+    assert row.detail_label.text() == "project"
     assert row.question_label.text() == "A question"
     qtbot.mouseClick(row.expand_button, Qt.MouseButton.LeftButton)
     text = labels(row)
@@ -1029,9 +1026,9 @@ def test_cancelled_parent_keeps_live_workers_and_their_controls(
         assert item is not None
         assert item.widget() is row
         assert row.badge.text() == "Incomplete" and row.badge.tone() == "incomplete"
-        assert row.detail_label.text().startswith("cancelled · 2 live runs · ")
+        assert row.detail_label.text().startswith("2 live runs · ")
         assert "Owner stopped it" in row.detail_label.text()
-        assert row.type_marker.label.text() == "Flow"
+        assert row.title_label.text().startswith("Flow · ")
         assert row.nested.count() == 2
         child = screen.live_rows[LIVE_A]
         assert child.badge.text() == "Waiting for Claude"
@@ -1045,7 +1042,7 @@ def test_cancelled_parent_keeps_live_workers_and_their_controls(
         qtbot.waitUntil(lambda: LIVE_A in screen.finished_rows)
         assert screen.expanded_live is None
         assert row.nested.indexOf(screen.finished_rows[LIVE_A]) >= 0
-        assert row.detail_label.text().startswith("cancelled · 1 live run · ")
+        assert row.detail_label.text().startswith("1 live run · ")
         assert screen.finished_rows[LIVE_A].badge.text() == "Done"
     finally:
         theme.apply(qapp, previous)
@@ -1198,7 +1195,7 @@ def test_flow_status_chips(
     screen = screen_for(context, qtbot)
     row = screen.flow_rows[FLOW]
     assert (row.badge.text(), row.badge.tone()) == (text, tone)
-    assert row.detail_label.text().startswith(status + " · ")
+    assert row.detail_label.text().startswith(f"ember/flow/{FLOW}")
 
 
 def test_finished_filters_combine_and_persist(
@@ -1652,8 +1649,19 @@ def test_rows_line_up_in_fixed_columns(
     def left(widget: QWidget, row: QWidget) -> int:
         return widget.mapTo(row, widget.rect().topLeft()).x()
 
-    for part in ("expand_button", "type_marker", "badge", "title_label"):
+    for part in ("expand_button", "badge", "title_label"):
         assert len({left(getattr(row, part), row) for row in rows}) == 1, part
+
+    def middle(widget: QWidget, row: QWidget) -> int:
+        return widget.mapTo(row, widget.rect().center()).y()
+
+    for row in rows:
+        lines = (
+            row.title_label.mapTo(row, row.title_label.rect().topLeft()).y()
+            + row.detail_label.mapTo(row, row.detail_label.rect().bottomLeft()).y()
+        ) // 2
+        assert abs(middle(row.expand_button, row) - lines) <= 1
+        assert abs(middle(row.badge, row) - lines) <= 1
     for row in rows:
         assert row.expand_button.property("kind") == "secondary"
         assert not row.detail_label.wordWrap()
@@ -1746,7 +1754,7 @@ def test_finished_parent_hides_its_runs_until_expanded(
     row = screen.flow_rows[FLOW]
     assert row.collapsed_runs
     assert not row.nested_box.isVisible()
-    assert " · 2 runs · " in row.detail_label.text()
+    assert row.detail_label.text().startswith("2 runs · ")
     row.expand_button.click()
     assert row.nested_box.isVisible()
     assert screen.finished_rows[first].isVisible()

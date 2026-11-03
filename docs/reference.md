@@ -2862,10 +2862,11 @@ the filters. Confirmation and result lists scroll within the available
 screen height.
 
 Every row has the same columns, each a fixed width, so rows line up: a
-round expand button with an outline and a chevron, a grey icon and the word
-Run, Flow or Panel, one of six status chips, the text, and the time and
-actions on the right. The marker and chip columns are as wide as the widest
-marker and chip. The title and second line each show one line, cut with an
+round expand button with an outline and a chevron, one of six status chips,
+the text, and the time and actions on the right. The chip column is as wide
+as the widest chip. The expand button and the chip are centred vertically
+on the text lines. The title starts with the row's type: `Run`, `Flow` or
+`Panel`. The title and second line each show one line, cut with an
 ellipsis, with the whole text in a tooltip. Chips are 22 pixels tall with
 6-pixel corners. The status chips:
 
@@ -2878,8 +2879,9 @@ ellipsis, with the whole text in a tooltip. Chips are 22 pixels tall with
 | Incomplete | A panel's `incomplete`, a flow's `cancelled` | Purple |
 | Failed | `failed`, a gone flow runner or panel process | Red |
 
-The second line includes the finer state and any flow reason. A cancelled
-flow appears in Finished with `cancelled` and its reason. A starting,
+The second line does not repeat the status the chip shows; the expanded
+record shows it. A flow's second line includes any reason. A cancelled
+flow appears in Finished with Incomplete and its reason. A starting,
 running or checking flow whose lifetime lock is not held and whose record
 has not changed for more than sixty seconds stays in Live with Failed and
 `runner gone`. A running panel uses Failed and `panel process gone` under
@@ -2899,13 +2901,14 @@ shows `Started <time> · <duration>`: its run time once ended, its elapsed
 time while live. In Finished, a parent's nested runs are hidden until its
 details are expanded, and its second line adds `1 run` or `<n> runs`; a
 Finished parent with a live nested run keeps them shown. The parent's
-second line includes `1 live run` or `<n> live runs` after the finer state
-when that count is above zero.
+second line starts with `1 live run` or `<n> live runs` when that count is
+above zero.
 
-A flow's title shows the repository folder, task count and merged count.
+A flow's title, after `Flow`, shows the repository folder, task count and
+merged count.
 Its second line includes its branch, active plan wave and reason. Expanded,
-it shows the pass count and task, writer and review details. A panel's title
-shows its member and answer counts; its second line includes the repository
+it shows the pass count and task, writer and review details. A panel's title,
+after `Panel`, shows its member and answer counts; its second line includes the repository
 folder. The first non-empty question line appears on a third line, elided
 to fit, with its full text in the tooltip. Expanded, a panel shows member
 status, worker, duration, reason and changed paths, and left-out members.
@@ -2922,7 +2925,7 @@ Buttons pass a file URL to `QDesktopServices.openUrl` for the desktop's
 default viewer. If it returns false, a warning names the path and says no
 viewer opened it.
 
-Run rows show engine, model and effort. A live run's second line includes
+A run's title, after `Run`, shows engine, model and effort. A live run's second line includes
 the repository folder, branch or `read-only`, and turn number; an ended
 run's includes its subject and branch. Live runs have Open terminal, which
 opens a terminal window on the run as `emb run --attach` does. Expanding a

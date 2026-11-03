@@ -50,7 +50,6 @@ from ember.app.widgets import (
     Card,
     ElidedLabel,
     StateView,
-    TypeMarker,
     button,
     set_icon,
 )
@@ -115,11 +114,13 @@ PANEL_BADGES = {
 
 
 def flow_title(flow: Mapping[str, Any]) -> str:
-    """Return the repository, task count and merged count."""
+    """Return "Flow · <repository> · <tasks> · <merged>/<tasks> merged"."""
     tasks = flow["tasks"]
     folder = PurePosixPath(flow["dir"]).name or flow["dir"]
     merged = sum(task["status"] == "merged" for task in tasks)
-    return f"{folder} · {plural(len(tasks), 'task')} · {merged}/{len(tasks)} merged"
+    return (
+        f"Flow · {folder} · {plural(len(tasks), 'task')} · {merged}/{len(tasks)} merged"
+    )
 
 
 def flow_detail(flow: Mapping[str, Any]) -> str:
@@ -217,15 +218,20 @@ def branch_text(run: Run) -> str:
     return "read-only" if run.read_only or not run.branch else run.branch
 
 
+def run_title(run: Run) -> str:
+    """Return "Run · <Engine> · <model> · <effort>"."""
+    return f"Run · {worker_line(run)}"
+
+
 def live_detail(run: Run) -> str:
     """Return "<repository folder> · <branch or read-only> · turn <n>"."""
     folder = PurePosixPath(run.repo).name or run.repo
-    return f"{run.status} · {folder} · {branch_text(run)} · turn {run.turn}"
+    return f"{folder} · {branch_text(run)} · turn {run.turn}"
 
 
 def finished_detail(run: Run) -> str:
     """Return "<subject> · <branch or read-only>"."""
-    return f"{run.status} · {run.subject} · {branch_text(run)}"
+    return f"{run.subject} · {branch_text(run)}"
 
 
 def _ended_at(run: Run) -> float:
@@ -459,35 +465,35 @@ def sandbox_warning(engine: str) -> str:
     )
 
 
-def _column_widths() -> tuple[int, int]:
-    """Return the widths of the type marker and status chip columns.
+def _chip_width() -> int:
+    """Return the status chip column's width.
 
-    Each is the widest marker or chip any row can show, so a wider word
-    never moves the next column.
+    It is the widest chip any row can show, so a wider word never moves
+    the text column.
     """
     if not _COLUMNS:
-        markers = [TypeMarker(kind) for kind in ("Run", "Flow", "Panel")]
         chips = [
             Badge(text, tone)
             for table in (BADGES, FLOW_BADGES, PANEL_BADGES)
             for text, tone in table.values()
         ]
-        _COLUMNS.append(max(marker.sizeHint().width() for marker in markers))
         _COLUMNS.append(max(chip.sizeHint().width() for chip in chips))
-        for widget in (*markers, *chips):
-            widget.deleteLater()
-    return _COLUMNS[0], _COLUMNS[1]
+        for chip in chips:
+            chip.deleteLater()
+    return _COLUMNS[0]
 
 
 _COLUMNS: list[int] = []
 
 
 class _ExpandableRow(QWidget):
-    """An expand button, type marker, chip, text, time, actions and a body.
+    """An expand button, chip, text, time, actions and a body.
 
-    The columns have fixed widths so rows line up. The title and detail
-    lines each show one line, cut with an ellipsis, with the whole text in
-    their tooltips; a third such line shows a question.
+    The columns have fixed widths so rows line up. The title starts with the
+    row's type (Run, Flow or Panel). The title and detail lines each show
+    one line, cut with an ellipsis, with the whole text in their tooltips; a
+    third such line shows a question. The expand button and the chip are
+    centred on the text lines.
     """
 
     def __init__(self, item_id: str, kind: str, what: str) -> None:
@@ -503,21 +509,17 @@ class _ExpandableRow(QWidget):
         outer.setSpacing(12)
         header = QHBoxLayout()
         header.setSpacing(12)
-        marker_width, chip_width = _column_widths()
         self.expand_button = button("", "secondary", size="sm")
         self.expand_button.setFixedWidth(theme.CONTROL_SM)
-        header.addWidget(self.expand_button, 0, Qt.AlignmentFlag.AlignTop)
-        self.type_marker = TypeMarker(kind.capitalize())
-        self.type_marker.setFixedWidth(marker_width)
-        header.addWidget(self.type_marker, 0, Qt.AlignmentFlag.AlignTop)
+        header.addWidget(self.expand_button, 0, Qt.AlignmentFlag.AlignVCenter)
         chip_column = QWidget()
-        chip_column.setFixedWidth(chip_width)
+        chip_column.setFixedWidth(_chip_width())
         chip_layout = QHBoxLayout(chip_column)
-        chip_layout.setContentsMargins(0, 4, 0, 0)
+        chip_layout.setContentsMargins(0, 0, 0, 0)
         self.badge = Badge("", "neutral")
         chip_layout.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignLeft)
         chip_layout.addStretch(1)
-        header.addWidget(chip_column, 0, Qt.AlignmentFlag.AlignTop)
+        header.addWidget(chip_column, 0, Qt.AlignmentFlag.AlignVCenter)
         lines = QVBoxLayout()
         lines.setSpacing(2)
         self.title_label = ElidedLabel()
@@ -642,7 +644,7 @@ class _LiveRow(_Row):
 
     def set_run(self, run: Run) -> None:
         super().set_run(run)
-        self.title_label.setText(worker_line(run))
+        self.title_label.setText(run_title(run))
         self.detail_label.setText(live_detail(run))
         self.update_elapsed()
         self.open_button.setAccessibleDescription(f"Open run {run.id} in a terminal")
@@ -673,7 +675,7 @@ class _FinishedRow(_Row):
         """Return everything the row shows of a run, expanded or not."""
         return (
             run.status,
-            worker_line(run),
+            run_title(run),
             finished_detail(run),
             finished_time(run),
             tuple(record_rows(run)),
@@ -687,7 +689,7 @@ class _FinishedRow(_Row):
             return
         self.shown_values = values
         super().set_run(run)
-        self.title_label.setText(worker_line(run))
+        self.title_label.setText(run_title(run))
         self.detail_label.setText(finished_detail(run))
         self.draw_time()
 
@@ -738,16 +740,17 @@ class _RecordRow(_ExpandableRow):
         badge = badges.get(
             "gone" if item.gone else data["status"], (data["status"], "neutral")
         )
-        state = data["status"]
+        # The chip shows the status; the detail adds only what it does not.
+        parts = []
         if item.gone:
-            state = (
+            parts.append(
                 "runner gone" if isinstance(item, FlowItem) else "panel process gone"
             )
         if self.live_count:
-            state += f" · {plural(self.live_count, 'live run')}"
+            parts.append(plural(self.live_count, "live run"))
         if self.collapsed_runs and self.run_count:
-            state += f" · {plural(self.run_count, 'run')}"
-        detail = f"{state} · {detail}"
+            parts.append(plural(self.run_count, "run"))
+        detail = " · ".join([*parts, detail])
         self.question_label.setText(
             item.question if isinstance(item, PanelItem) else ""
         )
