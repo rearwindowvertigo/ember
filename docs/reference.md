@@ -2731,6 +2731,11 @@ durations as `18 min`, `1 h 5 min` or `2 h`.
 | Left, Right, Home, End | In a screen mirror that has focus: scroll it sideways |
 | Up, Down, Page Up, Page Down | In a screen mirror that has focus: scroll it, or the screen around it when it shows every line |
 
+A control shows the blue focus ring only when it took focus from the
+keyboard: Tab, Shift+Tab or a shortcut. A control focused by a mouse
+click shows no ring. When the app moves focus itself, the ring follows the
+last input: a key press shows it, a mouse press does not.
+
 A screen mirror takes focus with Tab and then shows the focus ring. Keys
 pressed in it never reach the run's session.
 

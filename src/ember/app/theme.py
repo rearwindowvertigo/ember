@@ -4,7 +4,8 @@ Colours are tokens with a light and a dark value. `apply` sets the Fusion
 style, a palette and one style sheet built from the tokens of a mode, and
 emits `signals.changed` so painted widgets repaint. Widgets choose style
 rules through dynamic properties (`kind`, `role`, `scale`, `tone`), never
-through object names.
+through object names. The focus ring needs `keyfocus`, which
+`widgets.FocusTracker` sets only for focus that came from the keyboard.
 """
 
 import atexit
@@ -325,6 +326,8 @@ QPushButton:disabled {
 }
 QPushButton:focus {
     outline: none;
+}
+QPushButton[keyfocus="true"]:focus {
     border: 2px solid @focus-ring;
     min-height: 32px;
     max-height: 32px;
@@ -339,7 +342,7 @@ QPushButton[kind="primary"]:hover {
     background: @fill-primary-hover;
     border-color: @fill-primary-hover;
 }
-QPushButton[kind="primary"]:focus {
+QPushButton[kind="primary"][keyfocus="true"]:focus {
     border: 2px solid @focus-ring;
 }
 QPushButton[kind="ghost"] {
@@ -349,7 +352,7 @@ QPushButton[kind="ghost"] {
 QPushButton[kind="ghost"]:hover {
     background: @bg-hover;
 }
-QPushButton[kind="ghost"]:focus {
+QPushButton[kind="ghost"][keyfocus="true"]:focus {
     border: 2px solid @focus-ring;
 }
 QPushButton[kind="danger"] {
@@ -361,7 +364,7 @@ QPushButton[kind="danger"]:hover {
     background: @danger-fill-hover;
     border-color: @danger-fill-hover;
 }
-QPushButton[kind="danger"]:focus {
+QPushButton[kind="danger"][keyfocus="true"]:focus {
     border: 2px solid @focus-ring;
 }
 QPushButton[scale="sm"] {
@@ -370,7 +373,7 @@ QPushButton[scale="sm"] {
     padding: 0 12px;
     border-radius: 16px;
 }
-QPushButton[scale="sm"]:focus {
+QPushButton[scale="sm"][keyfocus="true"]:focus {
     min-height: 28px;
     max-height: 28px;
     padding: 0 11px;
@@ -392,7 +395,7 @@ QPushButton[role="segment"]:checked {
     color: @text-primary;
     border: 1px solid @border-strong;
 }
-QPushButton[role="segment"]:focus {
+QPushButton[role="segment"][keyfocus="true"]:focus {
     border: 2px solid @focus-ring;
 }
 QLineEdit, QComboBox {
@@ -407,7 +410,7 @@ QLineEdit, QComboBox {
     selection-background-color: @accent;
     selection-color: #ffffff;
 }
-QLineEdit:focus, QComboBox:focus {
+QLineEdit[keyfocus="true"]:focus, QComboBox[keyfocus="true"]:focus {
     border: 2px solid @focus-ring;
     min-height: 32px;
     max-height: 32px;
@@ -421,7 +424,8 @@ QComboBox[scale="sm"], QLineEdit[scale="sm"] {
     max-height: 30px;
     border-radius: 16px;
 }
-QComboBox[scale="sm"]:focus, QLineEdit[scale="sm"]:focus {
+QComboBox[scale="sm"][keyfocus="true"]:focus,
+QLineEdit[scale="sm"][keyfocus="true"]:focus {
     min-height: 28px;
     max-height: 28px;
 }
@@ -474,7 +478,7 @@ QScrollArea[role="mirror"] {
     border: 2px solid transparent;
     border-radius: 8px;
 }
-QScrollArea[role="mirror"]:focus {
+QScrollArea[role="mirror"][keyfocus="true"]:focus {
     border: 2px solid @focus-ring;
 }
 QScrollBar:vertical, QScrollBar:horizontal {

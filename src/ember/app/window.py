@@ -40,7 +40,7 @@ MINIMUM_HEIGHT = 600
 ICON_SIZE = 18
 """The size of a sidebar row's icon."""
 
-BADGE_HEIGHT = 20
+BADGE_HEIGHT = 22
 """The height of a sidebar row's count, in pixels."""
 
 _NAV_STYLE = """
@@ -54,7 +54,7 @@ QPushButton[role="nav"] {{
 }}
 QPushButton[role="nav"]:hover {{ background: {hover}; }}
 QPushButton[role="nav"]:checked {{ background: {selected}; }}
-QPushButton[role="nav"]:focus {{ border: 2px solid {focus}; }}
+QPushButton[role="nav"][keyfocus="true"]:focus {{ border: 2px solid {focus}; }}
 """
 
 
