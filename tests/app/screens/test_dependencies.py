@@ -565,3 +565,43 @@ def test_skill_does_not_make_newest_summary_incomplete() -> None:
     assert "Newest versions read today" in subtitle(report, now)
     assert "not read" not in subtitle(report, now)
     assert report.counts() == 1
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_release_notice_above_groups_opens_release_page(
+    env: dict[str, str],
+    qtbot: QtBot,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    theme.apply(qapp, mode)
+    url = "https://github.com/rearwindowvertigo/ember/releases/tag/v0.3.0"
+    opened: list[str] = []
+    monkeypatch.setattr(
+        screen_module.QDesktopServices,
+        "openUrl",
+        lambda value: opened.append(value.toString()),
+    )
+    base = _report(*SAMPLE)
+    report = replace(base, ember_release=deps.EmberRelease("0.3.0", url))
+    widget, context, calls = _screen(env, qtbot, monkeypatch, report)
+    alert = widget.release_alert
+    assert alert is not None and alert.isVisible()
+    assert alert.tone() == "info"
+    assert alert.title_label.text() == "Ember 0.3.0 is available"
+    assert alert.geometry().bottom() < widget.scroll_area.geometry().top()
+    assert widget.subtitle.text() == subtitle(base)
+    assert report.counts() == base.counts()
+    widget.check_button.setFocus()
+    widget.focusNextChild()
+    assert widget.focusWidget() == alert.buttons[0]
+    assert alert.buttons[0].text() == "Download"
+    alert.buttons[0].click()
+    assert opened == [url]
+    assert calls.commands == []
+    context._deps = base
+    context.deps_changed.emit(base)
+    assert widget.release_alert is None
+    assert widget.alert is None
+    assert widget.order()

@@ -43,6 +43,8 @@ class Fetcher:
 
     def __call__(self, url: str, timeout: float) -> str:
         assert timeout == deps.TIMEOUT
+        if url == deps.EMBER_RELEASE_URL and url not in self.replies:
+            raise OSError("no release fixture")
         self.calls.append(url)
         reply = self.replies[url]
         if isinstance(reply, Exception):
@@ -1504,7 +1506,9 @@ def test_none_newest_discards_cached_version(
     _read(env, APT)
     spec = replace(_specs(APT)[0], newest=deps.Source("none"))
     _stub(env, "apt-cache", 'echo unexpected > "' + env["PATH"] + '/read-newest"')
-    report = deps.read(env, components=(spec,), newest=newest, now=NOW)
+    report = deps.read(
+        env, components=(spec,), newest=newest, now=NOW, fetch=Fetcher({})
+    )
     assert _one(report).newest is None
     assert report.newest_read_at == {"tmux": None}
     assert report.oldest_newest_read() is None
@@ -1522,3 +1526,153 @@ def test_skill_requires_no_newest_source() -> None:
             'installed = { kind = "skill" }\n'
             'newest = { kind = "pypi", package = "example" }\n'
         )
+
+
+# Ember releases
+
+
+RELEASE_PAGE = "https://github.com/rearwindowvertigo/ember/releases/tag/v0.3.0"
+RELEASE_BODY = json.dumps({"tag_name": "v0.3.0", "html_url": RELEASE_PAGE})
+
+
+@pytest.fixture
+def ember_version(monkeypatch: pytest.MonkeyPatch) -> list[str | None]:
+    versions: list[str | None] = ["0.2.1"]
+
+    def version(package: str) -> str:
+        assert package == "ember-app"
+        if versions[0] is None:
+            raise deps.importlib.metadata.PackageNotFoundError(package)
+        return versions[0]
+
+    monkeypatch.setattr(deps.importlib.metadata, "version", version)
+    return versions
+
+
+@pytest.mark.parametrize(
+    ("installed", "tag", "expected"),
+    [
+        ("0.2.1", "v0.3.0", "0.3.0"),
+        ("0.2.1", "0.10.0", "0.10.0"),
+        ("0.3", "v0.3.0", None),
+        ("0.4.0", "v0.3.0", None),
+        ("0.3.0.dev1", "v0.4.0", None),
+        ("0.2.1", "v0.3.0-rc1", None),
+        (None, "v0.3.0", None),
+    ],
+)
+def test_ember_release_comparison(
+    env: dict[str, str],
+    ember_version: list[str | None],
+    installed: str | None,
+    tag: str,
+    expected: str | None,
+) -> None:
+    ember_version[0] = installed
+    fetch = Fetcher(
+        {
+            deps.EMBER_RELEASE_URL: json.dumps(
+                {"tag_name": tag, "html_url": RELEASE_PAGE}
+            )
+        }
+    )
+    report = deps.read(env, components=(), fetch=fetch, now=NOW)
+    assert fetch.calls == [deps.EMBER_RELEASE_URL]
+    assert report.to_json()["ember_release"] == (
+        {"version": expected, "url": RELEASE_PAGE} if expected else None
+    )
+    assert report.counts() == 0
+    assert report.newest_read_at == {}
+    assert report.oldest_newest_read() is None
+    assert report.newest_read_complete()
+
+
+def test_ember_release_cache_modes_and_installed_upgrade(
+    env: dict[str, str], ember_version: list[str | None]
+) -> None:
+    fetch = Fetcher({deps.EMBER_RELEASE_URL: RELEASE_BODY})
+    report = deps.read(env, components=(), fetch=fetch, now=NOW, newest="never")
+    assert report.ember_release is None
+    assert fetch.calls == []
+    first = deps.read(env, components=(), fetch=fetch, now=NOW)
+    assert first.ember_release == deps.EmberRelease("0.3.0", RELEASE_PAGE)
+    assert _cache(env)["ember_release"] == {
+        "tag_name": "v0.3.0",
+        "url": RELEASE_PAGE,
+        "read_at": NOW,
+    }
+    assert deps._load_cache(env) == {}
+    for mode, when in [("due", NOW + deps.MAX_AGE - 1), ("never", NOW + 7 * HOUR)]:
+        assert (
+            deps.read(
+                env, components=(), fetch=fetch, now=when, newest=mode
+            ).ember_release
+            == first.ember_release
+        )
+    assert len(fetch.calls) == 1
+    deps.read(env, components=(), fetch=fetch, now=NOW + 1, newest="always")
+    assert len(fetch.calls) == 2
+    deps.read(env, components=(), fetch=fetch, now=NOW + 1 + deps.MAX_AGE)
+    assert len(fetch.calls) == 3
+    ember_version[0] = "0.3.0"
+    report = deps.read(
+        env, components=(), fetch=fetch, now=NOW + 2 + deps.MAX_AGE, newest="never"
+    )
+    assert report.ember_release is None
+    assert len(fetch.calls) == 3
+
+
+@pytest.mark.parametrize("has_cache", [False, True])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError("timed out"),
+        OSError("offline"),
+        "not JSON",
+        "[]",
+        "{}",
+        '{"tag_name": 3, "html_url": "https://example.test"}',
+        '{"tag_name": "v0.4.0", "html_url": null}',
+        '{"tag_name": "v0.4.0", "html_url": ""}',
+        '{"tag_name": "bad", "html_url": "https://example.test"}',
+    ],
+)
+def test_ember_release_failure_keeps_cache_and_retries(
+    env: dict[str, str],
+    ember_version: list[str | None],
+    failure: str | Exception,
+    has_cache: bool,
+) -> None:
+    fetch = Fetcher({deps.EMBER_RELEASE_URL: RELEASE_BODY})
+    if has_cache:
+        deps.read(env, components=(), fetch=fetch, now=NOW)
+    before = _cache(env).get("ember_release") if has_cache else None
+    fetch.replies[deps.EMBER_RELEASE_URL] = failure
+    report = deps.read(env, components=(), fetch=fetch, now=NOW + 1, newest="always")
+    assert report.ember_release is None
+    assert _cache(env).get("ember_release") == before
+    fetch.replies[deps.EMBER_RELEASE_URL] = RELEASE_BODY
+    count = len(fetch.calls)
+    deps.read(env, components=(), fetch=fetch, now=NOW + 2, newest="never")
+    assert len(fetch.calls) == count
+    report = deps.read(env, components=(), fetch=fetch, now=NOW + 3)
+    assert report.ember_release == deps.EmberRelease("0.3.0", RELEASE_PAGE)
+    assert len(fetch.calls) == count + 1
+    assert "ember_release_retry" not in _cache(env)
+
+
+def test_release_cache_does_not_become_a_component(
+    env: dict[str, str], ember_version: list[str | None]
+) -> None:
+    _apt_stubs(env, "1.0", "1.0", older=False)
+    fetch = Fetcher({deps.EMBER_RELEASE_URL: RELEASE_BODY})
+    report = _read(env, APT, fetch)
+    assert list(deps._load_cache(env)) == ["tmux"]
+    assert list(_cache(env)) == ["components", "ember_release"]
+    assert report.counts() == 0
+    assert report.newest_read_at == {"tmux": NOW}
+    assert report.oldest_newest_read() == NOW
+    assert report.newest_read_complete()
+    _read(env, APT, fetch, now=NOW + 1, newest="always")
+    report = _read(env, APT, fetch, now=NOW + 2, newest="never")
+    assert report.oldest_newest_read() == NOW + 1
