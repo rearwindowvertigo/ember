@@ -375,6 +375,11 @@ QPushButton[kind="danger-outline"] {
 QPushButton[kind="danger-outline"]:hover {
     background: @danger-bg;
 }
+QPushButton[kind="danger-outline"]:disabled {
+    color: @text-disabled;
+    border-color: @border;
+    background: transparent;
+}
 QPushButton[kind="danger-outline"][keyfocus="true"]:focus {
     border: 2px solid @focus-ring;
 }

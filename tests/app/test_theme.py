@@ -291,3 +291,28 @@ def test_badge_is_short_with_rounded_corners(
     finally:
         theme.apply(qapp, previous)
         qapp.setStyleSheet("")
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_disabled_danger_outline_looks_disabled(
+    qapp: QApplication, qtbot: QtBot, mode: str
+) -> None:
+    previous = theme.current_mode()
+    try:
+        theme.apply(qapp, mode)
+        clear = widgets.button("Clear", "danger-outline", size="sm")
+        qtbot.addWidget(clear)
+        clear.resize(120, 32)
+        clear.show()
+        qtbot.waitExposed(clear)
+        enabled = clear.grab().toImage()
+        top = enabled.pixelColor(enabled.width() // 2, 0).name()
+        assert top == theme.hex_value("danger-text", mode)
+        clear.setEnabled(False)
+        disabled = clear.grab().toImage()
+        assert disabled.pixelColor(disabled.width() // 2, 0).name() == (
+            theme.hex_value("border", mode)
+        )
+    finally:
+        theme.apply(qapp, previous)
+        qapp.setStyleSheet("")
