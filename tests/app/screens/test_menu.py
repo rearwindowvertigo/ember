@@ -322,6 +322,12 @@ def test_cards_and_subtitle(env: dict[str, str], qtbot: QtBot) -> None:
     assert menu.SUBTITLE in _texts(screen)
     assert menu.MULTI_HELP in _texts(screen)
     assert menu.PANEL_HELP in _texts(screen)
+    assert (
+        "Reads the writer's branch and reports. Never edits. "
+        "Used for read-only single runs, a flow's reviewer when its plan and "
+        "command name none, and every gap check that names no reviewer, "
+        "including the one before a flow."
+    ) in _texts(screen)
     assert screen.multi.accessibleName() == "Multi-task work"
     assert screen.add_member.accessibleName() == "Add panel member"
 
