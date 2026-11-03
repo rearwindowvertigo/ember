@@ -1,10 +1,22 @@
+import os
+import subprocess
+import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
-from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QGuiApplication, QIcon, QPaintEvent, QTextLayout
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QLineEdit
+from PySide6.QtCore import QPoint, Qt, QTimer
+from PySide6.QtGui import (
+    QClipboard,
+    QContextMenuEvent,
+    QGuiApplication,
+    QIcon,
+    QPaintEvent,
+    QTextLayout,
+)
+from PySide6.QtWidgets import QApplication, QDialog, QFrame, QLabel, QLineEdit, QMenu
 from pytestqt.qtbot import QtBot
 
 from ember.app import theme, widgets
@@ -402,6 +414,175 @@ def test_run_command_dialog_only_run_accepts(qtbot: QtBot) -> None:
     dialog = _dialog(qtbot)
     qtbot.mouseClick(dialog.run_button, Qt.MouseButton.LeftButton)
     assert dialog.result() == QDialog.DialogCode.Accepted
+
+
+def test_run_command_dialog_copies_original(qtbot: QtBot) -> None:
+    command = "/opt/tools/bin/tool --path /home/owner/project"
+    dialog = _dialog(qtbot, command)
+    label = dialog.command
+    assert label.text() == command.replace("/", "/\u200b")
+    assert label.accessibleName() == label.accessibleDescription() == command
+    label.setFocus()
+    label.setSelection(0, 6)
+    qtbot.keyClick(label, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+    assert QGuiApplication.clipboard().text() == command
+    qtbot.mouseClick(dialog.copy_button, Qt.MouseButton.LeftButton)
+    assert QGuiApplication.clipboard().text() == command
+    assert dialog.result() == QDialog.DialogCode.Rejected
+    assert dialog.isVisible()
+
+    def copy_selection() -> None:
+        menu = label.findChild(QMenu)
+        assert menu is not None
+        menu.actions()[0].trigger()
+        menu.close()
+
+    QTimer.singleShot(0, copy_selection)
+    event = QContextMenuEvent(QContextMenuEvent.Reason.Mouse, QPoint(), QPoint())
+    label.contextMenuEvent(event)
+    assert QGuiApplication.clipboard().text() == "/opt/"
+
+
+@pytest.mark.parametrize("selection", ("mouse", "keyboard"))
+@pytest.mark.parametrize("backend", ("native", "double"))
+def test_run_command_dialog_primary_selection(
+    qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, selection: str, backend: str
+) -> None:
+    clipboard = QGuiApplication.clipboard()
+    if backend == "double":
+        contents: dict[QClipboard.Mode, str] = {}
+        clipboard = Mock(spec=QClipboard)
+        clipboard.supportsSelection.return_value = True
+        clipboard.setText.side_effect = lambda text, mode=QClipboard.Mode.Clipboard: (
+            contents.__setitem__(mode, text)
+        )
+        clipboard.text.side_effect = lambda mode=QClipboard.Mode.Clipboard: (
+            contents.get(mode, "")
+        )
+        monkeypatch.setattr(QGuiApplication, "clipboard", lambda: clipboard)
+    if not clipboard.supportsSelection():
+        pytest.skip("The platform does not support the primary selection")
+    command = "sudo npm install -g --prefix /usr/local @openai/codex@latest"
+    dialog = _dialog(qtbot, command)
+    label = dialog.command
+    clipboard.setText("ordinary clipboard")
+    label.setFocus()
+    if selection == "keyboard":
+        qtbot.keyClick(label, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+    else:
+        start = QPoint(
+            label.margin(), label.margin() + label.fontMetrics().height() // 2
+        )
+        end = QPoint(
+            label.width() - label.margin(), label.height() - label.margin() - 1
+        )
+        qtbot.mousePress(label, Qt.MouseButton.LeftButton, pos=start)
+        qtbot.mouseMove(label, pos=end)
+        qtbot.mouseRelease(label, Qt.MouseButton.LeftButton, pos=end)
+    assert label.selectedText() == command.replace("/", "/\u200b")
+    qtbot.waitUntil(lambda: clipboard.text(QClipboard.Mode.Selection) == command)
+    assert clipboard.text() == "ordinary clipboard"
+
+
+def _check_run_dialog_geometry(mode: str) -> None:
+    app = QApplication([])
+    theme.apply(app, mode)
+    for command in (
+        "codex login",
+        "tool " + "argument " * 50,
+        "/" + "/".join(["long-directory"] * 40) + "/tool",
+        "tool " + "a" * 300,
+        "tool\n" + "argument\n" * 150,
+    ):
+        dialog = widgets.RunCommandDialog(command)
+        hint = dialog.sizeHint()
+        dialog.show()
+        app.processEvents()
+        assert dialog.devicePixelRatioF() == 1.25
+        available = dialog.screen().availableGeometry()
+        assert hint.width() <= available.width() - 96
+        assert hint.height() <= available.height() - 96
+        assert dialog.width() <= available.width() - 96
+        assert dialog.height() <= available.height() - 96
+        assert hint.width() >= dialog.fontMetrics().horizontalAdvance(dialog.TITLE)
+        assert dialog.title.width() >= dialog.title.sizeHint().width()
+        assert dialog.title.height() >= dialog.title.sizeHint().height()
+        assert dialog.cancel_button.isVisible()
+        assert dialog.run_button.isVisible()
+        assert dialog.copy_button.isVisible()
+        for label in (dialog.text, dialog.command):
+            assert label.height() >= label.heightForWidth(label.width())
+        bar = dialog.scroll_area.verticalScrollBar()
+        if command.count("\n") > 100:
+            assert bar.maximum() > 0
+            bar.setValue(bar.maximum())
+            app.processEvents()
+            bottom = dialog.command.mapTo(
+                dialog.scroll_area.viewport(), dialog.command.rect().bottomLeft()
+            )
+            assert bottom.y() < dialog.scroll_area.viewport().height()
+        else:
+            assert bar.maximum() == 0
+            layout = dialog.layout()
+            assert layout is not None
+            margins = layout.contentsMargins()
+            required = (
+                margins.top()
+                + margins.bottom()
+                + dialog.title.sizeHint().height()
+                + dialog.text.heightForWidth(dialog.text.width())
+                + dialog.command.heightForWidth(dialog.command.width())
+                + dialog.copy_button.sizeHint().height()
+                + 3 * 16
+            )
+            assert hint.height() >= required
+        assert dialog.command.frameShape() == QFrame.Shape.NoFrame
+        if command != "codex login":
+            dialog.close()
+            continue
+        flags = dialog.command.textInteractionFlags()
+        for interaction in (flags, Qt.TextInteractionFlag.NoTextInteraction, flags):
+            dialog.command.setTextInteractionFlags(interaction)
+            app.processEvents()
+            image = dialog.grab().toImage()
+            origin = dialog.command.mapTo(dialog, QPoint())
+            ratio = image.devicePixelRatio()
+            left, top = round(origin.x() * ratio), round(origin.y() * ratio)
+            width = round(dialog.command.width() * ratio)
+            height = round(dialog.command.height() * ratio)
+            background = theme.color("bg-page")
+            for y in range(-3, height + 3):
+                for x in range(-3, width + 3):
+                    if 3 <= x < width - 3 and 3 <= y < height - 3:
+                        continue
+                    assert image.pixelColor(left + x, top + y) == background
+        dialog.close()
+
+
+@pytest.mark.parametrize("mode", ("light", "dark"))
+def test_run_command_dialog_fractional_scale(env: dict[str, str], mode: str) -> None:
+    test_file = Path(__file__).resolve()
+    process = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import runpy, sys; "
+            "runpy.run_path(sys.argv[1])['_check_run_dialog_geometry'](sys.argv[2])",
+            str(test_file),
+            mode,
+        ],
+        env={
+            **os.environ,
+            **env,
+            "PYTHONPATH": str(test_file.parents[2] / "src"),
+            "QT_QPA_PLATFORM": "offscreen",
+            "QT_SCALE_FACTOR": "1.25",
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert process.returncode == 0, process.stdout + process.stderr
 
 
 def test_switch_hit_area_is_the_whole_widget(qtbot: QtBot) -> None:
