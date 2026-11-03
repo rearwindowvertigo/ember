@@ -42,7 +42,11 @@ SOCKET_NAME = "app.sock"
 """The single-instance socket's name in Ember's runtime folder."""
 
 SHOW = b"show\n"
-"""What a second start sends to bring the window forward."""
+"""What a second start sends to bring the window forward. With an
+activation token it sends `show <token>`."""
+
+TOKEN = "XDG_ACTIVATION_TOKEN"
+"""The variable holding the desktop's activation token for a launch."""
 
 EX_OK = 0
 EX_USAGE = 64
@@ -82,12 +86,24 @@ def has_display(env: Mapping[str, str]) -> bool:
     )
 
 
-def hand_over(path: Path, *, hidden: bool) -> bool:
+def activation_token(env: Mapping[str, str]) -> str:
+    """Return the launch's activation token, or "" when it has none or a bad one."""
+    token = env.get(TOKEN, "")
+    if 0 < len(token) <= 512 and all(33 <= ord(char) <= 126 for char in token):
+        return token
+    return ""
+
+
+def hand_over(path: Path, *, hidden: bool, token: str = "") -> bool:
     """Reach a running instance and ask it to show its window.
+
+    The desktop gives a launch an activation token and shows a busy cursor
+    until a window uses it, so the token goes to the running instance.
 
     Args:
         path: The single-instance socket.
         hidden: Send nothing, so the running window stays as it is.
+        token: The launch's activation token, or "".
 
     Returns:
         True when an instance was listening.
@@ -97,7 +113,7 @@ def hand_over(path: Path, *, hidden: bool) -> bool:
     if not client.waitForConnected(CONNECT_MS):
         return False
     if not hidden:
-        client.write(SHOW)
+        client.write(SHOW if not token else f"show {token}\n".encode("ascii"))
         client.waitForBytesWritten(CONNECT_MS)
     client.disconnectFromServer()
     if client.state() != QLocalSocket.LocalSocketState.UnconnectedState:
@@ -187,8 +203,10 @@ class _Controller(QObject):
 
     def _read(self, socket: QLocalSocket) -> None:
         data = bytes(socket.readAll().data())
-        if b"show" in data:
-            self.parts.window.bring_forward()
+        for line in data.decode("ascii", "replace").splitlines():
+            word, _, token = line.partition(" ")
+            if word == "show":
+                self.parts.window.bring_forward(activation_token({TOKEN: token}))
 
     def _stop_watching(self) -> None:
         self._package = None
@@ -276,7 +294,7 @@ def start(argv: list[str], env: Mapping[str, str] | None = None) -> EmberApp | i
     path = folder / SOCKET_NAME
     existing = QApplication.instance()
     app = existing if isinstance(existing, QApplication) else QApplication(["emb"])
-    if hand_over(path, hidden=args.hidden):
+    if hand_over(path, hidden=args.hidden, token=activation_token(environment)):
         return EX_OK
     QLocalServer.removeServer(str(path))
     server = QLocalServer()

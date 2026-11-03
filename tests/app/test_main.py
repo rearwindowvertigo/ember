@@ -391,3 +391,30 @@ def test_restart_closes_the_socket_starts_the_app_and_quits(
         assert not parts.server.isListening()
         assert started == [(sys.executable, ["-I", "-m", "ember.cli", "app"])]
         assert quits == [True]
+
+
+def test_activation_token_keeps_only_a_plain_token() -> None:
+    assert main.activation_token({main.TOKEN: "gnome-shell/Ember/1234-5"}) == (
+        "gnome-shell/Ember/1234-5"
+    )
+    assert main.activation_token({}) == ""
+    assert main.activation_token({main.TOKEN: ""}) == ""
+    assert main.activation_token({main.TOKEN: "two words"}) == ""
+    assert main.activation_token({main.TOKEN: "a\nshow b"}) == ""
+    assert main.activation_token({main.TOKEN: "x" * 513}) == ""
+
+
+def test_second_start_hands_its_activation_token_to_the_running_window(
+    app_env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main, "installed_version", lambda: "0.4.0")
+    for parts in _start([], app_env, qtbot):
+        tokens: list[str] = []
+        monkeypatch.setattr(parts.window, "bring_forward", tokens.append)
+        assert main.start([], {**app_env, main.TOKEN: "dock-token-1"}) == 0
+        qtbot.waitUntil(lambda tokens=tokens: tokens == ["dock-token-1"])
+        assert main.start([], app_env) == 0
+        qtbot.waitUntil(lambda tokens=tokens: tokens == ["dock-token-1", ""])
+        assert main.start(["--hidden"], {**app_env, main.TOKEN: "hidden"}) == 0
+        qtbot.wait(200)
+        assert tokens == ["dock-token-1", ""]

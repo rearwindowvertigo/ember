@@ -2,7 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QProcessEnvironment, Qt
 from PySide6.QtWidgets import QApplication, QWidget
 from pytestqt.qtbot import QtBot
 
@@ -331,3 +331,39 @@ def test_screen_requested_switches(env: dict[str, str], qtbot: QtBot) -> None:
     assert window.current_key() == "dependencies"
     context.show_screen("nowhere")
     assert window.current_key() == "dependencies"
+
+
+def test_bring_forward_puts_a_token_where_qt_reads_it(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window, _context, _quit_app = _window(env, qtbot)
+    monkeypatch.delenv("XDG_ACTIVATION_TOKEN", raising=False)
+    window.bring_forward("dock-token-2")
+    assert window.isVisible()
+    assert QProcessEnvironment.systemEnvironment().value("XDG_ACTIVATION_TOKEN") in (
+        "dock-token-2",
+        "",
+    )
+    window.hide()
+    monkeypatch.delenv("XDG_ACTIVATION_TOKEN", raising=False)
+    window.bring_forward()
+    assert QProcessEnvironment.systemEnvironment().value("XDG_ACTIVATION_TOKEN") == ""
+
+
+@pytest.mark.parametrize("shown", [True, False])
+def test_quit_uses_a_tray_token_on_a_shown_window(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, shown: bool
+) -> None:
+    window, _context, quit_app = _window(env, qtbot)
+    if shown:
+        window.show()
+    activations: list[bool] = []
+    monkeypatch.setattr(window, "activateWindow", lambda: activations.append(True))
+    monkeypatch.setenv("XDG_ACTIVATION_TOKEN", "tray-token")
+    window.quit_app()
+    assert quit_app.calls == 1
+    assert activations == ([True] if shown else [])
+    monkeypatch.delenv("XDG_ACTIVATION_TOKEN")
+    activations.clear()
+    window.quit_app()
+    assert activations == []

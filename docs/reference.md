@@ -2680,7 +2680,9 @@ emb app [--hidden]
 ```
 
 Starts the desktop app, or brings the running one forward. One instance runs
-at a time.
+at a time. A start that finds a running app passes its `XDG_ACTIVATION_TOKEN`
+on the single-instance socket (`show <token>`), and the running app uses it
+when it raises its window, so the desktop's busy cursor for the launch ends.
 
 | Option | Does |
 |---|---|
@@ -2817,7 +2819,9 @@ Finished appears and counts as a top-level run in the tray.
 
 Clicking the icon also shows the window. Closing the window hides it to the
 tray. When the desktop has no tray, the window shows at start and closing it
-quits.
+quits. A menu click gives Ember an activation token; Quit Ember uses it on
+the window before quitting when the window is shown. With the window hidden
+the token is not used, and the desktop's busy cursor runs until its timeout.
 
 A run, flow or panel change updates the icon and tooltip at once. The menu
 keeps its lines until it next opens, when it rebuilds them. A click from a
