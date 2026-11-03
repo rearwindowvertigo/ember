@@ -2836,6 +2836,15 @@ records, newest first by end time, update time and id, with update time used
 when end time is absent. Its cap of twenty applies to top-level rows across
 runs, flows and panels. Each empty section shows its empty state.
 
+Live comes first. Finished starts as a preview of its three newest
+top-level rows, each with its nested runs, and a `Show all <n>` button in
+its header, where `<n>` is the number of rows the full list shows. The
+button is hidden when the preview already holds every row. Show all opens
+the full list with the Type, Status and Engine pickers and Clear; `Show
+fewer` returns to the preview. The pickers and Clear show only while the
+full list is open. Whether it is open is kept in `app.json` as
+`finished_open` and restored when the app starts.
+
 Finished filters this capped list by Type (all, Run, Flow, Panel), Status
 (all, Done, Incomplete, Failed) and Engine (all, Codex, OpenCode, Claude).
 The filters combine and test top-level rows: Run selects standalone runs,
@@ -2844,7 +2853,9 @@ when any readable run nested under it used that engine. A parent without
 readable nested runs matches only Engine=all. Filters start at all when
 the app starts and keep their values across reloads for the app session.
 
-Clear is disabled when no records are shown or a clear is pending. It
+Clear is a red outline button with a trash icon, and the caption `Remove
+shown records` under it. Clear is disabled when no records are shown or a
+clear is pending. It
 captures the shown top-level ids and calls `prune.remove` with
 `older_than=0` and those ids, first as a dry run and then, after confirmation,
 for removal. Both calls run off the GUI thread. The confirmation lists the
@@ -2861,8 +2872,13 @@ and errors. Closing the message reloads both record models and reapplies
 the filters. Confirmation and result lists scroll within the available
 screen height.
 
-Each row has an expand arrow, a grey icon and the word Run, Flow or Panel,
-then one of six status chips:
+Every row has the same columns, each a fixed width, so rows line up: a
+round expand button with an outline and a chevron, a grey icon and the word
+Run, Flow or Panel, one of six status chips, the text, and the time and
+actions on the right. The marker and chip columns are as wide as the widest
+marker and chip. The title and second line each show one line, cut with an
+ellipsis, with the whole text in a tooltip. Chips are 22 pixels tall with
+6-pixel corners. The status chips:
 
 | Chip | States | Colour |
 |---|---|---|
@@ -2888,8 +2904,10 @@ parents appears under the oldest parent by start time and then id. A run
 with a parent never appears at the top level in Overview, including when
 that parent falls beyond the Finished cap. A live worker under a Finished
 parent stays nested there; the tray and sidebar count it at the top level.
-Every readable nested run of a shown parent appears, whatever its age. The parent's second line includes `1 live run`
-or `<n> live runs` after the finer state when that count is above zero.
+Every readable nested run of a shown parent appears, whatever its age,
+oldest first by start time and then id, indented one column. The parent's
+second line includes `1 live run` or `<n> live runs` after the finer state
+when that count is above zero.
 
 A flow's title shows the repository folder, task count and merged count.
 Its second line includes its branch, active plan wave and reason. Expanded,
@@ -3018,7 +3036,7 @@ is not added again.
 
 | File | Holds |
 |---|---|
-| `$XDG_STATE_HOME/ember/app.json` | The window's `width`, `height` and last `screen`, mode 600; content that cannot be read gives the defaults |
+| `$XDG_STATE_HOME/ember/app.json` | The window's `width`, `height` and last `screen`, and Overview's `finished_open`, mode 600; content that cannot be read gives the defaults |
 | `$XDG_RUNTIME_DIR/ember/app.sock` | The single-instance socket |
 | `$XDG_CONFIG_HOME/autostart/io.github.rearwindowvertigo.Ember.desktop` | The autostart entry while `app.autostart` is on, mode 600: `Exec=<absolute path of emb> app --hidden`. When `emb` is not on `PATH` nothing is written, and the app prints the reason to standard error and shows it in Settings |
 

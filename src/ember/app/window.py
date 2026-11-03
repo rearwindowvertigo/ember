@@ -7,6 +7,7 @@ once the first settings snapshot is read; until then the content shows the
 read in progress, or its error with Try again.
 """
 
+import dataclasses
 import importlib.metadata
 from collections.abc import Callable
 from typing import cast
@@ -385,8 +386,11 @@ class MainWindow(QMainWindow):
 
     def _save_state(self) -> None:
         size = self.normalGeometry().size() if self.isMaximized() else self.size()
+        saved = state.load(self.context.env)
         state.save(
-            state.AppState(size.width(), size.height(), self._current),
+            dataclasses.replace(
+                saved, width=size.width(), height=size.height(), screen=self._current
+            ),
             self.context.env,
         )
 

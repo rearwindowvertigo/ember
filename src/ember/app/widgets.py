@@ -173,11 +173,12 @@ def install_focus_tracking(app: QApplication) -> FocusTracker:
 def button(
     text: str, kind: str = "secondary", *, size: str | None = None
 ) -> QPushButton:
-    """Return a push button styled as `primary`, `secondary`, `ghost` or `danger`.
+    """Return a push button styled by its kind.
 
     Args:
         text: The button's label.
-        kind: The style rule the button selects.
+        kind: The style rule the button selects: `primary`, `secondary`,
+            `ghost`, `danger` or `danger-outline`.
         size: `sm` for a small button, or `None`. It sets the `scale`
             property; `size` is QWidget's own geometry property.
 

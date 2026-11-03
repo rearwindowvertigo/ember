@@ -367,6 +367,17 @@ QPushButton[kind="danger"]:hover {
 QPushButton[kind="danger"][keyfocus="true"]:focus {
     border: 2px solid @focus-ring;
 }
+QPushButton[kind="danger-outline"] {
+    background: transparent;
+    color: @danger-text;
+    border: 1px solid @danger-text;
+}
+QPushButton[kind="danger-outline"]:hover {
+    background: @danger-bg;
+}
+QPushButton[kind="danger-outline"][keyfocus="true"]:focus {
+    border: 2px solid @focus-ring;
+}
 QPushButton[scale="sm"] {
     min-height: 30px;
     max-height: 30px;

@@ -20,7 +20,16 @@ def test_round_trip_is_private(env: dict[str, str]) -> None:
         "width": 1300,
         "height": 800,
         "screen": "engines",
+        "finished_open": False,
     }
+
+
+def test_finished_open_round_trips_and_needs_true(env: dict[str, str]) -> None:
+    state.save(state.AppState(1300, 800, "overview", finished_open=True), env)
+    assert state.load(env).finished_open is True
+    path = state.state_path(env)
+    path.write_text(json.dumps({"finished_open": "yes"}))
+    assert state.load(env).finished_open is False
 
 
 def test_corrupt_file_gives_defaults(env: dict[str, str]) -> None:
