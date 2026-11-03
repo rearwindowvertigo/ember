@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.0](https://github.com/rearwindowvertigo/ember/compare/v0.3.0...v0.4.0) (2026-11-03)
+
+
+### Added
+
+* **app:** lead Overview with Live and preview Finished ([fa2cead](https://github.com/rearwindowvertigo/ember/commit/fa2cead9abce9e514eaf4edeec83d4c2d969b5e8))
+* **flows:** set flow review rounds on the Menu screen ([400c59b](https://github.com/rearwindowvertigo/ember/commit/400c59bdd521e60591f1a5b609ee4949d6c67888))
+
+
+### Fixed
+
+* **app:** give the app icon a charcoal tile that fills its slot ([6708236](https://github.com/rearwindowvertigo/ember/commit/6708236b65d0f311c15fb5004eebe1fd456e40bc))
+* **app:** show a disabled Clear as disabled ([f1ff20c](https://github.com/rearwindowvertigo/ember/commit/f1ff20c78e5d568c92e25f05c80993fe4cbc5862))
+* **app:** show the focus ring only for keyboard focus ([034279c](https://github.com/rearwindowvertigo/ember/commit/034279c975ecc6dc16f0b55398a6810496419fd5))
+* **app:** solid borders, a picker arrow and short rounded chips ([1e5924c](https://github.com/rearwindowvertigo/ember/commit/1e5924c29373fa8dc851c166ba2acfb75e07812c))
+
 ## [0.3.0](https://github.com/rearwindowvertigo/ember/compare/v0.2.1...v0.3.0) (2026-11-03)
 
 
