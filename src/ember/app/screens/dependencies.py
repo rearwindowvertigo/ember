@@ -190,7 +190,11 @@ class DependencyTile(widgets.Card):
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         layout.addWidget(self.resolved_path)
-        self.resolved_path.setVisible(bool(item.resolved_path))
+        self.resolved_path.setVisible(
+            item.resolved_path is not None
+            and item.command is not None
+            and item.command_kind == "update"
+        )
         self.command: widgets.CommandLine | None = None
         self.note: QLabel | None = None
         if item.command is not None:
@@ -363,11 +367,18 @@ class DependenciesScreen(QWidget):
             self.release_alert = widgets.Alert(
                 "info",
                 f"Ember {release.version} is available",
-                actions=[("Download", open_release)],
+                actions=(
+                    [("Download", open_release)]
+                    if release.url.startswith(
+                        "https://github.com/rearwindowvertigo/ember/"
+                    )
+                    else []
+                ),
             )
             self.alert_area.addWidget(self.release_alert)
             self.release_alert.show()
-            QWidget.setTabOrder(self.check_button, self.release_alert.buttons[0])
+            if self.release_alert.buttons:
+                QWidget.setTabOrder(self.check_button, self.release_alert.buttons[0])
         self.tiles = {}
         self.groups = []
         groups = ordered(report)

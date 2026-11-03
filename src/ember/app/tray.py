@@ -72,7 +72,7 @@ def live_items(
     return sorted(top, key=_started), children
 
 
-def _counts(items: list[Item]) -> tuple[int, int, int]:
+def counts(items: list[Item]) -> tuple[int, int, int]:
     """Count top-level runs, flows and panels."""
     return (
         sum(isinstance(item, Run) for item in items),
@@ -163,7 +163,7 @@ class Tray(QObject):
         if live != self._live:
             self._live = live
             self.icon.setIcon(icons.tray_icon(live))
-        self.icon.setToolTip(tooltip(*_counts(items)))
+        self.icon.setToolTip(tooltip(*counts(items)))
         self._stale = True
 
     def _items(self) -> tuple[list[Item], dict[str, list[Run]]]:
@@ -175,7 +175,7 @@ class Tray(QObject):
     def _build_menu(self) -> None:
         items, children = self._items()
         self.menu.clear()
-        status = QAction(status_line(*_counts(items)), self.menu)
+        status = QAction(status_line(*counts(items)), self.menu)
         status.setEnabled(False)
         self.menu.addAction(status)
         for item in items:
