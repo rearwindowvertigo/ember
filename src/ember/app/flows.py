@@ -208,6 +208,7 @@ class FlowsModel(QObject):
     """Keep flow and panel records current through coalesced background reads."""
 
     changed = Signal()
+    reloaded = Signal()
     failed = Signal(str)
 
     def __init__(
@@ -321,7 +322,7 @@ class FlowsModel(QObject):
         self.failed.emit(self._error)
 
     def _loaded_records(self, snapshot: Snapshot) -> None:
-        """Store the snapshot and emit only when a shown value changed."""
+        """Store the snapshot and signal reloads and changed shown values."""
         keys: list[tuple[object, ...]] = [
             (
                 item.record["id"],
@@ -350,6 +351,7 @@ class FlowsModel(QObject):
         self._finish_read()
         if differs:
             self.changed.emit()
+        self.reloaded.emit()
 
     def _watch(self, wanted: list[str]) -> None:
         """Remove obsolete watches and re-add existing paths after a read."""

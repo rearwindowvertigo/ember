@@ -2768,8 +2768,19 @@ it shows the pass count and task, writer and review details. A panel's title
 shows its member and answer counts; its second line includes the repository
 folder. The first non-empty question line appears on a third line, elided
 to fit, with its full text in the tooltip. Expanded, a panel shows member
-status, worker, duration, reason and changed paths, left-out members and
-the selectable path to `summary.md`.
+status, worker, duration, reason and changed paths, and left-out members.
+
+Expanded panel details have a Summary button for `summary.md`. Expanded
+flow details have Briefs for the `briefs/` folder and one Check logs button.
+Check logs considers only files matching `check-*.log` directly in the flow
+folder. It selects the highest integer `(wave, attempt)` from
+`check-<wave>-<attempt>.log`; if no name parses, it selects the newest file
+by modification time. Buttons are disabled when their file or folder is
+absent. Targets are checked when details expand and on every model reload
+while those details are drawn. Collapsed rows do not check targets.
+Buttons pass a file URL to `QDesktopServices.openUrl` for the desktop's
+default viewer. If it returns false, a warning names the path and says no
+viewer opened it.
 
 Run rows show engine, model and effort. A live run's second line includes
 the repository folder, branch or `read-only`, and turn number; an ended

@@ -4,13 +4,15 @@ Models stay active while the app runs. Hidden screens defer redraws until
 shown, and live mirrors close when their row or the screen is hidden.
 """
 
+import re
+import stat
 import time
 from collections.abc import Callable, Mapping, Sequence
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QHideEvent
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QHideEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -18,6 +20,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -159,6 +162,23 @@ def panel_detail(item: PanelItem) -> str:
     """Return the panel's repository folder."""
     folder = PurePosixPath(item.record["dir"]).name or item.record["dir"]
     return folder
+
+
+def newest_check_log(folder: Path) -> Path | None:
+    """Prefer the highest numeric wave and attempt, else the newest mtime."""
+    candidates: list[tuple[tuple[int, int, int, int, str], Path]] = []
+    for path in folder.glob("check-*.log"):
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            continue
+        match = re.fullmatch(r"check-([0-9]+)-([0-9]+)\.log", path.name)
+        wave, attempt = (int(part) for part in match.groups()) if match else (0, 0)
+        key = (int(match is not None), wave, attempt, info.st_mtime_ns, path.name)
+        candidates.append((key, path))
+    return max(candidates)[1] if candidates else None
 
 
 def member_line(member: Mapping[str, Any]) -> str:
@@ -629,6 +649,8 @@ class _RecordRow(_ExpandableRow):
             label.setSizePolicy(policy)
         self.details: QWidget | None = None
         self.links: list[QPushButton] = []
+        self.file_buttons: dict[str, QPushButton] = {}
+        self.file_paths: dict[str, Path | None] = {}
         self.shown_values: tuple[object, ...] = ()
         self.nested = QVBoxLayout()
         self.nested.setContentsMargins(theme.CONTROL_SM + 12, 0, 0, 0)
@@ -680,6 +702,8 @@ class _RecordRow(_ExpandableRow):
         )
         self.update_elapsed()
         if values == self.shown_values:
+            if self.expanded:
+                self._refresh_files()
             return
         self.shown_values = values
         self.badge.set_tone(badge[1], badge[0])
@@ -708,6 +732,8 @@ class _RecordRow(_ExpandableRow):
             discard(self.details, self.body)
             self.details = None
         self.links = []
+        self.file_buttons = {}
+        self.file_paths = {}
         if shown:
             details = QWidget()
             layout = QVBoxLayout(details)
@@ -735,9 +761,56 @@ class _RecordRow(_ExpandableRow):
                     line.addWidget(link)
                     self.links.append(link)
                 layout.addLayout(line)
+            actions = QHBoxLayout()
+            names = (
+                ("Briefs", "Check logs")
+                if isinstance(self.item, FlowItem)
+                else ("Summary",)
+            )
+            for name in names:
+                link = button(name, "secondary", size="sm")
+                link.clicked.connect(
+                    lambda _checked=False, selected=name: self._open_file(selected)
+                )
+                actions.addWidget(link)
+                self.file_buttons[name] = link
+            actions.addStretch()
+            layout.addLayout(actions)
+            self._refresh_files()
             self.body.addWidget(details)
             self.details = details
         self.set_expanded(shown)
+
+    def _refresh_files(self) -> None:
+        """Check targets only while drawing expanded details."""
+        env = self.overview.context.env
+        if isinstance(self.item, FlowItem):
+            folder = flow_record.folder(self.item.record["id"], env)
+            briefs = folder / "briefs"
+            self.file_paths = {
+                "Briefs": briefs if briefs.is_dir() else None,
+                "Check logs": newest_check_log(folder),
+            }
+        else:
+            summary = panel_record.folder(self.item.record["id"], env) / "summary.md"
+            self.file_paths = {"Summary": summary if summary.is_file() else None}
+        for name, link in self.file_buttons.items():
+            path = self.file_paths[name]
+            link.setEnabled(path is not None)
+            link.setToolTip(str(path) if path is not None else "")
+
+    def _open_file(self, name: str) -> None:
+        """Open the selected file URL and report a refused viewer launch."""
+        path = self.file_paths[name]
+        if path is None or QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            return
+        message = QMessageBox(self)
+        message.setIcon(QMessageBox.Icon.Warning)
+        message.setWindowTitle("Could not open viewer")
+        message.setTextFormat(Qt.TextFormat.PlainText)
+        message.setText(f"No viewer opened {path}.")
+        message.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        message.open()
 
 
 class _FlowRow(_RecordRow):
@@ -759,10 +832,10 @@ class _FlowRow(_RecordRow):
 
 
 class _PanelRow(_RecordRow):
-    """A panel with member answers, omissions and its summary path."""
+    """A panel with member answers, omissions and a Summary button."""
 
     def entries(self) -> list[tuple[str, bool, str | None]]:
-        """Return member details followed by omissions and the summary path."""
+        """Return member details followed by omissions."""
         result: list[tuple[str, bool, str | None]] = []
         data = self.item.record
         for member in data["members"]:
@@ -775,8 +848,6 @@ class _PanelRow(_RecordRow):
             result.append(
                 (f"Left out {omitted['value']}: {omitted['reason']}", True, None)
             )
-        folder = panel_record.folder(data["id"], self.overview.context.env)
-        result.append((f"Summary: {folder / 'summary.md'}", True, None))
         return result
 
 
@@ -888,9 +959,9 @@ class OverviewScreen(QWidget):
         self._elapsed.setInterval(ELAPSED_MS)
         self._elapsed.timeout.connect(self._update_elapsed)
 
-        self.records.changed.connect(self._runs_changed)
+        self.records.reloaded.connect(self._runs_changed)
         self.records.failed.connect(self._runs_changed)
-        context.runs.changed.connect(self._runs_changed)
+        context.runs.reloaded.connect(self._runs_changed)
         context.runs.failed.connect(self._runs_changed)
         context.settings_changed.connect(self._settings_changed)
         context.visible_changed.connect(self._visible_changed)
@@ -1272,6 +1343,7 @@ class OverviewScreen(QWidget):
                 chain.append(row.open_button)
             elif isinstance(row, _RecordRow):
                 chain.extend(row.links)
+                chain.extend(row.file_buttons.values())
         chain.extend(filters)
         chain_tab_order(chain)
 

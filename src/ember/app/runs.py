@@ -74,6 +74,9 @@ class RunsModel(QObject):
     appeared or went away, the number of unreadable records changed, or a
     read succeeded after a failed one."""
 
+    reloaded = Signal()
+    """Emitted after every successful read, including unchanged records."""
+
     turn_failed = Signal(str)
     """A run's turn failed since the last read, with the run's engine."""
 
@@ -220,6 +223,7 @@ class RunsModel(QObject):
         self._finish_read()
         if differs:
             self.changed.emit()
+        self.reloaded.emit()
         if not first:
             for run in failed:
                 self.turn_failed.emit(run.engine)
