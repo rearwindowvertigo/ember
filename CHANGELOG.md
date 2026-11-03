@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.5.0](https://github.com/rearwindowvertigo/ember/compare/v0.4.0...v0.5.0) (2026-11-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* **deps:** emb deps --json no longer has the ember_release field, and emb deps text output no longer ends with an Ember release line.
+
+### Added
+
+* **app:** offer a restart when an upgrade finds Ember running ([7e89275](https://github.com/rearwindowvertigo/ember/commit/7e89275d004176f1333aec58f474e7c98bec0557))
+* **app:** show start times on nested runs and fold them in Finished ([530851c](https://github.com/rearwindowvertigo/ember/commit/530851ca98258fce5916d413f7964d30f6f0b917))
+
+
+### Fixed
+
+* **app:** give Engines' Check now the refresh icon ([c53d8cf](https://github.com/rearwindowvertigo/ember/commit/c53d8cfe50262bad301babb4c6f6110186f8a06c))
+* **deps:** remove the Ember update notice ([f4a4acf](https://github.com/rearwindowvertigo/ember/commit/f4a4acf2cba3c7ea07b618c0de3acf4df5aed1c4))
+
 ## [0.4.0](https://github.com/rearwindowvertigo/ember/compare/v0.3.0...v0.4.0) (2026-11-03)
 
 
