@@ -1066,5 +1066,10 @@ def test_prune_empty_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     }
     assert main(["prune", "--older-than", "0", "--dry-run", "--json"], env=env) == 0
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == {"removed": [], "skipped": [], "branches": []}
+    assert json.loads(captured.out) == {
+        "removed": [],
+        "skipped": [],
+        "branches": [],
+        "worktrees": [],
+    }
     assert captured.err == ""

@@ -66,8 +66,13 @@ class Result:
     errors: list[str] = field(default_factory=list)
 
     def to_json(self) -> dict[str, list[dict[str, str]]]:
-        """Return the command's three JSON fields."""
-        return dict(removed=self.removed, skipped=self.skipped, branches=self.branches)
+        """Return the command's four JSON fields."""
+        return dict(
+            removed=self.removed,
+            skipped=self.skipped,
+            branches=self.branches,
+            worktrees=self.worktrees,
+        )
 
 
 def _run_ids(value: object) -> set[str]:
