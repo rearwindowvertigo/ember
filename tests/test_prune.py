@@ -277,13 +277,13 @@ def test_dry_run_retains_files_and_external_logs(
 
 def test_invalid_folder_names_and_empty_folder(env: dict[str, str]) -> None:
     assert prune.remove(0, env=env).to_json() == dict(
-        removed=[], skipped=[], branches=[]
+        removed=[], skipped=[], branches=[], worktrees=[]
     )
     root = paths.runs_dir(env)
     (root / "not-a-record").mkdir(parents=True)
     (root / "settings.db").write_text("untouched")
     assert prune.remove(0, env=env).to_json() == dict(
-        removed=[], skipped=[], branches=[]
+        removed=[], skipped=[], branches=[], worktrees=[]
     )
     assert (root / "not-a-record").is_dir()
 
@@ -498,7 +498,8 @@ def test_json_failure_continues_and_reports_stderr(
     assert data["removed"] == [dict(id=good.id, kind="run")]
     assert data["skipped"][0]["id"] == bad.id
     assert "emb prune:" in captured.err and bad.id in captured.err
-    assert set(data) == {"removed", "skipped", "branches"}
+    assert set(data) == {"removed", "skipped", "branches", "worktrees"}
+    assert data["worktrees"] == []
 
 
 def test_parent_locks_held_until_child_removal(
@@ -907,13 +908,17 @@ def test_merged_and_absent_branches_are_never_listed(
     assert prune.main(0, as_json=as_json, env=env) == 0
     captured = capsys.readouterr()
     assert captured.err == ""
+    command = shlex.join(
+        ["git", "-C", "/checkout", "worktree", "remove", str(worktree)]
+    )
     if as_json:
-        assert json.loads(captured.out)["branches"] == []
-        assert str(worktree) not in captured.out
-    else:
-        command = shlex.join(
-            ["git", "-C", "/checkout", "worktree", "remove", str(worktree)]
+        data = json.loads(captured.out)
+        assert data["branches"] == []
+        assert (
+            dict(branch=branch, worktree=str(worktree), command=command)
+            in data["worktrees"]
         )
+    else:
         assert f"branch {branch}\n  worktree {worktree}: {command}\n" in captured.out
         assert "branch -D" not in captured.out
     assert "emb cleanup" not in captured.out
@@ -928,6 +933,74 @@ def test_merged_and_absent_branches_are_never_listed(
         assert all(args[0] != "merge-base" for args in queries)
     assert not runs.run_dir(ident, env).exists()
     assert worktree.exists()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_json_worktrees_match_text(
+    env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    dry_run: bool,
+) -> None:
+    expected: set[tuple[str, str, str]] = set()
+    records: list[runs.Run] = []
+    for state in ("merged", "absent", "unmerged"):
+        worktree = tmp_path / f"{state} worktree"
+        worktree.mkdir()
+        branch = f"ember/{state}"
+        records.append(
+            run(
+                env,
+                branch=branch,
+                base_branch="main",
+                read_only=False,
+                worktree=str(worktree),
+            )
+        )
+        command = shlex.join(
+            ["git", "-C", "/checkout", "worktree", "remove", str(worktree)]
+        )
+        expected.add((branch, str(worktree), command))
+
+    def git(
+        directory: str, *args: str, env: Mapping[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        if args[0] == "show-ref":
+            code = int(args[-1] == "refs/heads/ember/absent")
+        else:
+            assert args[0] == "merge-base"
+            code = int(args[-2] == "refs/heads/ember/unmerged")
+        return subprocess.CompletedProcess(args, code, "", "")
+
+    monkeypatch.setattr(prune, "_git", git)
+    assert prune.main(0, dry_run=True, env=env) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    text_worktrees: set[tuple[str, str, str]] = set()
+    branch = ""
+    for line in captured.out.splitlines():
+        if line.startswith("branch "):
+            branch = line.removeprefix("branch ").split(": ", 1)[0]
+        elif line.startswith("  worktree "):
+            worktree_path, command = line.removeprefix("  worktree ").split(": ", 1)
+            text_worktrees.add((branch, worktree_path, command))
+    assert text_worktrees == expected
+
+    assert prune.main(0, dry_run=dry_run, as_json=True, env=env) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    data = json.loads(captured.out)
+    assert {
+        (item["branch"], item["worktree"], item["command"])
+        for item in data["worktrees"]
+    } == text_worktrees
+    assert len(data["worktrees"]) == len(expected)
+    assert len(data["branches"]) == 1
+    assert data["branches"][0]["branch"] == "ember/unmerged"
+    for record in records:
+        assert record.folder.exists() == dry_run
+        assert Path(record.worktree).is_dir()
 
 
 def test_flow_without_base_lists_task_as_unmerged(

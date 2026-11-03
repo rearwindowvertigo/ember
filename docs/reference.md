@@ -2126,15 +2126,16 @@ When the worktree exists and no open run uses it,
 `git -C <dir> worktree remove <path>` precedes branch deletion with `&&`.
 Paths and branch names are shell-quoted. Merged and absent branches have
 no branch-deletion command; their remaining worktrees still have worktree
-removal commands in text output. Prune never prints `emb cleanup`.
+removal commands. Prune never prints `emb cleanup`.
 
-`--json` prints an object with three arrays:
+`--json` prints an object with four arrays:
 
 | Field | Entries |
 |---|---|
 | `removed` | `{id, kind}`, where kind is `run`, `flow` or `panel`; dry runs list candidates here |
 | `skipped` | `{id, reason}` |
-| `branches` | `{branch, command}`, including worktree removal commands when a worktree exists |
+| `branches` | `{branch, command}`; a branch command already includes its worktree removal when listed in `worktrees` |
+| `worktrees` | `{branch, worktree, command}` for every worktree listed in text output, including merged and deleted branches; empty when there are none |
 
 Read, lock, repository-query and removal failures are reported as
 `emb prune: <message>` on standard error. Processing continues after each
