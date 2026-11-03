@@ -253,9 +253,9 @@ def name_and_help(name: str, help_text: str) -> QWidget:
 class TooltipRow(QWidget):
     """A setting's name over its help line, its control on the right, and a tooltip.
 
-    The tooltip explains the setting more fully than the help line; it shows on
-    the name, the help line and the control. `help` can be redrawn as the
-    control's value changes.
+    The tooltip explains the setting more fully than the help line. An info
+    icon after the name shows it; the name, help line and control have none.
+    `help` can be redrawn as the control's value changes.
     """
 
     def __init__(
@@ -277,13 +277,17 @@ class TooltipRow(QWidget):
         column.setSpacing(2)
         self.heading = QLabel(name)
         self.heading.setFont(theme.font("label"))
+        self.info = widgets.InfoTip(name, tooltip)
+        title = QHBoxLayout()
+        title.setSpacing(4)
+        title.addWidget(self.heading)
+        title.addWidget(self.info, 0, Qt.AlignmentFlag.AlignVCenter)
+        title.addStretch(1)
         self.help = label(help_text, "secondary")
-        column.addWidget(self.heading)
+        column.addLayout(title)
         column.addWidget(self.help)
         row.addLayout(column, 1)
         row.addWidget(control, 0, Qt.AlignmentFlag.AlignVCenter)
-        for widget in (self.heading, self.help, control):
-            widget.setToolTip(tooltip)
 
 
 def titled_card(title: str) -> tuple[widgets.Card, QVBoxLayout]:

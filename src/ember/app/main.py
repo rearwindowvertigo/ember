@@ -294,6 +294,7 @@ def start(argv: list[str], env: Mapping[str, str] | None = None) -> EmberApp | i
     app.setQuitOnLastWindowClosed(not has_tray)
     theme.apply(app, theme.resolve_mode("system", app))
     widgets.install_focus_tracking(app)
+    widgets.install_tooltips(app)
 
     context = AppContext(environment)
 

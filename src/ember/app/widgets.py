@@ -5,10 +5,12 @@ repaint on `theme.signals.changed`. The other widgets are styled by the
 theme's style sheet through dynamic properties.
 """
 
+import html
 import math
 from collections.abc import Callable, Sequence
 from typing import cast
 
+from PySide6 import QtGui
 from PySide6.QtCore import (
     QEvent,
     QModelIndex,
@@ -31,6 +33,7 @@ from PySide6.QtGui import (
     QFont,
     QFontMetrics,
     QGuiApplication,
+    QHelpEvent,
     QHideEvent,
     QIcon,
     QKeyEvent,
@@ -63,6 +66,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -168,6 +172,107 @@ def install_focus_tracking(app: QApplication) -> FocusTracker:
         tracker = FocusTracker(app)
         app.installEventFilter(tracker)
     return tracker
+
+
+TIP_WIDTH = 320
+"""The width in pixels a tooltip wraps at when its text is wider."""
+
+PATH_BREAK = "\u200b"
+"""A zero-width space put after each `/`, so a long path wraps there."""
+
+
+def tip_text(text: str) -> str:
+    """Return a tooltip's text, wrapped at `TIP_WIDTH` when it is wider.
+
+    Text that fits in `TIP_WIDTH` on every line is returned unchanged. Wider
+    text becomes rich text in a table `TIP_WIDTH` wide, with its line breaks
+    kept and a break allowed after each `/`.
+
+    Args:
+        text: The tooltip's plain text.
+
+    Returns:
+        The text Qt shows as the tooltip.
+    """
+    metrics = QFontMetrics(theme.font("caption"))
+    lines = text.split("\n")
+    if all(metrics.horizontalAdvance(line) <= TIP_WIDTH for line in lines):
+        return text
+    body = "<br>".join(
+        html.escape(line, quote=False).replace("/", "/" + PATH_BREAK) for line in lines
+    )
+    return (
+        f'<table width="{TIP_WIDTH}" cellspacing="0" cellpadding="0">'
+        f"<tr><td>{body}</td></tr></table>"
+    )
+
+
+class TipWrapper(QObject):
+    """Shows each widget's plain-text tooltip through `tip_text`.
+
+    The widget keeps its plain text in `toolTip()`; only what is shown wraps.
+    """
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: D102
+        if event.type() != QEvent.Type.ToolTip or not isinstance(watched, QWidget):
+            return False
+        text = watched.toolTip()
+        if not text or QtGui.Qt.mightBeRichText(text):
+            return False
+        shown = tip_text(text)
+        if shown == text:
+            return False
+        QToolTip.showText(cast(QHelpEvent, event).globalPos(), shown, watched)
+        return True
+
+
+def install_tooltips(app: QApplication) -> TipWrapper:
+    """Install one `TipWrapper` on the application and return it."""
+    wrapper = app.findChild(TipWrapper)
+    if wrapper is None:
+        wrapper = TipWrapper(app)
+        app.installEventFilter(wrapper)
+    return wrapper
+
+
+class InfoTip(QPushButton):
+    """A small info icon that shows a tooltip on hover, keyboard focus or click."""
+
+    def __init__(self, about: str, text: str) -> None:
+        """Create the icon.
+
+        Args:
+            about: What the tooltip explains; it names the icon for screen
+                readers as "About <about>".
+            text: The tooltip's plain text.
+        """
+        super().__init__()
+        self.setProperty("role", "info")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName(f"About {about}")
+        self.setAccessibleDescription(text)
+        self.setToolTip(text)
+        self._paint_icon()
+        theme.signals.changed.connect(self._paint_icon)
+        self.clicked.connect(self.show_tip)
+
+    def _paint_icon(self, _mode: str = "") -> None:
+        self.setIcon(icons.icon("info", theme.color("text-muted"), 16))
+
+    def show_tip(self) -> None:
+        """Show the tooltip under the icon."""
+        point = self.mapToGlobal(QPoint(0, self.height() + 4))
+        QToolTip.showText(point, tip_text(self.toolTip()), self)
+
+    def focusInEvent(self, event: QFocusEvent) -> None:  # noqa: D102, N802
+        super().focusInEvent(event)
+        if event.reason() in KEYBOARD_REASONS:
+            self.show_tip()
+
+    def focusOutEvent(self, event: QFocusEvent) -> None:  # noqa: D102, N802
+        super().focusOutEvent(event)
+        QToolTip.hideText()
 
 
 def button(
@@ -557,7 +662,7 @@ class Picker(QComboBox):
         item.setData(value, Qt.ItemDataRole.UserRole)
         if hint:
             item.setData(hint, HINT_ROLE)
-            item.setToolTip(hint)
+            item.setToolTip(tip_text(hint))
         item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
         self._model.appendRow(item)
         if self.currentIndex() < 0 or self.is_header(self.currentIndex()):

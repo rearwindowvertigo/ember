@@ -928,7 +928,8 @@ def test_planning_rows_show_and_save_the_settings(
     assert screen.derived["gapcheck.reviewer"].picker.currentText() == (
         "Same as Reviewer"
     )
-    assert screen.when.toolTip() == menu.WHEN_TIP
+    assert screen.when_row.info.toolTip() == menu.WHEN_TIP
+    assert screen.when.toolTip() == ""
     saved: list[dict[str, object]] = []
     context.save_settings = lambda values, **_kwargs: saved.append(values)  # type: ignore[method-assign]
     screen.when.set_value("off")

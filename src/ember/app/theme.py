@@ -205,6 +205,8 @@ QToolTip {
     border: 1px solid @fill-primary;
     border-radius: 6px;
     padding: 4px 8px;
+    font-size: 12px;
+    font-weight: 400;
 }
 QFrame[role="card"] {
     background: @bg-card;
@@ -382,6 +384,25 @@ QPushButton[scale="sm"][keyfocus="true"]:focus {
     min-height: 28px;
     max-height: 28px;
     padding: 0 11px;
+}
+QPushButton[role="info"] {
+    border: 1px solid transparent;
+    background: transparent;
+    border-radius: 6px;
+    padding: 0;
+    min-height: 20px;
+    max-height: 20px;
+    min-width: 20px;
+    max-width: 20px;
+}
+QPushButton[role="info"]:hover {
+    background: @bg-hover;
+}
+QPushButton[role="info"][keyfocus="true"]:focus {
+    border: 2px solid @focus-ring;
+    padding: 0;
+    min-height: 20px;
+    max-height: 20px;
 }
 QWidget[role="segmented"] {
     background: @bg-subtle;
