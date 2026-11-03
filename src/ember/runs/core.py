@@ -25,7 +25,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TextIO
 
-from ember import choices, db, engines, paths, sandbox, tmux
+from ember import choices, db, engines, paths, processes, sandbox, tmux
 from ember.engines import Driver, LaunchSpec, TurnOutcome, status
 from ember.runs import exits, record
 from ember.runs.record import Run
@@ -1551,6 +1551,13 @@ class Core:
         return exits.OK
 
     def _end_session(self, run: Run) -> None:
+        # Processes a worker's tools start in a session of their own survive
+        # the tmux session, so the pane's descendants are found first.
+        found: list[processes.Process] = []
+        with contextlib.suppress(tmux.TmuxError):
+            pid = tmux.pane_pid(run.id, env=self.env)
+            if pid is not None:
+                found = processes.tree(pid)
         try:
             self._optional_driver(run.engine).close(run)
         except (engines.DriverError, tmux.TmuxError) as error:
@@ -1558,6 +1565,12 @@ class Core:
         if self._session_state(run.id) != MISSING:
             with self._engine_calls(run):
                 tmux.kill(run.id, env=self.env)
+        left = processes.end(found)
+        if left:
+            self._warn(
+                f"emb run: {run.id}: processes still running after SIGKILL: "
+                + ", ".join(str(pid) for pid in left)
+            )
         record.update(
             run,
             {"status": record.CLOSED, "ended_at": run.ended_at or time.time()},

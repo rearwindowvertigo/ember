@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from ember import choices, engines, paths, sandbox
+from ember import choices, engines, paths, processes, sandbox
 from ember.engines import Driver, LaunchSpec
 from ember.runs import core, exits, record
 from ember.runs.core import Core, RunError, StartOptions
@@ -1593,6 +1593,22 @@ def test_close_keeps_worktree_and_branch(
     assert core_.execute(lambda: core_.close(run_id)) == 0
     message = _brief(tmp_path, "more\n", "m.md")
     assert core_.execute(lambda: core_.send(run_id, message)) == 72
+
+
+def test_close_ends_a_process_the_worker_detached(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    marker = tmp_path / "detached.pid"
+    run_id = _started(tmp_path, env, repo, capsys, f"Task\n@detach {marker}\n")
+    pid = int(marker.read_text())
+    child = processes.tree(pid)
+    assert processes.running(child[0])
+    core_ = _core(env)
+    assert core_.execute(lambda: core_.close(run_id)) == 0
+    out, err = capsys.readouterr()
+    assert out == f"closed {run_id}\n"
+    assert err == ""
+    assert not processes.running(child[0])
 
 
 def test_close_refused_while_a_turn_is_collected_but_not_committed(

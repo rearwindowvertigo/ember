@@ -505,7 +505,12 @@ run whose turn is collected but not committed, with `next: emb run --recover
 <run> (commits the collected turn), then emb run --close <run>`, and a live
 session that holds messages Ember did not send or whose history cannot be
 checked, with the line `--send` prints. It ends the
-session and keeps the worktree and branch. A command waiting on a run that is
+session and keeps the worktree and branch. Before ending the session it
+records every process under the session's pane; after, it sends SIGTERM to
+each one still running, then SIGKILL after 2 seconds. This ends processes a
+worker's tools started in a session of their own, such as Codex's
+`codex-linux-sandbox`. A process still running after SIGKILL is named on
+standard error. A command waiting on a run that is
 closed stops with 72, also when the driver fails or the session is missing
 after the close.
 

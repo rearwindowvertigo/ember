@@ -234,6 +234,12 @@ def handle(message, turn):
             sys.exit(0)
         elif word == "@git":
             subprocess.run(["git", *rest.split()], check=False)
+        elif word == "@detach":
+            child = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(120)"],
+                start_new_session=True,
+            )
+            Path(rest).write_text(str(child.pid))
     show(f"turn {turn} done\n")
     outcome(turn, state="done", reply=reply)
 
