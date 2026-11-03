@@ -239,8 +239,10 @@ stalled partial edits without the owner's approval.
 ### 7. Verify and review
 
 Verify in the worker's own worktree and branch, not the session checkout.
-Write scratch output to `/tmp`, never into a worker's worktree.
-After every editing worker, run:
+Write scratch output to `/tmp`, never into a worker's worktree. Delete,
+clean or commit nothing there, including files your own checks create;
+run Python checks with `PYTHONDONTWRITEBYTECODE=1`. Cleanup decides from
+what the worktree holds. After every editing worker, run:
 
 ```bash
 python3 scripts/verify_branch.py --repo <repo> --base <session branch> --branch <worker branch> --worktree <worktree> --expect-files <n>
