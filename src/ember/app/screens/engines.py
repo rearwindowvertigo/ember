@@ -15,9 +15,11 @@ Every read, check and save runs in a task.
 
 from collections.abc import Sequence
 from decimal import Decimal
+from math import ceil
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFontMetricsF
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -855,14 +857,29 @@ class _ModelPanel(Card):
         self.missing_widget.setVisible(bool(absent))
 
     def _measure_names(self, saved: dict[str, str | None]) -> None:
-        """Fit the name column to all model ids, up to 320 logical pixels."""
-        name_label = self.rows[0].name if self.rows else self.name_header
-        metrics = name_label.fontMetrics()
+        """Fit the header and all model ids, up to 320 logical pixels."""
+
+        def width(label: QLabel, texts: Sequence[str]) -> int:
+            label.ensurePolished()
+            label.setFixedWidth(320)
+            extra = label.width() - label.contentsRect().width()
+            metrics = QFontMetricsF(label.font())
+            return ceil(max(metrics.horizontalAdvance(text) for text in texts) + extra)
+
+        measured = width(self.name_header, [self.name_header.text()])
         names = [model.id for model in self.models or ()]
         names += [model for model, _effort in self._absent(saved)]
-        self.name_width = min(
-            320, max((metrics.horizontalAdvance(n) for n in names), default=0)
-        )
+        if names:
+            name_label = (
+                self.rows[0].name if self.rows else ElidedLabel(parent=self.rows_widget)
+            )
+            name_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            measured = max(measured, width(name_label, names))
+            if not self.rows:
+                name_label.deleteLater()
+        self.name_width = min(320, measured)
         self.name_header.setFixedWidth(self.name_width)
         for row in self.rows:
             row.name.setFixedWidth(self.name_width)
