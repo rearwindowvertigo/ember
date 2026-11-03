@@ -20,7 +20,7 @@ standard error as `emb choices: <message>`.
 | (none) or `--json` | Read | Read reply |
 | `--id ID` | With a read or `--claim`: use the claim for `ID` | Read reply for `ID` |
 | `--claim --id ID` | Claim the pending one-time choice for `ID` | Read reply |
-| `--finish ID` | Release the claim for `ID` | `{"claim": {"id", "status": "gone"}, "generation", "errors"}` |
+| `--finish ID` | Release the claim for `ID` | `{"claim": {"id", "status": "gone", "was"}, "generation", "errors"}` |
 | `--request KEY=VALUE` | With a read or `--claim`: a request-layer value; repeatable | |
 | `--set KEY=VALUE` | Save a standing setting; repeatable | `{"settings": {...}, "generation", "errors"}` |
 | `--clear KEY` | Remove a standing setting; repeatable | As `--set` |
@@ -93,7 +93,10 @@ names the invalid values, `menu` is `null` and the exit code is 0.
   it. A claim of a new id does not consume a pending one-time choice that is
   not valid: it records nothing, and the reply has status `unknown`.
 - A claim reads as `gone` 7 days after it was made.
-- `--finish ID` records `ID` as `gone`, also when `ID` was not known.
+- `--finish ID` records `ID` as `gone`, also when `ID` was not known. `gone`
+  is the status of every finished claim. The reply's `was` is the status
+  before the finish: `claimed`, `none`, `gone` (finished before, or
+  expired) or `unknown`.
 - Claim status is `claimed`, `none`, `gone`, or `unknown` for an id never
   claimed. With `gone` or `unknown`, every key resolves to its default and
   `--request` values are not used.

@@ -510,12 +510,13 @@ def test_finish_marks_gone_and_is_idempotent(env: dict[str, str]) -> None:
     generation = _generation(env)
     reply = choices.finish("run-000001", env=env)
     assert reply == {
-        "claim": {"id": "run-000001", "status": "gone"},
+        "claim": {"id": "run-000001", "status": "gone", "was": "claimed"},
         "generation": generation,
         "errors": [],
     }
     again = choices.finish("run-000001", env=env)
     assert again["generation"] == generation
+    assert again["claim"]["was"] == "gone"
     reply = choices.read(
         "run-000001", request={"single.reviewer_as": "subagent"}, env=env
     )
@@ -527,11 +528,24 @@ def test_finish_marks_gone_and_is_idempotent(env: dict[str, str]) -> None:
 def test_finish_of_unknown_id_records_gone(env: dict[str, str]) -> None:
     reply = choices.finish("run-000002", env=env)
     assert reply["claim"]["status"] == "gone"
+    assert reply["claim"]["was"] == "unknown"
     assert reply["generation"] == 0
     assert choices.read("run-000002", env=env)["claim"]["status"] == "gone"
     choices.set_once({"single.writer_as": "subagent"}, env=env)
     assert choices.claim("run-000002", env=env)["claim"]["status"] == "gone"
     assert choices.snapshot(env=env)["once"] is not None
+
+
+def test_finish_reports_a_claim_without_a_choice(env: dict[str, str]) -> None:
+    choices.claim("run-000003", env=env)
+    assert choices.finish("run-000003", env=env)["claim"]["was"] == "none"
+
+
+def test_finish_reports_an_expired_claim_as_gone(env: dict[str, str]) -> None:
+    choices.set_once({"single.writer_as": "subagent"}, env=env, now=1000.0)
+    choices.claim("run-000004", env=env, now=1000.0)
+    reply = choices.finish("run-000004", env=env, now=1000.0 + choices.CLAIM_TTL)
+    assert reply["claim"] == {"id": "run-000004", "status": "gone", "was": "gone"}
 
 
 @pytest.mark.parametrize(

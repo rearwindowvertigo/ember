@@ -174,7 +174,7 @@ def test_owner_writes_and_claim(
     code, data, _ = _run(["--finish", "run-000001"], env, capsys)
     assert code == 0
     assert data == {
-        "claim": {"id": "run-000001", "status": "gone"},
+        "claim": {"id": "run-000001", "status": "gone", "was": "claimed"},
         "generation": 3,
         "errors": [],
     }

@@ -91,7 +91,9 @@ Finish with `emb choices --finish <id>`: after merge or discard for
 editing work, after review for read-only work, at once for no worker.
 For failed or cancelled work, review the partial results and settle merge
 or discard before the finish. `--finish` records the id `gone`, also when
-it was not known. A failed finish is retried with the same id.
+it was not known; `gone` in its reply means the finish worked. The reply's
+`was` is the status before the finish. A failed finish is retried with the
+same id.
 
 ## Exit codes
 

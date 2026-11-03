@@ -839,6 +839,10 @@ def finish(
 ) -> dict[str, Any]:
     """Release a claim; the id is recorded `gone`, also when it was unknown.
 
+    `gone` is the status of every finished claim. The reply's `was` is the
+    status before this call: `claimed`, `none`, `gone` (already finished or
+    expired) or `unknown`.
+
     Args:
         id: The run's claim id.
         expect_generation: The generation the caller last read, or `None`.
@@ -846,7 +850,7 @@ def finish(
         now: The time; `None` for the current time.
 
     Returns:
-        `{"claim": {"id", "status": "gone"}, "generation", "errors"}`.
+        `{"claim": {"id", "status": "gone", "was"}, "generation", "errors"}`.
 
     Raises:
         InvalidChoiceError: The id is not valid.
@@ -855,8 +859,15 @@ def finish(
     """
     run_id = check_id(id)
     at = _now(now)
+    was: list[str] = []
 
     def change(conn: sqlite3.Connection) -> bool:
+        # Expiry has already run in this transaction, so an expired claim
+        # reads as `gone` here.
+        row = conn.execute(
+            "SELECT status FROM claims WHERE id = ?", (run_id,)
+        ).fetchone()
+        was.append("unknown" if row is None else row[0])
         conn.execute(
             "INSERT INTO claims (id, status, at, copy) VALUES (?, 'gone', ?, NULL) "
             "ON CONFLICT (id) DO UPDATE SET status = 'gone', copy = NULL, "
@@ -867,7 +878,7 @@ def finish(
 
     def reply(conn: sqlite3.Connection, generation: int) -> dict[str, Any]:
         return {
-            "claim": {"id": run_id, "status": "gone"},
+            "claim": {"id": run_id, "status": "gone", "was": was[0]},
             "generation": generation,
             "errors": [],
         }
