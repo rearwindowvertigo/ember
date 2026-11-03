@@ -199,8 +199,9 @@ report, because the owner did not ask for it. Do not set message wording,
 docstrings or tests the request does not ask for. Do not fan out beyond what
 you can review.
 
-Before a flow or a Claude Workflow of two or more tasks starts, run the gap
-check in `references/gap-check.md`. Only those need it.
+Before a flow or a Claude Workflow of two or more tasks starts, follow the
+gap check in `references/gap-check.md`; Ember applies the owner's gap check
+settings and may skip it. Only those need it.
 
 ### 6. Start and follow the run
 

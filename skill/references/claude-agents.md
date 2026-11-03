@@ -58,8 +58,9 @@ Read results from the Workflow tool's result, or single returns from the
 run's `journal.jsonl`; the background task's output file is not the
 result. For a large task, run a small slice first.
 
-The runtime allows 16 concurrent agents, 4,096 items per call and 1,000
-agents per run. Scripts cannot read files or `import()`; `Date.now()` and
+Run at most the owner's Agents at once (`workflow.agents` in
+`emb choices --json` answers: 4, 8 or 16) at the same time. The runtime
+allows 16 concurrent agents, 4,096 items per call and 1,000 agents per run. Scripts cannot read files or `import()`; `Date.now()` and
 `Math.random()` throw, so the run can be replayed. A stopped run relaunches
 with cached results up to the first agent that changed or failed; that
 agent and every later one run again.
@@ -80,9 +81,12 @@ is implied. Start one background Bash `sleep <seconds>` and keep its task
 id beside the worker.
 
 When it ends, check the subagent's transcript: a growing transcript means
-wait; a stopped one without a result means stalled. For a Workflow, ask
-the owner whether to wait or stop. When the check says wait, start one
-more timer of the same length, and ask the owner when it ends. Stop a
+wait; a stopped one without a result means stalled. For a Workflow agent,
+follow the owner's When an agent runs late (`workflow.late`): `ask` asks
+the owner whether to wait or stop; `wait` starts one more timer of the same
+length and asks the owner when it ends; `stop` stops the agent. When the
+check says wait for a subagent, start one more timer of the same length,
+and ask the owner when it ends. Stop a
 stalled agent before respawning it narrower or doing the work yourself.
 
 As soon as the worker reports, stop its timer with TaskStop by that id,

@@ -11,7 +11,8 @@ its gap check, owner answers, verification and merge.
 Use the owner's named workers as `--writer W` and `--reviewer W` on both
 the dry run and start, where `W` is `<engine>:<model>[@<effort>]`.
 Otherwise resolution uses the plan's `writer` and `reviewer`, then the
-`single.writer` and `single.reviewer` rows. Normally leave workers out of
+`flow.writer` and `flow.reviewer` rows (Team's Flow writer and Flow
+reviewer, which follow `single.writer` and `single.reviewer` while `same`). Normally leave workers out of
 the plan. Team rows must be `set`; a Claude subagent row exits 64. Ask the
 owner for a CLI worker when the row cannot answer and none was named;
 pass the answer explicitly. Never set a row yourself. Say both resolved
@@ -23,7 +24,9 @@ Write a JSON plan in the session scratchpad:
 - `trailers`: the harness attribution trailer in a list.
 - `rounds`: leave it out; the flow then uses the owner's Flow review
   rounds row. Set it only for a flow that needs a different count, and say
-  why before the dry run. `parallel`: default 4.
+  why before the dry run. `parallel`: leave it out; the flow then uses the
+owner's Tasks at once row (`flow.parallel`). The stall time comes from
+Stall after (`flow.stall`) unless you pass `--stall`.
 - `check`: an argv list for the repository's full check.
 - `failure_model`: the cases that must work and those accepted.
 - `context`: only settled decisions and the rules tasks need.
@@ -138,7 +141,15 @@ python3 scripts/verify_branch.py --repo <repo> --base <session branch> --branch 
 ```
 
 Omit `--expect-files`. Run your own checks and apply the skill's exact
-review bar to the whole flow diff. Inspect each task's `outside_files`,
+review bar to the whole flow diff.
+
+When the dry run's and the flow record's `whole_review` is true (Team's
+Review the whole flow), also run one read-only review of the whole flow
+before the merge: `emb run --read-only` on the flow's reviewer, in the flow
+worktree, with a brief that holds the skill's exact review bar and asks
+for findings on `git diff <base>...ember/flow/<id>`. Handle its findings as
+any review's, and close the run after reading its reply. When
+`whole_review` is false, run no such review. Inspect each task's `outside_files`,
 every retained `should` and `lead` finding, and every retained branch.
 Give one verdict for the flow branch as the `--note` of the `emb merge`
 call, such as `--note 'Keep.'`. Run that call on its own, with no other
