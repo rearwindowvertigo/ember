@@ -5,7 +5,6 @@
 
 ### Added
 
-* **app:** display fixes and flow review rounds after 0.3.0 ([04d4ef3](https://github.com/rearwindowvertigo/ember/commit/04d4ef3392bce49ff346ff6f29fef55f20c2197f))
 * **app:** lead Overview with Live and preview Finished ([fa2cead](https://github.com/rearwindowvertigo/ember/commit/fa2cead9abce9e514eaf4edeec83d4c2d969b5e8))
 * **flows:** set flow review rounds on the Menu screen ([400c59b](https://github.com/rearwindowvertigo/ember/commit/400c59bdd521e60591f1a5b609ee4949d6c67888))
 
