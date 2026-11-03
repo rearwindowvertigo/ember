@@ -43,7 +43,7 @@ ICON_SIZE = 18
 
 BADGE_HEIGHT = 22
 
-RESTART_TITLE = "Ember {version} is installed. Restart to use it."
+RESTART_TITLE = "Ember {version} is installed."
 """The restart alert's text, after an upgrade while Ember runs."""
 """The height of a sidebar row's count, in pixels."""
 
@@ -140,6 +140,35 @@ class NavButton(QPushButton):
         return QSize(theme.SIDEBAR_WIDTH - 24, theme.CONTROL_MD)
 
 
+class UpdateBox(QFrame):
+    """The sidebar's offer to restart into a newer installed Ember."""
+
+    def __init__(self, restart: Callable[[], None]) -> None:
+        """Build the box with its Restart button.
+
+        Args:
+            restart: Quits this Ember and starts the installed one.
+        """
+        super().__init__()
+        self.setProperty("role", "update")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+        self.label = QLabel()
+        self.label.setFont(theme.font("caption"))
+        self.label.setWordWrap(True)
+        layout.addWidget(self.label)
+        self.restart_button = widgets.button("Restart", "secondary", size="sm")
+        self.restart_button.clicked.connect(restart)
+        layout.addWidget(self.restart_button, 0, Qt.AlignmentFlag.AlignLeft)
+
+    def set_text(self, text: str) -> None:
+        """Show which version is installed."""
+        self.label.setText(text)
+        self.setAccessibleName(text)
+        self.restart_button.setAccessibleDescription(text)
+
+
 class MainWindow(QMainWindow):
     """The window: sidebar, notices and the current screen."""
 
@@ -180,7 +209,7 @@ class MainWindow(QMainWindow):
         self.notice_area = QVBoxLayout()
         self.notice_area.setContentsMargins(24, 16, 24, 0)
         self.notice: widgets.Alert | None = None
-        self.restart_alert: widgets.Alert | None = None
+        self.update_box: UpdateBox | None = None
         content.addLayout(self.notice_area)
         self.stack = QStackedWidget()
         self.state_view = widgets.StateView()
@@ -244,6 +273,9 @@ class MainWindow(QMainWindow):
             self.nav[key] = item
             layout.addWidget(item)
         layout.addStretch(1)
+        self.update_area = QVBoxLayout()
+        self.update_area.setContentsMargins(0, 0, 0, 8)
+        layout.addLayout(self.update_area)
         self.version_label = QLabel(f"Ember {app_version()}")
         self.version_label.setProperty("role", "muted")
         self.version_label.setContentsMargins(10, 0, 10, 0)
@@ -346,23 +378,21 @@ class MainWindow(QMainWindow):
     def show_restart(self, version: str, restart: Callable[[], None]) -> None:
         """Offer a restart into the installed version until Ember restarts.
 
-        The alert has no Dismiss button and survives other notices; a second
-        call for another version replaces it.
+        The offer is a small box in the sidebar, above the version line. It
+        has no Dismiss button; a second call for another version replaces
+        its text.
 
         Args:
             version: The installed version.
             restart: Quits this Ember and starts the installed one.
         """
-        title = RESTART_TITLE.format(version=version)
-        if self.restart_alert is not None:
-            if self.restart_alert.title_label.text() == title:
-                return
-            self.notice_area.removeWidget(self.restart_alert)
-            self.restart_alert.deleteLater()
-        self.restart_alert = widgets.Alert(
-            "info", title, actions=[("Restart", restart)]
-        )
-        self.notice_area.insertWidget(0, self.restart_alert)
+        text = RESTART_TITLE.format(version=version)
+        if self.update_box is None:
+            self.update_box = UpdateBox(restart)
+            self.update_area.addWidget(self.update_box)
+        elif self.update_box.label.text() == text:
+            return
+        self.update_box.set_text(text)
         self.bring_forward()
 
     def _stale(self) -> None:

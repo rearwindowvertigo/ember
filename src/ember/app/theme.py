@@ -216,6 +216,14 @@ QFrame[role="sidebar"] {
     border: none;
     border-right: 1px solid @border;
 }
+QFrame[role="update"] {
+    background: @bg-accent;
+    border: none;
+    border-radius: 10px;
+}
+QFrame[role="update"] QLabel {
+    color: @text-accent;
+}
 QLabel {
     background: transparent;
     border: none;

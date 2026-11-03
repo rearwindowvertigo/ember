@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication
 from pytestqt.qtbot import QtBot
 
@@ -287,7 +288,7 @@ def test_hand_over_with_the_same_version_offers_no_restart(
         assert parts.version == "0.4.0"
         assert main.start(["--hidden"], app_env) == 0
         qtbot.wait(200)
-        assert parts.window.restart_alert is None
+        assert parts.window.update_box is None
 
 
 def test_hand_over_after_an_upgrade_offers_a_restart(
@@ -300,20 +301,26 @@ def test_hand_over_after_an_upgrade_offers_a_restart(
     for parts in _start([], app_env, qtbot):
         version["value"] = "0.5.0"
         assert main.start(["--hidden"], app_env) == 0
-        qtbot.waitUntil(lambda parts=parts: parts.window.restart_alert is not None)
-        alert = parts.window.restart_alert
-        assert alert is not None
-        assert alert.title_label.text() == (
-            "Ember 0.5.0 is installed. Restart to use it."
-        )
-        assert [button.text() for button in alert.buttons] == ["Restart"]
+        qtbot.waitUntil(lambda parts=parts: parts.window.update_box is not None)
+        box = parts.window.update_box
+        assert box is not None
+        assert box.label.text() == "Ember 0.5.0 is installed."
+        assert box.restart_button.text() == "Restart"
+        assert parts.window.sidebar.isAncestorOf(box)
+        assert parts.window.notice is None
+        version_top = parts.window.version_label.mapTo(parts.window, QPoint(0, 0))
+        assert box.mapTo(parts.window, QPoint(0, 0)).y() < version_top.y()
         parts.window.show_notice("info", "Another notice")
         parts.window.clear_notice()
-        assert parts.window.restart_alert is alert
+        assert parts.window.update_box is box
         assert main.start([], app_env) == 0
         qtbot.wait(200)
-        assert parts.window.restart_alert is alert
-        alert.buttons[0].click()
+        assert parts.window.update_box is box
+        version["value"] = "0.6.0"
+        assert main.start([], app_env) == 0
+        qtbot.waitUntil(lambda box=box: box.label.text() == "Ember 0.6.0 is installed.")
+        assert parts.window.update_box is box
+        box.restart_button.click()
         assert restarts == [parts]
 
 
@@ -335,13 +342,11 @@ def test_package_change_offers_a_restart_without_a_second_launch(
         )
         version["value"] = "0.5.0"
         qtbot.waitUntil(
-            lambda parts=parts: parts.window.restart_alert is not None, timeout=5000
+            lambda parts=parts: parts.window.update_box is not None, timeout=5000
         )
-        alert = parts.window.restart_alert
-        assert alert is not None
-        assert alert.title_label.text() == (
-            "Ember 0.5.0 is installed. Restart to use it."
-        )
+        box = parts.window.update_box
+        assert box is not None
+        assert box.label.text() == "Ember 0.5.0 is installed."
 
 
 def test_package_change_with_the_same_version_offers_no_restart(
@@ -358,7 +363,7 @@ def test_package_change_with_the_same_version_offers_no_restart(
     for parts in _start([], app_env, qtbot):
         (package / "other").mkdir()
         qtbot.wait(400)
-        assert parts.window.restart_alert is None
+        assert parts.window.update_box is None
 
 
 def test_package_folder_is_the_installed_metadata_folder(

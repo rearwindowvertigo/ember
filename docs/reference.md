@@ -2661,9 +2661,11 @@ On every such connection, and 2 seconds after the folder holding the
 installed `ember-app` metadata (`ember_app-<version>.dist-info`) last
 changed, the running app reads the installed version from disk and compares
 it with the version it started as. An upgrade installed while Ember runs
-therefore shows the alert without another start. When they differ, its window shows an info alert, `Ember <version> is installed.
-Restart to use it.`, with a Restart button and no Dismiss; the alert stays
-until Ember restarts. Restart closes the socket, starts the installed app
+therefore shows the offer without another start. When they differ, the
+window shows a small info box in the sidebar, directly above the version
+line: `Ember <version> is installed.` with a Restart button and no Dismiss.
+The box stays until Ember restarts; a later installed version replaces its
+text. No alert shows above the screen for it. Restart closes the socket, starts the installed app
 with the running interpreter (`python -I -m ember.cli app`) and quits. Runs
 keep running in their tmux sessions.
 
