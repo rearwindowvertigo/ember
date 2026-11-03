@@ -22,6 +22,7 @@ from typing import Any, TextIO
 
 from ember import branches, choices, db, paths, tmux
 from ember.flows import lock, plan, record
+from ember.gapcheck import policy
 from ember.runs import exits
 from ember.runs import record as run_record
 from ember.runs.core import STALL_MINUTES, Core
@@ -287,7 +288,7 @@ def _prepare(
     args: argparse.Namespace,
     env: Mapping[str, str],
     core: Core,
-) -> tuple[plan.Plan, Path, Path, str, plan.Worker, plan.Worker]:
+) -> tuple[plan.Plan, Path, Path, str, plan.Worker, plan.Worker, dict[str, Any]]:
     """Validate a plan, checkout, claim and both workers before creating state."""
     document = plan.load(args.plan)
     if not Path(document.dir).is_dir():
@@ -309,7 +310,7 @@ def _prepare(
             ) from error
         raise
     settings = _settings(args.claim, env)
-    document = _review_rounds(document, settings)
+    document = _parallel(_review_rounds(document, settings), settings)
     workers = [
         _worker(
             plan.resolve(role, getattr(args, role), document, settings),
@@ -319,7 +320,7 @@ def _prepare(
         )
         for role in plan.ROLES
     ]
-    return document, top, main, base, workers[0], workers[1]
+    return document, top, main, base, workers[0], workers[1], settings
 
 
 def _review_rounds(document: plan.Plan, settings: Mapping[str, Any]) -> plan.Plan:
@@ -337,6 +338,41 @@ def _review_rounds(document: plan.Plan, settings: Mapping[str, Any]) -> plan.Pla
     return replace(document, rounds=int(value) - 1, rounds_source="setting")
 
 
+def _parallel(document: plan.Plan, settings: Mapping[str, Any]) -> plan.Plan:
+    """Apply the owner's `flow.parallel` row unless the plan sets `parallel`."""
+    if document.parallel_source == "plan":
+        return document
+    row = (settings.get("answers") or {}).get("flow.parallel") or {}
+    value = row.get("value")
+    if value not in choices.FLOW_PARALLEL:
+        return document
+    return replace(document, parallel=int(value), parallel_source="setting")
+
+
+def _stall_minutes(args: argparse.Namespace, settings: Mapping[str, Any]) -> float:
+    """Return `--stall`, else the owner's `flow.stall` row, else the default."""
+    if args.stall is not None:
+        return args.stall
+    row = (settings.get("answers") or {}).get("flow.stall") or {}
+    value = row.get("value")
+    return int(value) if value in choices.FLOW_STALL else STALL_MINUTES
+
+
+def _whole_review(settings: Mapping[str, Any]) -> bool:
+    """Return whether the owner's `flow.whole_review` row is on."""
+    row = (settings.get("answers") or {}).get("flow.whole_review") or {}
+    return row.get("value", "on") == "on"
+
+
+def _gapcheck_decision(
+    document: plan.Plan, settings: Mapping[str, Any]
+) -> tuple[str, str]:
+    answers = settings.get("answers")
+    if not answers or "gapcheck.when" not in answers:
+        return policy.RUN, "the gap check settings cannot be read"
+    return policy.decide(answers, len(document.tasks))
+
+
 def _dry_run(
     args: argparse.Namespace,
     document: plan.Plan,
@@ -344,27 +380,33 @@ def _dry_run(
     base: str,
     writer: plan.Worker,
     reviewer: plan.Worker,
+    settings: Mapping[str, Any],
     env: Mapping[str, str],
     out: TextIO,
     err: TextIO,
 ) -> None:
-    """Print resolved workers, waves, warnings and the gap check command."""
-    gapcheck = [
-        "emb",
-        "gapcheck",
-        "--plan",
-        str(document.path),
-        "--dir",
-        str(top),
-        "--engine",
-        reviewer.engine,
-        "--model",
-        reviewer.model,
-    ]
-    if reviewer.effort is not None:
-        gapcheck += ["--effort", reviewer.effort]
+    """Print resolved workers, waves, warnings and the gap check decision.
+
+    The gap check command names the flow's reviewer when it was given with
+    `--reviewer` or in the plan; otherwise `emb gapcheck` uses the owner's
+    Gap check reviewer row. A plan the settings skip gets no
+    command; one they leave to the owner gets the command with `--confirmed`.
+    """
+    decision, why = _gapcheck_decision(document, settings)
+    gapcheck = ["emb", "gapcheck", "--plan", str(document.path), "--dir", str(top)]
+    if reviewer.source != "menu":
+        # A reviewer named for this flow, by option or in the plan, also
+        # checks its plan; the Gap check reviewer row covers the rest.
+        gapcheck += ["--engine", reviewer.engine, "--model", reviewer.model]
+        if reviewer.effort is not None:
+            gapcheck += ["--effort", reviewer.effort]
     if args.claim is not None:
         gapcheck += ["--claim", args.claim]
+    if decision == policy.ASK:
+        gapcheck.append("--confirmed")
+    command = None if decision == policy.SKIPPED else shlex.join(gapcheck)
+    whole = _whole_review(settings)
+    stall = _stall_minutes(args, settings)
     waves = plan.waves(document)
     warnings = plan.warnings(document, str(top), env)
     if args.json:
@@ -379,9 +421,15 @@ def _dry_run(
                     "check": list(document.check),
                     "rounds": document.rounds,
                     "rounds_source": document.rounds_source,
+                    "parallel": document.parallel,
+                    "parallel_source": document.parallel_source,
+                    "stall_minutes": stall,
+                    "whole_review": whole,
                     "waves": [[task.id for task in wave] for wave in waves],
                     "warnings": warnings,
-                    "gapcheck": shlex.join(gapcheck),
+                    "gapcheck": command,
+                    "gapcheck_status": decision,
+                    "gapcheck_reason": why,
                 },
                 indent=2,
             ),
@@ -404,7 +452,17 @@ def _dry_run(
             print(f"wave {number}:", file=out)
             for task in wave:
                 print(f"  {task.id}: {', '.join(task.files)}", file=out)
-        print(f"gap check: {shlex.join(gapcheck)}", file=out)
+        print(
+            f"parallel {document.parallel} ({document.parallel_source}), "
+            f"stall {stall:g} min, whole-flow review {'on' if whole else 'off'}",
+            file=out,
+        )
+        if command is None:
+            print(f"gap check: skipped, {why}", file=out)
+        elif decision == policy.ASK:
+            print(f"gap check: ask the owner, then {command}", file=out)
+        else:
+            print(f"gap check: {command}", file=out)
     for warning in warnings:
         print(f"WARNING: {warning}", file=err)
 
@@ -418,9 +476,9 @@ def _start(
     err: TextIO,
 ) -> int:
     """Validate, create the branch and record, then launch the runner."""
-    document, top, main, base, writer, reviewer = _prepare(args, env, core)
+    document, top, main, base, writer, reviewer, settings = _prepare(args, env, core)
     if args.dry_run:
-        _dry_run(args, document, top, base, writer, reviewer, env, out, err)
+        _dry_run(args, document, top, base, writer, reviewer, settings, env, out, err)
         return 0
     _require_tool("tmux", env)
     # Validate the runtime folder before leaving a record or worktree behind.
@@ -451,8 +509,9 @@ def _start(
         base_branch=base_branch,
         writer=writer,
         reviewer=reviewer,
-        stall_minutes=args.stall if args.stall is not None else STALL_MINUTES,
+        stall_minutes=_stall_minutes(args, settings),
         claim=args.claim,
+        whole_review=_whole_review(settings),
     )
     # None denotes a frozen engine default, not permission to read a later menu.
     for role in plan.ROLES:

@@ -55,6 +55,46 @@
       "value": "3",
       "layer": "default"
     },
+    "gapcheck.reviewer": {
+      "value": "same",
+      "layer": "default"
+    },
+    "flow.writer": {
+      "value": "same",
+      "layer": "default"
+    },
+    "flow.reviewer": {
+      "value": "same",
+      "layer": "default"
+    },
+    "gapcheck.when": {
+      "value": "always",
+      "layer": "default"
+    },
+    "gapcheck.ask": {
+      "value": "high",
+      "layer": "default"
+    },
+    "flow.parallel": {
+      "value": "4",
+      "layer": "default"
+    },
+    "flow.stall": {
+      "value": "10",
+      "layer": "default"
+    },
+    "flow.whole_review": {
+      "value": "on",
+      "layer": "default"
+    },
+    "workflow.agents": {
+      "value": "8",
+      "layer": "default"
+    },
+    "workflow.late": {
+      "value": "ask",
+      "layer": "default"
+    },
     "panel.members": {
       "value": [],
       "layer": "default"
@@ -110,6 +150,36 @@
       "effort": "medium",
       "run_as": null,
       "reason": null
+    },
+    "gapcheck.reviewer": {
+      "value": "codex:gpt-6.1-sol-mini",
+      "state": "set",
+      "engine": "codex",
+      "model": "gpt-6.1-sol-mini",
+      "effort": "medium",
+      "run_as": null,
+      "reason": null,
+      "same": true
+    },
+    "flow.writer": {
+      "value": "codex:gpt-6.1-sol",
+      "state": "set",
+      "engine": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "run_as": null,
+      "reason": null,
+      "same": true
+    },
+    "flow.reviewer": {
+      "value": "codex:gpt-6.1-sol-mini",
+      "state": "set",
+      "engine": "codex",
+      "model": "gpt-6.1-sol-mini",
+      "effort": "medium",
+      "run_as": null,
+      "reason": null,
+      "same": true
     },
     "multi.runs_as": {
       "value": "ask",

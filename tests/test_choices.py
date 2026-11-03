@@ -158,6 +158,16 @@ def test_defaults(env: dict[str, str]) -> None:
         "single.reviewer_as": "cli",
         "multi.runs_as": "ask",
         "flow.review_rounds": "3",
+        "gapcheck.reviewer": "same",
+        "flow.writer": "same",
+        "flow.reviewer": "same",
+        "gapcheck.when": "always",
+        "gapcheck.ask": "high",
+        "flow.parallel": "4",
+        "flow.stall": "10",
+        "flow.whole_review": "on",
+        "workflow.agents": "8",
+        "workflow.late": "ask",
         "panel.members": [],
         "sandbox.codex": "off",
         "sandbox.opencode": "off",
@@ -1151,6 +1161,9 @@ def test_panel_members_read_reply_and_allowed(panel_env: dict[str, str]) -> None
     assert list(reply["menu"]) == [
         "single.writer",
         "single.reviewer",
+        "gapcheck.reviewer",
+        "flow.writer",
+        "flow.reviewer",
         "multi.runs_as",
         "panel.members",
     ]
@@ -1319,3 +1332,32 @@ def test_invalid_panel_once_is_not_claimed(panel_env: dict[str, str]) -> None:
     with sqlite3.connect(_db_path(panel_env)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM once").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0
+
+
+def test_derived_rows_follow_their_single_row_while_same(env: dict[str, str]) -> None:
+    choices.set_settings(
+        {
+            "shortlist.codex": ["gpt-5@high"],
+            "shortlist.claude": ["opus@medium"],
+            "single.reviewer": "codex:gpt-5",
+            "single.writer_as": "subagent",
+            "flow.writer": "claude:opus",
+        },
+        env=env,
+    )
+    menu = choices.read(env=env)["menu"]
+    assert menu["gapcheck.reviewer"] == {**menu["single.reviewer"], "same": True}
+    assert menu["flow.reviewer"]["same"] is True
+    writer = menu["flow.writer"]
+    assert writer["same"] is False
+    assert (writer["engine"], writer["model"], writer["effort"]) == (
+        "claude",
+        "opus",
+        "medium",
+    )
+    assert writer["run_as"] == "subagent"
+
+
+def test_derived_rows_refuse_ask(env: dict[str, str]) -> None:
+    with pytest.raises(choices.InvalidChoiceError):
+        choices.set_settings({"flow.writer": "ask"}, env=env)

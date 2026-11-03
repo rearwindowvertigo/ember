@@ -164,6 +164,7 @@ def new_flow(
     claim: str | None,
     now: float | None = None,
     base_branch: str | None = None,
+    whole_review: bool = True,
 ) -> dict[str, Any]:
     """Build the initial flow record without creating any files."""
     if not is_flow_id(flow_id):
@@ -189,6 +190,7 @@ def new_flow(
         "trailers": list(plan.trailers),
         "read": list(plan.read),
         "stall_minutes": stall_minutes,
+        "whole_review": whole_review,
         "claim": claim,
         "status": "starting",
         "reason": None,

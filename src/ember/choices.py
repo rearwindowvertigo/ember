@@ -43,6 +43,14 @@ ENGINES = ("claude", "codex", "opencode")
 SANDBOXED = ("codex", "opencode", "claude")
 """The engines with a `sandbox.<engine>` switch, in display order."""
 MENU_KEYS = ("single.writer", "single.reviewer")
+SAME = "same"
+"""The value of a derived worker row that follows its single-task row."""
+DERIVED_KEYS = {
+    "gapcheck.reviewer": "single.reviewer",
+    "flow.writer": "single.writer",
+    "flow.reviewer": "single.reviewer",
+}
+"""Worker rows that follow a single-task row while set to `same`."""
 
 _ID = re.compile(r"[a-z0-9][a-z0-9-]{5,63}")
 _NAME = r"[A-Za-z0-9][A-Za-z0-9._-]*"
@@ -164,6 +172,14 @@ def _menu_value(value: object) -> None:
         _fail(f"{value!r} is not ask or <engine>:<model>")
 
 
+def _derived_value(value: object) -> None:
+    if not isinstance(value, str):
+        _fail(f"{value!r} is not a string")
+        return
+    if value != SAME and _split_menu(value) is None:
+        _fail(f"{value!r} is not same or <engine>:<model>")
+
+
 def _panel_members(value: object) -> None:
     """Validate the saved panel member syntax, count and uniqueness."""
     entries = _string_list(value)
@@ -243,6 +259,24 @@ def _key(name: str, values: tuple[str, ...], default: str) -> Key:
 REVIEW_ROUNDS = ("1", "2", "3", "4")
 """The values of `flow.review_rounds`: the most reviews of one flow task."""
 
+GAPCHECK_WHEN = ("off", "always", "2", "3", "4", "5", "6", "8", "10", "ask")
+"""The values of `gapcheck.when`: off, always, a least task count, or ask."""
+
+GAPCHECK_ASK = ("high", "medium", "all")
+"""The values of `gapcheck.ask`: the lowest gap harm put to the owner."""
+
+FLOW_PARALLEL = ("1", "2", "4", "6")
+"""The values of `flow.parallel`: flow tasks that run at once."""
+
+FLOW_STALL = ("5", "10", "20")
+"""The values of `flow.stall`: minutes without screen changes before a stop."""
+
+WORKFLOW_AGENTS = ("4", "8", "16")
+"""The values of `workflow.agents`: Claude Workflow agents at once."""
+
+WORKFLOW_LATE = ("ask", "wait", "stop")
+"""The values of `workflow.late`: what Claude does when an agent runs late."""
+
 
 def _keys() -> dict[str, Key]:
     keys = [_key("worker.network", _ON_OFF, "off")]
@@ -299,6 +333,26 @@ def _keys() -> dict[str, Key]:
             allowed=REVIEW_ROUNDS,
         )
     )
+    for name in DERIVED_KEYS:
+        keys.append(
+            Key(
+                name,
+                _ALL,
+                _derived_value,
+                _constant(SAME),
+                pattern="same or <engine>:<model> from that engine's shortlist",
+            )
+        )
+    for name, values, default in (
+        ("gapcheck.when", GAPCHECK_WHEN, "always"),
+        ("gapcheck.ask", GAPCHECK_ASK, "high"),
+        ("flow.parallel", FLOW_PARALLEL, "4"),
+        ("flow.stall", FLOW_STALL, "10"),
+        ("flow.whole_review", _ON_OFF, "on"),
+        ("workflow.agents", WORKFLOW_AGENTS, "8"),
+        ("workflow.late", WORKFLOW_LATE, "ask"),
+    ):
+        keys.append(Key(name, _ALL, _enum(*values), _constant(default), allowed=values))
     keys.append(
         Key(
             "panel.members",
@@ -606,6 +660,44 @@ def menu_row(
     return row
 
 
+def derived_row(
+    answers: Mapping[str, Mapping[str, Any]],
+    name: str,
+    connected: Mapping[str, bool] | None = None,
+) -> dict[str, Any]:
+    """Describe a gap check or flow worker row.
+
+    While its value is `same`, the row is its single-task row's, with
+    `same` true. Otherwise it is checked as a worker of its own; a Claude
+    model runs as its single-task row's `_as` choice says.
+
+    Args:
+        answers: Resolved answers, key to `{"value", "layer"}`.
+        name: A key of `DERIVED_KEYS`.
+        connected: As for `menu_row`.
+
+    Returns:
+        `menu_row`'s fields plus `same`.
+    """
+    base = DERIVED_KEYS[name]
+    value = answers[name]["value"]
+    if value == SAME:
+        return {**menu_row(answers, base, connected), "same": True}
+    row: dict[str, Any] = {
+        "value": value,
+        "state": "set",
+        "engine": None,
+        "model": None,
+        "effort": None,
+        "run_as": None,
+        "reason": None,
+    }
+    row.update(_member_row(answers, value, connected))
+    if row["engine"] == "claude":
+        row["run_as"] = answers[f"{base}_as"]["value"]
+    return {**row, "same": False}
+
+
 def _member_row(
     answers: Mapping[str, Mapping[str, Any]],
     value: object,
@@ -688,6 +780,7 @@ def _reply(
         if source_error
         else {
             **{name: menu_row(answers, name, connected) for name in MENU_KEYS},
+            **{name: derived_row(answers, name, connected) for name in DERIVED_KEYS},
             "multi.runs_as": runs_as_row(answers),
             "panel.members": panel_row(answers, connected),
         },

@@ -105,6 +105,7 @@ usage: emb gapcheck [-h] --plan FILE [--dir DIR]
                     [--engine {codex,opencode,claude}] [--model MODEL]
                     [--effort EFFORT] [--claim ID] [--read PATH] [--window]
                     [--stall MINUTES] [--json] [--brief] [--reply FILE]
+                    [--confirmed]
 
 Review a plan in one read-only run, print its brief, or read a reply from
 another worker.
@@ -125,6 +126,8 @@ options:
   --json                print a JSON result
   --brief               print the brief only
   --reply FILE          read an existing reply
+  --confirmed           run the check although the gap check settings skip or
+                        ask
 ==> emb flow --help <==
 usage: emb flow [-h] [--plan FILE] [--dry-run] [--start] [--watch FLOW]
                 [--status [FLOW]] [--lead FLOW TASK] [--resume FLOW]

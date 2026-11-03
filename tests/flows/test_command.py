@@ -1255,3 +1255,76 @@ def test_cancel_loses_race_to_completed_flow(
     assert code == 75 and not out and "is done" in err
     assert record.load(flow["id"], env) == completed[0]
     assert record.cancel_request(flow["id"], env) is None
+
+
+def _menu_plan(plan_file: Path) -> Path:
+    """Drop the plan's own workers so the dry run reads the Team rows."""
+    data = json.loads(plan_file.read_text())
+    del data["writer"], data["reviewer"]
+    plan_file.write_text(json.dumps(data))
+    return plan_file
+
+
+def test_dry_run_reads_the_flow_settings(env: dict[str, str], plan_file: Path) -> None:
+    choices.set_settings(
+        {
+            "shortlist.codex": ["gpt-5@high", "gpt-5-mini@low"],
+            "single.writer": "codex:gpt-5",
+            "single.reviewer": "codex:gpt-5",
+            "flow.reviewer": "codex:gpt-5-mini",
+            "flow.parallel": "2",
+            "flow.stall": "20",
+            "flow.whole_review": "off",
+        },
+        env=env,
+    )
+    code, out, err = invoke(
+        env, "--plan", str(_menu_plan(plan_file)), "--dry-run", "--json"
+    )
+    assert code == 0, err
+    result = json.loads(out)
+    assert result["writer"]["model"] == "gpt-5"
+    assert (result["reviewer"]["model"], result["reviewer"]["effort"]) == (
+        "gpt-5-mini",
+        "low",
+    )
+    assert (result["parallel"], result["parallel_source"]) == (2, "setting")
+    assert result["stall_minutes"] == 20
+    assert result["whole_review"] is False
+    assert result["gapcheck_status"] == "run"
+    assert "--engine" not in result["gapcheck"]
+
+
+def test_plan_parallel_wins_over_the_setting(
+    env: dict[str, str], plan_file: Path
+) -> None:
+    data = json.loads(plan_file.read_text())
+    data["parallel"] = 3
+    plan_file.write_text(json.dumps(data))
+    choices.set_settings({"flow.parallel": "6"}, env=env)
+    code, out, err = invoke(env, "--plan", str(plan_file), "--dry-run", "--json")
+    assert code == 0, err
+    result = json.loads(out)
+    assert (result["parallel"], result["parallel_source"]) == (3, "plan")
+
+
+@pytest.mark.parametrize(
+    ("when", "status", "has_command"),
+    [("off", "skipped", False), ("3", "skipped", False), ("ask", "ask", True)],
+)
+def test_dry_run_reports_the_gap_check_decision(
+    env: dict[str, str], plan_file: Path, when: str, status: str, has_command: bool
+) -> None:
+    choices.set_settings({"gapcheck.when": when}, env=env)
+    code, out, err = invoke(env, "--plan", str(plan_file), "--dry-run", "--json")
+    assert code == 0, err
+    result = json.loads(out)
+    assert result["gapcheck_status"] == status
+    assert result["gapcheck_reason"]
+    assert (result["gapcheck"] is not None) == has_command
+    if has_command:
+        assert result["gapcheck"].endswith("--confirmed")
+    code, out, err = invoke(env, "--plan", str(plan_file), "--dry-run")
+    assert code == 0, err
+    line = out.split("gap check: ")[1]
+    assert line.startswith("skipped, " if status == "skipped" else "ask the owner")
