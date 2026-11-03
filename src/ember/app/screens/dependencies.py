@@ -6,11 +6,13 @@ component's status, its installed and newest versions, and the update or
 install command when there is one, which runs only after the Run this
 command? dialog. Opening the screen shows the last report; Check now reads
 installed versions, and newest versions when due.
+A newer Ember release appears above the groups with a download link.
 """
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from ember import deps
@@ -243,6 +245,7 @@ class DependenciesScreen(QWidget):
         self.alert_area = QVBoxLayout()
         self.alert_area.setContentsMargins(0, 0, 0, 0)
         self.alert: widgets.Alert | None = None
+        self.release_alert: widgets.Alert | None = None
         layout.addLayout(self.alert_area)
 
         self.state_view = widgets.StateView()
@@ -349,6 +352,22 @@ class DependenciesScreen(QWidget):
         """
         self._dirty = False
         self.subtitle.setText(subtitle(report))
+        discard(self.release_alert, self.alert_area)
+        self.release_alert = None
+        if report.ember_release is not None:
+            release = report.ember_release
+
+            def open_release() -> None:
+                QDesktopServices.openUrl(QUrl(release.url))
+
+            self.release_alert = widgets.Alert(
+                "info",
+                f"Ember {release.version} is available",
+                actions=[("Download", open_release)],
+            )
+            self.alert_area.addWidget(self.release_alert)
+            self.release_alert.show()
+            QWidget.setTabOrder(self.check_button, self.release_alert.buttons[0])
         self.tiles = {}
         self.groups = []
         groups = ordered(report)

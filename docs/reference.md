@@ -2481,6 +2481,31 @@ that fails is reported and not cached, so the next run reads it again. A cache
 that cannot be read is treated as empty; one that cannot be written is left as
 it was. The skill installed read caches its link state and note.
 
+### Ember releases
+
+The dependency check reads
+`https://api.github.com/repos/rearwindowvertigo/ember/releases/latest`, which
+excludes drafts and pre-releases, with the same ten-second network timeout.
+It compares `importlib.metadata.version('ember-app')` with the release's
+`tag_name` using dotted numbers, removing a leading `v`. The download link
+is the release's `html_url`. When the installed package is not found, either
+version cannot be parsed, or the release is the same or older, no notice is
+shown. Ember does not install the release.
+
+The cache's top-level `ember_release` entry holds `tag_name`, `url` and
+`read_at`, separate from `components`. Every read compares the cached tag
+with the currently installed version. The `due` mode reads after six hours,
+`always` (`--refresh`) fetches every time, and `never` uses only the cache.
+A failed read shows no notice or error dialog, keeps the cached entry
+unchanged and is retried on the next due check. `ember_release_retry` records
+a pending retry when a cached entry exists. Failed reads are not cached.
+
+The Dependencies screen shows an info alert above the component groups
+with the newer version and a Download button opening the release page.
+The release check runs with the screen's dependency check, with no separate
+timer. Release reads are excluded from component counts and every
+newest-read summary.
+
 ### Output
 
 Text output has one line per component, in the order of the list:
@@ -2490,6 +2515,8 @@ is a command. An engine shows `resolved path: <path>` only with an update
 command, alongside the could-not-tell note when no method matched. JSON
 keeps `resolved_path` and `method` for every component. Skill rows show the
 link state and any move-path or reinstall note.
+When a newer Ember release exists, standard output ends with
+`Ember: version <version> available: <url>` after the components.
 
 `--json` prints one object:
 
@@ -2515,7 +2542,8 @@ link state and any move-path or reinstall note.
   "newest_read_at": {"tmux": 1800000000.0},
   "counts": 1,
   "newest_read_oldest": 1800000000.0,
-  "newest_read_complete": true
+  "newest_read_complete": true,
+  "ember_release": null
 }
 ```
 
@@ -2523,6 +2551,7 @@ link state and any move-path or reinstall note.
 |---|---|
 | `components[].resolved_path` | Engine launcher target after following symlinks; null when no executable is found or for other components |
 | `components[].method` | Matched method table (`path` and `update`, or `kind = "dpkg"` and `update`); null when none matched |
+| `ember_release` | Always present: `{"version": "0.3.0", "url": "https://github.com/rearwindowvertigo/ember/releases/tag/v0.3.0"}` when newer, otherwise null |
 | `installed_read_at` | When each component's installed version was read, by id; null when it was never read |
 | `newest_read_at` | When each component's reported newest version was read, by id; null when none is reported |
 | `counts` | Non-current skill components, plus other components that are `update available` or `missing` |

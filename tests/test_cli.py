@@ -1116,3 +1116,40 @@ def test_deps_failed_check_hides_path(
     item = json.loads(capsys.readouterr().out)["components"][0]
     assert item["resolved_path"] == f"{env['PATH']}/codex"
     assert item["method"] is None
+
+
+@pytest.mark.parametrize("newer", [True, False])
+def test_deps_ember_release_output(
+    env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    deps_fetch: _DepsFetch,
+    newer: bool,
+) -> None:
+    _deps_stubs(env)
+    original_fetch = deps.fetch_text
+    url = "https://github.com/rearwindowvertigo/ember/releases/tag/v999.0.0"
+
+    def fetch(address: str, timeout: float) -> str:
+        if address == deps.EMBER_RELEASE_URL:
+            return json.dumps(
+                {"tag_name": "v999.0.0" if newer else "v0.0.0", "html_url": url}
+            )
+        return original_fetch(address, timeout)
+
+    monkeypatch.setattr(deps, "fetch_text", fetch)
+    assert main(["deps"], env=env) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    if newer:
+        assert (
+            captured.out.splitlines()[-1] == f"Ember: version 999.0.0 available: {url}"
+        )
+    else:
+        assert "Ember: version" not in captured.out
+    assert main(["deps", "--json"], env=env) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out)["ember_release"] == (
+        {"version": "999.0.0", "url": url} if newer else None
+    )
