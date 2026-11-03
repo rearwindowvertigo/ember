@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from ember import deps
+from ember import cli, deps, skill
 from ember.engines import status
 
 NOW = 1_800_000_000.0
@@ -122,6 +122,7 @@ def test_packaged_list_is_valid() -> None:
         "opencode",
         "claude",
         "claude-desktop",
+        "ember-skill",
         "tmux",
         "bubblewrap",
         "git",
@@ -1320,3 +1321,204 @@ def test_shim_dpkg_lookup_uses_resolved_target(
     assert item.resolved_path == str(target)
     assert item.method is not None and item.method.kind == "dpkg"
     assert item.command == "sudo apt install --only-upgrade codex"
+
+
+# The skill link
+
+
+@pytest.fixture
+def skill_spec() -> deps.Spec:
+    return next(spec for spec in deps.load_components() if spec.id == "ember-skill")
+
+
+@pytest.mark.parametrize("newest", deps.NEWEST_MODES)
+@pytest.mark.parametrize("has_source", [True, False])
+@pytest.mark.parametrize(
+    ("state", "expected_status", "command"),
+    [
+        ("installed", deps.CURRENT, None),
+        ("missing", deps.MISSING, "emb skill install"),
+        ("broken link", deps.CHECK_FAILED, "emb skill install"),
+        ("other link", deps.CHECK_FAILED, "emb skill install --force"),
+        ("folder", deps.CHECK_FAILED, None),
+        ("file", deps.CHECK_FAILED, None),
+    ],
+)
+def test_skill_link_component(
+    env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    skill_spec: deps.Spec,
+    newest: str,
+    has_source: bool,
+    state: str,
+    expected_status: str,
+    command: str | None,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "SKILL.md").write_text("---\nname: ember\n---\n")
+    candidates = (source,) if has_source else (tmp_path / "absent",)
+    monkeypatch.setattr(skill, "source_candidates", lambda: candidates)
+    env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "claude-config")
+    link = skill.link_path(env)
+    link.parent.mkdir(parents=True)
+    if state == "installed":
+        link.symlink_to(source)
+        if not has_source:
+            state, expected_status = "other link", deps.CHECK_FAILED
+    elif state == "broken link":
+        link.symlink_to(tmp_path / "gone")
+    elif state == "other link":
+        other = tmp_path / "other"
+        other.mkdir()
+        link.symlink_to(other)
+    elif state == "folder":
+        link.mkdir()
+    elif state == "file":
+        link.write_text("keep this file")
+    expected = skill.status(env, candidates)
+    fetch = Fetcher({})
+    report = deps.read(
+        env, components=(skill_spec,), newest=newest, fetch=fetch, now=NOW
+    )
+    item = _one(report)
+    assert item.group == "apps"
+    assert item.status == expected_status
+    assert item.link_state == expected.state == state
+    assert item.installed is None and item.newest is None
+    assert item.error == (state if expected_status == deps.CHECK_FAILED else None)
+    assert item.command == (command if has_source else None)
+    assert item.command_kind == ("install" if item.command else None)
+    if not has_source:
+        assert item.note == "Reinstall Ember."
+    elif state in ("folder", "file"):
+        assert item.note == f"Move {link}, then run emb skill install."
+    else:
+        assert item.note is None
+    assert report.counts() == int(expected_status != deps.CURRENT)
+    assert report.installed_read_at == {item.id: NOW}
+    assert report.newest_read_at == {item.id: None}
+    assert report.oldest_newest_read() is None
+    assert report.newest_read_complete()
+    assert fetch.calls == []
+    assert skill.status(env, candidates) == expected
+
+    monkeypatch.setattr(deps, "read", lambda *args, **kwargs: report)
+    assert cli.main(["deps"], env=env) == 0
+    output = capsys.readouterr().out
+    assert state in output
+    assert "version" not in output and "newest" not in output
+    if item.command:
+        assert f"install: {item.command}" in output
+    if item.note:
+        assert item.note in output
+    assert cli.main(["deps", "--json"], env=env) == 0
+    data = json.loads(capsys.readouterr().out)["components"][0]
+    assert data["installed"] is None and data["newest"] is None
+    assert data["link_state"] == state
+
+
+@pytest.mark.parametrize("state", ["installed", "missing", "broken link"])
+def test_skill_cached_read(
+    env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    skill_spec: deps.Spec,
+    state: str,
+) -> None:
+    current = skill.Status(tmp_path / "link", state, None, tmp_path / "source", None)
+    monkeypatch.setattr(skill, "status", lambda *_args: current)
+    first = deps.read(env, components=(skill_spec,), newest="never", now=NOW)
+
+    def no_read(*args: object) -> skill.Status:
+        pytest.fail("cached skill status must not read the link")
+
+    monkeypatch.setattr(skill, "status", no_read)
+    cached = deps.read(
+        env, components=(skill_spec,), installed=False, newest="always", now=NOW + HOUR
+    )
+    assert cached == first
+
+
+def test_none_newest_excluded_from_reads_and_summaries(
+    env: dict[str, str],
+) -> None:
+    _apt_stubs(env, "1.0", "1.0", older=False)
+    # A versioned component may also opt out of newest reads.
+    no_newest = replace(_specs(APT)[0], id="no-newest", newest=deps.Source("none"))
+    for mode in deps.NEWEST_MODES:
+        report = deps.read(
+            env,
+            components=(*_specs(APT), no_newest),
+            newest=mode,
+            now=NOW,
+            fetch=Fetcher({}),
+        )
+        assert report.newest_read_at == {"tmux": NOW, "no-newest": None}
+        assert report.oldest_newest_read() == NOW
+        assert report.newest_read_complete()
+        stale = replace(report, newest_read_at={"tmux": NOW, "no-newest": NOW - HOUR})
+        assert stale.oldest_newest_read() == NOW
+        assert stale.newest_read_complete()
+
+
+def test_skill_counts_leave_other_failed_checks_unchanged(
+    env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    skill_spec: deps.Spec,
+) -> None:
+    monkeypatch.setattr(
+        skill,
+        "status",
+        lambda *_args: skill.Status(tmp_path / "link", "file", None, None, "missing"),
+    )
+    report = deps.read(env, components=(skill_spec,), newest="never", fetch=Fetcher({}))
+    failed_skill = _one(report)
+    failed_tool = replace(failed_skill, id="tool", installed_kind="command")
+    report = replace(report, components=(failed_skill, failed_tool))
+    assert report.counts() == 1
+
+
+@pytest.mark.parametrize(
+    "commands", ['"bad"', '{ file = "rm file" }', "{ missing = 1 }"]
+)
+def test_skill_commands_schema(commands: str) -> None:
+    with pytest.raises(deps.ComponentsError):
+        _specs(
+            "[[components]]" + "\n"
+            'id = "skill"\nlabel = "Skill"\ngroup = "apps"\n'
+            f'installed = {{ kind = "skill", commands = {commands} }}\n'
+            'newest = { kind = "none" }\n'
+        )
+
+
+@pytest.mark.parametrize("newest", deps.NEWEST_MODES)
+def test_none_newest_discards_cached_version(
+    env: dict[str, str],
+    newest: str,
+) -> None:
+    _apt_stubs(env, "1.0", "1.0", older=False)
+    _read(env, APT)
+    spec = replace(_specs(APT)[0], newest=deps.Source("none"))
+    _stub(env, "apt-cache", 'echo unexpected > "' + env["PATH"] + '/read-newest"')
+    report = deps.read(env, components=(spec,), newest=newest, now=NOW)
+    assert _one(report).newest is None
+    assert report.newest_read_at == {"tmux": None}
+    assert report.oldest_newest_read() is None
+    assert report.newest_read_complete()
+    assert not (Path(env["PATH"]) / "read-newest").exists()
+    cached = _cache(env)["components"]
+    assert isinstance(cached, dict)
+    assert "newest" not in cached["tmux"]
+
+
+def test_skill_requires_no_newest_source() -> None:
+    with pytest.raises(deps.ComponentsError, match="a skill needs newest kind none"):
+        _specs(
+            '[[components]]\nid = "skill"\nlabel = "Skill"\ngroup = "apps"\n'
+            'installed = { kind = "skill" }\n'
+            'newest = { kind = "pypi", package = "example" }\n'
+        )

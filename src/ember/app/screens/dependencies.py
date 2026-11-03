@@ -86,6 +86,10 @@ def subtitle(report: deps.DepsReport, now: float | None = None) -> str:
         summary = f"{parts[0]}."
     else:
         summary = f"{', '.join(parts[:-1])} and {parts[-1]}."
+    if report.components and all(
+        item.newest_kind == "none" for item in report.components
+    ):
+        return summary
     oldest = report.oldest_newest_read()
     if oldest is None:
         read = "Newest versions not read yet."
@@ -136,8 +140,10 @@ def versions_line(item: deps.Component) -> str:
     Returns:
         "Installed <v> · Newest <v>", with "Not read" for a version that was
         not read; a missing component shows only its newest version, when
-        one was read.
+        one was read. A skill shows its link state.
     """
+    if item.installed_kind == "skill":
+        return item.link_state or NOT_READ
     newest = item.newest or NOT_READ
     if item.status == deps.MISSING:
         return "" if item.newest is None else f"Newest {newest}"
@@ -176,7 +182,7 @@ class DependencyTile(widgets.Card):
         self.error = label(item.error or "", "muted")
         self.error.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.error)
-        self.error.setVisible(bool(item.error))
+        self.error.setVisible(bool(item.error) and item.error != item.link_state)
         self.resolved_path = label(item.resolved_path or "", "muted")
         self.resolved_path.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse

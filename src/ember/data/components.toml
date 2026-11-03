@@ -110,6 +110,13 @@ update = "sudo apt install --only-upgrade claude-desktop"
 install_note = "Not installed."
 
 [[components]]
+id = "ember-skill"
+label = "ember skill"
+group = "apps"
+installed = { kind = "skill", commands = { missing = "emb skill install", "broken link" = "emb skill install", "other link" = "emb skill install --force" } }
+newest = { kind = "none" }
+
+[[components]]
 id = "tmux"
 label = "tmux"
 group = "system"
