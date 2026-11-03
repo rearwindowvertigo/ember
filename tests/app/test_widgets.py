@@ -813,3 +813,43 @@ def test_info_tip_shows_on_click_and_keyboard_focus(qtbot: QtBot) -> None:
         qtbot.waitUntil(lambda: not QToolTip.isVisible(), timeout=2000)
     finally:
         QToolTip.hideText()
+
+
+def test_tip_text_caps_unbroken_text_at_the_tip_width(
+    qapp: QApplication, qtbot: QtBot
+) -> None:
+    name = "codex-" + "a" * 90 + ".md"
+    path = f"/home/owner/runs/{name}"
+    label = QLabel(widgets.tip_text(path))
+    qtbot.addWidget(label)
+    label.setWordWrap(True)
+    label.adjustSize()
+    assert label.width() <= widgets.TIP_WIDTH + 8
+    assert widgets.PATH_BREAK in widgets.tip_text(name)
+
+
+def test_info_tip_stays_open_after_tab_key_release(qtbot: QtBot) -> None:
+    host = QWidget()
+    qtbot.addWidget(host)
+    layout = QVBoxLayout(host)
+    other = QPushButton("Other")
+    other.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    info = widgets.InfoTip("Run the gap check", LONG_TIP)
+    layout.addWidget(other)
+    layout.addWidget(info)
+    host.show()
+    qtbot.waitExposed(host)
+    host.activateWindow()
+    qtbot.waitUntil(host.isActiveWindow, timeout=2000)
+    other.setFocus(Qt.FocusReason.OtherFocusReason)
+    qtbot.waitUntil(other.hasFocus, timeout=2000)
+    try:
+        qtbot.keyPress(other, Qt.Key.Key_Tab)
+        qtbot.waitUntil(info.hasFocus, timeout=2000)
+        qtbot.keyRelease(info, Qt.Key.Key_Tab)
+        qtbot.waitUntil(QToolTip.isVisible, timeout=2000)
+        qtbot.wait(50)
+        assert QToolTip.isVisible()
+        assert QToolTip.text() == widgets.tip_text(LONG_TIP)
+    finally:
+        QToolTip.hideText()

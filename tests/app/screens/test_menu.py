@@ -992,3 +992,34 @@ def test_when_help_covers_every_value() -> None:
     assert menu.when_help("2") == (
         "Plans of 2 or more tasks. Plans of 1 task start without one."
     )
+
+
+def test_info_icons_sit_before_their_controls_in_tab_order(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    choices.set_settings({"multi.runs_as": "ask"}, env=env)
+    _context, screen = _screen(env, qtbot)
+    tips = screen.tip_rows
+    expected: list[QWidget] = [
+        tips["gapcheck.reviewer"].info,
+        screen.derived["gapcheck.reviewer"].picker,
+        tips["gapcheck.when"].info,
+        screen.when,
+        tips["gapcheck.ask"].info,
+        screen.asks.buttons()[0],
+        tips["flow.writer"].info,
+        screen.derived["flow.writer"].picker,
+        tips["flow.review_rounds"].info,
+        screen.rounds.buttons()[0],
+        tips["flow.parallel"].info,
+        screen.segments["flow.parallel"].buttons()[0],
+        tips["flow.whole_review"].info,
+        screen.whole,
+        tips["workflow.agents"].info,
+        screen.segments["workflow.agents"].buttons()[0],
+        tips["workflow.late"].info,
+        screen.segments["workflow.late"].buttons()[0],
+    ]
+    first = screen.roles["writer"].picker
+    chain = focus_chain(screen, qtbot, first)
+    assert [w for w in chain if w in expected] == expected

@@ -199,12 +199,29 @@ def tip_text(text: str) -> str:
     if all(metrics.horizontalAdvance(line) <= TIP_WIDTH for line in lines):
         return text
     body = "<br>".join(
-        html.escape(line, quote=False).replace("/", "/" + PATH_BREAK) for line in lines
+        " ".join(_breakable(word, metrics) for word in line.split(" "))
+        for line in lines
     )
     return (
         f'<table width="{TIP_WIDTH}" cellspacing="0" cellpadding="0">'
         f"<tr><td>{body}</td></tr></table>"
     )
+
+
+def _breakable(word: str, metrics: QFontMetrics) -> str:
+    """Escape a word, allowing a break after `/`, or anywhere it is too wide."""
+    parts = [part + "/" for part in word.split("/")]
+    parts[-1] = parts[-1][:-1]
+    pieces: list[str] = []
+    for part in parts:
+        while metrics.horizontalAdvance(part) > TIP_WIDTH:
+            cut = len(part) - 1
+            while cut > 1 and metrics.horizontalAdvance(part[:cut]) > TIP_WIDTH:
+                cut -= 1
+            pieces.append(part[:cut])
+            part = part[cut:]
+        pieces.append(part)
+    return PATH_BREAK.join(html.escape(piece, quote=False) for piece in pieces if piece)
 
 
 class TipWrapper(QObject):
@@ -253,6 +270,7 @@ class InfoTip(QPushButton):
         self.setAccessibleName(f"About {about}")
         self.setAccessibleDescription(text)
         self.setToolTip(text)
+        self._show_on_release = False
         self._paint_icon()
         theme.signals.changed.connect(self._paint_icon)
         self.clicked.connect(self.show_tip)
@@ -269,9 +287,24 @@ class InfoTip(QPushButton):
         super().focusInEvent(event)
         if event.reason() in KEYBOARD_REASONS:
             self.show_tip()
+            self._show_on_release = True
+
+    def keyReleaseEvent(self, event: QKeyEvent) -> None:  # noqa: D102, N802
+        super().keyReleaseEvent(event)
+        # Qt hides a tooltip on any key release, including the Tab that
+        # brought focus here, so the tooltip is shown again once the release
+        # has been handled.
+        if self._show_on_release:
+            self._show_on_release = False
+            QTimer.singleShot(0, self._show_if_focused)
+
+    def _show_if_focused(self) -> None:
+        if self.hasFocus():
+            self.show_tip()
 
     def focusOutEvent(self, event: QFocusEvent) -> None:  # noqa: D102, N802
         super().focusOutEvent(event)
+        self._show_on_release = False
         QToolTip.hideText()
 
 
