@@ -112,6 +112,9 @@ entry with its task, role and run id. Cancellation stops the flow runner;
 writer and reviewer turns keep running. It closes no task run and deletes
 no branch or worktree. `emb flow --resume <id>` restarts from the recorded
 task states. A cancelled watch exits 82; `--lead` requires a resume first.
+Exit 75 from `--cancel` means the flow had already ended or the 60-second
+deadline from writing `cancel.json` passed with the request still pending;
+follow `next: emb flow --status <id>`.
 
 ## Exits
 

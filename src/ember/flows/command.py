@@ -30,6 +30,7 @@ NOT_MERGED = 82
 POLL_SECONDS = 1.0
 START_SECONDS = 30.0
 SESSION_EXIT_SECONDS = 10.0
+CANCEL_SECONDS = 60.0
 GIT_LOCATION = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -167,22 +168,27 @@ def runner_command(flow_id: str) -> list[str]:
 
 
 @contextlib.contextmanager
-def lifecycle(flow_id: str, env: Mapping[str, str]) -> Iterator[None]:
+def lifecycle(
+    flow_id: str, env: Mapping[str, str], *, blocking: bool = True
+) -> Iterator[None]:
     """Serialize startup, answers and cancellation with runner shutdown.
 
     The runner must hold this same lifecycle.lock for its final answer read
     through releasing its lifetime lock. It must not hold it for a wave.
     """
-    with _file_lock(record.folder(flow_id, env) / "lifecycle.lock"):
+    with _file_lock(record.folder(flow_id, env) / "lifecycle.lock", blocking=blocking):
         yield
 
 
 @contextlib.contextmanager
-def _file_lock(path: Path) -> Iterator[None]:
+def _file_lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
     """Hold an exclusive lock on a private file until the operation ends."""
     fd = paths.open_private_file(path)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError as error:
+            raise lock.Busy(f"another command holds {path.name}") from error
         yield
     finally:
         os.close(fd)
@@ -610,22 +616,34 @@ def _cancel(
         }
         run_record.write_private(directory / "startup.json", '{"at": 0}\n')
         run_record.write_private(directory / record.CANCEL_NAME, json.dumps(request))
+        deadline = time.monotonic() + CANCEL_SECONDS
         _signal_cancel(flow, env)
     while True:
-        with lifecycle(flow_id, env):
-            if not lock.live(flow_id, env):
-                flow = _load(flow_id, env, missing_code=65)
-                if flow["status"] not in record.ENDED:
-                    record.finish_cancel(flow, request, env)
-                elif flow["status"] != "cancelled":
-                    raise CommandError(
-                        75,
-                        f"the flow {flow_id} is {flow['status']}",
-                        f"next: emb flow --status {flow_id}",
-                    )
-                result = _cancel_report(flow, env, err)
-                break
-        time.sleep(POLL_SECONDS)
+        try:
+            with lifecycle(flow_id, env, blocking=False):
+                if not lock.live(flow_id, env):
+                    flow = _load(flow_id, env, missing_code=65)
+                    if flow["status"] not in record.ENDED:
+                        record.finish_cancel(flow, request, env)
+                    elif flow["status"] != "cancelled":
+                        raise CommandError(
+                            75,
+                            f"the flow {flow_id} is {flow['status']}",
+                            f"next: emb flow --status {flow_id}",
+                        )
+                    result = _cancel_report(flow, env, err)
+                    break
+        except lock.Busy:
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CommandError(
+                75,
+                f"the runner for {flow_id} is still running after {CANCEL_SECONDS:g} "
+                "seconds",
+                f"next: emb flow --status {flow_id}",
+            )
+        time.sleep(min(POLL_SECONDS, remaining))
     if as_json:
         print(json.dumps(result, indent=2), file=out)
     else:
