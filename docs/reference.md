@@ -2922,8 +2922,9 @@ expanded details.
 
 The subtitle uses the tray status line, counting the same top-level live
 runs, flows and panels. Above the sections, an alert names each enabled
-engine whose sandbox setting gives it no sandbox, with Open Engines. Live has one line naming the non-zero counts of unreadable
-runs, flows and panels; the line is hidden when every count is zero.
+engine whose sandbox setting gives it no sandbox, with Open Engines. Live
+has one line naming the non-zero counts of unreadable runs, flows and
+panels; the line is hidden when every count is zero.
 
 When the runs folder cannot be read, the screen shows the reason and Try
 again in place of the sections. A failed flow and panel read shows an alert
