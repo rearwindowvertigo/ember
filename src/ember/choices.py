@@ -240,6 +240,10 @@ def _key(name: str, values: tuple[str, ...], default: str) -> Key:
     return Key(name, _STANDING, _enum(*values), _constant(default), allowed=values)
 
 
+REVIEW_ROUNDS = ("1", "2", "3", "4")
+"""The values of `flow.review_rounds`: the most reviews of one flow task."""
+
+
 def _keys() -> dict[str, Key]:
     keys = [_key("worker.network", _ON_OFF, "off")]
     keys += [_key(f"engine.{engine}", _ON_OFF, "on") for engine in ENGINES]
@@ -284,6 +288,15 @@ def _keys() -> dict[str, Key]:
             _enum("ask", "flow", "workflow"),
             _constant("ask"),
             allowed=("ask", "flow", "workflow"),
+        )
+    )
+    keys.append(
+        Key(
+            "flow.review_rounds",
+            _ALL,
+            _enum(*REVIEW_ROUNDS),
+            _constant("3"),
+            allowed=REVIEW_ROUNDS,
         )
     )
     keys.append(

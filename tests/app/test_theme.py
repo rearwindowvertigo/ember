@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -13,7 +14,7 @@ from PySide6.QtWidgets import (
 )
 from pytestqt.qtbot import QtBot
 
-from ember.app import theme
+from ember.app import theme, widgets
 
 
 @pytest.mark.parametrize("mode", theme.MODES)
@@ -244,3 +245,74 @@ def test_status_tones_meet_text_contrast(mode: str, tone: str) -> None:
         )
         >= 4.5
     )
+
+
+def test_border_tokens_are_solid() -> None:
+    assert theme.TOKENS["border"] == ("#e6e6e6", "#414141")
+    assert theme.TOKENS["border-strong"] == ("#cccccc", "#4c4c4c")
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_picker_arrow_is_chevron_in_text_secondary(mode: str) -> None:
+    sheet = theme.style_sheet(mode)
+    found = re.search(r"QComboBox::down-arrow \{\s*image: url\(([^)]+)\);", sheet)
+    assert found is not None
+    svg = Path(found.group(1)).read_text()
+    assert "currentColor" not in svg
+    assert theme.hex_value("text-secondary", mode) in svg
+    assert "m6 9 6 6 6-6" in svg
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_badge_is_short_with_rounded_corners(
+    qapp: QApplication, qtbot: QtBot, mode: str
+) -> None:
+    previous = theme.current_mode()
+    try:
+        theme.apply(qapp, mode)
+        host = QWidget()
+        host.setObjectName("host")
+        host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        host.setStyleSheet("#host { background: #808080; }")
+        qtbot.addWidget(host)
+        layout = QVBoxLayout(host)
+        badge = widgets.Badge("Done", "success")
+        layout.addWidget(badge)
+        host.resize(200, 80)
+        host.show()
+        qtbot.waitExposed(host)
+        image = host.grab().toImage()
+        box = badge.geometry()
+        assert box.height() == 22
+        corner = image.pixelColor(box.topLeft())
+        center = image.pixelColor(box.center())
+        assert corner.name() == "#808080"
+        assert center.name() != "#808080"
+    finally:
+        theme.apply(qapp, previous)
+        qapp.setStyleSheet("")
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_disabled_danger_outline_looks_disabled(
+    qapp: QApplication, qtbot: QtBot, mode: str
+) -> None:
+    previous = theme.current_mode()
+    try:
+        theme.apply(qapp, mode)
+        clear = widgets.button("Clear", "danger-outline", size="sm")
+        qtbot.addWidget(clear)
+        clear.resize(120, 32)
+        clear.show()
+        qtbot.waitExposed(clear)
+        enabled = clear.grab().toImage()
+        top = enabled.pixelColor(enabled.width() // 2, 0).name()
+        assert top == theme.hex_value("danger-text", mode)
+        clear.setEnabled(False)
+        disabled = clear.grab().toImage()
+        assert disabled.pixelColor(disabled.width() // 2, 0).name() == (
+            theme.hex_value("border", mode)
+        )
+    finally:
+        theme.apply(qapp, previous)
+        qapp.setStyleSheet("")

@@ -384,6 +384,7 @@ def test_keys_scroll_the_view_and_never_reach_tmux(
 
 def test_focus_ring_style() -> None:
     sheet = theme.style_sheet("light")
-    rule = sheet.split('QScrollArea[role="mirror"]:focus')[1].split("}")[0]
+    selector = 'QScrollArea[role="mirror"][keyfocus="true"]:focus'
+    rule = sheet.split(selector)[1].split("}")[0]
     assert theme.color("focus-ring", "light").name() in rule.lower()
     assert 'QScrollArea[role="mirror"] {' in sheet

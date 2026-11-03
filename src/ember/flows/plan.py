@@ -101,6 +101,9 @@ class Plan:
     failure_model: str
     read: tuple[str, ...]
     tasks: tuple[Task, ...]
+    rounds_source: str = "plan"
+    """Where `rounds` came from: `plan`, `setting`, or `default` before the
+    owner's `flow.review_rounds` row is applied."""
 
     def task(self, task_id: str) -> Task:
         """Find a task by id, raising KeyError if it is absent."""
@@ -268,6 +271,7 @@ def parse(text: str, path: Path) -> Plan:
         writer=workers["writer"],
         reviewer=workers["reviewer"],
         rounds=value.get("rounds", 2),
+        rounds_source="plan" if "rounds" in value else "default",
         parallel=value.get("parallel", 4),
         check=tuple(value.get("check", [])),
         check_timeout=value.get("check_timeout", 1800),

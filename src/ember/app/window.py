@@ -7,6 +7,7 @@ once the first settings snapshot is read; until then the content shows the
 read in progress, or its error with Try again.
 """
 
+import dataclasses
 import importlib.metadata
 from collections.abc import Callable
 from typing import cast
@@ -40,7 +41,7 @@ MINIMUM_HEIGHT = 600
 ICON_SIZE = 18
 """The size of a sidebar row's icon."""
 
-BADGE_HEIGHT = 20
+BADGE_HEIGHT = 22
 """The height of a sidebar row's count, in pixels."""
 
 _NAV_STYLE = """
@@ -54,7 +55,7 @@ QPushButton[role="nav"] {{
 }}
 QPushButton[role="nav"]:hover {{ background: {hover}; }}
 QPushButton[role="nav"]:checked {{ background: {selected}; }}
-QPushButton[role="nav"]:focus {{ border: 2px solid {focus}; }}
+QPushButton[role="nav"][keyfocus="true"]:focus {{ border: 2px solid {focus}; }}
 """
 
 
@@ -385,8 +386,11 @@ class MainWindow(QMainWindow):
 
     def _save_state(self) -> None:
         size = self.normalGeometry().size() if self.isMaximized() else self.size()
+        saved = state.load(self.context.env)
         state.save(
-            state.AppState(size.width(), size.height(), self._current),
+            dataclasses.replace(
+                saved, width=size.width(), height=size.height(), screen=self._current
+            ),
             self.context.env,
         )
 

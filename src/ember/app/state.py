@@ -1,8 +1,8 @@
 """The window's size and last screen, kept between starts.
 
 The file is `$XDG_STATE_HOME/ember/app.json`, mode 600 in a mode 700 folder:
-`{"width", "height", "screen"}`. Content that cannot be read or is not valid
-gives the defaults; a write that fails is ignored.
+`{"width", "height", "screen", "finished_open"}`. Content that cannot be read
+or is not valid gives the defaults; a write that fails is ignored.
 """
 
 import contextlib
@@ -34,10 +34,17 @@ class AppState:
     width: int = DEFAULT_WIDTH
     height: int = DEFAULT_HEIGHT
     screen: str = DEFAULT_SCREEN
+    finished_open: bool = False
+    """Whether Overview's Finished list was left open."""
 
     def to_json(self) -> dict[str, object]:
         """Return the state as a JSON-ready dict."""
-        return {"width": self.width, "height": self.height, "screen": self.screen}
+        return {
+            "width": self.width,
+            "height": self.height,
+            "screen": self.screen,
+            "finished_open": self.finished_open,
+        }
 
 
 def state_path(env: Mapping[str, str] | None = None) -> Path:
@@ -79,6 +86,7 @@ def load(env: Mapping[str, str] | None = None) -> AppState:
         width=_size(value.get("width"), DEFAULT_WIDTH),
         height=_size(value.get("height"), DEFAULT_HEIGHT),
         screen=screen if isinstance(screen, str) and screen else DEFAULT_SCREEN,
+        finished_open=value.get("finished_open") is True,
     )
 
 

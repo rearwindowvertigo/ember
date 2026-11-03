@@ -35,6 +35,7 @@ ICON_NAMES = (
     "folder-plus",
     "x",
     "check",
+    "trash-2",
 )
 """The Lucide icons shipped in `assets/icons/`."""
 

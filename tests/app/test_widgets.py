@@ -1,7 +1,7 @@
 import os
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import cast
 from unittest.mock import Mock
@@ -16,7 +16,18 @@ from PySide6.QtGui import (
     QPaintEvent,
     QTextLayout,
 )
-from PySide6.QtWidgets import QApplication, QDialog, QFrame, QLabel, QLineEdit, QMenu
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QDialog,
+    QFrame,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 from pytestqt.qtbot import QtBot
 
 from ember.app import theme, widgets
@@ -661,3 +672,81 @@ def test_incomplete_badge(qtbot: QtBot) -> None:
     qtbot.addWidget(badge)
     assert badge.text() == "Incomplete"
     assert badge.tone() == "incomplete"
+
+
+@pytest.fixture
+def focus_host(
+    qapp: QApplication, qtbot: QtBot
+) -> Iterator[tuple[QWidget, QPushButton, QComboBox]]:
+    """A shown window with a button and a picker, keyboard focus tracked."""
+    tracker = widgets.install_focus_tracking(qapp)
+    host = QWidget()
+    qtbot.addWidget(host)
+    layout = QVBoxLayout(host)
+    first = widgets.button("First")
+    combo = QComboBox()
+    combo.addItems(["all", "Codex"])
+    layout.addWidget(first)
+    layout.addWidget(combo)
+    host.show()
+    qtbot.waitExposed(host)
+    host.activateWindow()
+    qtbot.waitActive(host)
+    yield host, first, combo
+    qapp.removeEventFilter(tracker)
+    tracker.setParent(None)
+    tracker.deleteLater()
+
+
+def test_click_focus_has_no_ring_and_tab_focus_has_one(
+    qtbot: QtBot, focus_host: tuple[QWidget, QPushButton, QComboBox]
+) -> None:
+    _host, first, combo = focus_host
+    qtbot.mouseClick(first, Qt.MouseButton.LeftButton)
+    assert first.hasFocus()
+    assert not widgets.focus_visible(first)
+    qtbot.keyClick(first, Qt.Key.Key_Tab)
+    assert combo.hasFocus()
+    assert widgets.focus_visible(combo)
+    assert first.property("keyfocus") is False
+    qtbot.mouseClick(first, Qt.MouseButton.LeftButton)
+    assert not widgets.focus_visible(first)
+    assert combo.property("keyfocus") is False
+
+
+def test_app_moved_focus_follows_the_last_input(
+    qtbot: QtBot, focus_host: tuple[QWidget, QPushButton, QComboBox]
+) -> None:
+    _host, first, combo = focus_host
+    qtbot.mouseClick(first, Qt.MouseButton.LeftButton)
+    combo.setFocus(Qt.FocusReason.OtherFocusReason)
+    assert not widgets.focus_visible(combo)
+    qtbot.keyClick(combo, Qt.Key.Key_Down)
+    first.setFocus(Qt.FocusReason.OtherFocusReason)
+    assert widgets.focus_visible(first)
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_ring_is_drawn_only_for_keyboard_focus(
+    qapp: QApplication,
+    qtbot: QtBot,
+    focus_host: tuple[QWidget, QPushButton, QComboBox],
+    mode: str,
+) -> None:
+    previous = theme.current_mode()
+    try:
+        theme.apply(qapp, mode)
+        _host, first, combo = focus_host
+        ring = theme.color("focus-ring").name()
+        combo.setFocus(Qt.FocusReason.MouseFocusReason)
+        qapp.processEvents()
+        clicked = combo.grab().toImage()
+        assert clicked.pixelColor(clicked.width() // 2, 0).name() != ring
+        first.setFocus(Qt.FocusReason.MouseFocusReason)
+        qtbot.keyClick(first, Qt.Key.Key_Tab)
+        qapp.processEvents()
+        tabbed = combo.grab().toImage()
+        assert tabbed.pixelColor(tabbed.width() // 2, 0).name() == ring
+    finally:
+        theme.apply(qapp, previous)
+        qapp.setStyleSheet("")

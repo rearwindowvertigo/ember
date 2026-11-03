@@ -49,6 +49,8 @@ def _raw(env: dict[str, str], sql: str, *args: object) -> None:
 
 
 VALID = [
+    ("flow.review_rounds", "1"),
+    ("flow.review_rounds", "4"),
     ("worker.network", "on"),
     ("worker.network", "off"),
     ("engine.claude", "off"),
@@ -75,6 +77,9 @@ VALID = [
 ]
 
 INVALID = [
+    ("flow.review_rounds", "0"),
+    ("flow.review_rounds", "5"),
+    ("flow.review_rounds", 2),
     ("worker.network", "yes"),
     ("worker.network", True),
     ("engine.claude", "ON"),
@@ -152,6 +157,7 @@ def test_defaults(env: dict[str, str]) -> None:
         "single.reviewer": "ask",
         "single.reviewer_as": "cli",
         "multi.runs_as": "ask",
+        "flow.review_rounds": "3",
         "panel.members": [],
         "sandbox.codex": "off",
         "sandbox.opencode": "off",

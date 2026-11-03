@@ -21,7 +21,9 @@ Write a JSON plan in the session scratchpad:
 
 - `dir`: the absolute checkout path; `base` only when other than `HEAD`.
 - `trailers`: the harness attribution trailer in a list.
-- `rounds`: default 2; `parallel`: default 4.
+- `rounds`: leave it out; the flow then uses the owner's Flow review
+  rounds row. Set it only for a flow that needs a different count, and say
+  why before the dry run. `parallel`: default 4.
 - `check`: an argv list for the repository's full check.
 - `failure_model`: the cases that must work and those accepted.
 - `context`: only settled decisions and the rules tasks need.

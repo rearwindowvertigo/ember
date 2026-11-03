@@ -4,6 +4,7 @@ Models stay active while the app runs. Hidden screens defer redraws until
 shown, and live mirrors close when their row or the screen is hidden.
 """
 
+import dataclasses
 import re
 import stat
 import time
@@ -29,7 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from ember import prune, sandbox
-from ember.app import icons, theme, tray
+from ember.app import icons, state, theme, tray
 from ember.app.flows import FlowItem, PanelItem, plan_wave
 from ember.app.mirror import MirrorView
 from ember.app.runs import DONE, FINISHED_LIMIT, LIVE
@@ -61,6 +62,12 @@ from ember.runs.record import Run
 
 if TYPE_CHECKING:
     from ember.app.context import AppContext
+
+CLEAR_CAPTION = "Remove shown records"
+"""The line under Clear that says what it does."""
+
+FINISHED_PREVIEW = 3
+"""Finished items shown while the Finished list is not open."""
 
 ELAPSED_MS = 30_000
 """How often active run, flow and panel elapsed times are redrawn while shown."""
@@ -443,10 +450,35 @@ def sandbox_warning(engine: str) -> str:
     )
 
 
-class _ExpandableRow(QWidget):
-    """An arrow, type marker, badge, time, actions and optional body.
+def _column_widths() -> tuple[int, int]:
+    """Return the widths of the type marker and status chip columns.
 
-    The header has title and detail lines and a third, elided question line.
+    Each is the widest marker or chip any row can show, so a wider word
+    never moves the next column.
+    """
+    if not _COLUMNS:
+        markers = [TypeMarker(kind) for kind in ("Run", "Flow", "Panel")]
+        chips = [
+            Badge(text, tone)
+            for table in (BADGES, FLOW_BADGES, PANEL_BADGES)
+            for text, tone in table.values()
+        ]
+        _COLUMNS.append(max(marker.sizeHint().width() for marker in markers))
+        _COLUMNS.append(max(chip.sizeHint().width() for chip in chips))
+        for widget in (*markers, *chips):
+            widget.deleteLater()
+    return _COLUMNS[0], _COLUMNS[1]
+
+
+_COLUMNS: list[int] = []
+
+
+class _ExpandableRow(QWidget):
+    """An expand button, type marker, chip, text, time, actions and a body.
+
+    The columns have fixed widths so rows line up. The title and detail
+    lines each show one line, cut with an ellipsis, with the whole text in
+    their tooltips; a third such line shows a question.
     """
 
     def __init__(self, item_id: str, kind: str, what: str) -> None:
@@ -462,20 +494,27 @@ class _ExpandableRow(QWidget):
         outer.setSpacing(12)
         header = QHBoxLayout()
         header.setSpacing(12)
-        self.expand_button = button("", "ghost", size="sm")
+        marker_width, chip_width = _column_widths()
+        self.expand_button = button("", "secondary", size="sm")
         self.expand_button.setFixedWidth(theme.CONTROL_SM)
         header.addWidget(self.expand_button, 0, Qt.AlignmentFlag.AlignTop)
         self.type_marker = TypeMarker(kind.capitalize())
+        self.type_marker.setFixedWidth(marker_width)
         header.addWidget(self.type_marker, 0, Qt.AlignmentFlag.AlignTop)
+        chip_column = QWidget()
+        chip_column.setFixedWidth(chip_width)
+        chip_layout = QHBoxLayout(chip_column)
+        chip_layout.setContentsMargins(0, 4, 0, 0)
         self.badge = Badge("", "neutral")
-        header.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignTop)
+        chip_layout.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignLeft)
+        chip_layout.addStretch(1)
+        header.addWidget(chip_column, 0, Qt.AlignmentFlag.AlignTop)
         lines = QVBoxLayout()
         lines.setSpacing(2)
-        self.title_label = QLabel()
+        self.title_label = ElidedLabel()
         self.title_label.setFont(theme.font("label"))
-        self.detail_label = QLabel()
+        self.detail_label = ElidedLabel()
         self.detail_label.setProperty("role", "secondary")
-        self.detail_label.setWordWrap(True)
         lines.addWidget(self.title_label)
         lines.addWidget(self.detail_label)
         self.question_label = ElidedLabel()
@@ -644,12 +683,6 @@ class _RecordRow(_ExpandableRow):
         self.overview = screen
         kind = "flow" if isinstance(item, FlowItem) else "panel"
         super().__init__(item.record["id"], kind, "details")
-        self.title_label.setWordWrap(True)
-        for label in (self.title_label, self.detail_label):
-            label.setTextFormat(Qt.TextFormat.PlainText)
-            policy = label.sizePolicy()
-            policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
-            label.setSizePolicy(policy)
         self.details: QWidget | None = None
         self.file_buttons: dict[str, QPushButton] = {}
         self.file_paths: dict[str, Path | None] = {}
@@ -904,7 +937,22 @@ class OverviewScreen(QWidget):
             "Finished"
         )
         self.finished_empty.setText("No finished runs, flows or panels yet.")
-        filters = QHBoxLayout()
+        finished_layout = self.finished_card.layout()
+        assert isinstance(finished_layout, QVBoxLayout)
+        heading_item = finished_layout.takeAt(0)
+        heading = heading_item.widget() if heading_item is not None else None
+        assert heading is not None
+        header = QHBoxLayout()
+        header.addWidget(heading)
+        header.addStretch(1)
+        self.finished_toggle = button("", "secondary", size="sm")
+        self.finished_toggle.clicked.connect(self.toggle_finished_list)
+        header.addWidget(self.finished_toggle)
+        finished_layout.insertLayout(0, header)
+        self.finished_open = state.load(context.env).finished_open
+        self.filter_bar = QWidget()
+        filters = QHBoxLayout(self.filter_bar)
+        filters.setContentsMargins(0, 0, 0, 0)
         self.type_filter = QComboBox()
         self.status_filter = QComboBox()
         self.engine_filter = QComboBox()
@@ -921,12 +969,20 @@ class OverviewScreen(QWidget):
             filters.addWidget(combo)
             combo.currentTextChanged.connect(self.refresh)
         filters.addStretch(1)
-        self.clear_button = button("Clear", "secondary", size="sm")
+        clear_column = QVBoxLayout()
+        clear_column.setSpacing(4)
+        self.clear_button = button("Clear", "danger-outline", size="sm")
         self.clear_button.clicked.connect(self.clear_finished)
-        filters.addWidget(self.clear_button)
-        finished_layout = self.finished_card.layout()
-        assert isinstance(finished_layout, QVBoxLayout)
-        finished_layout.insertLayout(1, filters)
+        self.clear_button.setAccessibleDescription(CLEAR_CAPTION)
+        clear_column.addWidget(self.clear_button, 0, Qt.AlignmentFlag.AlignRight)
+        self.clear_caption = QLabel(CLEAR_CAPTION)
+        self.clear_caption.setFont(theme.font("caption"))
+        self.clear_caption.setProperty("role", "secondary")
+        clear_column.addWidget(self.clear_caption, 0, Qt.AlignmentFlag.AlignRight)
+        filters.addLayout(clear_column)
+        finished_layout.insertWidget(1, self.filter_bar)
+        self._draw_clear_icon()
+        theme.signals.changed.connect(self._draw_clear_icon)
         self._shown_finished: tuple[str, ...] = ()
         self._clearing = False
         self._prune_dialog: _PruneDialog | None = None
@@ -1000,22 +1056,28 @@ class OverviewScreen(QWidget):
             *self.records.panels(),
         ]
         live, finished, children = sections(runs.runs(), parents)
-        finished = [
-            item
-            for item in finished
-            if matches_filters(
-                item,
-                children.get(item_id(item), []),
-                self.type_filter.currentText(),
-                self.status_filter.currentText(),
-                self.engine_filter.currentText().lower(),
-            )
-        ]
+        total = len(finished)
+        if self.finished_open:
+            finished = [
+                item
+                for item in finished
+                if matches_filters(
+                    item,
+                    children.get(item_id(item), []),
+                    self.type_filter.currentText(),
+                    self.status_filter.currentText(),
+                    self.engine_filter.currentText().lower(),
+                )
+            ]
+        else:
+            finished = finished[:FINISHED_PREVIEW]
+        self._draw_finished_header(total)
         self._shown_finished = tuple(item_id(item) for item in finished)
         self._update_clear()
         self.finished_empty.setText(
             "No finished records match the filters."
-            if any(
+            if self.finished_open
+            and any(
                 combo.currentText() != "all"
                 for combo in (self.type_filter, self.status_filter, self.engine_filter)
             )
@@ -1054,6 +1116,30 @@ class OverviewScreen(QWidget):
         self.finished_card.show()
         self._draw_sections(live, finished, children)
         self._chain_focus()
+
+    def toggle_finished_list(self) -> None:
+        """Open the full Finished list, or return to its preview, and keep it."""
+        self.finished_open = not self.finished_open
+        saved = state.load(self.context.env)
+        state.save(
+            dataclasses.replace(saved, finished_open=self.finished_open),
+            self.context.env,
+        )
+        self.refresh()
+        self.finished_toggle.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _draw_finished_header(self, total: int) -> None:
+        """Show the pickers and Clear only while the full list is open."""
+        self.filter_bar.setVisible(self.finished_open)
+        self.finished_toggle.setText(
+            "Show fewer" if self.finished_open else f"Show all {total}"
+        )
+        self.finished_toggle.setVisible(self.finished_open or total > FINISHED_PREVIEW)
+
+    def _draw_clear_icon(self, *_args: object) -> None:
+        set_icon(
+            self.clear_button, icons.icon("trash-2", theme.color("danger-text"), 16)
+        )
 
     def _show_state(self) -> None:
         """Hide the cards and give the state view their place."""
@@ -1285,10 +1371,15 @@ class OverviewScreen(QWidget):
         if not self.records_alert.isHidden():
             chain.extend(self.records_alert.buttons)
         filters: list[QWidget] = [
-            self.type_filter,
-            self.status_filter,
-            self.engine_filter,
-            self.clear_button,
+            control
+            for control in (
+                self.finished_toggle,
+                self.type_filter,
+                self.status_filter,
+                self.engine_filter,
+                self.clear_button,
+            )
+            if control.isVisibleTo(self)
         ]
         for row in self._reading_order:
             if row._item_id in self._shown_finished and filters:

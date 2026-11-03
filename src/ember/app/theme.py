@@ -4,11 +4,17 @@ Colours are tokens with a light and a dark value. `apply` sets the Fusion
 style, a palette and one style sheet built from the tokens of a mode, and
 emits `signals.changed` so painted widgets repaint. Widgets choose style
 rules through dynamic properties (`kind`, `role`, `scale`, `tone`), never
-through object names.
+through object names. The focus ring needs `keyfocus`, which
+`widgets.FocusTracker` sets only for focus that came from the keyboard.
 """
 
+import atexit
 import re
+import shutil
+import tempfile
 from dataclasses import dataclass
+from importlib.resources import files
+from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QGuiApplication, QPalette
@@ -25,8 +31,8 @@ TOKENS: dict[str, tuple[str, str]] = {
     "bg-subtle": ("#f3f3f3", "#2c2c2c"),
     "bg-hover": ("#0000000d", "#ffffff13"),
     "bg-selected": ("#00000014", "#ffffff26"),
-    "border": ("#0000001a", "#ffffff26"),
-    "border-strong": ("#00000033", "#ffffff33"),
+    "border": ("#e6e6e6", "#414141"),
+    "border-strong": ("#cccccc", "#4c4c4c"),
     "text-primary": ("#0d0d0d", "#ededed"),
     "text-secondary": ("#5d5d5d", "#b4b4b4"),
     "text-muted": ("#6b6b6b", "#999999"),
@@ -71,7 +77,11 @@ TOKENS: dict[str, tuple[str, str]] = {
     "term-14": ("#085a62", "#86e1e6"),
     "term-15": ("#3a3a3a", "#ffffff"),
 }
-"""Colour tokens as (light, dark); eight hex digits are `#rrggbbaa`."""
+"""Colour tokens as (light, dark); eight hex digits are `#rrggbbaa`.
+
+Border tokens are solid: Qt draws a rounded border as overlapping strokes,
+and a colour with transparency shows a brighter dot at each overlap.
+"""
 
 SPACE = (4, 8, 12, 16, 20, 24, 32, 48)
 """The spacing steps, in pixels."""
@@ -236,8 +246,10 @@ QLabel[role="secondary"] {
     color: @text-secondary;
 }
 QLabel[role="badge"] {
-    border-radius: 10px;
-    padding: 2px 8px;
+    border-radius: 6px;
+    min-height: 22px;
+    max-height: 22px;
+    padding: 0 8px;
     font-size: 12px;
     font-weight: 500;
     background: @bg-subtle;
@@ -314,6 +326,8 @@ QPushButton:disabled {
 }
 QPushButton:focus {
     outline: none;
+}
+QPushButton[keyfocus="true"]:focus {
     border: 2px solid @focus-ring;
     min-height: 32px;
     max-height: 32px;
@@ -328,7 +342,7 @@ QPushButton[kind="primary"]:hover {
     background: @fill-primary-hover;
     border-color: @fill-primary-hover;
 }
-QPushButton[kind="primary"]:focus {
+QPushButton[kind="primary"][keyfocus="true"]:focus {
     border: 2px solid @focus-ring;
 }
 QPushButton[kind="ghost"] {
@@ -338,7 +352,7 @@ QPushButton[kind="ghost"] {
 QPushButton[kind="ghost"]:hover {
     background: @bg-hover;
 }
-QPushButton[kind="ghost"]:focus {
+QPushButton[kind="ghost"][keyfocus="true"]:focus {
     border: 2px solid @focus-ring;
 }
 QPushButton[kind="danger"] {
@@ -350,7 +364,23 @@ QPushButton[kind="danger"]:hover {
     background: @danger-fill-hover;
     border-color: @danger-fill-hover;
 }
-QPushButton[kind="danger"]:focus {
+QPushButton[kind="danger"][keyfocus="true"]:focus {
+    border: 2px solid @focus-ring;
+}
+QPushButton[kind="danger-outline"] {
+    background: transparent;
+    color: @danger-text;
+    border: 1px solid @danger-text;
+}
+QPushButton[kind="danger-outline"]:hover {
+    background: @danger-bg;
+}
+QPushButton[kind="danger-outline"]:disabled {
+    color: @text-disabled;
+    border-color: @border;
+    background: transparent;
+}
+QPushButton[kind="danger-outline"][keyfocus="true"]:focus {
     border: 2px solid @focus-ring;
 }
 QPushButton[scale="sm"] {
@@ -359,7 +389,7 @@ QPushButton[scale="sm"] {
     padding: 0 12px;
     border-radius: 16px;
 }
-QPushButton[scale="sm"]:focus {
+QPushButton[scale="sm"][keyfocus="true"]:focus {
     min-height: 28px;
     max-height: 28px;
     padding: 0 11px;
@@ -381,7 +411,7 @@ QPushButton[role="segment"]:checked {
     color: @text-primary;
     border: 1px solid @border-strong;
 }
-QPushButton[role="segment"]:focus {
+QPushButton[role="segment"][keyfocus="true"]:focus {
     border: 2px solid @focus-ring;
 }
 QLineEdit, QComboBox {
@@ -396,7 +426,7 @@ QLineEdit, QComboBox {
     selection-background-color: @accent;
     selection-color: #ffffff;
 }
-QLineEdit:focus, QComboBox:focus {
+QLineEdit[keyfocus="true"]:focus, QComboBox[keyfocus="true"]:focus {
     border: 2px solid @focus-ring;
     min-height: 32px;
     max-height: 32px;
@@ -410,13 +440,19 @@ QComboBox[scale="sm"], QLineEdit[scale="sm"] {
     max-height: 30px;
     border-radius: 16px;
 }
-QComboBox[scale="sm"]:focus, QLineEdit[scale="sm"]:focus {
+QComboBox[scale="sm"][keyfocus="true"]:focus,
+QLineEdit[scale="sm"][keyfocus="true"]:focus {
     min-height: 28px;
     max-height: 28px;
 }
 QComboBox::drop-down {
     border: none;
     width: 28px;
+}
+QComboBox::down-arrow {
+    image: url(@@arrow-down);
+    width: 16px;
+    height: 16px;
 }
 QComboBox QAbstractItemView {
     background: @bg-raised;
@@ -458,7 +494,7 @@ QScrollArea[role="mirror"] {
     border: 2px solid transparent;
     border-radius: 8px;
 }
-QScrollArea[role="mirror"]:focus {
+QScrollArea[role="mirror"][keyfocus="true"]:focus {
     border: 2px solid @focus-ring;
 }
 QScrollBar:vertical, QScrollBar:horizontal {
@@ -483,16 +519,41 @@ QScrollBar::add-page, QScrollBar::sub-page {
 """
 
 _TOKEN_REF = re.compile(r"@([a-z][a-z0-9-]*)")
+_ICON_FILES: dict[tuple[str, str], Path] = {}
+
+
+def _icon_file(name: str, value: str) -> Path:
+    """Return a Lucide icon from `assets/icons/` drawn in a colour, as a file.
+
+    Style sheet images are read from files, so each icon and colour is
+    written once to a folder of the process that is removed at exit.
+    """
+    key = (name, value)
+    if key not in _ICON_FILES:
+        if not _ICON_FILES:
+            folder = Path(tempfile.mkdtemp(prefix="ember-theme-"))
+            atexit.register(shutil.rmtree, folder, ignore_errors=True)
+        else:
+            folder = next(iter(_ICON_FILES.values())).parent
+        svg = files("ember.app").joinpath("assets", "icons", f"{name}.svg")
+        path = folder / f"{name}-{value.lstrip('#')}.svg"
+        path.write_text(svg.read_text().replace("currentColor", _css(value)))
+        _ICON_FILES[key] = path
+    return _ICON_FILES[key]
 
 
 def style_sheet(mode: str) -> str:
     """Return the app's style sheet for a mode, every token resolved.
 
+    The picker arrow is the `chevron-down` icon in `text-secondary`.
+
     Raises:
         KeyError: The template names a token that does not exist.
     """
     index = _mode_index(mode)
-    return _TOKEN_REF.sub(lambda m: _css(TOKENS[m.group(1)][index]), _STYLE)
+    arrow = _icon_file("chevron-down", TOKENS["text-secondary"][index])
+    sheet = _STYLE.replace("@@arrow-down", arrow.as_posix())
+    return _TOKEN_REF.sub(lambda m: _css(TOKENS[m.group(1)][index]), sheet)
 
 
 def palette(mode: str) -> QPalette:

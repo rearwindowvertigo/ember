@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 from pytestqt.qtbot import QtBot
 
 from ember import paths, prune, sandbox
-from ember.app import flows, theme, tray
+from ember.app import flows, state, theme, tray
 from ember.app.context import AppContext
 from ember.app.screens import overview
 from ember.app.screens.overview import OverviewScreen
@@ -107,6 +107,12 @@ def write_mix(env: dict[str, str]) -> None:
             last_reason="sign-in needed",
         )
     )
+
+
+def open_finished(screen: OverviewScreen) -> None:
+    """Open the full Finished list, with its pickers and Clear."""
+    if not screen.finished_open:
+        screen.toggle_finished_list()
 
 
 def loaded(env: dict[str, str], context: AppContext, qtbot: QtBot) -> OverviewScreen:
@@ -384,6 +390,7 @@ def test_keyboard_reach(
     values |= {f"sandbox.{engine}": "off" for engine in sandbox.ENGINES}
     use_settings(context, monkeypatch, values)
     screen = loaded(env, context, qtbot)
+    open_finished(screen)
     assert len(screen.sandbox_alerts) == 3
     with qtbot.waitActive(screen):
         screen.activateWindow()
@@ -394,6 +401,7 @@ def test_keyboard_reach(
         controls.extend((row.expand_button, row.open_button))
     controls.extend(
         (
+            screen.finished_toggle,
             screen.type_filter,
             screen.status_filter,
             screen.engine_filter,
@@ -642,8 +650,11 @@ def test_panel_details(env: dict[str, str], context: AppContext, qtbot: QtBot) -
     assert not any(line.startswith("Summary:") for line in text)
     assert f"Run {LIVE_A}" not in text
     assert [
-        button.text() for button in screen.finished_card.findChildren(QPushButton)
-    ] == ["Clear", "", "Summary"]
+        button.text()
+        for button in screen.finished_card.findChildren(QPushButton)
+        if button is not screen.finished_toggle
+        and not screen.filter_bar.isAncestorOf(button)
+    ] == ["", "Summary"]
 
 
 def test_newest_check_log(tmp_path: Path) -> None:
@@ -992,7 +1003,8 @@ def test_record_keyboard_order_and_long_text(
     assert area is not None
     assert area.horizontalScrollBar().maximum() == 0
     assert screen.width() == 900
-    assert flow_row.detail_label.sizePolicy().hasHeightForWidth()
+    assert not flow_row.detail_label.wordWrap()
+    assert flow_row.detail_label.toolTip() == flow_row.detail_label.text()
     assert flow_row.details is not None
     assert all(
         label.sizePolicy().hasHeightForWidth()
@@ -1090,6 +1102,7 @@ def test_finished_cap_merges_types_and_keeps_all_nested_runs(
     context.runs.reload()
     qtbot.waitUntil(lambda: len(context.runs.runs()) == 31)
     screen = screen_for(context, qtbot)
+    open_finished(screen)
     layout = screen.finished_rows_layout
     assert layout.count() == 20
     row_ids = []
@@ -1204,6 +1217,7 @@ def test_finished_filters_combine_and_persist(
     env: dict[str, str], context: AppContext, qtbot: QtBot
 ) -> None:
     screen = loaded(env, context, qtbot)
+    open_finished(screen)
     flow = make_flow(env, status="cancelled", ended_at=1_800_000_600)
     flow["tasks"][0]["writer_run"] = DONE_A
     flow_record.save(flow, env)
@@ -1266,6 +1280,7 @@ def test_filters_apply_after_cap_and_ignore_unreadable_workers(
             )
         )
     screen = screen_for(context, qtbot)
+    open_finished(screen)
     context.runs.reload()
     qtbot.waitUntil(lambda: len(context.runs.runs()) == 20)
     screen.type_filter.setCurrentText("Run")
@@ -1296,6 +1311,7 @@ def test_clear_uses_frozen_ids_and_background_tasks(
     cancel: bool,
 ) -> None:
     screen = loaded(env, context, qtbot)
+    open_finished(screen)
     screen.engine_filter.setCurrentText("Codex")
     calls: list[tuple[int, tuple[str, ...], bool]] = []
     release = threading.Event()
@@ -1578,3 +1594,121 @@ def test_nested_worker_survives_removed_parent(
     assert screen.live_rows_layout.indexOf(child) == 0
     child.expand_button.click()
     assert screen.expanded_live == LIVE_A
+
+
+def _write_closed(env: dict[str, str], count: int) -> None:
+    for n in range(count):
+        write_run(
+            make_run(
+                env,
+                f"codex-20260101-120000-{n:06x}",
+                status=record.CLOSED,
+                ended_at=1_800_000_000 + n,
+            )
+        )
+
+
+def test_finished_preview_shows_three_and_show_all_is_kept(
+    env: dict[str, str], context: AppContext, qtbot: QtBot
+) -> None:
+    _write_closed(env, 5)
+    context.runs.reload()
+    qtbot.waitUntil(lambda: len(context.runs.runs()) == 5)
+    screen = screen_for(context, qtbot)
+    assert not screen.finished_open
+    assert screen.finished_rows_layout.count() == overview.FINISHED_PREVIEW
+    assert screen._shown_finished == tuple(
+        f"codex-20260101-120000-{n:06x}" for n in (4, 3, 2)
+    )
+    assert not screen.filter_bar.isVisible()
+    assert screen.finished_toggle.text() == "Show all 5"
+    screen.finished_toggle.click()
+    assert screen.finished_open
+    assert screen.finished_rows_layout.count() == 5
+    assert screen.filter_bar.isVisible()
+    assert screen.finished_toggle.text() == "Show fewer"
+    assert state.load(env).finished_open
+    fresh = screen_for(context, qtbot)
+    assert fresh.finished_open
+    assert fresh.filter_bar.isVisible()
+    fresh.finished_toggle.click()
+    assert not state.load(env).finished_open
+
+
+def test_show_all_is_hidden_when_the_preview_holds_everything(
+    env: dict[str, str], context: AppContext, qtbot: QtBot
+) -> None:
+    _write_closed(env, 2)
+    context.runs.reload()
+    qtbot.waitUntil(lambda: len(context.runs.runs()) == 2)
+    screen = screen_for(context, qtbot)
+    assert screen.finished_toggle.isHidden()
+    assert screen.finished_rows_layout.count() == 2
+
+
+def test_rows_line_up_in_fixed_columns(
+    env: dict[str, str], context: AppContext, qtbot: QtBot
+) -> None:
+    flow = make_flow(env, status="done", ended_at=1_800_000_900)
+    flow_record.save(flow, env)
+    screen = loaded(env, context, qtbot)
+    open_finished(screen)
+    qtbot.waitUntil(lambda: FLOW in screen.flow_rows)
+    rows = [
+        *screen.live_rows.values(),
+        *screen.finished_rows.values(),
+        screen.flow_rows[FLOW],
+    ]
+    qtbot.waitUntil(lambda: all(row.isVisible() for row in rows))
+
+    def left(widget: QWidget, row: QWidget) -> int:
+        return widget.mapTo(row, widget.rect().topLeft()).x()
+
+    for part in ("expand_button", "type_marker", "badge", "title_label"):
+        assert len({left(getattr(row, part), row) for row in rows}) == 1, part
+    for row in rows:
+        assert row.expand_button.property("kind") == "secondary"
+        assert not row.detail_label.wordWrap()
+
+
+def test_nested_runs_are_oldest_first(
+    env: dict[str, str], context: AppContext, qtbot: QtBot
+) -> None:
+    late = "codex-20260101-130000-aaaaaa"
+    early = "claude-20260101-110000-bbbbbb"
+    write_run(make_run(env, late, status=record.CLOSED, started_at=3000, ended_at=3100))
+    write_run(
+        make_run(env, early, status=record.CLOSED, started_at=1000, ended_at=5000)
+    )
+    flow = make_flow(env, status="done", ended_at=6000)
+    flow["tasks"][0]["writer_run"] = late
+    flow["tasks"][0]["review_run"] = early
+    flow_record.save(flow, env)
+    context.runs.reload()
+    qtbot.waitUntil(lambda: len(context.runs.runs()) == 2)
+    screen = screen_for(context, qtbot)
+    nested = screen.flow_rows[FLOW].nested
+    order = []
+    for n in range(nested.count()):
+        item = nested.itemAt(n)
+        assert item is not None
+        widget = item.widget()
+        assert isinstance(widget, overview._Row)
+        order.append(widget.run.id)
+    assert order == [early, late]
+
+
+def test_clear_is_a_red_outline_with_its_caption(
+    env: dict[str, str], context: AppContext, qtbot: QtBot
+) -> None:
+    screen = loaded(env, context, qtbot)
+    open_finished(screen)
+    assert screen.clear_button.property("kind") == "danger-outline"
+    assert screen.clear_button.accessibleName() == "Clear"
+    assert screen.clear_button.accessibleDescription() == "Remove shown records"
+    assert not screen.clear_button.icon().isNull()
+    assert screen.clear_caption.text() == "Remove shown records"
+    assert screen.clear_caption.isVisible()
+    clear = screen.clear_button.mapTo(screen, screen.clear_button.rect().topLeft())
+    caption = screen.clear_caption.mapTo(screen, screen.clear_caption.rect().topLeft())
+    assert caption.y() > clear.y()

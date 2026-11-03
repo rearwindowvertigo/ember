@@ -27,6 +27,7 @@ from PySide6.QtGui import (
     QClipboard,
     QColor,
     QContextMenuEvent,
+    QFocusEvent,
     QFont,
     QFontMetrics,
     QGuiApplication,
@@ -48,6 +49,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractButton,
+    QApplication,
     QButtonGroup,
     QComboBox,
     QDialog,
@@ -106,14 +108,77 @@ def repolish(widget: QWidget) -> None:
     widget.update()
 
 
+KEYBOARD_REASONS = (
+    Qt.FocusReason.TabFocusReason,
+    Qt.FocusReason.BacktabFocusReason,
+    Qt.FocusReason.ShortcutFocusReason,
+)
+"""Focus reasons that always show the focus ring."""
+
+
+def focus_visible(widget: QWidget) -> bool:
+    """Return whether a widget has focus that arrived from the keyboard."""
+    return widget.hasFocus() and widget.property("keyfocus") is True
+
+
+class FocusTracker(QObject):
+    """Mark keyboard focus with the `keyfocus` property for the style sheet.
+
+    Focus taken by Tab, Shift+Tab or a shortcut sets `keyfocus` to true;
+    focus taken by a mouse click sets it to false. Focus that the app moves,
+    or that returns with the window, follows the last input: a key press or a
+    mouse press. Losing focus clears the property.
+    """
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        """Create the tracker; the last input counts as the mouse."""
+        super().__init__(parent)
+        self.keyboard = False
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: D102
+        kind = event.type()
+        if kind == QEvent.Type.KeyPress:
+            self.keyboard = True
+        elif kind == QEvent.Type.MouseButtonPress:
+            self.keyboard = False
+        elif kind == QEvent.Type.FocusIn and isinstance(watched, QWidget):
+            reason = cast(QFocusEvent, event).reason()
+            if reason in KEYBOARD_REASONS:
+                visible = True
+            elif reason == Qt.FocusReason.MouseFocusReason:
+                visible = False
+            else:
+                visible = self.keyboard
+            _set_keyfocus(watched, visible)
+        elif kind == QEvent.Type.FocusOut and isinstance(watched, QWidget):
+            _set_keyfocus(watched, False)
+        return False
+
+
+def _set_keyfocus(widget: QWidget, visible: bool) -> None:
+    if widget.property("keyfocus") is not visible:
+        widget.setProperty("keyfocus", visible)
+        repolish(widget)
+
+
+def install_focus_tracking(app: QApplication) -> FocusTracker:
+    """Install one `FocusTracker` on the application and return it."""
+    tracker = app.findChild(FocusTracker)
+    if tracker is None:
+        tracker = FocusTracker(app)
+        app.installEventFilter(tracker)
+    return tracker
+
+
 def button(
     text: str, kind: str = "secondary", *, size: str | None = None
 ) -> QPushButton:
-    """Return a push button styled as `primary`, `secondary`, `ghost` or `danger`.
+    """Return a push button styled by its kind.
 
     Args:
         text: The button's label.
-        kind: The style rule the button selects.
+        kind: The style rule the button selects: `primary`, `secondary`,
+            `ghost`, `danger` or `danger-outline`.
         size: `sm` for a small button, or `None`. It sets the `scale`
             property; `size` is QWidget's own geometry property.
 
@@ -253,7 +318,7 @@ class Switch(QAbstractButton):
             left = track.right() - margin - diameter if on else track.left() + margin
             painter.setBrush(theme.color("thumb"))
             painter.drawEllipse(QRectF(left, track.top() + margin, diameter, diameter))
-            if self.hasFocus():
+            if focus_visible(self):
                 pen = QPen(theme.color("focus-ring"), 2)
                 painter.setPen(pen)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
