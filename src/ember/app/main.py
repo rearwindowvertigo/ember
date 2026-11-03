@@ -18,7 +18,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QCoreApplication, QObject, QProcess
+from PySide6.QtCore import (
+    QCoreApplication,
+    QFileSystemWatcher,
+    QObject,
+    QProcess,
+    QTimer,
+)
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication
@@ -107,6 +113,23 @@ def installed_version() -> str | None:
         return None
 
 
+UPGRADE_SETTLE_MS = 2_000
+"""Milliseconds without further package changes before the version is read."""
+
+
+def package_folder() -> Path | None:
+    """Return the folder that holds the installed `ember-app` metadata.
+
+    An upgrade replaces the `ember_app-<version>.dist-info` folder in it.
+    """
+    try:
+        folder = importlib.metadata.distribution("ember-app").locate_file("")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    path = Path(str(folder))
+    return path if path.is_dir() else None
+
+
 def restart_command() -> list[str]:
     """Return the command that starts the installed Ember's app."""
     return [sys.executable, "-I", "-m", "ember.cli", "app"]
@@ -136,6 +159,19 @@ class _Controller(QObject):
         self._autostart_on: bool | None = None
         parts.server.newConnection.connect(self._connection)
         parts.context.settings_changed.connect(self._settings_changed)
+        # An upgrade installed while Ember runs shows the restart offer once
+        # the package folder has been still for a moment.
+        self._settle = QTimer(self)
+        self._settle.setSingleShot(True)
+        self._settle.setInterval(UPGRADE_SETTLE_MS)
+        self._settle.timeout.connect(self._check_version)
+        self._watcher = QFileSystemWatcher(self)
+        self._package = package_folder()
+        if self._package is not None:
+            self._watcher.addPath(str(self._package))
+        self._watcher.directoryChanged.connect(self._package_changed)
+        parts.app.aboutToQuit.connect(self._stop_watching)
+        parts.window.destroyed.connect(self._stop_watching)
         hints = parts.app.styleHints()
         hints.colorSchemeChanged.connect(self._scheme_changed)
 
@@ -153,6 +189,19 @@ class _Controller(QObject):
         data = bytes(socket.readAll().data())
         if b"show" in data:
             self.parts.window.bring_forward()
+
+    def _stop_watching(self) -> None:
+        self._package = None
+        self._settle.stop()
+        if self._watcher.directories():
+            self._watcher.removePaths(self._watcher.directories())
+
+    def _package_changed(self, _path: str) -> None:
+        if self._package is None:
+            return
+        if str(self._package) not in self._watcher.directories():
+            self._watcher.addPath(str(self._package))
+        self._settle.start()
 
     def _check_version(self) -> None:
         """Offer a restart when the installed version is not this one."""

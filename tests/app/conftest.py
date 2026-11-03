@@ -8,7 +8,7 @@ from PySide6.QtCore import QCoreApplication, QEvent, QObject, QThreadPool
 from PySide6.QtGui import QFont, QPalette
 from PySide6.QtWidgets import QApplication, QWidget
 
-from ember.app import theme
+from ember.app import main, theme
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -33,6 +33,16 @@ def _restore_appearance(qapp: QApplication) -> Iterator[None]:
         qapp.setStyle(style)
     qapp.setPalette(palette)
     qapp.setFont(font)
+
+
+@pytest.fixture(autouse=True)
+def _no_package_watch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the app from watching the shared environment's package folder.
+
+    Other tests change that folder while they run; a test that needs the
+    watch points `package_folder` at its own folder.
+    """
+    monkeypatch.setattr(main, "package_folder", lambda: None)
 
 
 @pytest.fixture
