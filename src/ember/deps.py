@@ -19,6 +19,7 @@ and supplies `HOME`, the XDG variables and `PATH`.
 """
 
 import contextlib
+import dataclasses
 import http.client
 import importlib.metadata
 import json
@@ -40,7 +41,7 @@ from pathlib import Path
 from string import Formatter
 from typing import Any
 
-from ember import paths
+from ember import paths, skill
 from ember.engines import status
 
 TIMEOUT = 10
@@ -65,10 +66,10 @@ STATUSES = (MISSING, CHECK_FAILED, UPDATE_AVAILABLE, CURRENT)
 GROUPS = ("apps", "system", "libraries")
 """The component groups: engines and apps, system tools, Ember's libraries."""
 
-INSTALLED_KINDS = ("apt", "command", "python")
+INSTALLED_KINDS = ("apt", "command", "python", "skill")
 """How an installed version can be read."""
 
-NEWEST_KINDS = ("apt", "json", "text", "pypi")
+NEWEST_KINDS = ("apt", "json", "text", "pypi", "none")
 """How a newest version can be read."""
 
 NEWEST_MODES = ("due", "always", "never")
@@ -115,6 +116,9 @@ class Source:
 
     field: str | None = None
     """The JSON object's key that holds the version, for `json`."""
+
+    commands: Mapping[str, str] = dataclasses.field(default_factory=dict)
+    """Install commands by link state, for `skill`."""
 
 
 @dataclass(frozen=True)
@@ -176,11 +180,10 @@ class Component:
     """The newest version, or `None` when it was not read."""
 
     error: str | None
-    """Why the status is `check failed`, naming the read; `None` otherwise."""
+    """Why the check failed: a read error or skill link state; `None` otherwise."""
 
     command: str | None
-    """The update command while an update is available, the install command
-    while missing, else `None`."""
+    """The update, install or skill repair command, or `None`."""
 
     command_kind: str | None
     """`update`, `install` or `None`, as `command`."""
@@ -194,11 +197,20 @@ class Component:
     method: Method | None = None
     """The matched install method, or `None` when none matched."""
 
+    installed_kind: str | None = None
+    """The installed source kind."""
+
+    newest_kind: str | None = None
+    """The newest source kind; `none` has no newest reads."""
+
+    link_state: str | None = None
+    """The skill link state, in place of a version."""
+
     def to_json(self) -> dict[str, Any]:
         """Return the component as a JSON-ready dict.
 
         Returns:
-            Every field.
+            The report fields, including `link_state` for a skill.
         """
         return {
             "id": self.id,
@@ -213,6 +225,11 @@ class Component:
             "note": self.note,
             "resolved_path": self.resolved_path,
             "method": None if self.method is None else self.method.to_json(),
+            **(
+                {"link_state": self.link_state}
+                if self.installed_kind == "skill"
+                else {}
+            ),
         }
 
 
@@ -235,21 +252,28 @@ class DepsReport:
         """Return how many components need the owner.
 
         Returns:
-            The number with status `update available` or `missing`.
+            Non-current skills and other components that are missing or outdated.
         """
         return sum(
-            item.status in (UPDATE_AVAILABLE, MISSING) for item in self.components
+            item.status != CURRENT
+            if item.installed_kind == "skill"
+            else item.status in (UPDATE_AVAILABLE, MISSING)
+            for item in self.components
         )
 
     def _needs_newest(self) -> list[str]:
-        return [item.id for item in self.components if item.status != MISSING]
+        return [
+            item.id
+            for item in self.components
+            if item.status != MISSING and item.newest_kind != "none"
+        ]
 
     def oldest_newest_read(self) -> float | None:
         """Return the oldest newest-version read among installed components.
 
         Returns:
             The earliest `newest_read_at` of a component that is not missing,
-            or `None` when none was read.
+            excluding newest kind `none`, or `None` when none was read.
         """
         times = [
             stamp
@@ -263,7 +287,7 @@ class DepsReport:
 
         Returns:
             True when every component that is not missing has a
-            `newest_read_at`.
+            `newest_read_at`, excluding newest kind `none`.
         """
         return all(
             self.newest_read_at.get(key) is not None for key in self._needs_newest()
@@ -295,6 +319,8 @@ _SOURCE_FIELDS: dict[tuple[str, str], tuple[tuple[str, ...], tuple[str, ...]]] =
     ("installed", "apt"): (("package",), ()),
     ("installed", "command"): (("pattern",), ("engine", "argv")),
     ("installed", "python"): (("package",), ()),
+    ("installed", "skill"): ((), ("commands",)),
+    ("newest", "none"): ((), ()),
     ("newest", "apt"): (("package",), ()),
     ("newest", "json"): (("url", "field"), ()),
     ("newest", "text"): (("url",), ()),
@@ -327,6 +353,14 @@ def _source(where: str, role: str, value: object) -> Source:
         if name not in value:
             raise ComponentsError(f"{where}: missing field {name}")
         _text(where, name, value[name])
+    if kind == "skill":
+        commands = value.get("commands", {})
+        states = {skill.MISSING, skill.BROKEN_LINK, skill.OTHER_LINK}
+        if not isinstance(commands, dict) or set(commands) - states:
+            raise ComponentsError(f"{where}: commands must map repairable link states")
+        for state, command in commands.items():
+            _text(where, state, command)
+        return Source(kind=kind, commands=commands)
     if kind != "command":
         url = value.get("url")
         if url is not None and not url.startswith("https://"):
@@ -436,6 +470,8 @@ def _spec(index: int, value: object) -> Spec:
         )
     installed = _source(where, "installed", value["installed"])
     newest = _source(where, "newest", value["newest"])
+    if installed.kind == "skill" and newest.kind != "none":
+        raise ComponentsError(f"{where}: a skill needs newest kind none")
     if newest.kind == "apt" and installed.kind != "apt":
         raise ComponentsError(
             f"{where}: an apt newest read needs an apt installed read"
@@ -623,6 +659,8 @@ class _Installed:
     missing: bool
     error: str | None
     read_at: float
+    link_state: str | None = None
+    note: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -630,6 +668,11 @@ class _Installed:
             "missing": self.missing,
             "error": self.error,
             "read_at": self.read_at,
+            **(
+                {"link_state": self.link_state, "note": self.note}
+                if self.link_state is not None
+                else {}
+            ),
         }
 
 
@@ -693,6 +736,19 @@ def _read_installed(
     spec: Spec, env: Mapping[str, str], deadline: float, now: float
 ) -> _Installed:
     source = spec.installed
+    if source.kind == "skill":
+        current = skill.status(env, skill.source_candidates())
+        note = None
+        if current.source is None:
+            note = "Reinstall Ember."
+        elif current.state in (skill.FOLDER, skill.FILE):
+            note = f"Move {current.link}, then run emb skill install."
+        error = (
+            None if current.state in (skill.INSTALLED, skill.MISSING) else current.state
+        )
+        return _Installed(
+            None, current.state == skill.MISSING, error, now, current.state, note
+        )
     try:
         if source.kind == "apt":
             version = _installed_apt(source.package or "", env, deadline)
@@ -835,9 +891,16 @@ def _installed_from_json(value: object) -> _Installed | None:
         return None
     if not (error is None or isinstance(error, str)):
         return None
-    if not missing and version is None and error is None:
+    link_state, note = value.get("link_state"), value.get("note")
+    if not (link_state is None or isinstance(link_state, str)):
         return None
-    return _Installed(None if missing else version, missing, error, read_at)
+    if not (note is None or isinstance(note, str)):
+        return None
+    if not missing and version is None and error is None and link_state is None:
+        return None
+    return _Installed(
+        None if missing else version, missing, error, read_at, link_state, note
+    )
 
 
 def _newest_from_json(value: object) -> _Newest | None:
@@ -920,9 +983,16 @@ def _row(
     installed: str | None,
     newest: str | None,
     error: str | None,
+    *,
+    link_state: str | None = None,
+    note: str | None = None,
 ) -> Component:
-    command = kind = note = None
-    if state == UPDATE_AVAILABLE:
+    command = kind = None
+    if spec.installed.kind == "skill":
+        if note is None:
+            command = spec.installed.commands.get(link_state or "")
+            kind = "install"
+    elif state == UPDATE_AVAILABLE:
         command, kind = spec.update, "update"
         note = spec.update_note
     elif state == MISSING:
@@ -943,6 +1013,9 @@ def _row(
         command=command,
         command_kind=kind,
         note=note,
+        installed_kind=spec.installed.kind,
+        newest_kind=spec.newest.kind,
+        link_state=link_state,
     )
 
 
@@ -956,6 +1029,24 @@ def _evaluate_versions(
         found = _read_installed(spec, options.env, options.deadline, options.now)
     else:
         found = held_installed
+    if spec.newest.kind == "none":
+        state = CHECK_FAILED
+        error = "installed version: not read and nothing cached"
+        if found is not None:
+            state = (
+                MISSING if found.missing else CHECK_FAILED if found.error else CURRENT
+            )
+            error = found.error
+        row = _row(
+            spec,
+            state,
+            None if found is None else found.version,
+            None,
+            error,
+            link_state=None if found is None else found.link_state,
+            note=None if found is None else found.note,
+        )
+        return _Outcome(row, found, None)
     if found is not None and found.missing:
         newest = held_newest.version if held_newest else None
         row = _row(spec, MISSING, None, newest, None)
@@ -1185,7 +1276,9 @@ def read(
     entries = {
         spec.id: (
             outcome.installed,
-            outcome.newest or held.get(spec.id, (None, None))[1],
+            None
+            if spec.newest.kind == "none"
+            else outcome.newest or held.get(spec.id, (None, None))[1],
         )
         for spec, outcome in zip(specs, outcomes, strict=True)
     }

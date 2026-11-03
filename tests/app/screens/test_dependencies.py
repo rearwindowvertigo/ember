@@ -391,6 +391,16 @@ def test_sidebar_count_follows_deps_changed(
         "2 updates available, 2 items missing and 1 check failed."
     )
     assert screen_module.ordered(report)[0][0] == "apps"
+    failed_skill = replace(
+        _component("ember-skill", deps.CHECK_FAILED, group="apps"),
+        installed_kind="skill",
+        newest_kind="none",
+        link_state="broken link",
+    )
+    report = _report(*SAMPLE, failed_skill)
+    context._deps = report
+    context.deps_changed.emit(report)
+    assert window.nav["dependencies"].count() == report.counts() == 5
 
 
 def test_check_now_without_a_report_shows_one_spinner(
@@ -473,3 +483,85 @@ def test_unidentified_install_shows_path_command_and_note(
     assert tile.command is not None and tile.command.command() == item.command
     tile.command.run_button.click()
     assert calls.commands == [item.command]
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+@pytest.mark.parametrize(
+    ("state", "status", "command", "note"),
+    [
+        ("installed", deps.CURRENT, None, None),
+        ("missing", deps.MISSING, "emb skill install", None),
+        ("broken link", deps.CHECK_FAILED, "emb skill install", None),
+        ("other link", deps.CHECK_FAILED, "emb skill install --force", None),
+        ("folder", deps.CHECK_FAILED, None, "Move /skill, then run emb skill install."),
+        ("file", deps.CHECK_FAILED, None, "Move /skill, then run emb skill install."),
+        ("missing", deps.MISSING, None, "Reinstall Ember."),
+    ],
+)
+def test_skill_tile(
+    env: dict[str, str],
+    qtbot: QtBot,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    state: str,
+    status: str,
+    command: str | None,
+    note: str | None,
+) -> None:
+    theme.apply(qapp, mode)
+    item = replace(
+        _component(
+            "ember-skill",
+            status,
+            group="apps",
+            label="ember skill",
+            installed=None,
+            newest=None,
+            error=state if status == deps.CHECK_FAILED else None,
+            command=command,
+            command_kind="install" if command else None,
+            note=note,
+        ),
+        installed_kind="skill",
+        newest_kind="none",
+        link_state=state,
+    )
+    report = _report(item)
+    assert "Newest versions" not in subtitle(report)
+    widget, _context, calls = _screen(env, qtbot, monkeypatch, report)
+    assert widget.order() == [("apps", ["ember-skill"])]
+    tile = widget.tiles[item.id]
+    assert tile.versions.text() == state
+    assert tile.versions.isVisible()
+    assert tile.error.isHidden()
+    assert tile.badge.text() == screen_module.BADGES[status][0]
+    if command:
+        assert tile.command is not None
+        assert tile.command.command() == command
+        tile.command.run_button.click()
+        assert calls.commands == [command]
+    else:
+        assert tile.command is None
+    if note:
+        assert tile.note is not None and tile.note.text() == note
+    else:
+        assert tile.note is None
+
+
+def test_skill_does_not_make_newest_summary_incomplete() -> None:
+    now = time.time()
+    item = replace(
+        _component("ember-skill", deps.CHECK_FAILED),
+        installed_kind="skill",
+        newest_kind="none",
+        link_state="broken link",
+    )
+    report = deps.DepsReport(
+        components=(_component("tool", deps.CURRENT), item),
+        installed_read_at={"tool": now, "ember-skill": now},
+        newest_read_at={"tool": now, "ember-skill": None},
+    )
+    assert "Newest versions read today" in subtitle(report, now)
+    assert "not read" not in subtitle(report, now)
+    assert report.counts() == 1

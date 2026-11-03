@@ -515,7 +515,7 @@ def test_deps_text(
     captured = capsys.readouterr()
     assert captured.err == ""
     lines = captured.out.splitlines()
-    assert lines[:8] == [
+    assert lines[:10] == [
         "Codex: current, installed 1.0.0, newest 1.0.0",
         "OpenCode: missing",
         "  install: curl -fsSL https://opencode.ai/install | bash",
@@ -523,6 +523,8 @@ def test_deps_text(
         "  install: curl -fsSL https://claude.ai/install.sh | bash",
         "Claude Desktop: update available, installed 1.0, newest 1.1",
         "  update: sudo apt install --only-upgrade claude-desktop",
+        "ember skill: missing",
+        "  install: emb skill install",
         "tmux: update available, installed 1.0, newest 1.1",
     ]
     assert lines[-1].startswith("PySide6: ")

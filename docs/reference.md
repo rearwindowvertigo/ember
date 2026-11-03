@@ -2291,7 +2291,8 @@ emb deps [--refresh] [--json]
 Shows each component Ember depends on: its installed version, the newest
 version its source offers, its status and the command that updates or
 installs it. It reads installed versions every time and newest versions when
-due. It installs and updates nothing.
+due. The `ember` skill link shows its state in place of a version. It installs
+and updates nothing.
 
 | Option | Does |
 |---|---|
@@ -2312,6 +2313,7 @@ The list is `ember/data/components.toml` in the package:
 | `opencode` | OpenCode | `apps` | `opencode --version`, `^(\S+)$` | `version` of `https://registry.npmjs.org/opencode-ai/latest` | Detected install method | `curl -fsSL https://opencode.ai/install \| bash` |
 | `claude` | Claude Code | `apps` | `claude --version`, `^(\S+) \(Claude Code\)$` | the text of `https://downloads.claude.ai/claude-code-releases/latest` | Detected install method | `curl -fsSL https://claude.ai/install.sh \| bash` |
 | `claude-desktop` | Claude Desktop | `apps` | apt `claude-desktop` | apt | `sudo apt install --only-upgrade claude-desktop` | none; note "Not installed." |
+| `ember-skill` | ember skill | `apps` | `emb skill status` link state | none | none | By link state, below |
 | `tmux` | tmux | `system` | apt `tmux` | apt | `sudo apt install --only-upgrade tmux` | `sudo apt install tmux` |
 | `bubblewrap` | bubblewrap | `system` | apt `bubblewrap` | apt | `sudo apt install --only-upgrade bubblewrap` | `sudo apt install bubblewrap` |
 | `git` | git | `system` | apt `git` | apt | `sudo apt install --only-upgrade git` | `sudo apt install git` |
@@ -2331,14 +2333,41 @@ not valid:
 | `id` | Unique, `[a-z0-9-]+` |
 | `label` | The shown name |
 | `group` | `apps`, `system` or `libraries` |
-| `installed` | `kind = "apt"` with `package`; `kind = "command"` with `pattern`, a regular expression whose group 1 is the version, and either `engine` (the engine's CLI run with `--version`) or `argv`; or `kind = "python"` with `package` |
-| `newest` | `kind = "apt"` with `package` (only with an apt `installed`); `kind = "json"` with `url` and `field`; `kind = "text"` with `url`; or `kind = "pypi"` with `package` |
+| `installed` | `kind = "apt"` with `package`; `kind = "command"` with `pattern`, a regular expression whose group 1 is the version, and either `engine` (the engine's CLI run with `--version`) or `argv`; `kind = "python"` with `package`; or `kind = "skill"` with an optional `commands` map from link states to install commands |
+| `newest` | `kind = "apt"` with `package` (only with an apt `installed`); `kind = "json"` with `url` and `field`; `kind = "text"` with `url`; `kind = "pypi"` with `package`; or `kind = "none"` for no newest version (required for `skill`) |
 | `update` | Optional: the command shown while an update is available |
 | `methods` | Optional: ordered `[[components.methods]]` tables with `path` and `update`, or `kind = "dpkg"` and `update`; replaces `update` for engines |
 | `updater` | Required with engine methods: `codex update`, `opencode upgrade` or `claude update`, used when no method matches |
 | `install` | Optional: the command shown while the component is missing |
 | `update_note` | Optional: shown while an update is available and there is no `update` |
 | `install_note` | Optional: shown while the component is missing and there is no `install` |
+
+### Skill link
+
+The `ember-skill` component uses the same source candidates and link path as
+`emb skill status`, including `CLAUDE_CONFIG_DIR`. Its installed source kind
+is `skill`; its newest source kind is `none`.
+
+| Link state | Status | Command or note |
+|---|---|---|
+| `installed` | `current` | none |
+| `missing` | `missing` | `emb skill install` |
+| `broken link` | `check failed` | `emb skill install` |
+| `other link` | `check failed` | `emb skill install --force` |
+| `folder` | `check failed` | Move the link path, then run `emb skill install`; no command button |
+| `file` | `check failed` | Move the link path, then run `emb skill install`; no command button |
+
+When no source is found, every link state shows `Reinstall Ember.` with no
+command. For `check failed`, `error` is the link state. The installed source's
+`commands` map supplies commands for `missing`, `broken link` and `other link`
+before status-based command selection.
+
+The CLI and Dependencies screen show the link state in place of versions.
+JSON includes `link_state`, with null `installed` and `newest` versions. Every
+skill status except `current` counts in `counts` and the sidebar badge;
+other components count only when missing or when an update is available.
+Components with newest kind `none` are skipped in every newest mode,
+including `--refresh`, and excluded from newest-read summaries.
 
 ### Update methods
 
@@ -2436,7 +2465,7 @@ compared as text.
 
 `command` is the update command while an update is available and the install
 command while missing, with `command_kind` `update` or `install`; otherwise
-both are null. `note` is `update_note` or `install_note` for that status when
+both are null, except for skill commands and notes described above. `note` is `update_note` or `install_note` for that status when
 there is no command for it, or the could-not-tell note alongside an update
 command when no install method matched; otherwise null.
 
@@ -2450,7 +2479,7 @@ seconds since the epoch. A newest version is read again when its cached read
 is missing or six hours old or more; `--refresh` reads it now. A newest read
 that fails is reported and not cached, so the next run reads it again. A cache
 that cannot be read is treated as empty; one that cannot be written is left as
-it was.
+it was. The skill installed read caches its link state and note.
 
 ### Output
 
@@ -2459,7 +2488,8 @@ Text output has one line per component, in the order of the list:
 then an indented `update: <command>` or `install: <command>` line when there
 is a command. An engine shows `resolved path: <path>` only with an update
 command, alongside the could-not-tell note when no method matched. JSON
-keeps `resolved_path` and `method` for every component.
+keeps `resolved_path` and `method` for every component. Skill rows show the
+link state and any move-path or reinstall note.
 
 `--json` prints one object:
 
@@ -2495,9 +2525,9 @@ keeps `resolved_path` and `method` for every component.
 | `components[].method` | Matched method table (`path` and `update`, or `kind = "dpkg"` and `update`); null when none matched |
 | `installed_read_at` | When each component's installed version was read, by id; null when it was never read |
 | `newest_read_at` | When each component's reported newest version was read, by id; null when none is reported |
-| `counts` | How many components are `update available` or `missing` |
-| `newest_read_oldest` | The oldest `newest_read_at` among components that are not missing; null when there is none |
-| `newest_read_complete` | Whether every component that is not missing has a newest version read |
+| `counts` | Non-current skill components, plus other components that are `update available` or `missing` |
+| `newest_read_oldest` | The oldest `newest_read_at` among components that are not missing and have a newest source other than `none`; null when there is none |
+| `newest_read_complete` | Whether every component that is not missing and has a newest source other than `none` has a newest version read |
 
 ## `emb skill`
 
