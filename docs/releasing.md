@@ -18,8 +18,8 @@
   default subject and has an empty body (`gh pr merge <n> --merge --body
   ""`), so Release Please reads only the pull request's own commits. A body
   holding the pull request's title is read as one more change.
-- The release pull request is merged only when the release's target in its
-  design document is complete.
+- The release pull request is merged only when every issue in the
+  release's milestone is closed. The milestone is then closed.
 - Release Please also sets the project's version in `uv.lock`
   (`extra-files` in `release-please-config.json`), so `uv.lock` matches
   `pyproject.toml` after each release.

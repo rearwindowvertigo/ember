@@ -1,0 +1,39 @@
+name: Bug
+description: Ember does something wrong
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Ember version
+      description: The output of `emb --version`.
+      placeholder: 0.5.0
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Desktop app, emb command, Flows, panels or gap checks, The ember skill, Package or release]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps
+      description: The commands run or the clicks made, in order.
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: Output, exit codes and screenshots.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What was expected
+    validations:
+      required: true

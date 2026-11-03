@@ -1,0 +1,25 @@
+name: Feature
+description: A new feature or a change to behaviour
+labels: [feature]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Desktop app, emb command, Flows, panels or gap checks, The ember skill, Package or release]
+    validations:
+      required: true
+  - type: textarea
+    id: need
+    attributes:
+      label: Need
+      description: What cannot be done today, or what is slow.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: The change, and where it goes (command, screen or file).
+    validations:
+      required: true

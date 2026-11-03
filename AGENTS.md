@@ -5,8 +5,12 @@ lead AI coding workers on one machine. Claude splits the work, Codex, OpenCode
 or Claude workers do it in isolated git worktrees, and Claude reviews and
 merges the result. The owner watches and configures it in the desktop app.
 
-The design is in `docs/design/`. Decisions are in `docs/decisions/`. Releases
-follow `docs/releasing.md`.
+Work is tracked in GitHub Issues: one issue per bug, feature or task, with
+one type label (`bug`, `feature`, `chore`), one area label (`app`, `cli`,
+`flows`, `skill`, `packaging`) and the milestone of its target release.
+`gh issue list --milestone <version>` lists a release's work. A pull
+request that finishes an issue says `Closes #<n>` in its description.
+Decisions are in `docs/decisions/`. Releases follow `docs/releasing.md`.
 
 ## Rules for every change
 
@@ -64,7 +68,7 @@ follow `docs/releasing.md`.
 | `tests/` | pytest tests |
 | `skill/` | The `ember` skill for Claude Code, with its references and eval cases |
 | `packaging/` | The `.deb` build, the desktop entry and icons |
-| `docs/design/` | Design documents, numbered, each with a status and target release |
+| `docs/design/` | Designs 0001 to 0004 (0.1.0 to 0.5.0), kept as history, and any later design too large for an issue |
 | `docs/decisions/` | Architecture decision records, numbered |
 | `docs/releasing.md` | Versioning, changelog and tags |
 | `docs/reference.md` | Current behaviour, once built |

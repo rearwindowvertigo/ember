@@ -55,8 +55,8 @@ A review runs once for each new entry, when the owner asks for it.
 4. Commit the review on its own branch, with a `chore(survey):` subject,
    and open a pull request for it alone.
 
-A proposed change in a review is not a decision. It enters a design
-document only when the owner accepts it.
+A proposed change in a review is not a decision. It becomes an issue only
+when the owner accepts it.
 
 ## Scores
 
