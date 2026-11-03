@@ -1,6 +1,8 @@
 ---
 date: yyyy-mm-dd
 ember_version: x.y.z
+ember_versions_built: [<x.y.z of each release made during the session; [] when none>]
+main_commit: <short commit of main when the entry was written>
 session_model: <the filling session's model id>
 task: <one line naming the session's work>
 engines: [<engines used>]
