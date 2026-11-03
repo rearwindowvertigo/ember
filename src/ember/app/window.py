@@ -42,6 +42,9 @@ ICON_SIZE = 18
 """The size of a sidebar row's icon."""
 
 BADGE_HEIGHT = 22
+
+RESTART_TITLE = "Ember {version} is installed. Restart to use it."
+"""The restart alert's text, after an upgrade while Ember runs."""
 """The height of a sidebar row's count, in pixels."""
 
 _NAV_STYLE = """
@@ -177,6 +180,7 @@ class MainWindow(QMainWindow):
         self.notice_area = QVBoxLayout()
         self.notice_area.setContentsMargins(24, 16, 24, 0)
         self.notice: widgets.Alert | None = None
+        self.restart_alert: widgets.Alert | None = None
         content.addLayout(self.notice_area)
         self.stack = QStackedWidget()
         self.state_view = widgets.StateView()
@@ -338,6 +342,28 @@ class MainWindow(QMainWindow):
             self.notice_area.removeWidget(self.notice)
             self.notice.deleteLater()
             self.notice = None
+
+    def show_restart(self, version: str, restart: Callable[[], None]) -> None:
+        """Offer a restart into the installed version until Ember restarts.
+
+        The alert has no Dismiss button and survives other notices; a second
+        call for another version replaces it.
+
+        Args:
+            version: The installed version.
+            restart: Quits this Ember and starts the installed one.
+        """
+        title = RESTART_TITLE.format(version=version)
+        if self.restart_alert is not None:
+            if self.restart_alert.title_label.text() == title:
+                return
+            self.notice_area.removeWidget(self.restart_alert)
+            self.restart_alert.deleteLater()
+        self.restart_alert = widgets.Alert(
+            "info", title, actions=[("Restart", restart)]
+        )
+        self.notice_area.insertWidget(0, self.restart_alert)
+        self.bring_forward()
 
     def _stale(self) -> None:
         self.show_notice("info", STALE_TITLE, STALE_TEXT)

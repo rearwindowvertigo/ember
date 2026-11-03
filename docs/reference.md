@@ -2648,6 +2648,14 @@ connects to it, sends `show` (nothing with `--hidden`) and exits 0; the
 running app then shows, raises and activates its window. A socket file with
 no app listening is removed and the start goes on.
 
+On every such connection the running app reads the installed `ember-app`
+version from disk and compares it with the version it started as. When they
+differ, its window shows an info alert, `Ember <version> is installed.
+Restart to use it.`, with a Restart button and no Dismiss; the alert stays
+until Ember restarts. Restart closes the socket, starts the installed app
+with the running interpreter (`python -I -m ember.cli app`) and quits. Runs
+keep running in their tmux sessions; an open screen mirror closes.
+
 At start the app:
 
 - shows the window, unless `--hidden` was given and a tray is available;
