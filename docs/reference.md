@@ -99,8 +99,11 @@ names the invalid values, `menu` is `null` and the exit code is 0.
 
 ### Generation
 
-Each write that changes the database raises `generation` by one. A write that
-changes nothing leaves it.
+`--set`, `--clear`, `--once` and `--clear-once` raise `generation` by one
+when they write a standing-setting or pending one-time-choice row. A claim
+that consumes a pending one-time choice also raises it by one. Other claims,
+claim reads, finishes, and expiry of claims or pending one-time choices leave
+it unchanged. A write that changes no row leaves it unchanged.
 
 ### Read reply
 

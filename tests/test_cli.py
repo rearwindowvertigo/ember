@@ -175,13 +175,13 @@ def test_owner_writes_and_claim(
     assert code == 0
     assert data == {
         "claim": {"id": "run-000001", "status": "gone"},
-        "generation": 4,
+        "generation": 3,
         "errors": [],
     }
     code, data, _ = _run(["--clear", "single.writer"], env, capsys)
     assert data["settings"] == {"shortlist.codex": ["gpt-5@high", "o3@low"]}
     code, data, _ = _run(["--clear-once"], env, capsys)
-    assert data == {"cleared": "one-time", "generation": 5, "errors": []}
+    assert data == {"cleared": "one-time", "generation": 4, "errors": []}
 
 
 def test_empty_list_value(
