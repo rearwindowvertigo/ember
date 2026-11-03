@@ -400,7 +400,7 @@ def resolve(
         return worker
     line = (
         f"owner: name the flow's {role} with --{role}, "
-        f"or set {role.title()} on the Menu screen"
+        f"or set {role.title()} on the Team screen"
     )
     menu = settings.get("menu")
     if settings.get("source_error") or menu is None:
@@ -415,7 +415,7 @@ def resolve(
             f"{ROW[role]} runs claude:{row['model']} as a subagent; "
             "a flow runs CLI workers",
             f"owner: name the flow's {role} with --{role} claude:{row['model']}, "
-            f"or set {role.title()} to run as the CLI on the Menu screen",
+            f"or set {role.title()} to run as the CLI on the Team screen",
         )
     return Worker(row["engine"], row["model"], row["effort"], "menu")
 

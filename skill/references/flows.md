@@ -12,7 +12,7 @@ Use the owner's named workers as `--writer W` and `--reviewer W` on both
 the dry run and start, where `W` is `<engine>:<model>[@<effort>]`.
 Otherwise resolution uses the plan's `writer` and `reviewer`, then the
 `single.writer` and `single.reviewer` rows. Normally leave workers out of
-the plan. Menu rows must be `set`; a Claude subagent row exits 64. Ask the
+the plan. Team rows must be `set`; a Claude subagent row exits 64. Ask the
 owner for a CLI worker when the row cannot answer and none was named;
 pass the answer explicitly. Never set a row yourself. Say both resolved
 workers and their efforts in one line before the dry run.

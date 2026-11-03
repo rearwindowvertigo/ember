@@ -58,7 +58,7 @@ def test_screens_list_in_sidebar_order() -> None:
     assert KEYS == ("overview", "menu", "engines", "dependencies", "settings")
     assert [title for _k, title, _i, _c in SCREENS] == [
         "Overview",
-        "Menu",
+        "Team",
         "Engines",
         "Dependencies",
         "Settings",

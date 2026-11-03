@@ -33,7 +33,7 @@ GIT_LOCATION = (
     "GIT_PREFIX",
 )
 REVIEWER_LINE = (
-    "owner: name the reviewer for this gap check, or set Reviewer on the Menu screen"
+    "owner: name the reviewer for this gap check, or set Reviewer on the Team screen"
 )
 
 

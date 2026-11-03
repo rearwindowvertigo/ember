@@ -114,7 +114,7 @@ Use `single.writer` for edits and `single.reviewer` for read-only work.
 For a `claude` row, `run_as` picks `cli` (`emb run --engine claude`) or
 `subagent`. Take engine, model and effort from a `set` row, and write the
 row, model and effort as one visible line right before the start, for example:
-`Menu, Single runs Writer: Codex gpt-6.1-sol, high.`
+`Team, Single tasks Writer: Codex gpt-6.1-sol, high.`
 
 An explicit worker or model in the owner's request wins over the menu,
 within the gates. Use its named model; otherwise use the job's row when it
@@ -367,7 +367,7 @@ work before the finish.
 
 Never run `emb choices --set`, `--clear`, `--once` or `--clear-once`; they
 also refuse without a terminal (exit 77). A worker pick does not authorize
-changing the owner's settings. Point the owner to Ember's Menu or Settings
+changing the owner's settings. Point the owner to Ember's Team or Settings
 screen (`emb app`), or give the exact command to run at their terminal:
 `emb choices --set <key>=<value>` for a standing setting, or
 `emb choices --once <key>=<value>` for a one-time choice. A

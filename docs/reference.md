@@ -852,7 +852,7 @@ existing reply exits 66. A successful turn with no reply file exits 81.
 |---|---|---|
 | 0 | The reply covers every step, or the brief was printed | A failed close prints a warning |
 | 1 | Settings database or run record cannot be read, or checkout discovery times out | `owner: repair or remove the settings database the message names`, `next: emb run --status <run>` or a new check |
-| 64 | Usage error, invalid claim, reviewer row not `set`, Claude subagent row, or a run start check | `next: emb gapcheck --help`, the claim's `emb choices` line, `owner: name the reviewer for this gap check, or set Reviewer on the Menu screen`, the `--brief`/`--reply` route, or the run's line |
+| 64 | Usage error, invalid claim, reviewer row not `set`, Claude subagent row, or a run start check | `next: emb gapcheck --help`, the claim's `emb choices` line, `owner: name the reviewer for this gap check, or set Reviewer on the Team screen`, the `--brief`/`--reply` route, or the run's line |
 | 65 | `--dir` is not in a git checkout | `next: emb gapcheck --plan <plan> --dir <a folder in the checkout>` |
 | 66 | Plan or reply cannot be read, or `--dir` does not exist or is not a folder | `next: ls -l <path>` |
 | 69 | Git is unavailable, the runtime folder cannot be used, or the run exits 69 | `owner: install git`, the run's runtime-folder instruction, or the run's line |
@@ -1001,7 +1001,7 @@ colons and slashes. The result records `engine`, `model`, `effort` and
 Menu resolution requires a readable settings source and a row in state
 `set`. A Claude row set to run as a subagent is refused: a flow runs CLI
 workers. These refusals give code 64 with an `owner:` line naming the
-role's explicit option and Menu screen. Explicit options and plan workers
+role's explicit option and Team screen. Explicit options and plan workers
 work when the rows are `ask`; they do not require a shortlist entry.
 
 The worker check requires its engine switch to be `on` (64), a connected
@@ -1606,7 +1606,7 @@ or checks the engine when no usable cache exists. No member left exits
 64; when every saved member was excluded, the diagnostic says
 `no panel member to run: every saved member was left out`. Exclusions
 are printed before the action line:
-`owner: name the members with --member <engine>:<model>[@<effort>], or set Panel on the Menu screen`.
+`owner: name the members with --member <engine>:<model>[@<effort>], or set Panel on the Team screen`.
 
 Effort comes from an explicit `@effort`, then a saved member's shortlist
 entry, then the driver's default for the model. A null default leaves
@@ -2686,7 +2686,7 @@ they cannot be read it shows the reason and Try again.
 
 The window opens at 1100 by 720 pixels and is never smaller than 900 by 600.
 Its size and last screen are kept between starts. The sidebar shows the Ember
-mark and name, one row per screen (Overview, Menu, Engines, Dependencies,
+mark and name, one row per screen (Overview, Team, Engines, Dependencies,
 Settings) and `Ember <version>` at the bottom. Overview's row counts
 top-level live items: standalone live runs plus every flow and panel in
 Live, including stopped flows waiting for Claude and gone runners or panel
@@ -2719,7 +2719,7 @@ durations as `18 min`, `1 h 5 min` or `2 h`.
 
 | Keys | Do |
 |---|---|
-| Ctrl+1 to Ctrl+5 | Open Overview, Menu, Engines, Dependencies, Settings |
+| Ctrl+1 to Ctrl+5 | Open Overview, Team, Engines, Dependencies, Settings |
 | Ctrl+W | Hide the window to the tray; quit when there is no tray |
 | Ctrl+Q | Quit |
 
@@ -2964,9 +2964,9 @@ again in place of the sections. A failed flow and panel read shows an alert
 with Try again and keeps the previous records. The initial loading state
 waits for both record models.
 
-### Menu
+### Team
 
-Menu shows the standing worker menu in three cards: Single tasks, Work of
+Team shows the standing worker menu in three cards: Single tasks, Work of
 several tasks and Panel. Single tasks holds the Writer and Reviewer pickers
 (`single.writer`, `single.reviewer`). Each lists Ask each time (`ask`), then,
 for Codex, OpenCode and Claude in that order, each engine that is on and has

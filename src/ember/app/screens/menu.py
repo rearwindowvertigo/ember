@@ -1,4 +1,4 @@
-"""The Menu screen: Single tasks, Work of several tasks and Panel cards.
+"""The Team screen: Single tasks, Work of several tasks and Panel cards.
 
 Two rows, Writer and Reviewer, each a picker of Ask each time and the
 shortlisted models of every engine that is on, under the engine's name. While
@@ -239,7 +239,7 @@ class _Role:
 class MenuScreen(QWidget):
     """The standing choices for single tasks, multi-task work and panels."""
 
-    TITLE = "Menu"
+    TITLE = "Team"
 
     def __init__(self, context: AppContext) -> None:
         """Create the screen.
