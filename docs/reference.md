@@ -2758,7 +2758,9 @@ quits.
 
 A run, flow or panel change updates the icon and tooltip at once. The menu
 keeps its lines until it next opens, when it rebuilds them. A click from a
-stale menu still triggers its action after the menu closes. Quit Ember hides
+stale menu still triggers its action after the menu closes. When a run's
+line cannot open its terminal, such as for a run closed while the menu was
+open, the window shows with the error in its alert. Quit Ember hides
 the window and the tray icon at once, then waits up to 12 seconds for running
 background tasks to end before the app exits.
 
