@@ -786,3 +786,12 @@ def test_brief_of_a_skipped_plan_prints_no_brief(
     assert code == 0, err
     assert out == ""
     assert err.startswith("gap check skipped: the gap check is off")
+
+
+def test_unreadable_settings_ask_about_every_gap() -> None:
+    gap = {"harm": "low"}
+    result: dict[str, Any] = {"steps": [{"gaps": [gap]}], "ranked": [gap]}
+    defaults = {"gapcheck.ask": {"value": "high", "layer": "default"}}
+    command._mark_asks(result, {"source_error": True, "answers": defaults})
+    assert result["ask"] == "all"
+    assert gap["ask_owner"] is True

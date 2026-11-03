@@ -1361,3 +1361,11 @@ def test_derived_rows_follow_their_single_row_while_same(env: dict[str, str]) ->
 def test_derived_rows_refuse_ask(env: dict[str, str]) -> None:
     with pytest.raises(choices.InvalidChoiceError):
         choices.set_settings({"flow.writer": "ask"}, env=env)
+
+
+def test_derived_rows_refuse_a_model_off_the_shortlist(env: dict[str, str]) -> None:
+    choices.set_settings({"shortlist.codex": ["gpt-5@high"]}, env=env)
+    with pytest.raises(choices.InvalidChoiceError):
+        choices.set_settings({"flow.writer": "codex:typo"}, env=env)
+    choices.set_settings({"flow.writer": "codex:gpt-5"}, env=env)
+    choices.set_settings({"flow.writer": "same"}, env=env)

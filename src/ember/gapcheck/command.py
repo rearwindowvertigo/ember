@@ -233,9 +233,14 @@ def _settings_quietly(env: Mapping[str, str]) -> dict[str, Any] | None:
 def _mark_asks(result: dict[str, Any], settings: Mapping[str, Any] | None) -> None:
     """Mark each gap the owner is asked about, per `gapcheck.ask`.
 
-    Without readable settings every gap is asked about.
+    Without readable settings, including settings read with a source error
+    (whose answers are defaults), every gap is asked about.
     """
-    answers = None if settings is None else settings.get("answers")
+    answers = (
+        None
+        if settings is None or settings.get("source_error")
+        else settings.get("answers")
+    )
     result["status"] = policy.RUN
     result["ask"] = "all" if answers is None else answers["gapcheck.ask"]["value"]
     for step in result["steps"]:

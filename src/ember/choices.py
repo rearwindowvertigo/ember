@@ -994,13 +994,13 @@ def _check_shortlisted(
     values: Mapping[str, object], settings: Mapping[str, object]
 ) -> None:
     """Refuse a menu value whose model is not on its engine's shortlist."""
-    entries = [(name, values.get(name)) for name in MENU_KEYS]
+    entries = [(name, values.get(name)) for name in (*MENU_KEYS, *DERIVED_KEYS)]
     entries.extend(
         ("panel.members", value)
         for value in _string_list(values.get("panel.members", []))
     )
     for name, value in entries:
-        if not isinstance(value, str) or value == "ask":
+        if not isinstance(value, str) or value in ("ask", SAME):
             continue
         parts = _split_menu(value)
         if parts is None:
