@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/rearwindowvertigo/ember/compare/v0.6.0...v0.7.0) (2026-11-03)
+
+
+### Added
+
+* **app:** put the row type in the title and centre Overview rows ([59be2ad](https://github.com/rearwindowvertigo/ember/commit/59be2adb84155e941c1e964daac1a36c3449eef9)), closes [#51](https://github.com/rearwindowvertigo/ember/issues/51)
+
 ## [0.6.0](https://github.com/rearwindowvertigo/ember/compare/v0.5.0...v0.6.0) (2026-11-03)
 
 
