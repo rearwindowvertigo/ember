@@ -242,6 +242,13 @@ def finished_time(run: Run, now: float | None = None) -> str:
     return f"{when(end, now)} · {duration(end - run.started_at)}"
 
 
+def started_time(run: Run, now: float | None = None) -> str:
+    """Return a nested run's start time and its run or elapsed time."""
+    now = time.time() if now is None else now
+    end = _ended_at(run) if run.status in DONE else now
+    return f"Started {when(run.started_at, now)} · {duration(end - run.started_at)}"
+
+
 def record_rows(run: Run, now: float | None = None) -> list[tuple[str, str]]:
     """Return a finished run's record as label and value rows."""
     return [
@@ -556,7 +563,22 @@ class _Row(_ExpandableRow):
     def __init__(self, run: Run, what: str) -> None:
         """Build a run row without drawing its values."""
         self.run = run
+        self.nested = False
         super().__init__(run.id, "run", what)
+
+    def set_nested(self, nested: bool) -> None:
+        """Mark the row as nested under a flow or panel, and redraw its time.
+
+        A nested row shows its start time; a top-level row keeps its own
+        time text.
+        """
+        if nested != self.nested:
+            self.nested = nested
+            self.draw_time()
+
+    def draw_time(self, now: float | None = None) -> None:
+        """Draw the row's time text."""
+        raise NotImplementedError
 
     def set_run(self, run: Run) -> None:
         """Store the run and draw its badge."""
@@ -587,8 +609,16 @@ class _LiveRow(_Row):
         self.open_button.setAccessibleDescription(f"Open run {run.id} in a terminal")
 
     def update_elapsed(self, now: float | None = None) -> None:
+        self.draw_time(now)
+
+    def draw_time(self, now: float | None = None) -> None:
+        """Draw elapsed time, or the start time when nested."""
         now = time.time() if now is None else now
-        self.time_label.setText(duration(now - self.run.started_at))
+        self.time_label.setText(
+            started_time(self.run, now)
+            if self.nested
+            else duration(now - self.run.started_at)
+        )
 
     def open_mirror(self, env: Mapping[str, str]) -> None:
         if self.mirror is not None:
@@ -638,10 +668,16 @@ class _FinishedRow(_Row):
         super().set_run(run)
         self.title_label.setText(worker_line(run))
         self.detail_label.setText(finished_detail(run))
-        self.time_label.setText(finished_time(run))
+        self.draw_time()
         if self.details is not None:
             self._drop_details()
             self._add_details()
+
+    def draw_time(self, now: float | None = None) -> None:
+        """Draw end time and duration, or the start time when nested."""
+        self.time_label.setText(
+            started_time(self.run, now) if self.nested else finished_time(self.run, now)
+        )
 
     def show_details(self, shown: bool) -> None:
         if shown and self.details is None:
@@ -680,6 +716,8 @@ class _RecordRow(_ExpandableRow):
         """Create a record row with details and nested worker rows."""
         self.item = item
         self.live_count = 0
+        self.run_count = 0
+        self.collapsed_runs = False
         self.overview = screen
         kind = "flow" if isinstance(item, FlowItem) else "panel"
         super().__init__(item.record["id"], kind, "details")
@@ -687,10 +725,11 @@ class _RecordRow(_ExpandableRow):
         self.file_buttons: dict[str, QPushButton] = {}
         self.file_paths: dict[str, Path | None] = {}
         self.shown_values: tuple[object, ...] = ()
-        self.nested = QVBoxLayout()
+        self.nested_box = QWidget()
+        self.nested = QVBoxLayout(self.nested_box)
         self.nested.setContentsMargins(theme.CONTROL_SM + 12, 0, 0, 0)
         self.nested.setSpacing(16)
-        self.outer.addLayout(self.nested)
+        self.outer.addWidget(self.nested_box)
         self.set_item(item)
 
     def entries(self) -> list[tuple[str, bool]]:
@@ -717,6 +756,8 @@ class _RecordRow(_ExpandableRow):
             )
         if self.live_count:
             state += f" · {plural(self.live_count, 'live run')}"
+        if self.collapsed_runs and self.run_count:
+            state += f" · {plural(self.run_count, 'run')}"
         detail = f"{state} · {detail}"
         self.question_label.setText(
             item.question if isinstance(item, PanelItem) else ""
@@ -802,6 +843,14 @@ class _RecordRow(_ExpandableRow):
             self.body.addWidget(details)
             self.details = details
         self.set_expanded(shown)
+        self.show_nested()
+
+    def show_nested(self) -> None:
+        """Show nested runs, except in Finished while the row is collapsed.
+
+        A Finished parent with a live nested run keeps its runs shown.
+        """
+        self.nested_box.setVisible(not self.collapsed_runs or self.expanded)
 
     def _refresh_files(self) -> None:
         """Check targets only while drawing expanded details."""
@@ -1263,8 +1312,14 @@ class OverviewScreen(QWidget):
                 )
                 rows[key] = row
             row.live_count = sum(run.status in LIVE for run in children[key])
+            row.run_count = len(children[key])
+            row.collapsed_runs = item_ended(item) and row.live_count == 0
             row.set_item(item)
-            _place(row.nested, [self._run_row(run) for run in children[key]])
+            nested_rows = [self._run_row(run) for run in children[key]]
+            for nested_row in nested_rows:
+                nested_row.set_nested(True)
+            _place(row.nested, nested_rows)
+            row.show_nested()
         self._reading_order = []
         for items, layout, empty in (
             (live, self.live_rows_layout, self.live_empty),
@@ -1274,6 +1329,7 @@ class OverviewScreen(QWidget):
             for item in items:
                 if isinstance(item, Run):
                     row = self._run_row(item)
+                    row.set_nested(False)
                     self._reading_order.append(row)
                 else:
                     row = (

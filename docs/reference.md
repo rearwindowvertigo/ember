@@ -2880,7 +2880,11 @@ with a parent never appears at the top level in Overview, including when
 that parent falls beyond the Finished cap. A live worker under a Finished
 parent stays nested there; the tray and sidebar count it at the top level.
 Every readable nested run of a shown parent appears, whatever its age,
-oldest first by start time and then id, indented one column. The parent's
+oldest first by start time and then id, indented one column. A nested row
+shows `Started <time> · <duration>`: its run time once ended, its elapsed
+time while live. In Finished, a parent's nested runs are hidden until its
+details are expanded, and its second line adds `1 run` or `<n> runs`; a
+Finished parent with a live nested run keeps them shown. The parent's
 second line includes `1 live run` or `<n> live runs` after the finer state
 when that count is above zero.
 

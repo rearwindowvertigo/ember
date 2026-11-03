@@ -1695,7 +1695,11 @@ def test_nested_runs_are_oldest_first(
         widget = item.widget()
         assert isinstance(widget, overview._Row)
         order.append(widget.run.id)
+        assert widget.nested
+        assert widget.time_label.text() == overview.started_time(widget.run)
     assert order == [early, late]
+    assert screen.finished_rows[early].time_label.text().startswith("Started ")
+    assert "· 1 h 6 min" in screen.finished_rows[early].time_label.text()
 
 
 def test_clear_is_a_red_outline_with_its_caption(
@@ -1712,3 +1716,51 @@ def test_clear_is_a_red_outline_with_its_caption(
     clear = screen.clear_button.mapTo(screen, screen.clear_button.rect().topLeft())
     caption = screen.clear_caption.mapTo(screen, screen.clear_caption.rect().topLeft())
     assert caption.y() > clear.y()
+
+
+def test_top_level_rows_keep_their_time_text(
+    env: dict[str, str], context: AppContext, qtbot: QtBot
+) -> None:
+    screen = loaded(env, context, qtbot)
+    for row in (*screen.live_rows.values(), *screen.finished_rows.values()):
+        assert not row.nested
+        assert not row.time_label.text().startswith("Started ")
+    for row in screen.finished_rows.values():
+        assert row.time_label.text() == overview.finished_time(row.run)
+
+
+def test_started_time_of_live_and_finished_runs(env: dict[str, str]) -> None:
+    live = make_run(env, status=record.RUNNING, started_at=1000)
+    assert overview.started_time(live, now=1000 + 125).endswith("· 2 min")
+    done = make_run(env, status=record.CLOSED, started_at=1000, ended_at=1000 + 600)
+    assert overview.started_time(done, now=99_999).startswith("Started ")
+    assert overview.started_time(done, now=99_999).endswith("· 10 min")
+
+
+def test_finished_parent_hides_its_runs_until_expanded(
+    env: dict[str, str], context: AppContext, qtbot: QtBot
+) -> None:
+    first = "codex-20260101-130000-aaaaaa"
+    second = "claude-20260101-110000-bbbbbb"
+    write_run(
+        make_run(env, first, status=record.CLOSED, started_at=3000, ended_at=3100)
+    )
+    write_run(
+        make_run(env, second, status=record.CLOSED, started_at=1000, ended_at=5000)
+    )
+    flow = make_flow(env, status="done", ended_at=6000)
+    flow["tasks"][0]["writer_run"] = first
+    flow["tasks"][0]["review_run"] = second
+    flow_record.save(flow, env)
+    context.runs.reload()
+    qtbot.waitUntil(lambda: len(context.runs.runs()) == 2)
+    screen = screen_for(context, qtbot)
+    row = screen.flow_rows[FLOW]
+    assert row.collapsed_runs
+    assert not row.nested_box.isVisible()
+    assert " · 2 runs · " in row.detail_label.text()
+    row.expand_button.click()
+    assert row.nested_box.isVisible()
+    assert screen.finished_rows[first].isVisible()
+    row.expand_button.click()
+    assert not row.nested_box.isVisible()
