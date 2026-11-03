@@ -865,7 +865,9 @@ def test_cancelled_parent_keeps_live_workers_and_their_controls(
         screen = screen_for(context, qtbot)
         row = screen.flow_rows[FLOW]
         assert screen.live_rows_layout.count() == 0
-        assert screen.finished_rows_layout.itemAt(0).widget() is row
+        item = screen.finished_rows_layout.itemAt(0)
+        assert item is not None
+        assert item.widget() is row
         assert row.badge.text() == "Incomplete" and row.badge.tone() == "incomplete"
         assert row.detail_label.text().startswith("cancelled · 2 live runs · ")
         assert "Owner stopped it" in row.detail_label.text()
@@ -930,7 +932,14 @@ def test_finished_cap_merges_types_and_keeps_all_nested_runs(
     screen = screen_for(context, qtbot)
     layout = screen.finished_rows_layout
     assert layout.count() == 20
-    assert [layout.itemAt(n).widget()._item_id for n in range(20)] == top_ids[:3:-1]
+    row_ids = []
+    for n in range(20):
+        item = layout.itemAt(n)
+        assert item is not None
+        widget = item.widget()
+        assert isinstance(widget, overview._ExpandableRow)
+        row_ids.append(widget._item_id)
+    assert row_ids == top_ids[:3:-1]
     assert not screen.has_run(hidden_child)
     parent = screen.flow_rows[top_ids[21]]
     assert parent.nested.count() == 22
@@ -960,11 +969,15 @@ def test_multiple_parents_choose_oldest_then_id(
     flow_row, panel_row = screen.flow_rows[FLOW], screen.panel_rows[PANEL]
     owner, other = (panel_row, flow_row) if panel_start < 100 else (flow_row, panel_row)
     assert owner.nested.count() == 1 and other.nested.count() == 0
-    assert owner.nested.itemAt(0).widget() is screen.live_rows[LIVE_A]
+    item = owner.nested.itemAt(0)
+    assert item is not None
+    assert item.widget() is screen.live_rows[LIVE_A]
     assert "1 live run" in owner.detail_label.text()
     assert "live run" not in other.detail_label.text()
     assert screen.live_rows_layout.count() == 2
-    assert screen.live_rows_layout.itemAt(0).widget() is owner
+    item = screen.live_rows_layout.itemAt(0)
+    assert item is not None
+    assert item.widget() is owner
 
 
 def test_mixed_order_uses_start_end_update_and_id(env: dict[str, str]) -> None:
