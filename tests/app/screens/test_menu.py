@@ -340,7 +340,7 @@ def test_review_rounds_show_saved_value_and_save_only_changes(
 ) -> None:
     choices.set_settings({"flow.review_rounds": value}, env=env)
     context, screen = _screen(env, qtbot)
-    assert screen.rounds.accessibleName() == "Flow review rounds"
+    assert screen.rounds.accessibleName() == "Max review rounds"
     assert screen.rounds.value() == value
     assert [label for _, label in menu.ROUNDS] == ["1", "2", "3", "4"]
     generation = choices.snapshot(env=env)["generation"]
@@ -352,7 +352,7 @@ def test_review_rounds_show_saved_value_and_save_only_changes(
         screen.rounds.buttons()[int(target) - 1].click()
     assert _stored(env, "flow.review_rounds") == target
     assert screen.rounds.value() == target
-    assert "Flow review rounds" in _texts(screen)
+    assert "Max review rounds" in _texts(screen)
 
 
 def test_review_rounds_default_to_three(env: dict[str, str], qtbot: QtBot) -> None:
@@ -928,7 +928,8 @@ def test_planning_rows_show_and_save_the_settings(
     assert screen.derived["gapcheck.reviewer"].picker.currentText() == (
         "Same as Reviewer"
     )
-    assert screen.when.toolTip() == menu.WHEN_TIP
+    assert screen.when_row.info.toolTip() == menu.WHEN_TIP
+    assert screen.when.toolTip() == ""
     saved: list[dict[str, object]] = []
     context.save_settings = lambda values, **_kwargs: saved.append(values)  # type: ignore[method-assign]
     screen.when.set_value("off")
@@ -971,9 +972,54 @@ def test_flow_settings_show_their_values(env: dict[str, str], qtbot: QtBot) -> N
     assert screen.derived["flow.writer"].picker.currentText() == "Same as Writer"
 
 
+def test_limit_settings_name_themselves_as_maximums(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    _context, screen = _screen(env, qtbot)
+    texts = [label.text() for label in screen.findChildren(QLabel)]
+    for name in ("Max tasks at once", "Max agents at once", "Max review rounds"):
+        assert name in texts
+    assert "No more than this many flow tasks run at the same time." in texts
+    assert (
+        "No more than this many Claude Workflow agents run at the same time." in texts
+    )
+    assert "The most times a reviewer can check one flow task." in texts
+
+
 def test_when_help_covers_every_value() -> None:
     for value, _text in menu.WHEN:
         assert menu.when_help(value)
     assert menu.when_help("2") == (
         "Plans of 2 or more tasks. Plans of 1 task start without one."
     )
+
+
+def test_info_icons_sit_before_their_controls_in_tab_order(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    choices.set_settings({"multi.runs_as": "ask"}, env=env)
+    _context, screen = _screen(env, qtbot)
+    tips = screen.tip_rows
+    expected: list[QWidget] = [
+        tips["gapcheck.reviewer"].info,
+        screen.derived["gapcheck.reviewer"].picker,
+        tips["gapcheck.when"].info,
+        screen.when,
+        tips["gapcheck.ask"].info,
+        screen.asks.buttons()[0],
+        tips["flow.writer"].info,
+        screen.derived["flow.writer"].picker,
+        tips["flow.review_rounds"].info,
+        screen.rounds.buttons()[0],
+        tips["flow.parallel"].info,
+        screen.segments["flow.parallel"].buttons()[0],
+        tips["flow.whole_review"].info,
+        screen.whole,
+        tips["workflow.agents"].info,
+        screen.segments["workflow.agents"].buttons()[0],
+        tips["workflow.late"].info,
+        screen.segments["workflow.late"].buttons()[0],
+    ]
+    first = screen.roles["writer"].picker
+    chain = focus_chain(screen, qtbot, first)
+    assert [w for w in chain if w in expected] == expected

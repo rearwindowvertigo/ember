@@ -90,3 +90,14 @@ def test_discard_and_clear_layout(qtbot: QtBot) -> None:
     assert layout.count() == 0
     assert second.isHidden()
     common.discard(None)
+
+
+def test_tooltip_row_puts_its_tooltip_on_the_info_icon_only(qtbot: QtBot) -> None:
+    control = QPushButton("Always")
+    row = common.TooltipRow("Run the gap check", "Before every flow.", "Full.", control)
+    qtbot.addWidget(row)
+    assert row.info.toolTip() == "Full."
+    assert row.info.accessibleName() == "About Run the gap check"
+    assert row.heading.toolTip() == ""
+    assert row.help.toolTip() == ""
+    assert control.toolTip() == ""

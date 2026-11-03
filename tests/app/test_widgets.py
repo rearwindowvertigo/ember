@@ -7,11 +7,14 @@ from typing import cast
 from unittest.mock import Mock
 
 import pytest
-from PySide6.QtCore import QPoint, Qt, QTimer
+from PySide6 import QtGui
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
 from PySide6.QtGui import (
     QClipboard,
     QContextMenuEvent,
+    QFocusEvent,
     QGuiApplication,
+    QHelpEvent,
     QIcon,
     QPaintEvent,
     QTextLayout,
@@ -25,6 +28,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QPushButton,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -731,3 +735,121 @@ def test_ring_is_drawn_only_for_keyboard_focus(
     finally:
         theme.apply(qapp, previous)
         qapp.setStyleSheet("")
+
+
+LONG_TIP = (
+    "When Claude has a plan checked for gaps before a flow or Claude Workflow "
+    "starts. A plan the setting skips starts without a check and without a "
+    "question."
+)
+
+
+def test_tip_text_keeps_short_text() -> None:
+    assert widgets.tip_text("Remove shown records") == "Remove shown records"
+    assert widgets.tip_text("gpt-6-astra\nGPT 6 Astra") == "gpt-6-astra\nGPT 6 Astra"
+    assert widgets.tip_text("") == ""
+
+
+def test_tip_text_wraps_long_text_at_the_tip_width() -> None:
+    shown = widgets.tip_text(LONG_TIP + " <b>")
+    assert shown.startswith(f'<table width="{widgets.TIP_WIDTH}"')
+    assert "When Claude has a plan" in shown
+    assert "&lt;b&gt;" in shown
+    assert QtGui.Qt.mightBeRichText(shown)
+
+
+def test_tip_text_breaks_long_paths_after_slashes() -> None:
+    path = "/home/owner/.local/state/ember/runs/codex-20261103-120000-abcdef/reply.md"
+    shown = widgets.tip_text(path + "\n" + path)
+    assert f"/{widgets.PATH_BREAK}runs/{widgets.PATH_BREAK}" in shown
+    assert "<br>" in shown
+
+
+def test_tip_wrapper_shows_long_tooltips_wrapped(
+    qapp: QApplication, qtbot: QtBot
+) -> None:
+    widgets.install_tooltips(qapp)
+    assert widgets.install_tooltips(qapp) is qapp.findChild(widgets.TipWrapper)
+    label = QLabel("x")
+    qtbot.addWidget(label)
+    label.setToolTip(LONG_TIP)
+    label.show()
+    point = QPoint(2, 2)
+    event = QHelpEvent(QEvent.Type.ToolTip, point, label.mapToGlobal(point))
+    try:
+        QApplication.sendEvent(label, event)
+        assert QToolTip.text() == widgets.tip_text(LONG_TIP)
+        assert label.toolTip() == LONG_TIP
+    finally:
+        QToolTip.hideText()
+
+
+def _focus(widget: QWidget, kind: QEvent.Type, reason: Qt.FocusReason) -> None:
+    QApplication.sendEvent(widget, QFocusEvent(kind, reason))
+
+
+def test_info_tip_shows_on_click_and_keyboard_focus(qtbot: QtBot) -> None:
+    host = QWidget()
+    qtbot.addWidget(host)
+    layout = QVBoxLayout(host)
+    info = widgets.InfoTip("Run the gap check", LONG_TIP)
+    layout.addWidget(info)
+    host.show()
+    assert info.accessibleName() == "About Run the gap check"
+    assert info.toolTip() == LONG_TIP
+    assert info.focusPolicy() == Qt.FocusPolicy.StrongFocus
+    try:
+        info.click()
+        assert QToolTip.isVisible()
+        assert QToolTip.text() == widgets.tip_text(LONG_TIP)
+        QToolTip.hideText()
+        qtbot.waitUntil(lambda: not QToolTip.isVisible(), timeout=2000)
+        _focus(info, QEvent.Type.FocusIn, Qt.FocusReason.MouseFocusReason)
+        assert not QToolTip.isVisible()
+        _focus(info, QEvent.Type.FocusIn, Qt.FocusReason.TabFocusReason)
+        assert QToolTip.isVisible()
+        assert QToolTip.text() == widgets.tip_text(LONG_TIP)
+        _focus(info, QEvent.Type.FocusOut, Qt.FocusReason.TabFocusReason)
+        qtbot.waitUntil(lambda: not QToolTip.isVisible(), timeout=2000)
+    finally:
+        QToolTip.hideText()
+
+
+def test_tip_text_caps_unbroken_text_at_the_tip_width(
+    qapp: QApplication, qtbot: QtBot
+) -> None:
+    name = "codex-" + "a" * 90 + ".md"
+    path = f"/home/owner/runs/{name}"
+    label = QLabel(widgets.tip_text(path))
+    qtbot.addWidget(label)
+    label.setWordWrap(True)
+    label.adjustSize()
+    assert label.width() <= widgets.TIP_WIDTH + 8
+    assert widgets.PATH_BREAK in widgets.tip_text(name)
+
+
+def test_info_tip_stays_open_after_tab_key_release(qtbot: QtBot) -> None:
+    host = QWidget()
+    qtbot.addWidget(host)
+    layout = QVBoxLayout(host)
+    other = QPushButton("Other")
+    other.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    info = widgets.InfoTip("Run the gap check", LONG_TIP)
+    layout.addWidget(other)
+    layout.addWidget(info)
+    host.show()
+    qtbot.waitExposed(host)
+    host.activateWindow()
+    qtbot.waitUntil(host.isActiveWindow, timeout=2000)
+    other.setFocus(Qt.FocusReason.OtherFocusReason)
+    qtbot.waitUntil(other.hasFocus, timeout=2000)
+    try:
+        qtbot.keyPress(other, Qt.Key.Key_Tab)
+        qtbot.waitUntil(info.hasFocus, timeout=2000)
+        qtbot.keyRelease(info, Qt.Key.Key_Tab)
+        qtbot.waitUntil(QToolTip.isVisible, timeout=2000)
+        qtbot.wait(50)
+        assert QToolTip.isVisible()
+        assert QToolTip.text() == widgets.tip_text(LONG_TIP)
+    finally:
+        QToolTip.hideText()

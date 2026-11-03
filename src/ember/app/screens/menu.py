@@ -60,7 +60,7 @@ MULTI = (("ask", "Ask each time"), ("flow", "Flow"), ("workflow", "Claude Workfl
 MULTI_HELP = "How Claude runs two or more tasks that each need a worker."
 ROUNDS = tuple((value, value) for value in choices.REVIEW_ROUNDS)
 ROUNDS_HELP = (
-    "The most times a reviewer checks one flow task. "
+    "The most times a reviewer can check one flow task. "
     "A flow plan that sets its own rounds wins."
 )
 PANEL_HELP = "The models a panel asks when Claude is given no members."
@@ -143,8 +143,8 @@ LATE = (("ask", "Ask me"), ("wait", "Wait once more"), ("stop", "Stop"))
 SEGMENTS = (
     (
         "flow.parallel",
-        "Tasks at once",
-        "How many flow tasks run side by side.",
+        "Max tasks at once",
+        "No more than this many flow tasks run at the same time.",
         "The most flow tasks that run at the same time. A plan that sets its "
         "own parallel count wins.",
         PARALLEL,
@@ -159,9 +159,10 @@ SEGMENTS = (
     ),
     (
         "workflow.agents",
-        "Agents at once",
-        "Agents use this session's Claude model.",
-        "The most Claude Workflow agents that run at the same time.",
+        "Max agents at once",
+        "No more than this many Claude Workflow agents run at the same time.",
+        "The most Claude Workflow agents that run at the same time. Agents use "
+        "this session's Claude model.",
         AGENTS,
     ),
     (
@@ -437,6 +438,8 @@ class MenuScreen(QWidget):
         self.derived: dict[str, _Derived] = {}
         self.segments: dict[str, widgets.Segmented] = {}
         rows: dict[str, TooltipRow] = {}
+        self.tip_rows = rows
+        """Each setting's row with an info icon, by settings key."""
         for key, name, help_text, tip, same in DERIVED:
             derived = _Derived(key, name, same)
             self.derived[key] = derived
@@ -463,6 +466,7 @@ class MenuScreen(QWidget):
             self.when.add_option(text, value)
         self.when.activated.connect(self._when_picked)
         self.when_row = TooltipRow("Run the gap check", "", WHEN_TIP, self.when)
+        rows["gapcheck.when"] = self.when_row
         planning.addWidget(self.when_row)
         self.asks = widgets.Segmented(ASKS)
         self.asks.setAccessibleName("Gaps Claude asks you about")
@@ -472,6 +476,7 @@ class MenuScreen(QWidget):
         self.asks_row = TooltipRow(
             "Gaps Claude asks you about", "", ASKS_TIP, self.asks
         )
+        rows["gapcheck.ask"] = self.asks_row
         planning.addWidget(self.asks_row)
         layout.addWidget(planning_card)
 
@@ -490,30 +495,27 @@ class MenuScreen(QWidget):
             flows.addWidget(rows[key])
             flows.addWidget(self.derived[key].warning)
         self.rounds = widgets.Segmented(ROUNDS)
-        self.rounds.setAccessibleName("Flow review rounds")
+        self.rounds.setAccessibleName("Max review rounds")
         self.rounds.changed.connect(self._rounds_picked)
-        flows.addWidget(
-            TooltipRow(
-                "Flow review rounds",
-                "The most times a reviewer checks one flow task.",
-                ROUNDS_HELP,
-                self.rounds,
-            )
+        rows["flow.review_rounds"] = TooltipRow(
+            "Max review rounds",
+            "The most times a reviewer can check one flow task.",
+            ROUNDS_HELP,
+            self.rounds,
         )
+        flows.addWidget(rows["flow.review_rounds"])
         flows.addWidget(rows["flow.parallel"])
         flows.addWidget(rows["flow.stall"])
         self.whole = widgets.Switch()
         self.whole.setAccessibleName("Review the whole flow")
         self.whole.clicked.connect(self._whole_picked)
-        flows.addWidget(
-            TooltipRow(
-                "Review the whole flow",
-                "One review of all the flow's changes together, before Claude "
-                "merges it.",
-                WHOLE_TIP,
-                self.whole,
-            )
+        rows["flow.whole_review"] = TooltipRow(
+            "Review the whole flow",
+            "One review of all the flow's changes together, before Claude merges it.",
+            WHOLE_TIP,
+            self.whole,
         )
+        flows.addWidget(rows["flow.whole_review"])
         layout.addWidget(self.flow_card)
 
         self.workflow_card, workflows = titled_card("Claude Workflows")
@@ -675,18 +677,24 @@ class MenuScreen(QWidget):
             order.append(controls.picker)
             order.extend(controls.run_as.buttons())
         order.append(self.open_engines)
-        order.append(self.derived["gapcheck.reviewer"].picker)
-        order.append(self.when)
+        tips = self.tip_rows
+        order.extend(
+            (tips["gapcheck.reviewer"].info, self.derived["gapcheck.reviewer"].picker)
+        )
+        order.extend((tips["gapcheck.when"].info, self.when))
+        order.append(tips["gapcheck.ask"].info)
         order.extend(self.asks.buttons())
         order.extend(self.multi.buttons())
-        order.extend(
-            (self.derived["flow.writer"].picker, self.derived["flow.reviewer"].picker)
-        )
+        for key in ("flow.writer", "flow.reviewer"):
+            order.extend((tips[key].info, self.derived[key].picker))
+        order.append(tips["flow.review_rounds"].info)
         order.extend(self.rounds.buttons())
         for key in ("flow.parallel", "flow.stall"):
+            order.append(tips[key].info)
             order.extend(self.segments[key].buttons())
-        order.append(self.whole)
+        order.extend((tips["flow.whole_review"].info, self.whole))
         for key in ("workflow.agents", "workflow.late"):
+            order.append(tips[key].info)
             order.extend(self.segments[key].buttons())
         order.extend(self.member_removes.values())
         order.extend((self.remove_all, self.add_member))

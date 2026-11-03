@@ -2780,6 +2780,15 @@ keyboard: Tab, Shift+Tab or a shortcut. A control focused by a mouse
 click shows no ring. When the app moves focus itself, the ring follows the
 last input: a key press shows it, a mouse press does not.
 
+Tooltips draw in `fill-primary` with `on-primary`, 6-pixel corners and
+12-pixel text. A tooltip wider than 320 pixels wraps at 320 pixels, keeps
+its line breaks and may break a path after each `/`; a shorter one shows on
+one line. A setting row with more to say than its help line has an info
+icon after its name; hovering the icon, focusing it from the keyboard or
+clicking it shows the tooltip under it, and the name, help line and control
+have no tooltip. A button that shows only an icon keeps its tooltip on the
+button. The tray icon's tooltip is drawn by the desktop.
+
 ### Tray
 
 The tray icon shows whether any run, flow or panel is live, always in the
@@ -3050,18 +3059,19 @@ Work of several tasks holds Multi-task work (`multi.runs_as`): Ask each time
 it is Claude Workflow, and Claude Workflows unless it is Flow.
 
 Flows holds Flow writer and Flow reviewer (`flow.writer`, `flow.reviewer`),
-pickers that start with Same as Writer and Same as Reviewer; Flow review
+pickers that start with Same as Writer and Same as Reviewer; Max review
 rounds (`flow.review_rounds`): 1, 2, 3 or 4, the most times a reviewer
-checks one flow task; Tasks at once (`flow.parallel`): 1, 2, 4, 6; Stall
+can check one flow task; Max tasks at once (`flow.parallel`): 1, 2, 4, 6,
+the most flow tasks that run at the same time; Stall
 after (`flow.stall`): 5, 10, 20 min; and Review the whole flow
-(`flow.whole_review`), a switch. Claude Workflows holds Agents at once
-(`workflow.agents`): 4, 8, 16; and When an agent runs late
+(`flow.whole_review`), a switch. Claude Workflows holds Max agents
+at once (`workflow.agents`): 4, 8, 16, the most agents that run at the
+same time; and When an agent runs late
 (`workflow.late`): Ask me, Wait once more, Stop. These are available even
 when no engine offers a model.
 
-Every setting in Planning, Flows and Claude Workflows has a tooltip on its
-name, help line and control that explains it more fully. Tooltips draw in
-`fill-primary` with `on-primary`.
+Every setting in Planning, Flows and Claude Workflows has an info icon after
+its name whose tooltip explains it more fully.
 
 Panel lists `panel.members` in saved order. A member shows
 `<Engine> · <model> · <effort>`, omitting effort when none is set. A member

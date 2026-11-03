@@ -5,10 +5,12 @@ repaint on `theme.signals.changed`. The other widgets are styled by the
 theme's style sheet through dynamic properties.
 """
 
+import html
 import math
 from collections.abc import Callable, Sequence
 from typing import cast
 
+from PySide6 import QtGui
 from PySide6.QtCore import (
     QEvent,
     QModelIndex,
@@ -31,6 +33,7 @@ from PySide6.QtGui import (
     QFont,
     QFontMetrics,
     QGuiApplication,
+    QHelpEvent,
     QHideEvent,
     QIcon,
     QKeyEvent,
@@ -63,6 +66,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -168,6 +172,140 @@ def install_focus_tracking(app: QApplication) -> FocusTracker:
         tracker = FocusTracker(app)
         app.installEventFilter(tracker)
     return tracker
+
+
+TIP_WIDTH = 320
+"""The width in pixels a tooltip wraps at when its text is wider."""
+
+PATH_BREAK = "\u200b"
+"""A zero-width space put after each `/`, so a long path wraps there."""
+
+
+def tip_text(text: str) -> str:
+    """Return a tooltip's text, wrapped at `TIP_WIDTH` when it is wider.
+
+    Text that fits in `TIP_WIDTH` on every line is returned unchanged. Wider
+    text becomes rich text in a table `TIP_WIDTH` wide, with its line breaks
+    kept and a break allowed after each `/`.
+
+    Args:
+        text: The tooltip's plain text.
+
+    Returns:
+        The text Qt shows as the tooltip.
+    """
+    metrics = QFontMetrics(theme.font("caption"))
+    lines = text.split("\n")
+    if all(metrics.horizontalAdvance(line) <= TIP_WIDTH for line in lines):
+        return text
+    body = "<br>".join(
+        " ".join(_breakable(word, metrics) for word in line.split(" "))
+        for line in lines
+    )
+    return (
+        f'<table width="{TIP_WIDTH}" cellspacing="0" cellpadding="0">'
+        f"<tr><td>{body}</td></tr></table>"
+    )
+
+
+def _breakable(word: str, metrics: QFontMetrics) -> str:
+    """Escape a word, allowing a break after `/`, or anywhere it is too wide."""
+    parts = [part + "/" for part in word.split("/")]
+    parts[-1] = parts[-1][:-1]
+    pieces: list[str] = []
+    for part in parts:
+        while metrics.horizontalAdvance(part) > TIP_WIDTH:
+            cut = len(part) - 1
+            while cut > 1 and metrics.horizontalAdvance(part[:cut]) > TIP_WIDTH:
+                cut -= 1
+            pieces.append(part[:cut])
+            part = part[cut:]
+        pieces.append(part)
+    return PATH_BREAK.join(html.escape(piece, quote=False) for piece in pieces if piece)
+
+
+class TipWrapper(QObject):
+    """Shows each widget's plain-text tooltip through `tip_text`.
+
+    The widget keeps its plain text in `toolTip()`; only what is shown wraps.
+    """
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: D102
+        if event.type() != QEvent.Type.ToolTip or not isinstance(watched, QWidget):
+            return False
+        text = watched.toolTip()
+        if not text or QtGui.Qt.mightBeRichText(text):
+            return False
+        shown = tip_text(text)
+        if shown == text:
+            return False
+        QToolTip.showText(cast(QHelpEvent, event).globalPos(), shown, watched)
+        return True
+
+
+def install_tooltips(app: QApplication) -> TipWrapper:
+    """Install one `TipWrapper` on the application and return it."""
+    wrapper = app.findChild(TipWrapper)
+    if wrapper is None:
+        wrapper = TipWrapper(app)
+        app.installEventFilter(wrapper)
+    return wrapper
+
+
+class InfoTip(QPushButton):
+    """A small info icon that shows a tooltip on hover, keyboard focus or click."""
+
+    def __init__(self, about: str, text: str) -> None:
+        """Create the icon.
+
+        Args:
+            about: What the tooltip explains; it names the icon for screen
+                readers as "About <about>".
+            text: The tooltip's plain text.
+        """
+        super().__init__()
+        self.setProperty("role", "info")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName(f"About {about}")
+        self.setAccessibleDescription(text)
+        self.setToolTip(text)
+        self._show_on_release = False
+        self._paint_icon()
+        theme.signals.changed.connect(self._paint_icon)
+        self.clicked.connect(self.show_tip)
+
+    def _paint_icon(self, _mode: str = "") -> None:
+        self.setIcon(icons.icon("info", theme.color("text-muted"), 16))
+
+    def show_tip(self) -> None:
+        """Show the tooltip under the icon."""
+        point = self.mapToGlobal(QPoint(0, self.height() + 4))
+        QToolTip.showText(point, tip_text(self.toolTip()), self)
+
+    def focusInEvent(self, event: QFocusEvent) -> None:  # noqa: D102, N802
+        super().focusInEvent(event)
+        if event.reason() in KEYBOARD_REASONS:
+            self.show_tip()
+            self._show_on_release = True
+
+    def keyReleaseEvent(self, event: QKeyEvent) -> None:  # noqa: D102, N802
+        super().keyReleaseEvent(event)
+        # Qt hides a tooltip on any key release, including the Tab that
+        # brought focus here, so the tooltip is shown again once the release
+        # has been handled.
+        if self._show_on_release:
+            self._show_on_release = False
+            QTimer.singleShot(0, self._show_if_focused)
+
+    def _show_if_focused(self) -> None:
+        if self.hasFocus():
+            self.show_tip()
+
+    def focusOutEvent(self, event: QFocusEvent) -> None:  # noqa: D102, N802
+        super().focusOutEvent(event)
+        self._show_on_release = False
+        QToolTip.hideText()
 
 
 def button(
@@ -557,7 +695,7 @@ class Picker(QComboBox):
         item.setData(value, Qt.ItemDataRole.UserRole)
         if hint:
             item.setData(hint, HINT_ROLE)
-            item.setToolTip(hint)
+            item.setToolTip(tip_text(hint))
         item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
         self._model.appendRow(item)
         if self.currentIndex() < 0 or self.is_header(self.currentIndex()):
