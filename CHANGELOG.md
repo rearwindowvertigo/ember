@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.3.0](https://github.com/rearwindowvertigo/ember/compare/v0.2.1...v0.3.0) (2026-11-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* **merge:** `emb merge` without `--note` exits 64.
+
+### Added
+
+* add emb prune to remove old ended records ([8456be8](https://github.com/rearwindowvertigo/ember/commit/8456be88dd20ebacad0143ee957b1d211bd28d8b))
+* add emb prune to remove old ended records (turn 2) ([d54681b](https://github.com/rearwindowvertigo/ember/commit/d54681bdeee9ca789d0d42d12a5e8f0d9d0a09da))
+* add emb prune to remove old ended records (turn 3) ([82dbf2d](https://github.com/rearwindowvertigo/ember/commit/82dbf2d43156368bb948e04f7f2e0c413b807a17))
+* add emb prune to remove old ended records (turn 4) ([101a6a0](https://github.com/rearwindowvertigo/ember/commit/101a6a07c9bf23ee4e2c74745224fcb316d5546e))
+* **app:** count flows and panels waiting for the lead ([caaa771](https://github.com/rearwindowvertigo/ember/commit/caaa771ace25ef8abee7ec691662728c91007e72))
+* **app:** filter Finished records and clear them with emb prune ([c0ccf1f](https://github.com/rearwindowvertigo/ember/commit/c0ccf1f39c7befe5b4c5da334657d8a076a18375))
+* **app:** open a flow's summary, briefs and check logs ([5cfa427](https://github.com/rearwindowvertigo/ember/commit/5cfa4272f84b698f58ac8517dee66bd17f80b338))
+* **app:** show a newer Ember release on the Dependencies screen ([bcbea5e](https://github.com/rearwindowvertigo/ember/commit/bcbea5e17f448db775fd12326e49720ed05a19ee))
+* **app:** show running flows and panels in the tray ([2120cd4](https://github.com/rearwindowvertigo/ember/commit/2120cd40d09b98335c2914365a03051e765a7c07))
+* **app:** show runs, flows and panels in Live and Finished (turn 2) ([600fbe4](https://github.com/rearwindowvertigo/ember/commit/600fbe43eae99b8f01edfc97fd6cacebcec59945))
+* **deps:** list the ember skill link as a component ([acf8b07](https://github.com/rearwindowvertigo/ember/commit/acf8b0739c8369d720d22b3a992d863dc94f22f2))
+* **flows:** add emb flow --cancel ([869514e](https://github.com/rearwindowvertigo/ember/commit/869514ea012a2ced558acad6951adfff18ce71fe))
+* **merge:** require the verdict line as emb merge --note ([360c53e](https://github.com/rearwindowvertigo/ember/commit/360c53ea230586f12eb750f263a016aa07821d44))
+* **panels:** retry a failed member and close a panel ([2fc3cda](https://github.com/rearwindowvertigo/ember/commit/2fc3cda8b9ff4c9a67ea788e5f3f68f4b7988baf))
+* **prune:** list leftover worktrees in emb prune --json ([933eaaa](https://github.com/rearwindowvertigo/ember/commit/933eaaa1742871a1c5aa57fe89dca007a556ec8f))
+
+
+### Fixed
+
+* **app:** act on a click in a tray menu that went stale ([9007dce](https://github.com/rearwindowvertigo/ember/commit/9007dce4e0cc4958f1cf8d948c3f96d437e43974))
+* **app:** act on a click in a tray menu that went stale (turn 2) ([8f913ee](https://github.com/rearwindowvertigo/ember/commit/8f913ee50fea57923796bf3caacaa8a99ddfc340))
+* **app:** fit the Run this command? dialog to its content ([6f2977d](https://github.com/rearwindowvertigo/ember/commit/6f2977dc485144c3155338aa0e4bfcb6afb715da))
+* **app:** fit the Run this command? dialog to its content (turn 2) ([cd86de8](https://github.com/rearwindowvertigo/ember/commit/cd86de8f45ac055663bdab1bae423816c16d87c9))
+* **app:** keep nested rows in place and fix final review findings ([22015c3](https://github.com/rearwindowvertigo/ember/commit/22015c36868791a47da96e15aeb93377fba53d27))
+* **app:** size the model list's name column to its widest name ([219097a](https://github.com/rearwindowvertigo/ember/commit/219097afe7d5d482d1bbab2e582dfc9e76940acf))
+* **choices:** raise the generation only when settings change ([c17189a](https://github.com/rearwindowvertigo/ember/commit/c17189aae1c1e10a2e449c3dea63a49b68ecc0b9))
+* **deps:** build update commands from each tool's install method ([dda0d9a](https://github.com/rearwindowvertigo/ember/commit/dda0d9a6b59294a78cbbef02821271ac6481fccd))
+* **deps:** build update commands from each tool's install method (turn 2) ([e0da421](https://github.com/rearwindowvertigo/ember/commit/e0da421e274ee0b922dd3a9dafa1a5bf05189c9b))
+* **deps:** build update commands from each tool's install method (turn 3) ([e8f0d43](https://github.com/rearwindowvertigo/ember/commit/e8f0d43f9ee14d38ca975b1631a7a9659bc4fc68))
+* **flows:** report a cancel without a reason or with a missing run record ([b7604b7](https://github.com/rearwindowvertigo/ember/commit/b7604b78f22f3971fd1ffb6074b300f130fda214))
+* **flows:** stop waiting for a stuck runner after a cancel deadline ([34bce25](https://github.com/rearwindowvertigo/ember/commit/34bce255b0415b46337f93b64daef0bbe26077e7))
+* **merge:** run merge and cleanup git commands from the main checkout ([0c5b08a](https://github.com/rearwindowvertigo/ember/commit/0c5b08a3f8e12eb9f1b2682993eef52692c114b7))
+* **prune:** check branches from a checkout that still exists ([da279b2](https://github.com/rearwindowvertigo/ember/commit/da279b2a936137e22c1550cbcb8c770b7690dd3d))
+* **skill:** leave a worker's worktree untouched during checks ([459cc48](https://github.com/rearwindowvertigo/ember/commit/459cc4874e06fa18ed6f91fcdea4a1a565959464))
+
 ## [0.2.1](https://github.com/rearwindowvertigo/ember/compare/v0.2.0...v0.2.1) (2026-11-02)
 
 
