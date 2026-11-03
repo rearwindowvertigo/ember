@@ -1,16 +1,20 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 from pytestqt.qtbot import QtBot
 
 from ember import deps
-from ember.app import state
+from ember.app import flows, state, theme
 from ember.app.context import STALE_TITLE, AppContext
 from ember.app.screens import KEYS, SCREENS
 from ember.app.window import MINIMUM_HEIGHT, MINIMUM_WIDTH, MainWindow, app_version
+from ember.flows import record as flow_record
+from ember.panels import record as panel_record
 
+from .test_flows import make_flow, make_panel  # pyrefly: ignore[missing-import]
 from .test_runs import make_run, write_run  # pyrefly: ignore[missing-import]
 
 
@@ -216,6 +220,96 @@ def test_counts_shown_only_above_zero(env: dict[str, str], qtbot: QtBot) -> None
     context.deps_changed.emit(empty)
     assert window.nav["dependencies"].count() is None
     context.runs.stop()
+
+
+@pytest.mark.parametrize(
+    ("kind", "status", "count"),
+    [
+        ("flow", "starting", 1),
+        ("flow", "running", 1),
+        ("flow", "checking", 1),
+        ("flow", "stopped", 1),
+        ("flow", "done", None),
+        ("flow", "failed", None),
+        ("flow", "cancelled", None),
+        ("panel", "running", 1),
+        ("panel", "done", None),
+        ("panel", "incomplete", None),
+    ],
+)
+@pytest.mark.parametrize("now", [100, 1000])
+def test_counts_parents_without_workers_on_another_screen(
+    env: dict[str, str],
+    qtbot: QtBot,
+    tmp_path: Path,
+    kind: str,
+    status: str,
+    count: int | None,
+    now: float,
+) -> None:
+    state.save(state.AppState(1100, 720, "menu"), env)
+    window, context, _quit = _window(env, qtbot)
+    assert window.screen_widget("overview") is None
+    assert window.nav["overview"].count() is None
+    assert window.nav["overview"].accessibleDescription() == ""
+    (make_flow if kind == "flow" else make_panel)(env, status=status)
+    proc_locks = tmp_path / "proc-locks"
+    proc_locks.write_text("")
+    context.flows._loaded_records(flows.read(env, proc_locks=proc_locks, now=now))
+    assert window.nav["overview"].count() == count
+    assert window.nav["overview"].accessibleDescription() == (
+        "" if count is None else f"{count} live"
+    )
+    assert window.current_key() == "menu"
+    assert window.screen_widget("overview") is None
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_count_groups_workers_and_keeps_live_workers_of_finished_parents(
+    env: dict[str, str], qtbot: QtBot, qapp: QApplication, mode: str
+) -> None:
+    state.save(state.AppState(1100, 720, "menu"), env)
+    window, context, _quit = _window(env, qtbot)
+    previous = theme.current_mode()
+    try:
+        theme.apply(qapp, mode)
+        workers = [
+            make_run(env, f"codex-20260101-120000-{index:06x}", status=status)
+            for index, status in enumerate(
+                ["starting", "running", "waiting", "running", "closed", "failed"]
+            )
+        ]
+        context.runs._loaded_records((workers, 0, []))
+        assert window.nav["overview"].count() == 4
+        flow = make_flow(env, status="stopped")
+        flow["tasks"][0]["writer_run"] = workers[1].id
+        flow["tasks"][1]["writer_run"] = workers[2].id
+        flow_record.save(flow, env)
+        panel = make_panel(env)
+        panel["members"][0]["run"] = workers[3].id
+        panel_record.save(panel, env)
+        context.flows._loaded_records(flows.read(env))
+        assert window.nav["overview"].count() == 3
+        assert window.nav["overview"].accessibleDescription() == "3 live"
+
+        flow.update(status="cancelled", ended_at=200, updated_at=200)
+        flow_record.save(flow, env)
+        context.flows._loaded_records(flows.read(env))
+        assert window.nav["overview"].count() == 4
+        panel.update(status="incomplete", ended_at=200, updated_at=200)
+        panel_record.save(panel, env)
+        context.flows._loaded_records(flows.read(env))
+        assert window.nav["overview"].count() == 4
+        assert window.nav["overview"].accessibleDescription() == "4 live"
+
+        context.runs._loaded_records(
+            ([replace(run, status="closed", ended_at=200) for run in workers], 0, [])
+        )
+        assert window.nav["overview"].count() is None
+        assert window.nav["overview"].accessibleDescription() == ""
+    finally:
+        theme.apply(qapp, previous)
+        qapp.setStyleSheet("")
 
 
 def test_stale_and_error_notices(env: dict[str, str], qtbot: QtBot) -> None:

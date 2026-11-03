@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from ember import __version__
-from ember.app import icons, state, theme, widgets
+from ember.app import icons, state, theme, tray, widgets
 from ember.app.context import STALE_TEXT, STALE_TITLE, AppContext
 from ember.app.screens import KEYS, SCREENS, Screen
 
@@ -199,6 +199,7 @@ class MainWindow(QMainWindow):
         context.error.connect(self._error)
         context.screen_requested.connect(self.show_screen)
         context.runs.changed.connect(self.update_counts)
+        context.flows.changed.connect(self.update_counts)
         context.deps_changed.connect(self.update_counts)
         theme.signals.changed.connect(self._theme_changed)
         self._theme_changed()
@@ -303,8 +304,12 @@ class MainWindow(QMainWindow):
     # Counts
 
     def update_counts(self, *_args: object) -> None:
-        """Show the live runs and the dependencies that need the owner."""
-        live = len(self.context.runs.live())
+        """Show top-level live items and dependencies that need the owner."""
+        items, _children = tray.live_items(
+            self.context.runs.live(),
+            [*self.context.flows.flows(), *self.context.flows.panels()],
+        )
+        live = len(items)
         self.nav["overview"].set_count(live, f"{live} live")
         report = self.context.deps()
         needs = 0 if report is None else report.counts()
