@@ -2654,7 +2654,7 @@ differ, its window shows an info alert, `Ember <version> is installed.
 Restart to use it.`, with a Restart button and no Dismiss; the alert stays
 until Ember restarts. Restart closes the socket, starts the installed app
 with the running interpreter (`python -I -m ember.cli app`) and quits. Runs
-keep running in their tmux sessions; an open screen mirror closes.
+keep running in their tmux sessions.
 
 At start the app:
 
@@ -2711,16 +2711,11 @@ durations as `18 min`, `1 h 5 min` or `2 h`.
 | Ctrl+1 to Ctrl+5 | Open Overview, Menu, Engines, Dependencies, Settings |
 | Ctrl+W | Hide the window to the tray; quit when there is no tray |
 | Ctrl+Q | Quit |
-| Left, Right, Home, End | In a screen mirror that has focus: scroll it sideways |
-| Up, Down, Page Up, Page Down | In a screen mirror that has focus: scroll it, or the screen around it when it shows every line |
 
 A control shows the blue focus ring only when it took focus from the
 keyboard: Tab, Shift+Tab or a shortcut. A control focused by a mouse
 click shows no ring. When the app moves focus itself, the ring follows the
 last input: a key press shows it, a mouse press does not.
-
-A screen mirror takes focus with Tab and then shows the focus ring. Keys
-pressed in it never reach the run's session.
 
 ### Tray
 
@@ -2919,15 +2914,15 @@ viewer opened it.
 Run rows show engine, model and effort. A live run's second line includes
 the repository folder, branch or `read-only`, and turn number; an ended
 run's includes its subject and branch. Live runs have Open terminal, which
-opens a terminal window on the run as `emb run --attach` does. Expanding an
-ended run shows its record, including last exit and reason. Rows and expanded
+opens a terminal window on the run as `emb run --attach` does. Expanding a
+run shows its record, including last exit and reason; a live run's Ended is
+`Not yet`. Rows and expanded
 details survive unrelated record changes. Elapsed times update every thirty
 seconds while shown.
 
-Expanding a live run shows its read-only tmux screen mirror. One mirror is
-open at a time. It closes when the row collapses, the run ends or its parent
-leaves the shown rows, Overview is left or the window hides. Expanding an
-ended run shows one record at a time. One flow and one panel can also have
+One live run and one ended run can be expanded at a time. An expanded live
+run's record follows the run while it is live, and collapses when the run
+ends. Overview shows no worker's screen; Open terminal does. One flow and one panel can also have
 expanded details.
 
 The subtitle uses the tray status line, counting the same top-level live

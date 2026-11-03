@@ -1,7 +1,7 @@
 """Live and Finished runs, flows and panels with nested worker rows.
 
 Models stay active while the app runs. Hidden screens defer redraws until
-shown, and live mirrors close when their row or the screen is hidden.
+shown.
 """
 
 import dataclasses
@@ -32,7 +32,6 @@ from PySide6.QtWidgets import (
 from ember import prune, sandbox
 from ember.app import icons, state, theme, tray
 from ember.app.flows import FlowItem, PanelItem, plan_wave
-from ember.app.mirror import MirrorView
 from ember.app.runs import DONE, FINISHED_LIMIT, LIVE
 from ember.app.screens.common import (
     chain_tab_order,
@@ -205,9 +204,6 @@ def item_time(started: float, ended: float | None, now: float | None = None) -> 
     return f"{when(ended, now)} · {duration(ended - started)}"
 
 
-MIRROR_DESCRIPTION = "Screen of run {id}, read-only. Updates when the worker writes."
-
-
 def worker_line(run: Run) -> str:
     """Return "<Engine> · <model> · <effort>", leaving out a missing effort."""
     parts = [engine_name(run.engine), run.model]
@@ -250,7 +246,7 @@ def started_time(run: Run, now: float | None = None) -> str:
 
 
 def record_rows(run: Run, now: float | None = None) -> list[tuple[str, str]]:
-    """Return a finished run's record as label and value rows."""
+    """Return a run's record as label and value rows."""
     return [
         ("Run", run.id),
         ("Subject", run.subject),
@@ -263,10 +259,16 @@ def record_rows(run: Run, now: float | None = None) -> list[tuple[str, str]]:
             f"{plural(run.turn, 'turn')}, {plural(len(run.commits), 'commit')}",
         ),
         ("Started", when(run.started_at, now)),
-        ("Ended", "Not recorded" if run.ended_at is None else when(run.ended_at, now)),
+        ("Ended", _ended_text(run, now)),
         ("Last exit", "None" if run.last_exit is None else str(run.last_exit)),
         ("Last reason", run.last_reason or "None"),
     ]
+
+
+def _ended_text(run: Run, now: float | None) -> str:
+    if run.ended_at is not None:
+        return when(run.ended_at, now)
+    return "Not yet" if run.status in LIVE else "Not recorded"
 
 
 def unreadable_line(runs: int, flows: int = 0, panels: int = 0) -> str:
@@ -558,13 +560,15 @@ class _ExpandableRow(QWidget):
 
 
 class _Row(_ExpandableRow):
-    """The shared header of a live or finished run."""
+    """The shared header of a live or finished run; expanded, its record."""
 
-    def __init__(self, run: Run, what: str) -> None:
+    def __init__(self, run: Run) -> None:
         """Build a run row without drawing its values."""
         self.run = run
         self.nested = False
-        super().__init__(run.id, "run", what)
+        self.details: QWidget | None = None
+        self.detail_values: tuple[tuple[str, str], ...] = ()
+        super().__init__(run.id, "run", "details")
 
     def set_nested(self, nested: bool) -> None:
         """Mark the row as nested under a flow or panel, and redraw its time.
@@ -585,14 +589,49 @@ class _Row(_ExpandableRow):
         self.run = run
         text, tone = BADGES.get(run.status, (run.status, "neutral"))
         self.badge.set_tone(tone, text)
+        if self.details is not None and tuple(record_rows(run)) != self.detail_values:
+            self._drop_details()
+            self._add_details()
+
+    def show_details(self, shown: bool) -> None:
+        """Show or hide the run's record."""
+        if shown and self.details is None:
+            self._add_details()
+        elif not shown and self.details is not None:
+            self._drop_details()
+        self.set_expanded(shown)
+
+    def _add_details(self) -> None:
+        details = QWidget()
+        grid = QGridLayout(details)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(4)
+        rows = record_rows(self.run)
+        for row, (label, value) in enumerate(rows):
+            name = QLabel(label)
+            name.setProperty("role", "secondary")
+            text = QLabel(value)
+            text.setWordWrap(True)
+            text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            grid.addWidget(name, row, 0, Qt.AlignmentFlag.AlignTop)
+            grid.addWidget(text, row, 1)
+        grid.setColumnStretch(1, 1)
+        self.body.addWidget(details)
+        self.details = details
+        self.detail_values = tuple(rows)
+
+    def _drop_details(self) -> None:
+        discard(self.details, self.body)
+        self.details = None
+        self.detail_values = ()
 
 
 class _LiveRow(_Row):
-    """A live run's row; expanded, it holds the run's screen mirror."""
+    """A live run's row; expanded, it shows the run's record."""
 
     def __init__(self, run: Run, open_terminal: Callable[[str], None]) -> None:
-        super().__init__(run, "screen")
-        self.mirror: MirrorView | None = None
+        super().__init__(run)
         self.open_button = button("Open terminal", "secondary", size="sm")
         set_icon(
             self.open_button, icons.icon("terminal", theme.color("text-primary"), 16)
@@ -620,30 +659,12 @@ class _LiveRow(_Row):
             else duration(now - self.run.started_at)
         )
 
-    def open_mirror(self, env: Mapping[str, str]) -> None:
-        if self.mirror is not None:
-            return
-        mirror = MirrorView(self.run.id, env)
-        mirror.setAccessibleDescription(MIRROR_DESCRIPTION.format(id=self.run.id))
-        self.body.addWidget(mirror)
-        self.mirror = mirror
-        self.set_expanded(True)
-        mirror.start()
-
-    def close_mirror(self) -> None:
-        mirror, self.mirror = self.mirror, None
-        if mirror is not None:
-            mirror.stop()
-            discard(mirror, self.body)
-        self.set_expanded(False)
-
 
 class _FinishedRow(_Row):
     """A finished run's row; expanded, it shows the run's record."""
 
     def __init__(self, run: Run) -> None:
-        super().__init__(run, "details")
-        self.details: QWidget | None = None
+        super().__init__(run)
         self.shown_values: tuple[object, ...] = ()
         self.set_run(run)
 
@@ -669,44 +690,12 @@ class _FinishedRow(_Row):
         self.title_label.setText(worker_line(run))
         self.detail_label.setText(finished_detail(run))
         self.draw_time()
-        if self.details is not None:
-            self._drop_details()
-            self._add_details()
 
     def draw_time(self, now: float | None = None) -> None:
         """Draw end time and duration, or the start time when nested."""
         self.time_label.setText(
             started_time(self.run, now) if self.nested else finished_time(self.run, now)
         )
-
-    def show_details(self, shown: bool) -> None:
-        if shown and self.details is None:
-            self._add_details()
-        elif not shown and self.details is not None:
-            self._drop_details()
-        self.set_expanded(shown)
-
-    def _add_details(self) -> None:
-        details = QWidget()
-        grid = QGridLayout(details)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(16)
-        grid.setVerticalSpacing(4)
-        for row, (label, value) in enumerate(record_rows(self.run)):
-            name = QLabel(label)
-            name.setProperty("role", "secondary")
-            text = QLabel(value)
-            text.setWordWrap(True)
-            text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            grid.addWidget(name, row, 0, Qt.AlignmentFlag.AlignTop)
-            grid.addWidget(text, row, 1)
-        grid.setColumnStretch(1, 1)
-        self.body.addWidget(details)
-        self.details = details
-
-    def _drop_details(self) -> None:
-        discard(self.details, self.body)
-        self.details = None
 
 
 class _RecordRow(_ExpandableRow):
@@ -1069,12 +1058,10 @@ class OverviewScreen(QWidget):
     def hideEvent(self, event: QHideEvent) -> None:  # noqa: D102
         super().hideEvent(event)
         self._elapsed.stop()
-        self.collapse_live()
 
     def _visible_changed(self, visible: bool) -> None:
         if not visible:
             self._elapsed.stop()
-            self.collapse_live()
         elif self.isVisible():
             self.shown()
 
@@ -1083,12 +1070,6 @@ class OverviewScreen(QWidget):
             self.refresh()
         else:
             self._stale = True
-            # A run that left the live list closes its mirror even while
-            # hidden; the screen redraws when shown.
-            if self.expanded_live is not None and self.expanded_live not in {
-                run.id for run in self.context.runs.live()
-            }:
-                self.collapse_live()
 
     def _settings_changed(self, _snapshot: dict) -> None:
         if self.isVisible():
@@ -1380,7 +1361,6 @@ class OverviewScreen(QWidget):
             self.collapse_live()
         for run_id in [key for key in self.live_rows if key not in wanted]:
             row = self.live_rows.pop(run_id)
-            row.close_mirror()
             discard(row, self.live_rows_layout)
         for run in live:
             row = self.live_rows.get(run.id)
@@ -1460,7 +1440,7 @@ class OverviewScreen(QWidget):
     # Expanding
 
     def toggle_live(self, run_id: str) -> None:
-        """Expand a live row with its mirror, or collapse it; one at a time."""
+        """Expand a live row with its record, or collapse it; one at a time."""
         if self.expanded_live == run_id:
             self.collapse_live()
             return
@@ -1469,13 +1449,13 @@ class OverviewScreen(QWidget):
         if row is None:
             return
         self.expanded_live = run_id
-        row.open_mirror(self.context.env)
+        row.show_details(True)
 
     def collapse_live(self) -> None:
-        """Collapse the expanded live row and close its mirror."""
+        """Collapse the expanded live row."""
         run_id, self.expanded_live = self.expanded_live, None
         if run_id is not None and run_id in self.live_rows:
-            self.live_rows[run_id].close_mirror()
+            self.live_rows[run_id].show_details(False)
 
     def toggle_finished(self, run_id: str) -> None:
         """Expand a finished row with its record, or collapse it; one at a time."""
@@ -1491,12 +1471,6 @@ class OverviewScreen(QWidget):
             return
         self.expanded_finished = run_id
         row.show_details(True)
-
-    def mirror(self) -> MirrorView | None:
-        """Return the open mirror, or `None`."""
-        if self.expanded_live is None or self.expanded_live not in self.live_rows:
-            return None
-        return self.live_rows[self.expanded_live].mirror
 
     # Sandbox alerts
 

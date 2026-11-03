@@ -79,7 +79,6 @@ def test_token_values_match_the_plan() -> None:
     assert theme.TOKENS["bg-page"] == ("#ffffff", "#191919")
     assert theme.TOKENS["bg-hover"] == ("#0000000d", "#ffffff13")
     assert theme.TOKENS["accent"] == theme.TOKENS["focus-ring"]
-    assert theme.TOKENS["term-15"] == ("#3a3a3a", "#ffffff")
 
 
 def test_opaque_backgrounds_found() -> None:
@@ -91,15 +90,6 @@ def test_opaque_backgrounds_found() -> None:
         "bg-subtle",
         "bg-accent",
     }
-
-
-@pytest.mark.parametrize("mode", theme.MODES)
-def test_term_colours_meet_5_8_on_term_bg(mode: str) -> None:
-    palette = theme.mirror_palette(mode)
-    assert len(palette.colors) == 16
-    for index, value in enumerate(palette.colors):
-        assert theme.contrast(value, palette.bg) >= 5.8, (mode, index)
-    assert theme.contrast(palette.fg, palette.bg) >= 5.8
 
 
 @pytest.mark.parametrize("mode", theme.MODES)
@@ -210,11 +200,10 @@ def test_font_steps(qapp: QApplication) -> None:  # noqa: ARG001
     display = theme.font("display")
     assert display.pixelSize() == 28
     assert display.weight() == 500
-    assert theme.font("term").pixelSize() == 12
 
 
 @pytest.mark.parametrize(
-    ("step", "size"), [("title", 20), ("term", 12), ("display", 28)]
+    ("step", "size"), [("title", 20), ("code", 14), ("display", 28)]
 )
 def test_font_step_survives_apply(
     qapp: QApplication, qtbot: QtBot, step: str, size: int

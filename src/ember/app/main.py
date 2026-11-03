@@ -284,8 +284,7 @@ def start(argv: list[str], env: Mapping[str, str] | None = None) -> EmberApp | i
 def restart(parts: EmberApp) -> None:
     """Close the socket, start the installed Ember and quit this one.
 
-    Runs keep running in their tmux sessions; an open screen mirror closes
-    with the window.
+    Runs keep running in their tmux sessions.
     """
     parts.server.close()
     QProcess.startDetached(restart_command()[0], restart_command()[1:])
