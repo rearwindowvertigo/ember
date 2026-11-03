@@ -49,6 +49,7 @@ empty list.
 | `shortlist.opencode` | List of `<provider>/<model>`, with optional `@<effort>`; each part `[A-Za-z0-9][A-Za-z0-9._-]*`, the provider part may start with `~` and the model part may also contain `:` | `[]` | standing |
 | `single.writer`, `single.reviewer` | `ask`, or `<engine>:<model>` with the model on that engine's shortlist when saved | `ask` | request, one-time, standing |
 | `multi.runs_as` | `ask`, `flow`, `workflow` | `ask` | request, one-time, standing |
+| `flow.review_rounds` | `1`, `2`, `3`, `4` | `3` | request, one-time, standing |
 | `panel.members` | List of `<engine>:<model>` with each model on its engine's shortlist when saved, at most 8, no duplicates | `[]` | request, one-time, standing |
 | `single.writer_as`, `single.reviewer_as` | `cli`, `subagent` | `cli` | request, one-time, standing |
 | `sandbox.codex` | `on`, `off` | `on` when `bwrap` is on `PATH` or the `codex` on `PATH` has a bundled `bwrap`, else `off` | standing |
@@ -939,7 +940,7 @@ is refused with code 64.
 | `base` | `HEAD` | Non-blank string |
 | `trailers` | `[]` | List of non-blank strings without CR or LF |
 | `writer`, `reviewer` | Menu row | Objects with required `engine` and `model`, optional `effort`, and no other keys |
-| `rounds` | `2` | Integer from 0 to 3 |
+| `rounds` | `flow.review_rounds` minus one | Integer from 0 to 3; fix rounds per task |
 | `parallel` | `4` | Integer from 1 to 8; maximum concurrent jobs within a wave |
 | `check` | No check | Non-empty argv list of strings; first argument non-blank; no NUL in any argument |
 | `check_timeout` | `1800` | Integer seconds, at least 1 |
@@ -1423,11 +1424,14 @@ an error.
 
 Data goes to standard output; diagnostics and action lines go to standard
 error. `--dry-run` text prints the resolved writer and reviewer with their
-sources, the base commit, the check as shell words (or `none`), numbered
-waves with each task's declared files, and `gap check: <command>`.
-Warnings print as `WARNING: <text>`. JSON has `plan`, `dir`, `base`,
-`writer`, `reviewer`, `check`, `waves` (arrays of task ids), `warnings` and
-`gapcheck` (the shell command). Empty lists and zero finding counts remain
+sources, the base commit, `rounds <n> fix rounds, at most <n+1> reviews
+per task (<source>)`, the check as shell words (or `none`), numbered waves
+with each task's declared files, and `gap check: <command>`. The rounds
+source is `plan` when the plan sets `rounds`, otherwise `setting` (the
+owner's `flow.review_rounds` minus one). Warnings print as
+`WARNING: <text>`. JSON has `plan`, `dir`, `base`, `writer`, `reviewer`,
+`check`, `rounds`, `rounds_source`, `waves` (arrays of task ids),
+`warnings` and `gapcheck` (the shell command). Empty lists and zero finding counts remain
 in JSON.
 
 `--start` prints:
@@ -2976,8 +2980,10 @@ offers a model, the pickers hold Ask each time only and the screen shows
 "Shortlist models in Engines to offer them here." with Open Engines.
 
 Work of several tasks holds Multi-task work (`multi.runs_as`): Ask each time
-(`ask`), Flow (`flow`) or Claude Workflow (`workflow`). It is available even
-when no engine offers a model.
+(`ask`), Flow (`flow`) or Claude Workflow (`workflow`), and Flow review
+rounds (`flow.review_rounds`): 1, 2, 3 or 4, the most times a reviewer
+checks one flow task. Both are available even when no engine offers a
+model.
 
 Panel lists `panel.members` in saved order. A member shows
 `<Engine> · <model> · <effort>`, omitting effort when none is set. A member

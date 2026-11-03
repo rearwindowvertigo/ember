@@ -309,6 +309,7 @@ def _prepare(
             ) from error
         raise
     settings = _settings(args.claim, env)
+    document = _review_rounds(document, settings)
     workers = [
         _worker(
             plan.resolve(role, getattr(args, role), document, settings),
@@ -319,6 +320,21 @@ def _prepare(
         for role in plan.ROLES
     ]
     return document, top, main, base, workers[0], workers[1]
+
+
+def _review_rounds(document: plan.Plan, settings: Mapping[str, Any]) -> plan.Plan:
+    """Use the owner's `flow.review_rounds` row when the plan sets no rounds.
+
+    The row counts reviews of one task; a plan's `rounds` counts fix rounds,
+    one fewer.
+    """
+    if document.rounds_source == "plan":
+        return document
+    row = (settings.get("answers") or {}).get("flow.review_rounds") or {}
+    value = row.get("value")
+    if value not in choices.REVIEW_ROUNDS:
+        return document
+    return replace(document, rounds=int(value) - 1, rounds_source="setting")
 
 
 def _dry_run(
@@ -361,6 +377,8 @@ def _dry_run(
                     "writer": writer.to_json(),
                     "reviewer": reviewer.to_json(),
                     "check": list(document.check),
+                    "rounds": document.rounds,
+                    "rounds_source": document.rounds_source,
                     "waves": [[task.id for task in wave] for wave in waves],
                     "warnings": warnings,
                     "gapcheck": shlex.join(gapcheck),
@@ -373,6 +391,11 @@ def _dry_run(
         print(f"writer {writer.text()} ({writer.source})", file=out)
         print(f"reviewer {reviewer.text()} ({reviewer.source})", file=out)
         print(f"base {base}", file=out)
+        print(
+            f"rounds {document.rounds} fix rounds, at most {document.rounds + 1} "
+            f"reviews per task ({document.rounds_source})",
+            file=out,
+        )
         print(
             f"check {shlex.join(document.check) if document.check else 'none'}",
             file=out,

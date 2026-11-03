@@ -52,6 +52,11 @@ SUBTITLE = "Which workers Claude uses. Ask each time means Claude asks you."
 
 MULTI = (("ask", "Ask each time"), ("flow", "Flow"), ("workflow", "Claude Workflow"))
 MULTI_HELP = "How Claude runs two or more tasks that each need a worker."
+ROUNDS = tuple((value, value) for value in choices.REVIEW_ROUNDS)
+ROUNDS_HELP = (
+    "The most times a reviewer checks one flow task. "
+    "A flow plan that sets its own rounds wins."
+)
 PANEL_HELP = "The models a panel asks when Claude is given no members."
 PANEL_LIMIT = 8
 ADD_MEMBER = "Add member"
@@ -304,6 +309,13 @@ class MenuScreen(QWidget):
         self.multi.changed.connect(self._multi_picked)
         multi_row.addWidget(self.multi)
         multi_layout.addLayout(multi_row)
+        rounds_row = QHBoxLayout()
+        rounds_row.addWidget(name_and_help("Flow review rounds", ROUNDS_HELP), 1)
+        self.rounds = widgets.Segmented(ROUNDS)
+        self.rounds.setAccessibleName("Flow review rounds")
+        self.rounds.changed.connect(self._rounds_picked)
+        rounds_row.addWidget(self.rounds)
+        multi_layout.addLayout(rounds_row)
         layout.addWidget(multi_card)
 
         panel_card, panel_layout = titled_card("Panel")
@@ -362,6 +374,7 @@ class MenuScreen(QWidget):
             panel = choices.panel_row(answers, connected)
             multi = choices.runs_as_row(answers)
         self.multi.set_value(multi["value"])
+        self.rounds.set_value(answers["flow.review_rounds"]["value"])
         self._fill_panel(answers, panel)
         self._chain_focus()
 
@@ -443,6 +456,7 @@ class MenuScreen(QWidget):
             order.extend(controls.run_as.buttons())
         order.append(self.open_engines)
         order.extend(self.multi.buttons())
+        order.extend(self.rounds.buttons())
         order.extend(self.member_removes.values())
         order.extend((self.remove_all, self.add_member))
         chain_tab_order(order)
@@ -540,6 +554,11 @@ class MenuScreen(QWidget):
         """Save the multi-task choice only when it changed."""
         if value != self.context.setting("multi.runs_as"):
             self._save({"multi.runs_as": value})
+
+    def _rounds_picked(self, value: str) -> None:
+        """Save the flow review rounds only when they changed."""
+        if value != self.context.setting("flow.review_rounds"):
+            self._save({"flow.review_rounds": value})
 
     def _add_member(self, _index: int) -> None:
         """Append the selected member and reset the picker to its prompt."""

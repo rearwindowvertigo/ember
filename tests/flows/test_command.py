@@ -191,6 +191,41 @@ def test_dry_run(
 
 
 @pytest.mark.parametrize(
+    ("setting", "plan_rounds", "expected"),
+    [
+        (None, None, (2, "setting")),
+        ("1", None, (0, "setting")),
+        ("4", None, (3, "setting")),
+        ("1", 3, (3, "plan")),
+    ],
+)
+def test_dry_run_review_rounds(
+    env: dict[str, str],
+    plan_file: Path,
+    setting: str | None,
+    plan_rounds: int | None,
+    expected: tuple[int, str],
+) -> None:
+    if setting is not None:
+        choices.set_settings({"flow.review_rounds": setting}, env=env)
+    if plan_rounds is not None:
+        value = json.loads(plan_file.read_text())
+        value["rounds"] = plan_rounds
+        plan_file.write_text(json.dumps(value))
+    code, out, err = invoke(env, "--plan", str(plan_file), "--dry-run", "--json")
+    assert code == 0, err
+    result = json.loads(out)
+    assert (result["rounds"], result["rounds_source"]) == expected
+    code, out, err = invoke(env, "--plan", str(plan_file), "--dry-run")
+    assert code == 0, err
+    rounds, source = expected
+    assert (
+        f"rounds {rounds} fix rounds, at most {rounds + 1} reviews per task ({source})"
+        in out
+    )
+
+
+@pytest.mark.parametrize(
     "options",
     [
         [],

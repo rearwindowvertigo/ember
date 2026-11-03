@@ -332,6 +332,32 @@ def test_cards_and_subtitle(env: dict[str, str], qtbot: QtBot) -> None:
     assert screen.add_member.accessibleName() == "Add panel member"
 
 
+@pytest.mark.parametrize("value", ["1", "3", "4"])
+def test_review_rounds_show_saved_value_and_save_only_changes(
+    env: dict[str, str], qtbot: QtBot, value: str
+) -> None:
+    choices.set_settings({"flow.review_rounds": value}, env=env)
+    context, screen = _screen(env, qtbot)
+    assert screen.rounds.accessibleName() == "Flow review rounds"
+    assert screen.rounds.value() == value
+    assert [label for _, label in menu.ROUNDS] == ["1", "2", "3", "4"]
+    generation = choices.snapshot(env=env)["generation"]
+    with qtbot.assertNotEmitted(context.settings_changed, wait=50):
+        screen.rounds.changed.emit(value)
+    assert choices.snapshot(env=env)["generation"] == generation
+    target = "2" if value != "2" else "1"
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        screen.rounds.buttons()[int(target) - 1].click()
+    assert _stored(env, "flow.review_rounds") == target
+    assert screen.rounds.value() == target
+    assert "Flow review rounds" in _texts(screen)
+
+
+def test_review_rounds_default_to_three(env: dict[str, str], qtbot: QtBot) -> None:
+    _context, screen = _screen(env, qtbot)
+    assert screen.rounds.value() == "3"
+
+
 @pytest.mark.parametrize("value", ["ask", "flow", "workflow"])
 def test_multi_shows_saved_value_and_saves_only_changes(
     env: dict[str, str], qtbot: QtBot, value: str
