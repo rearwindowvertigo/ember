@@ -890,7 +890,7 @@ existing reply exits 66. A successful turn with no reply file exits 81.
 |---|---|---|
 | 0 | The reply covers every step, or the brief was printed | A failed close prints a warning |
 | 1 | Settings database or run record cannot be read, or checkout discovery times out | `owner: repair or remove the settings database the message names`, `next: emb run --status <run>` or a new check |
-| 64 | Usage error, invalid claim, reviewer row not `set`, Claude subagent row, or a run start check | `next: emb gapcheck --help`, the claim's `emb choices` line, `owner: name the reviewer for this gap check, or set Reviewer on the Team screen`, the `--brief`/`--reply` route, or the run's line |
+| 64 | Usage error, invalid claim, reviewer row not `set`, Claude subagent row, or a run start check | `next: emb gapcheck --help`, the claim's `emb choices` line, `owner: name the reviewer for this gap check, or set Gap check reviewer on the Team screen`, the `--brief`/`--reply` route, or the run's line |
 | 65 | `--dir` is not in a git checkout | `next: emb gapcheck --plan <plan> --dir <a folder in the checkout>` |
 | 66 | Plan or reply cannot be read, or `--dir` does not exist or is not a folder | `next: ls -l <path>` |
 | 69 | Git is unavailable, the runtime folder cannot be used, or the run exits 69 | `owner: install git`, the run's runtime-folder instruction, or the run's line |
@@ -987,7 +987,7 @@ is refused with code 64.
 | `trailers` | `[]` | List of non-blank strings without CR or LF |
 | `writer`, `reviewer` | Menu row | Objects with required `engine` and `model`, optional `effort`, and no other keys |
 | `rounds` | `flow.review_rounds` minus one | Integer from 0 to 3; fix rounds per task |
-| `parallel` | `4` | Integer from 1 to 8; maximum concurrent jobs within a wave |
+| `parallel` | `flow.parallel` (default `4`) | Integer from 1 to 8; maximum concurrent jobs within a wave |
 | `check` | No check | Non-empty argv list of strings; first argument non-blank; no NUL in any argument |
 | `check_timeout` | `1800` | Integer seconds, at least 1 |
 | `context`, `failure_model` | `""` | Strings |

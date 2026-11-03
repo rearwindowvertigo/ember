@@ -795,3 +795,19 @@ def test_unreadable_settings_ask_about_every_gap() -> None:
     command._mark_asks(result, {"source_error": True, "answers": defaults})
     assert result["ask"] == "all"
     assert gap["ask_owner"] is True
+
+
+def test_confirmed_subagent_route_keeps_confirmed(
+    env: dict[str, str], repo: Path, plan_file: Path
+) -> None:
+    choices.set_settings(
+        {"single.reviewer_as": "subagent", "gapcheck.when": "ask"}, env=env
+    )
+    code, _out, err = invoke(env, plan_file, "--dir", str(repo), "--confirmed")
+    assert code == 64
+    assert "--brief --confirmed, then give the brief" in err
+    code, out, err = invoke(
+        env, plan_file, "--dir", str(repo), "--brief", "--confirmed"
+    )
+    assert code == 0, err
+    assert out.startswith("Gap check of the plan")

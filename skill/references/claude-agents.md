@@ -68,8 +68,9 @@ agent and every later one run again.
 Verify, review and merge every editing result as the skill says, one
 branch at a time.
 
-A Claude Workflow of two or more tasks starts only after the gap check
-in `references/gap-check.md`.
+A Claude Workflow of two or more tasks starts only after following
+`references/gap-check.md`, which may skip the check by the owner's
+settings.
 
 ## Deadlines
 

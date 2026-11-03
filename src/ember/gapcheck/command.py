@@ -155,7 +155,8 @@ def _engine(args: argparse.Namespace, settings: Mapping[str, Any], command: str)
         raise CommandError(
             64,
             f"{name} runs claude:{row['model']} as a subagent",
-            f"next: {command} --brief, then give the brief to a read-only Claude "
+            f"next: {command} --brief{' --confirmed' if args.confirmed else ''}, "
+            "then give the brief to a read-only Claude "
             f"subagent on {row['model']} and read its answer with "
             f"{command} --reply <file>",
         )

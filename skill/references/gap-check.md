@@ -12,6 +12,27 @@ those it accepts: a nonblank `failure_model` string in a flow plan, or a
 wording, docstrings or tests the owner did not ask for. A blank plan is
 refused; a one-step plan is checked as one step.
 
+## Decide first
+
+Settle whether the plan gets a check before choosing a reviewer or asking
+any worker question:
+
+- Flow: read `gapcheck_status` in the `emb flow --dry-run` JSON.
+- Claude Workflow: read `gapcheck.when` in the choices reply you already
+  hold for the run's claim, and count the plan's steps (its tasks or
+  numbered steps). `off`, or a number above the step count, is `skipped`;
+  `ask` is `ask`; anything else is `run`. Run no command to find out.
+
+Then:
+
+- `skipped`: run nothing and ask nothing. Start from the plan, and say in
+  your report that it ran without a gap check and why (the dry run's
+  `gapcheck_reason`, or the setting and step count).
+- `ask`: put one question to the owner: run the gap check, or start without
+  one. On start without, go on as for `skipped`. On run, every command below
+  carries `--confirmed`.
+- `run`: go on below.
+
 ## Run and read
 
 Run as a background Bash command, unpiped, and take its exit code:
@@ -28,21 +49,11 @@ is one. If no reviewer was named and
 the row cannot answer, ask the owner using the skill's worker question.
 Never change settings to make the check run.
 
-For a flow, read `gapcheck_status` in the `emb flow --dry-run` JSON:
-
-- `skipped`: `gapcheck` is null. Run nothing and ask nothing; start the flow
-  from the plan, and say in your report that it ran without a gap check and
-  why (`gapcheck_reason`).
-- `ask`: put one question to the owner, with `gapcheck_reason`: run the gap
-  check, or start without one. On run, use the `gapcheck` command, which
-  carries `--confirmed`; on start without, go on as for `skipped`.
-- `run`: run the exact `gapcheck` command (also printed after `gap check:`).
-  Add `--claim <id>` when absent.
-
-For a Claude Workflow, run `emb gapcheck` itself. Its JSON `status` is
-`skipped`, `ask` or `run` with the same meaning; `skipped` and `ask` start no
-reviewer and print `reason`. After the owner says to run an `ask` check,
-run the same command with `--confirmed`.
+For a flow, run the exact `gapcheck` command from the dry run (also printed
+after `gap check:`; it already carries `--confirmed` after an `ask`). Add
+`--claim <id>` when absent. For a Claude Workflow, run the command above.
+Should `emb gapcheck` itself report `status` `skipped` or `ask`, the
+settings changed since you read them: treat it as the decision above.
 
 Read the JSON or text before starting work. Check `parse_error`,
 `uncovered_steps` and `unknown_steps`: any error or missing or unknown
@@ -57,8 +68,9 @@ skill's rules; bring `owner:` lines to the owner.
 Exit 64 naming the `--brief`/`--reply` route means the reviewer row runs
 as a Claude subagent:
 
-1. Print the brief:
-   `emb gapcheck --plan <file> --dir <repo> --brief > <scratch>/gap-brief.md`.
+1. Print the brief, with `--confirmed` when the owner approved an `ask`
+   check:
+   `emb gapcheck --plan <file> --dir <repo> --brief [--confirmed] > <scratch>/gap-brief.md`.
 2. Give it to a read-only general-purpose subagent without isolation.
    Follow `references/claude-agents.md` for its model and tools.
 3. Save its final message to a scratch file, then parse it:
