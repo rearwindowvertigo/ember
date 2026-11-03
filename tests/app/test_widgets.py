@@ -367,8 +367,8 @@ def test_command_line_copy_and_run(qtbot: QtBot) -> None:
 def _dialog(qtbot: QtBot, command: str = "codex login") -> widgets.RunCommandDialog:
     dialog = widgets.RunCommandDialog(command)
     qtbot.addWidget(dialog)
-    dialog.show()
-    qtbot.waitExposed(dialog)
+    with qtbot.waitExposed(dialog):
+        dialog.show()
     return dialog
 
 
@@ -438,6 +438,7 @@ def test_run_command_dialog_copies_original(qtbot: QtBot) -> None:
         menu.close()
 
     QTimer.singleShot(0, copy_selection)
+    label.setSelection(0, 6)
     event = QContextMenuEvent(QContextMenuEvent.Reason.Mouse, QPoint(), QPoint())
     label.contextMenuEvent(event)
     assert QGuiApplication.clipboard().text() == "/opt/"
@@ -470,11 +471,13 @@ def test_run_command_dialog_primary_selection(
     if selection == "keyboard":
         qtbot.keyClick(label, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
     else:
-        start = QPoint(
-            label.margin(), label.margin() + label.fontMetrics().height() // 2
-        )
+        text_height = label.heightForWidth(label.width()) - 2 * label.margin()
+        text_top = (label.height() - text_height) // 2
+        half_line = label.fontMetrics().height() // 2
+        start = QPoint(label.margin(), text_top + half_line)
         end = QPoint(
-            label.width() - label.margin(), label.height() - label.margin() - 1
+            label.width() - label.margin() - 1,
+            text_top + text_height - half_line,
         )
         qtbot.mousePress(label, Qt.MouseButton.LeftButton, pos=start)
         qtbot.mouseMove(label, pos=end)
