@@ -327,6 +327,17 @@ def test_tiles_never_run_under_the_scroll_bar(
         assert right < area.viewport().width()
 
 
+def test_first_report_in_a_wide_window_uses_three_columns(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    widget, _context, _calls = _screen(env, qtbot, monkeypatch, None)
+    widget.resize(1400, 600)
+    qtbot.wait(100)
+    widget.context.deps_changed.emit(_report(*SAMPLE))
+    qtbot.waitUntil(lambda: bool(widget.tiles), timeout=2000)
+    qtbot.waitUntil(lambda: widget.columns == 3, timeout=2000)
+
+
 def test_columns_drop_when_three_do_not_fit(
     env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
 ) -> None:

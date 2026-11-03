@@ -10,8 +10,7 @@ installed versions, and newest versions when due.
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QResizeEvent
+from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from ember import deps
@@ -264,6 +263,9 @@ class DependenciesScreen(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self.scroll_area.hide()
+        # The column count follows the scroll area's own size, which changes
+        # when it is first shown as well as when the window resizes.
+        self.scroll_area.installEventFilter(self)
         layout.addWidget(self.scroll_area, 1)
         self.groups: list[tuple[str, QLabel]] = []
 
@@ -426,12 +428,13 @@ class DependenciesScreen(QWidget):
             for index, tile in enumerate(tiles):
                 grid.addWidget(tile, index // self.columns, index % self.columns)
 
-    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: D102
-        super().resizeEvent(event)
-        columns = self.fitting_columns()
-        if columns != self.columns:
-            self.columns = columns
-            self._place()
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: D102, N802
+        if watched is self.scroll_area and event.type() == QEvent.Type.Resize:
+            columns = self.fitting_columns()
+            if columns != self.columns:
+                self.columns = columns
+                self._place()
+        return super().eventFilter(watched, event)
 
     def order(self) -> list[tuple[str, list[str]]]:
         """Return the shown group keys with their component ids, in order."""
