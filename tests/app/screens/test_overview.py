@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import threading
 from collections.abc import Iterator, Mapping, Sequence
@@ -6,12 +7,13 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QDialogButtonBox,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QWidget,
@@ -19,7 +21,7 @@ from PySide6.QtWidgets import (
 from pytestqt.qtbot import QtBot
 
 from ember import paths, prune, sandbox
-from ember.app import flows
+from ember.app import flows, theme
 from ember.app.context import AppContext
 from ember.app.screens import overview
 from ember.app.screens.overview import OverviewScreen
@@ -647,12 +649,167 @@ def test_panel_details(env: dict[str, str], context: AppContext, qtbot: QtBot) -
     assert "No reply" in text
     assert "Changed: a.py" in text
     assert "Left out claude:opus: engine off" in text
-    assert f"Summary: {panel_record.folder(PANEL, env) / 'summary.md'}" in text
+    assert not any(line.startswith("Summary:") for line in text)
     assert f"Run {LIVE_A}" not in text
     assert row.links == []
     assert [
         button.text() for button in screen.finished_card.findChildren(QPushButton)
-    ] == ["Clear", ""]
+    ] == ["Clear", "", "Summary"]
+
+
+def test_newest_check_log(tmp_path: Path) -> None:
+    assert overview.newest_check_log(tmp_path) is None
+    (tmp_path / "check-99-99.log").mkdir()
+    (tmp_path / "check-99-99.log" / "check-100-1.log").touch()
+    (tmp_path / "other.log").touch()
+    assert overview.newest_check_log(tmp_path) is None
+    older = tmp_path / "check-legacy.log"
+    newer = tmp_path / "check-recent.log"
+    older.touch()
+    newer.touch()
+    os.utime(older, ns=(200, 200))
+    os.utime(newer, ns=(300, 300))
+    assert overview.newest_check_log(tmp_path) == newer
+    for name in ("check-9-99.log", "check-10-2.log", "check-10-10.log"):
+        path = tmp_path / name
+        path.touch()
+        os.utime(path, ns=(100, 100))
+    assert overview.newest_check_log(tmp_path) == tmp_path / "check-10-10.log"
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+@pytest.mark.parametrize("ended", [False, True])
+def test_record_file_buttons(
+    env: dict[str, str],
+    context: AppContext,
+    qtbot: QtBot,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    ended: bool,
+) -> None:
+    env["XDG_STATE_HOME"] = str(Path(env["XDG_STATE_HOME"]) / "space # and <text>")
+    make_flow(env, status="done" if ended else "stopped")
+    make_panel(env, status="done" if ended else "running")
+    folder = flow_record.folder(FLOW, env)
+    briefs = folder / "briefs"
+    briefs.mkdir(exist_ok=True)
+    log = folder / "check-10-2.log"
+    log.touch()
+    summary = panel_record.folder(PANEL, env) / "summary.md"
+    summary.touch()
+    opened: list[QUrl] = []
+
+    def open_url(url: QUrl) -> bool:
+        opened.append(url)
+        return True
+
+    monkeypatch.setattr(overview.QDesktopServices, "openUrl", open_url)
+    previous = theme.current_mode()
+    try:
+        theme.apply(qapp, mode)
+        screen = screen_for(context, qtbot)
+        flow = screen.flow_rows[FLOW]
+        panel = screen.panel_rows[PANEL]
+        assert not flow.file_buttons and not panel.file_buttons
+        flow.expand_button.click()
+        panel.expand_button.click()
+        assert list(flow.file_buttons) == ["Briefs", "Check logs"]
+        assert list(panel.file_buttons) == ["Summary"]
+        for row in (flow, panel):
+            for button in row.file_buttons.values():
+                qtbot.waitUntil(button.isVisible)
+                assert button.isEnabled() and button.isVisible()
+                assert row.details is not None and row.details.isAncestorOf(button)
+                button.click()
+        assert opened == [QUrl.fromLocalFile(str(p)) for p in (briefs, log, summary)]
+        assert all(url.isLocalFile() for url in opened)
+        monkeypatch.setattr(overview.QDesktopServices, "openUrl", lambda _url: False)
+        panel.file_buttons["Summary"].click()
+        message = panel.findChild(QMessageBox)
+        assert message is not None
+        assert message.icon() == QMessageBox.Icon.Warning
+        assert message.textFormat() == Qt.TextFormat.PlainText
+        assert message.text() == f"No viewer opened {summary}."
+        message.accept()
+    finally:
+        theme.apply(qapp, previous)
+
+
+def test_record_file_buttons_refresh_only_when_expanded(
+    env: dict[str, str],
+    context: AppContext,
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    make_flow(env)
+    make_panel(env)
+    folder = flow_record.folder(FLOW, env)
+    briefs = folder / "briefs"
+    if briefs.exists():
+        shutil.rmtree(briefs)
+    summary = panel_record.folder(PANEL, env) / "summary.md"
+    summary.unlink(missing_ok=True)
+    calls: list[str] = []
+    original = overview._RecordRow._refresh_files
+
+    def refresh(row: overview._RecordRow) -> None:
+        calls.append(row._item_id)
+        original(row)
+
+    monkeypatch.setattr(overview._RecordRow, "_refresh_files", refresh)
+    screen = screen_for(context, qtbot)
+    flow = screen.flow_rows[FLOW]
+    panel = screen.panel_rows[PANEL]
+    with qtbot.waitSignal(context.flows.reloaded):
+        context.flows.reload()
+    assert calls == []
+    flow.expand_button.click()
+    panel.expand_button.click()
+    assert calls == [FLOW, PANEL]
+    assert all(
+        not button.isEnabled()
+        for row in (flow, panel)
+        for button in row.file_buttons.values()
+    )
+    details = flow.details, panel.details
+    briefs.mkdir()
+    summary.touch()
+    log = folder / "check-1-1.log"
+    log.touch()
+    with qtbot.waitSignal(context.flows.reloaded):
+        context.flows.reload()
+    assert (flow.details, panel.details) == details
+    assert all(
+        button.isEnabled()
+        for row in (flow, panel)
+        for button in row.file_buttons.values()
+    )
+    newest = folder / "check-2-1.log"
+    newest.touch()
+    with qtbot.waitSignal(context.runs.reloaded):
+        context.runs.reload()
+    assert flow.file_paths["Check logs"] == newest
+    briefs.rmdir()
+    summary.unlink()
+    log.unlink()
+    newest.unlink()
+    with qtbot.waitSignal(context.flows.reloaded):
+        context.flows.reload()
+    assert all(
+        not button.isEnabled()
+        for row in (flow, panel)
+        for button in row.file_buttons.values()
+    )
+    flow.expand_button.click()
+    panel.expand_button.click()
+    calls.clear()
+    with qtbot.waitSignal(context.flows.reloaded):
+        context.flows.reload()
+    assert calls == []
+    summary.touch()
+    panel.expand_button.click()
+    assert panel.file_buttons["Summary"].isEnabled()
 
 
 def test_record_rows_survive_other_changes_and_refresh_links(
