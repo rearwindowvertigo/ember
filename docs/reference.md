@@ -1230,7 +1230,7 @@ to the owner with its findings and every available choice.
 | `stopped`, with a branch | `send`, `accept`, `review`, `worker`, `drop` |
 | `stopped`, without a branch | `worker`, `drop` |
 | `conflict` | `worker`, `drop` |
-| `blocked` | `drop` |
+| `pending`, `blocked` | `drop` |
 | Other | None |
 
 `--send` copies the correction to `answers/<n>.md` under the same lock
@@ -1253,7 +1253,8 @@ refused.
 An optional reviewer applies to this task from then on. `--worker` closes
 the old writer without force, retains its branch, and starts a new writer
 from the flow tip. `--drop` closes the writer without force and retains its
-branch. Dropped tasks leave their dependants blocked. Retained branches
+branch. A pending task that has not started is dropped without starting a
+writer. Dropped tasks leave their dependants blocked. Retained branches
 are listed in the flow's `abandoned` field.
 
 Answers are queued, then taken between waves. The runner checks each

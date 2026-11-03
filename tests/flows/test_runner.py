@@ -532,6 +532,17 @@ def test_stale_and_unreadable_answers_advance_cursor(h: Harness) -> None:
     assert any("unreadable answer line 2" in reason for reason in reasons)
 
 
+def test_dropped_pending_task_never_starts_and_blocks_dependants(h: Harness) -> None:
+    h.create([task("a"), task("b", after=["a"]), task("c")])
+    h.answer("drop")
+    flow = h.run()
+    states = {item["id"]: item for item in flow["tasks"]}
+    assert states["a"]["status"] == "dropped"
+    assert states["a"]["writer_run"] is None
+    assert states["b"]["status"] == "blocked"
+    assert states["c"]["status"] == "merged"
+
+
 def test_second_runner_does_not_change_record(
     h: Harness, capsys: pytest.CaptureFixture[str]
 ) -> None:

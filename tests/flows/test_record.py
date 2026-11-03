@@ -342,10 +342,11 @@ def test_no_flows(env: dict[str, str]) -> None:
         ("stopped", None, ("worker", "drop")),
         ("conflict", "branch", ("worker", "drop")),
         ("blocked", None, ("drop",)),
+        ("pending", None, ("drop",)),
         *[
             (state, "branch", ())
             for state in record.TASK_STATUSES
-            if state not in ("stopped", "conflict", "blocked")
+            if state not in ("stopped", "conflict", "blocked", "pending")
         ],
     ],
 )
