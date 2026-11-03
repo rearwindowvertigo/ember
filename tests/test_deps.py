@@ -1,8 +1,11 @@
 import json
+import os
 import re
+import shlex
 import stat
 import time
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -651,10 +654,11 @@ def test_installed_from_cache(env: dict[str, str]) -> None:
         "newest version: not read and nothing cached"
     )
     _read(env, CODEX, fetch)
-    (Path(env["PATH"]) / "codex").unlink()
+    _stub(env, "codex", "exit 1\n")
     item = _one(_read(env, CODEX, fetch, installed=False, now=NOW + 1))
     assert item.status == deps.UPDATE_AVAILABLE
     assert item.installed == "1.0.0"
+    (Path(env["PATH"]) / "codex").unlink()
     item = _one(_read(env, CODEX, fetch, now=NOW + 2))
     assert item.status == deps.MISSING
 
@@ -754,6 +758,8 @@ def test_report_order_counts_and_json(env: dict[str, str]) -> None:
         "command": None,
         "command_kind": None,
         "note": "Reinstall Ember.",
+        "resolved_path": None,
+        "method": None,
     }
     assert data["installed_read_at"] == {"tmux": NOW, "lib": NOW, "codex": NOW}
     assert data["newest_read_at"] == {"tmux": NOW, "lib": None, "codex": None}
@@ -777,3 +783,363 @@ def test_dotted() -> None:
     assert deps.dotted("0") == (0,)
     with pytest.raises(deps.ReadError):
         deps.dotted("1.2a")
+
+
+# Install methods
+
+
+def _engine_spec(engine: str = "codex") -> deps.Spec:
+    return next(spec for spec in deps.load_components() if spec.id == engine)
+
+
+def _engine_read(
+    env: dict[str, str],
+    spec: deps.Spec,
+    *,
+    installed: bool = True,
+    newest: str = "due",
+    version: str = "2.0.0",
+    deadline: float = deps.TIMEOUT,
+) -> deps.Component:
+    body = version if spec.newest.kind == "text" else json.dumps({"version": version})
+    return _one(
+        deps.read(
+            env,
+            components=(spec,),
+            fetch=Fetcher({spec.newest.url or "": body}),
+            installed=installed,
+            newest=newest,
+            deadline=deadline,
+        )
+    )
+
+
+def _launcher(env: dict[str, str], engine: str, target: Path) -> Path:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    versions = {
+        "codex": "codex-cli 1.0.0",
+        "opencode": "1.0.0",
+        "claude": "1.0.0 (Claude Code)",
+    }
+    target.write_text(
+        "#!/bin/sh\nprintf '%s\\n' " + shlex.quote(versions[engine]) + "\n"
+    )
+    target.chmod(0o755)
+    launcher = Path(env["PATH"]) / engine
+    launcher.symlink_to(target)
+    return launcher
+
+
+@pytest.mark.parametrize("engine", ["codex", "opencode", "claude"])
+@pytest.mark.parametrize("manager", ["npm", "pnpm", "bun", "brew"])
+@pytest.mark.parametrize("writable", [True, False])
+def test_install_method_layouts(
+    env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    engine: str,
+    manager: str,
+    writable: bool,
+) -> None:
+    prefix = tmp_path / "prefix with ' spaces"
+    package = {
+        "codex": "@openai/codex",
+        "opencode": "opencode-ai",
+        "claude": "@anthropic-ai/claude-code",
+    }[engine]
+    layouts = {
+        "npm": (
+            f"lib/node_modules/{package}/bin/cli.js",
+            ["npm", "install", "-g", "--prefix", str(prefix), package + "@latest"],
+        ),
+        "pnpm": (
+            f"global/5/node_modules/{package}/bin/cli.js",
+            ["pnpm", "add", "-g", package + "@latest"],
+        ),
+        "bun": (
+            f"install/global/node_modules/{package}/bin/cli.js",
+            ["bun", "add", "-g", package + "@latest"],
+        ),
+        "brew": (f"Cellar/{engine}/1.0.0/bin/{engine}", ["brew", "upgrade", engine]),
+    }
+    layout, expected = layouts[manager]
+    target = prefix / layout
+    _launcher(env, engine, target)
+    checked = []
+    access = os.access
+
+    def check_access(path: str | Path, mode: int) -> bool:
+        if mode == os.W_OK:
+            checked.append(Path(path))
+            return writable
+        return access(path, mode)
+
+    monkeypatch.setattr(deps.os, "access", check_access)
+    item = _engine_read(env, _engine_spec(engine))
+    assert item.status == deps.UPDATE_AVAILABLE
+    assert item.command_kind == "update"
+    assert shlex.split(item.command or "") == ([] if writable else ["sudo"]) + expected
+    assert checked == [
+        prefix / "lib/node_modules" if manager == "npm" else target.parent
+    ]
+    assert item.resolved_path == str(target)
+    assert item.method is not None and item.method.path is not None
+    assert item.note is None
+    assert item.to_json()["method"] == item.method.to_json()
+    assert item.to_json()["resolved_path"] == str(target)
+
+
+@pytest.mark.parametrize("engine", ["claude", "opencode"])
+@pytest.mark.parametrize("writable", [True, False])
+def test_vendor_launcher(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch, engine: str, writable: bool
+) -> None:
+    home = Path(env["HOME"])
+    target = home / (
+        ".local/share/claude/versions/1.0.0"
+        if engine == "claude"
+        else ".opencode/bin/opencode"
+    )
+    launcher = _launcher(env, engine, target)
+    if engine == "opencode":
+        launcher.unlink()
+        launcher = target  # The known location outside PATH.
+    access = os.access
+    monkeypatch.setattr(
+        deps.os,
+        "access",
+        lambda path, mode: writable if mode == os.W_OK else access(path, mode),
+    )
+    item = _engine_read(env, _engine_spec(engine))
+    assert shlex.split(item.command or "") == ([] if writable else ["sudo"]) + [
+        str(launcher),
+        "update" if engine == "claude" else "upgrade",
+    ]
+    assert item.resolved_path == str(target)
+    assert item.method is not None
+    assert item.note is None
+
+
+@pytest.mark.parametrize("engine", ["codex", "opencode", "claude"])
+def test_dpkg_method(env: dict[str, str], tmp_path: Path, engine: str) -> None:
+    target = tmp_path / "usr/bin" / engine
+    _launcher(env, engine, target)
+    _stub(env, "dpkg-query", 'printf "%s\\n" "engine-package:amd64: $2"\n')
+    item = _engine_read(env, _engine_spec(engine))
+    assert item.command == "sudo apt install --only-upgrade engine-package:amd64"
+    assert item.method is not None and item.method.kind == "dpkg"
+    assert item.note is None
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "exit 1\n",
+        "exit 2\n",
+        "echo malformed\n",
+        'printf "one: %s\\ntwo: %s\\n" "$2" "$2"\n',
+        'echo "one, two: $2"\n',
+        'echo "one: /some/other/file"\n',
+        "/bin/sleep 1\n",
+    ],
+)
+def test_dpkg_failure_uses_launcher(
+    env: dict[str, str], tmp_path: Path, reply: str
+) -> None:
+    target = tmp_path / "unknown/real-codex"
+    launcher = _launcher(env, "codex", target)
+    _stub(env, "dpkg-query", reply)
+    item = _engine_read(env, _engine_spec(), deadline=0.2)
+    assert item.command == f"{launcher} update"
+    assert item.command_kind == "update"
+    assert item.status == deps.UPDATE_AVAILABLE
+    assert item.method is None
+    assert item.resolved_path == str(target)
+    assert item.note == "Ember could not tell how the tool was installed."
+
+
+@pytest.mark.parametrize("version", ["1.0.0", "2.0.0"])
+def test_unknown_install_note_only_with_update(
+    env: dict[str, str], tmp_path: Path, version: str
+) -> None:
+    target = tmp_path / "unknown/real-codex"
+    _launcher(env, "codex", target)
+    item = _engine_read(env, _engine_spec(), version=version)
+    assert item.method is None
+    assert item.resolved_path == str(target)
+    assert (item.note is not None) == (version == "2.0.0")
+    assert (item.command is not None) == (version == "2.0.0")
+
+
+def test_methods_are_resolved_on_cached_reads(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    spec = _engine_spec()
+    first = tmp_path / "npm/lib/node_modules/@openai/codex/bin/codex.js"
+    launcher = _launcher(env, "codex", first)
+    assert _engine_read(env, spec).method == spec.methods[0]
+    launcher.unlink()
+    second = tmp_path / "bun/install/global/node_modules/@openai/codex/bin/codex.js"
+    _launcher(env, "codex", second)
+    item = _engine_read(env, spec, installed=False, newest="never")
+    assert item.method == spec.methods[2]
+    assert item.resolved_path == str(second)
+    assert item.command == "bun add -g @openai/codex@latest"
+    cached = json.dumps(_cache(env))
+    assert "resolved_path" not in cached and "method" not in cached
+    launcher.unlink()
+    item = _engine_read(env, spec, installed=False, newest="never")
+    assert item.status == deps.MISSING
+    assert item.resolved_path is None and item.method is None
+    assert item.command == spec.install
+    assert item.command_kind == "install" and item.note is None
+
+
+def test_dpkg_skipped_on_cached_read(env: dict[str, str], tmp_path: Path) -> None:
+    _launcher(env, "codex", tmp_path / "usr/bin/codex")
+    log = tmp_path / "dpkg-calls"
+    _stub(
+        env,
+        "dpkg-query",
+        f'echo called >> {shlex.quote(str(log))}\nprintf "%s\\n" "codex: $2"\n',
+    )
+    spec = _engine_spec()
+    assert _engine_read(env, spec).method is not None
+    item = _engine_read(env, spec, installed=False, newest="never")
+    assert log.read_text() == "called\n"
+    assert item.method is None and item.note is not None
+
+
+def test_path_methods_precede_dpkg_and_keep_order(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    spec = _engine_spec()
+    target = tmp_path / "lib/node_modules/@openai/codex/bin/codex.js"
+    _launcher(env, "codex", target)
+    log = tmp_path / "dpkg-calls"
+    _stub(env, "dpkg-query", f"echo called >> {shlex.quote(str(log))}\n")
+    spec = replace(
+        spec,
+        methods=(
+            spec.methods[-1],
+            *spec.methods[:-1],
+            deps.Method(path="{prefix}/bin/*", update="other"),
+        ),
+    )
+    item = _engine_read(env, spec)
+    assert item.method == spec.methods[1]
+    assert not log.exists()
+
+
+@pytest.mark.parametrize(
+    ("pattern", "path", "expected"),
+    [
+        (
+            "{prefix}/lib/node_modules/{package}",
+            "/usr/lib/node_modules/@openai/codex/bin/codex.js",
+            {"prefix": "/usr", "package": "@openai/codex"},
+        ),
+        (
+            "{prefix}/lib/node_modules/{package}",
+            "/usr/lib/node_modules/codex",
+            {"prefix": "/usr", "package": "codex"},
+        ),
+        ("{prefix}/lib/node_modules/{package}", "/usr/lib/node_modules/@openai", None),
+        ("/opt/bin/codex", "/opt/bin/codex-extra", None),
+        ("/opt/bin/codex", "/else/opt/bin/codex", None),
+        ("/opt/*/codex", "/opt/a/b/codex", None),
+        (
+            "{prefix}/Cellar/{formula}",
+            "/opt/Cellar/codex/1/bin/codex",
+            {"prefix": "/opt", "formula": "codex"},
+        ),
+    ],
+)
+def test_method_pattern_boundaries(
+    pattern: str, path: str, expected: dict[str, str] | None
+) -> None:
+    match = deps._path_pattern(pattern).match(path)
+    assert (None if match is None else match.groupdict()) == expected
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        'methods = "bad"',
+        "methods = [3]",
+        'methods = [{kind = "other", update = "cmd"}]',
+        'methods = [{kind = "dpkg", path = "/bin/codex", update = "cmd"}]',
+        'methods = [{path = "/bin/codex"}]',
+        'methods = [{path = "/bin/{unknown}", update = "cmd"}]',
+        'methods = [{path = "/bin/{package}", update = "cmd {prefix}"}]',
+        'methods = [{path = "/bin/{package}", update = "cmd {package!r}"}]',
+    ],
+)
+def test_invalid_method_schema(method: str) -> None:
+    text = CODEX.replace(
+        'update = "codex update"', 'updater = "codex update"\n' + method
+    )
+    with pytest.raises(deps.ComponentsError):
+        deps.parse_components(text)
+
+
+def test_dpkg_does_not_duplicate_sudo(
+    env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _launcher(env, "codex", tmp_path / "usr/bin/codex")
+    _stub(env, "dpkg-query", 'printf "%s\\n" "codex: $2"\n')
+    access = os.access
+    monkeypatch.setattr(
+        deps.os,
+        "access",
+        lambda path, mode: False if mode == os.W_OK else access(path, mode),
+    )
+    item = _engine_read(env, _engine_spec())
+    assert item.command == "sudo apt install --only-upgrade codex"
+
+
+def test_fallback_quotes_launcher_and_checks_resolved_parent(
+    env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "owner's tools"
+    bin_dir.mkdir()
+    env["PATH"] = str(bin_dir)
+    target = tmp_path / "unknown/codex"
+    launcher = _launcher(env, "codex", target)
+    shim = tmp_path / "shim"
+    shim.symlink_to(target)
+    launcher.unlink()
+    launcher.symlink_to(shim)
+    checked = []
+    access = os.access
+
+    def check_access(path: str | Path, mode: int) -> bool:
+        if mode == os.W_OK:
+            checked.append(Path(path))
+            return False
+        return access(path, mode)
+
+    monkeypatch.setattr(deps.os, "access", check_access)
+    item = _engine_read(env, _engine_spec())
+    assert shlex.split(item.command or "") == ["sudo", str(launcher), "update"]
+    assert item.resolved_path == str(target)
+    assert checked == [target.parent]
+
+
+def test_missing_engine_has_no_method_or_resolved_path(env: dict[str, str]) -> None:
+    item = _engine_read(env, _engine_spec())
+    assert item.status == deps.MISSING
+    assert item.to_json()["resolved_path"] is None
+    assert item.to_json()["method"] is None
+    assert item.command == "npm install -g @openai/codex"
+    assert item.command_kind == "install" and item.note is None
+
+
+def test_failed_version_check_has_no_install_method_note(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    _launcher(env, "codex", tmp_path / "unknown/codex")
+    item = _engine_read(env, _engine_spec(), version="not-a-version")
+    assert item.status == deps.CHECK_FAILED
+    assert item.note is None and item.command is None
+    assert item.resolved_path is not None

@@ -515,8 +515,9 @@ def test_deps_text(
     captured = capsys.readouterr()
     assert captured.err == ""
     lines = captured.out.splitlines()
-    assert lines[:8] == [
+    assert lines[:9] == [
         "Codex: current, installed 1.0.0, newest 1.0.0",
+        f"  resolved path: {env['PATH']}/codex",
         "OpenCode: missing",
         "  install: curl -fsSL https://opencode.ai/install | bash",
         "Claude Code: missing",
@@ -1073,3 +1074,25 @@ def test_prune_empty_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
         "worktrees": [],
     }
     assert captured.err == ""
+
+
+def test_deps_unknown_install_text_and_json(
+    env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    deps_fetch: _DepsFetch,
+) -> None:
+    _deps_stubs(env)
+    _stub(env, "codex", "echo codex-cli 0.9.0\n")
+    assert main(["deps"], env=env) == 0
+    output = capsys.readouterr().out
+    launcher = str(Path(env["PATH"]) / "codex")
+    assert output.startswith("Codex: update available, installed 0.9.0, newest 1.0.0\n")
+    assert f"  resolved path: {launcher}\n" in output
+    assert f"  update: {launcher} update\n" in output
+    assert "  Ember could not tell how the tool was installed.\n" in output
+    assert main(["deps", "--json"], env=env) == 0
+    item = json.loads(capsys.readouterr().out)["components"][0]
+    assert item["resolved_path"] == launcher
+    assert item["method"] is None
+    assert item["command_kind"] == "update"
+    assert item["note"] == "Ember could not tell how the tool was installed."

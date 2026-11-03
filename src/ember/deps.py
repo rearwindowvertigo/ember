@@ -33,9 +33,10 @@ import tomllib
 import urllib.request
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path
+from string import Formatter
 from typing import Any
 
 from ember import paths
@@ -116,6 +117,25 @@ class Source:
 
 
 @dataclass(frozen=True)
+class Method:
+    """An install path pattern and its update command, or a dpkg lookup."""
+
+    update: str
+    path: str | None = None
+    kind: str = "path"
+
+    def to_json(self) -> dict[str, str]:
+        """Return the method's component-table fields.
+
+        Returns:
+            The update template and path, or the dpkg kind.
+        """
+        if self.path is None:
+            return {"kind": self.kind, "update": self.update}
+        return {"path": self.path, "update": self.update}
+
+
+@dataclass(frozen=True)
 class Spec:
     """One component as `components.toml` lists it."""
 
@@ -128,6 +148,8 @@ class Spec:
     install: str | None
     update_note: str | None
     install_note: str | None
+    methods: tuple[Method, ...] = ()
+    updater: str | None = None
 
 
 @dataclass(frozen=True)
@@ -163,7 +185,13 @@ class Component:
     """`update`, `install` or `None`, as `command`."""
 
     note: str | None
-    """The note for the status when there is no command for it."""
+    """The status note, including an unidentified install method."""
+
+    resolved_path: str | None = None
+    """The engine launcher's target after following symlinks."""
+
+    method: Method | None = None
+    """The matched install method, or `None` when none matched."""
 
     def to_json(self) -> dict[str, Any]:
         """Return the component as a JSON-ready dict.
@@ -182,6 +210,8 @@ class Component:
             "command": self.command,
             "command_kind": self.command_kind,
             "note": self.note,
+            "resolved_path": self.resolved_path,
+            "method": None if self.method is None else self.method.to_json(),
         }
 
 
@@ -259,7 +289,7 @@ class DepsReport:
 
 
 _REQUIRED = ("id", "label", "group", "installed", "newest")
-_OPTIONAL = ("update", "install", "update_note", "install_note")
+_OPTIONAL = ("update", "install", "update_note", "install_note", "updater")
 _SOURCE_FIELDS: dict[tuple[str, str], tuple[tuple[str, ...], tuple[str, ...]]] = {
     ("installed", "apt"): (("package",), ()),
     ("installed", "command"): (("pattern",), ("engine", "argv")),
@@ -328,11 +358,66 @@ def _source(where: str, role: str, value: object) -> Source:
     return Source(kind=kind, engine=engine, argv=tuple(argv), pattern=pattern)
 
 
+def _fields(template: str) -> set[str]:
+    fields = set()
+    for _literal, field, format_spec, conversion in Formatter().parse(template):
+        if field is not None:
+            if field not in {"prefix", "package", "formula", "launcher"}:
+                raise ValueError(f"unknown placeholder {field!r}")
+            if format_spec or conversion:
+                raise ValueError("placeholders cannot have formats or conversions")
+            fields.add(field)
+    return fields
+
+
+def _path_pattern(pattern: str) -> re.Pattern[str]:
+    captures = {
+        "prefix": r".*",
+        "package": r"(?:@[^/]+/[^/]+|[^/@][^/]*)",
+        "formula": r"[^/]+",
+    }
+    parts = []
+    for literal, field, _format_spec, _conversion in Formatter().parse(pattern):
+        parts.append(re.escape(literal).replace(r"\*", "[^/]*"))
+        if field is not None:
+            parts.append(f"(?P<{field}>{captures[field]})")
+    return re.compile("^" + "".join(parts) + r"(?=/|$)")
+
+
+def _methods(where: str, value: object) -> tuple[Method, ...]:
+    if not isinstance(value, list):
+        raise ComponentsError(f"{where}: methods must be a list of tables")
+    methods = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            raise ComponentsError(f"{where}: each method must be a table")
+        kind = entry.get("kind", "path")
+        if kind not in ("path", "dpkg"):
+            raise ComponentsError(f"{where}: method kind must be path or dpkg")
+        allowed = {"kind", "update"} | ({"path"} if kind == "path" else set())
+        if set(entry) - allowed:
+            raise ComponentsError(f"{where}: unknown method field")
+        update = _text(where, "method update", entry.get("update"))
+        pattern = (
+            _text(where, "method path", entry.get("path")) if kind == "path" else None
+        )
+        try:
+            fields = {"package"} if pattern is None else _fields(pattern)
+            if pattern is not None:
+                _path_pattern(pattern)
+            if _fields(update) - (fields | {"launcher"}):
+                raise ValueError("update uses a placeholder absent from the path")
+        except (ValueError, KeyError, re.error) as error:
+            raise ComponentsError(f"{where}: invalid method: {error}") from None
+        methods.append(Method(update=update, path=pattern, kind=kind))
+    return tuple(methods)
+
+
 def _spec(index: int, value: object) -> Spec:
     where = f"components[{index}]"
     if not isinstance(value, dict):
         raise ComponentsError(f"{where} must be a table")
-    unknown = sorted(set(value) - {*_REQUIRED, *_OPTIONAL})
+    unknown = sorted(set(value) - {*_REQUIRED, *_OPTIONAL, "methods"})
     if unknown:
         raise ComponentsError(f"{where}: unknown field {', '.join(unknown)}")
     for name in _REQUIRED:
@@ -358,6 +443,20 @@ def _spec(index: int, value: object) -> Spec:
         name: _text(where, name, value[name]) if name in value else None
         for name in _OPTIONAL
     }
+    methods = _methods(where, value.get("methods", []))
+    if methods or optional["updater"] is not None:
+        if installed.engine is None or optional["updater"] is None:
+            raise ComponentsError(f"{where}: methods need an engine and updater")
+        if optional["update"] is not None:
+            raise ComponentsError(f"{where}: give methods instead of update")
+        try:
+            updater = shlex.split(optional["updater"] or "")
+        except ValueError as error:
+            raise ComponentsError(f"{where}: invalid updater: {error}") from None
+        if len(updater) < 2 or updater[0] != installed.engine:
+            raise ComponentsError(
+                f"{where}: updater must name the engine and arguments"
+            )
     return Spec(
         id=ident,
         label=label,
@@ -368,6 +467,8 @@ def _spec(index: int, value: object) -> Spec:
         install=optional["install"],
         update_note=optional["update_note"],
         install_note=optional["install_note"],
+        methods=methods,
+        updater=optional["updater"],
     )
 
 
@@ -844,7 +945,7 @@ def _row(
     )
 
 
-def _evaluate(
+def _evaluate_versions(
     spec: Spec,
     held: tuple[_Installed | None, _Newest | None],
     options: _Options,
@@ -886,6 +987,106 @@ def _evaluate(
             return _Outcome(_row(spec, state, installed, newest, None), found, reported)
     row = _row(spec, CHECK_FAILED, installed, newest, "; ".join(errors))
     return _Outcome(row, found, reported)
+
+
+def _dpkg_owner(resolved: Path, options: _Options) -> str | None:
+    if not options.installed:
+        return None
+    try:
+        binary = _tool("dpkg-query", options.env)
+        code, out, _err = run_command(
+            [binary, "-S", str(resolved)], options.env, options.deadline
+        )
+    except ReadError:
+        return None
+    lines = out.strip().splitlines()
+    if code != 0 or len(lines) != 1:
+        return None
+    package, separator, owned = lines[0].partition(": ")
+    if (
+        not separator
+        or owned != str(resolved)
+        or not re.fullmatch(r"[a-z0-9][a-z0-9+.-]*(?::[a-z0-9-]+)?", package)
+    ):
+        return None
+    return package
+
+
+def _update_command(
+    spec: Spec, launcher: str, resolved: Path | None, options: _Options
+) -> tuple[str, Method | None]:
+    command = shlex.join([launcher, *shlex.split(spec.updater or "")[1:]])
+    matched = None
+    folder = Path(launcher).parent if resolved is None else resolved.parent
+    # Path methods retain their listed order; dpkg is always last.
+    for method in sorted(spec.methods, key=lambda method: method.kind == "dpkg"):
+        if resolved is None:
+            break
+        values = {"launcher": launcher}
+        if method.path is not None:
+            candidate = str(resolved)
+            if method.path.startswith("~/"):
+                try:
+                    relative = resolved.relative_to(paths.home_dir(options.env))
+                except ValueError:
+                    continue
+                candidate = "~/" + str(relative)
+            match = _path_pattern(method.path).match(candidate)
+            if match is None:
+                continue
+            values.update(match.groupdict())
+            if "prefix" in values:
+                values["prefix"] = values["prefix"] or "/"
+            if method.path == "{prefix}/lib/node_modules/{package}":
+                folder = Path(values["prefix"]) / "lib" / "node_modules"
+        else:
+            package = _dpkg_owner(resolved, options)
+            if package is None:
+                continue
+            values["package"] = package
+        command = method.update.format_map(
+            {name: shlex.quote(value) for name, value in values.items()}
+        )
+        matched = method
+        break
+    if not os.access(folder, os.W_OK) and shlex.split(command)[0] != "sudo":
+        command = "sudo " + command
+    return command, matched
+
+
+def _evaluate(
+    spec: Spec,
+    held: tuple[_Installed | None, _Newest | None],
+    options: _Options,
+) -> _Outcome:
+    outcome = _evaluate_versions(spec, held, options)
+    if spec.installed.engine is None:
+        return outcome
+    launcher = status.locate(spec.installed.engine, options.env)
+    if launcher is None:
+        row = _row(spec, MISSING, None, outcome.component.newest, None)
+        return replace(outcome, component=row)
+    resolved = None
+    with contextlib.suppress(OSError, RuntimeError):
+        resolved = Path(launcher).resolve(strict=True)
+    row = replace(
+        outcome.component, resolved_path=None if resolved is None else str(resolved)
+    )
+    if spec.updater is not None:
+        command, method = _update_command(spec, launcher, resolved, options)
+        row = replace(row, method=method)
+        if row.status == UPDATE_AVAILABLE:
+            row = replace(
+                row,
+                command=command,
+                command_kind="update",
+                note=(
+                    "Ember could not tell how the tool was installed."
+                    if method is None
+                    else None
+                ),
+            )
+    return replace(outcome, component=row)
 
 
 def read(
