@@ -36,6 +36,19 @@ def test_status_lines() -> None:
     assert tray_module.tooltip(0) == "Ember · No runs live"
 
 
+def test_menu_is_populated_at_construction(env: dict[str, str]) -> None:
+    context = AppContext(env)
+    calls: list[str] = []
+    tray = Tray(context, lambda: calls.append("open"), lambda: calls.append("quit"))
+
+    assert tray.lines() == ["No runs live", "-", "Open Ember", "Quit Ember"]
+    actions = tray.menu.actions()
+    assert not actions[0].isEnabled()
+    actions[2].trigger()
+    actions[3].trigger()
+    assert calls == ["open", "quit"]
+
+
 def test_menu_with_no_runs_live(env: dict[str, str], qtbot: QtBot) -> None:
     write_run(make_run(env, status=record.CLOSED, ended_at=1_800_000_100.0))
     tray, context, _calls = _tray(env, qtbot)

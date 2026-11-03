@@ -77,6 +77,8 @@ class Tray(QObject):
         self.menu.aboutToShow.connect(self._menu_shown)
         context.runs.changed.connect(self.update)
         self.update()
+        self._build_menu(context.runs.live())
+        self._stale = False
 
     def show(self) -> None:
         """Put the icon in the tray."""
