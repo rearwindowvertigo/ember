@@ -27,6 +27,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import time
 import tomllib
@@ -373,7 +374,7 @@ def _fields(template: str) -> set[str]:
 def _path_pattern(pattern: str) -> re.Pattern[str]:
     captures = {
         "prefix": r".*",
-        "package": r"(?:@[^/]+/[^/]+|[^/@][^/]*)",
+        "package": r"(?:@[^/]+/[^/.][^/]*|[^/@.][^/]*)",
         "formula": r"[^/]+",
     }
     parts = []
@@ -1027,8 +1028,10 @@ def _update_command(
             candidate = str(resolved)
             if method.path.startswith("~/"):
                 try:
-                    relative = resolved.relative_to(paths.home_dir(options.env))
-                except ValueError:
+                    relative = resolved.relative_to(
+                        paths.home_dir(options.env).resolve()
+                    )
+                except OSError, RuntimeError, ValueError:
                     continue
                 candidate = "~/" + str(relative)
             match = _path_pattern(method.path).match(candidate)
@@ -1054,6 +1057,27 @@ def _update_command(
     return command, matched
 
 
+def _shim_target(resolved: Path) -> Path:
+    """Return a small script's first quoted basedir node_modules target."""
+    limit = 64 * 1024
+    try:
+        info = resolved.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            return resolved
+        with resolved.open("rb") as stream:
+            content = stream.read(limit + 1)
+        if len(content) > limit or not content.startswith(b"#!"):
+            return resolved
+        text = content.decode("utf-8")
+        for match in re.finditer(r"""(["'])\$basedir/([^"'\r\n]+)\1""", text):
+            relative = match.group(2)
+            if not Path(relative).is_absolute() and "/node_modules/" in "/" + relative:
+                return (resolved.parent / relative).resolve(strict=True)
+    except OSError, UnicodeError, RuntimeError:
+        pass
+    return resolved
+
+
 def _evaluate(
     spec: Spec,
     held: tuple[_Installed | None, _Newest | None],
@@ -1069,6 +1093,8 @@ def _evaluate(
     resolved = None
     with contextlib.suppress(OSError, RuntimeError):
         resolved = Path(launcher).resolve(strict=True)
+    if resolved is not None:
+        resolved = _shim_target(resolved)
     row = replace(
         outcome.component, resolved_path=None if resolved is None else str(resolved)
     )

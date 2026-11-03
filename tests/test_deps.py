@@ -831,7 +831,7 @@ def _launcher(env: dict[str, str], engine: str, target: Path) -> Path:
 
 
 @pytest.mark.parametrize("engine", ["codex", "opencode", "claude"])
-@pytest.mark.parametrize("manager", ["npm", "pnpm", "bun", "brew"])
+@pytest.mark.parametrize("manager", ["npm", "bun", "brew"])
 @pytest.mark.parametrize("writable", [True, False])
 def test_install_method_layouts(
     env: dict[str, str],
@@ -851,10 +851,6 @@ def test_install_method_layouts(
         "npm": (
             f"lib/node_modules/{package}/bin/cli.js",
             ["npm", "install", "-g", "--prefix", str(prefix), package + "@latest"],
-        ),
-        "pnpm": (
-            f"global/5/node_modules/{package}/bin/cli.js",
-            ["pnpm", "add", "-g", package + "@latest"],
         ),
         "bun": (
             f"install/global/node_modules/{package}/bin/cli.js",
@@ -1143,3 +1139,146 @@ def test_failed_version_check_has_no_install_method_note(
     assert item.status == deps.CHECK_FAILED
     assert item.note is None and item.command is None
     assert item.resolved_path is not None
+
+
+@pytest.mark.parametrize("engine", ["codex", "opencode", "claude"])
+@pytest.mark.parametrize("writable", [True, False])
+def test_pnpm_shell_shim(
+    env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    engine: str,
+    writable: bool,
+) -> None:
+    pnpm_home = Path(env["HOME"]) / ".local/share/pnpm"
+    pnpm_home.mkdir(parents=True)
+    env["PATH"] = str(pnpm_home)
+    package = {
+        "codex": "@openai/codex",
+        "opencode": "opencode-ai",
+        "claude": "@anthropic-ai/claude-code",
+    }[engine]
+    relative = f"global/5/node_modules/{package}/bin/{engine}.js"
+    target = pnpm_home / relative
+    launcher = _launcher(env, engine, target)
+    launcher.unlink()
+    launcher.write_text(
+        f'#!/bin/sh\nbasedir=${{0%/*}}\nexec node "$basedir/{relative}" "$@"\n'
+    )
+    launcher.chmod(0o755)
+    _stub(env, "node", 'exec /bin/sh "$@"\n')
+    checked = []
+    access = os.access
+
+    def check_access(path: str | Path, mode: int) -> bool:
+        if mode == os.W_OK:
+            checked.append(Path(path))
+            return writable
+        return access(path, mode)
+
+    monkeypatch.setattr(deps.os, "access", check_access)
+    item = _engine_read(env, _engine_spec(engine))
+    assert not launcher.is_symlink()
+    assert item.status == deps.UPDATE_AVAILABLE
+    assert (
+        item.command == ("" if writable else "sudo ") + f"pnpm add -g {package}@latest"
+    )
+    assert item.method == _engine_spec(engine).methods[1]
+    assert item.resolved_path == str(target)
+    assert checked == [target.parent]
+    assert item.note is None
+
+
+@pytest.mark.parametrize("engine", ["claude", "opencode"])
+def test_vendor_pattern_resolves_home_symlink(
+    env: dict[str, str], tmp_path: Path, engine: str
+) -> None:
+    real_home = Path(env["HOME"])
+    linked_home = tmp_path / "linked-home"
+    linked_home.symlink_to(real_home, target_is_directory=True)
+    env["HOME"] = str(linked_home)
+    target = real_home / (
+        ".local/share/claude/versions/1.0.0"
+        if engine == "claude"
+        else ".opencode/bin/opencode"
+    )
+    launcher = _launcher(env, engine, target)
+    if engine == "opencode":
+        launcher.unlink()
+        launcher = linked_home / ".opencode/bin/opencode"
+    item = _engine_read(env, _engine_spec(engine))
+    assert item.method == _engine_spec(engine).methods[-2]
+    assert item.resolved_path == str(target)
+    assert item.command == f"{launcher} {'update' if engine == 'claude' else 'upgrade'}"
+    assert item.note is None
+
+
+def test_pnpm_store_is_not_a_package(env: dict[str, str], tmp_path: Path) -> None:
+    target = tmp_path / "global/5/node_modules/.pnpm/codex@1.0.0/bin/codex.js"
+    launcher = _launcher(env, "codex", target)
+    item = _engine_read(env, _engine_spec())
+    assert item.method is None
+    assert item.command == f"{launcher} update"
+    assert item.note is not None
+
+
+def test_shim_target_follows_first_node_modules_path(tmp_path: Path) -> None:
+    target = tmp_path / "real/node_modules/codex/cli.js"
+    target.parent.mkdir(parents=True)
+    target.touch()
+    shim = tmp_path / "codex"
+    shim.write_text(
+        '#!/bin/sh\n"$basedir/node"\n'
+        '"$basedir/real/node_modules/codex/cli.js"\n'
+        '"$basedir/other/node_modules/codex/cli.js"\n'
+    )
+    # The first qualifying path itself contains a symlink.
+    (tmp_path / "real/node_modules/codex/cli.js").unlink()
+    actual = tmp_path / "actual.js"
+    actual.touch()
+    target.symlink_to(actual)
+    assert deps._shim_target(shim) == actual
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b'\x7fELF"$basedir/global/5/node_modules/codex/cli.js"',
+        b'"$basedir/global/5/node_modules/codex/cli.js"',
+        b'#!/bin/sh\n"$basedir/node"',
+        b'#!/bin/sh\n"$basedir/global/5/node_modules/codex/cli.js"\xff',
+        b'#!/bin/sh\n"$basedir/global/5/node_modules/codex/cli.js"' + b" " * 65536,
+        b'#!/bin/sh\n"$basedir/missing/node_modules/codex/cli.js"',
+    ],
+)
+def test_shim_target_falls_back(tmp_path: Path, content: bytes) -> None:
+    target = tmp_path / "global/5/node_modules/codex/cli.js"
+    target.parent.mkdir(parents=True)
+    target.touch()
+    shim = tmp_path / "codex"
+    shim.write_bytes(content)
+    assert deps._shim_target(shim) == shim
+
+
+def test_shim_target_read_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shim = tmp_path / "codex"
+    shim.write_text('#!/bin/sh\n"$basedir/global/5/node_modules/codex/cli.js"')
+
+    def fail_read(self: Path, mode: str) -> None:
+        raise OSError("read failed")
+
+    monkeypatch.setattr(Path, "open", fail_read)
+    assert deps._shim_target(shim) == shim
+
+
+def test_shim_at_size_limit(tmp_path: Path) -> None:
+    target = tmp_path / "node_modules/codex/cli.js"
+    target.parent.mkdir(parents=True)
+    target.touch()
+    shim = tmp_path / "codex"
+    content = b'#!/bin/sh\n"$basedir/node_modules/codex/cli.js"\n'
+    shim.write_bytes(content.ljust(64 * 1024, b" "))
+    assert deps._shim_target(shim) == target
+    assert deps._shim_target(tmp_path) == tmp_path

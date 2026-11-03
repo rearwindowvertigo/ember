@@ -877,7 +877,11 @@ def _deps_lines(item: deps.Component) -> list[str]:
     if item.error:
         head += f": {item.error}"
     lines = [head]
-    if item.resolved_path is not None:
+    if (
+        item.resolved_path is not None
+        and item.command is not None
+        and item.command_kind == "update"
+    ):
         lines.append(f"  resolved path: {item.resolved_path}")
     if item.command is not None:
         lines.append(f"  {item.command_kind}: {item.command}")

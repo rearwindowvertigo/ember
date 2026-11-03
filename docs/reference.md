@@ -2348,6 +2348,16 @@ OpenCode), and follows its symlinks. It matches this resolved path against
 `[[components.methods]]` in order. The first matching path supplies the
 update command. The dpkg method is tried after all path methods.
 
+For a regular script of at most 64 KiB whose first line starts with `#!`,
+Ember reads the first quoted `$basedir/<relative path>` containing
+`/node_modules/`. It resolves that path against the script's folder,
+following symlinks, and matches the methods against that target. This covers
+pnpm's global shell shims, such as a launcher in `$PNPM_HOME` pointing to
+`$basedir/global/5/node_modules/@openai/codex/bin/codex.js`. ELF binaries
+are not read as scripts. A read or resolution failure, or no such quoted
+path, leaves the launcher as the path to match. Updater commands keep the
+original launcher name.
+
 | Path pattern | Update template |
 |---|---|
 | `{prefix}/lib/node_modules/{package}` | `npm install -g --prefix {prefix} {package}@latest` |
@@ -2362,8 +2372,9 @@ A pattern starts at the beginning of the resolved path and matches either
 the whole path or a leading part ending at a `/` boundary. `{prefix}`
 captures any path, `{package}` captures a name or exactly two segments for
 an `@scope/name`, `{formula}` captures one segment, and `*` stays within one
-segment. `~` uses the owner's home folder. Captured values are shell-quoted
-in the command. `{launcher}` is the full unresolved launcher path.
+segment. Package names cannot start with `.`, so `.pnpm` store folders do
+not match as packages. `~` uses the owner's home folder after resolving its
+symlinks. Captured values are shell-quoted in the command. `{launcher}` is the full unresolved launcher path.
 
 The dpkg method runs `dpkg-query -S <resolved path>` with the shared command
 deadline. One package owning that path supplies `{package}`; a failed,
@@ -2444,8 +2455,9 @@ it was.
 Text output has one line per component, in the order of the list:
 `<label>: <status>[, installed <version>][, newest <version>][: <error>]`,
 then an indented `update: <command>` or `install: <command>` line when there
-is a command. An engine also shows `resolved path: <path>` when found, and
-the could-not-tell note when its update command has no matched method.
+is a command. An engine shows `resolved path: <path>` only with an update
+command, alongside the could-not-tell note when no method matched. JSON
+keeps `resolved_path` and `method` for every component.
 
 `--json` prints one object:
 

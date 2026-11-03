@@ -515,9 +515,8 @@ def test_deps_text(
     captured = capsys.readouterr()
     assert captured.err == ""
     lines = captured.out.splitlines()
-    assert lines[:9] == [
+    assert lines[:8] == [
         "Codex: current, installed 1.0.0, newest 1.0.0",
-        f"  resolved path: {env['PATH']}/codex",
         "OpenCode: missing",
         "  install: curl -fsSL https://opencode.ai/install | bash",
         "Claude Code: missing",
@@ -527,6 +526,7 @@ def test_deps_text(
         "tmux: update available, installed 1.0, newest 1.1",
     ]
     assert lines[-1].startswith("PySide6: ")
+    assert "resolved path:" not in captured.out
 
 
 def test_deps_json_and_refresh(
@@ -542,6 +542,8 @@ def test_deps_json_and_refresh(
         "claude",
     ]
     assert data["components"][0]["status"] == "current"
+    assert data["components"][0]["resolved_path"] == f"{env['PATH']}/codex"
+    assert data["components"][0]["method"] is None
     assert deps_fetch.calls.count(codex) == 1
     assert main(["deps", "--json"], env=env) == 0
     capsys.readouterr()
@@ -1096,3 +1098,19 @@ def test_deps_unknown_install_text_and_json(
     assert item["method"] is None
     assert item["command_kind"] == "update"
     assert item["note"] == "Ember could not tell how the tool was installed."
+
+
+def test_deps_failed_check_hides_path(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str], deps_fetch: _DepsFetch
+) -> None:
+    _deps_stubs(env)
+    _stub(env, "codex", "echo unrecognised-version\n")
+    assert main(["deps"], env=env) == 0
+    output = capsys.readouterr().out
+    assert output.startswith("Codex: check failed")
+    assert "resolved path:" not in output
+    assert "Ember could not tell" not in output
+    assert main(["deps", "--json"], env=env) == 0
+    item = json.loads(capsys.readouterr().out)["components"][0]
+    assert item["resolved_path"] == f"{env['PATH']}/codex"
+    assert item["method"] is None
