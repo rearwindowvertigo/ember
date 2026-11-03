@@ -2350,8 +2350,10 @@ update command. The dpkg method is tried after all path methods.
 
 For a regular script of at most 64 KiB whose first line starts with `#!`,
 Ember reads the first quoted `$basedir/<relative path>` containing
-`/node_modules/`. It resolves that path against the script's folder,
-following symlinks, and matches the methods against that target. This covers
+`/node_modules/`. It makes that path absolute against the script's folder
+and normalizes it without following symlinks for path-method matching.
+The fully resolved target supplies `resolved_path`, dpkg's ownership lookup,
+and the permission check outside npm. This covers
 pnpm's global shell shims, such as a launcher in `$PNPM_HOME` pointing to
 `$basedir/global/5/node_modules/@openai/codex/bin/codex.js`. ELF binaries
 are not read as scripts. A read or resolution failure, or no such quoted
@@ -2368,7 +2370,7 @@ original launcher name.
 | `~/.opencode/bin/opencode` (OpenCode) | `{launcher} upgrade` |
 | `kind = "dpkg"`, no path | `sudo apt install --only-upgrade {package}` |
 
-A pattern starts at the beginning of the resolved path and matches either
+A pattern starts at the beginning of the candidate path and matches either
 the whole path or a leading part ending at a `/` boundary. `{prefix}`
 captures any path, `{package}` captures a name or exactly two segments for
 an `@scope/name`, `{formula}` captures one segment, and `*` stays within one

@@ -1159,8 +1159,17 @@ def test_pnpm_shell_shim(
         "claude": "@anthropic-ai/claude-code",
     }[engine]
     relative = f"global/5/node_modules/{package}/bin/{engine}.js"
-    target = pnpm_home / relative
+    modules = pnpm_home / "global/5/node_modules"
+    stored_package = (
+        modules / ".pnpm" / f"{package.replace('/', '+')}@1.0.0/node_modules" / package
+    )
+    target = stored_package / f"bin/{engine}.js"
     launcher = _launcher(env, engine, target)
+    package_link = modules / package
+    package_link.parent.mkdir(parents=True, exist_ok=True)
+    package_link.symlink_to(
+        os.path.relpath(stored_package, package_link.parent), target_is_directory=True
+    )
     launcher.unlink()
     launcher.write_text(
         f'#!/bin/sh\nbasedir=${{0%/*}}\nexec node "$basedir/{relative}" "$@"\n'
@@ -1179,6 +1188,7 @@ def test_pnpm_shell_shim(
     monkeypatch.setattr(deps.os, "access", check_access)
     item = _engine_read(env, _engine_spec(engine))
     assert not launcher.is_symlink()
+    assert package_link.is_symlink()
     assert item.status == deps.UPDATE_AVAILABLE
     assert (
         item.command == ("" if writable else "sudo ") + f"pnpm add -g {package}@latest"
@@ -1222,14 +1232,14 @@ def test_pnpm_store_is_not_a_package(env: dict[str, str], tmp_path: Path) -> Non
     assert item.note is not None
 
 
-def test_shim_target_follows_first_node_modules_path(tmp_path: Path) -> None:
+def test_shim_target_preserves_first_node_modules_path(tmp_path: Path) -> None:
     target = tmp_path / "real/node_modules/codex/cli.js"
     target.parent.mkdir(parents=True)
     target.touch()
     shim = tmp_path / "codex"
     shim.write_text(
         '#!/bin/sh\n"$basedir/node"\n'
-        '"$basedir/real/node_modules/codex/cli.js"\n'
+        '"$basedir/./real/node_modules/codex/../codex/cli.js"\n'
         '"$basedir/other/node_modules/codex/cli.js"\n'
     )
     # The first qualifying path itself contains a symlink.
@@ -1237,7 +1247,8 @@ def test_shim_target_follows_first_node_modules_path(tmp_path: Path) -> None:
     actual = tmp_path / "actual.js"
     actual.touch()
     target.symlink_to(actual)
-    assert deps._shim_target(shim) == actual
+    assert deps._shim_target(shim) == target
+    assert target.resolve() == actual
 
 
 @pytest.mark.parametrize(
@@ -1282,3 +1293,30 @@ def test_shim_at_size_limit(tmp_path: Path) -> None:
     shim.write_bytes(content.ljust(64 * 1024, b" "))
     assert deps._shim_target(shim) == target
     assert deps._shim_target(tmp_path) == tmp_path
+
+
+def test_shim_dpkg_lookup_uses_resolved_target(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    target = tmp_path / "store/node_modules/codex/bin/codex.js"
+    launcher = _launcher(env, "codex", target)
+    modules = tmp_path / "node_modules"
+    modules.mkdir()
+    (modules / "codex").symlink_to(target.parent.parent, target_is_directory=True)
+    launcher.unlink()
+    launcher.write_text(
+        "#!/bin/sh\nbasedir=${0%/*}\n"
+        'exec /bin/sh "$basedir/../node_modules/codex/bin/codex.js" "$@"\n'
+    )
+    launcher.chmod(0o755)
+    log = tmp_path / "dpkg-path"
+    _stub(
+        env,
+        "dpkg-query",
+        f'printf "%s" "$2" > {shlex.quote(str(log))}\nprintf "%s\\n" "codex: $2"\n',
+    )
+    item = _engine_read(env, _engine_spec())
+    assert log.read_text() == str(target)
+    assert item.resolved_path == str(target)
+    assert item.method is not None and item.method.kind == "dpkg"
+    assert item.command == "sudo apt install --only-upgrade codex"

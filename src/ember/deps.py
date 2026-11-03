@@ -1014,7 +1014,11 @@ def _dpkg_owner(resolved: Path, options: _Options) -> str | None:
 
 
 def _update_command(
-    spec: Spec, launcher: str, resolved: Path | None, options: _Options
+    spec: Spec,
+    launcher: str,
+    resolved: Path | None,
+    method_path: Path | None,
+    options: _Options,
 ) -> tuple[str, Method | None]:
     command = shlex.join([launcher, *shlex.split(spec.updater or "")[1:]])
     matched = None
@@ -1025,10 +1029,11 @@ def _update_command(
             break
         values = {"launcher": launcher}
         if method.path is not None:
-            candidate = str(resolved)
+            candidate_path = method_path or resolved
+            candidate = str(candidate_path)
             if method.path.startswith("~/"):
                 try:
-                    relative = resolved.relative_to(
+                    relative = candidate_path.relative_to(
                         paths.home_dir(options.env).resolve()
                     )
                 except OSError, RuntimeError, ValueError:
@@ -1058,7 +1063,7 @@ def _update_command(
 
 
 def _shim_target(resolved: Path) -> Path:
-    """Return a small script's first quoted basedir node_modules target."""
+    """Return a script's normalized target path without following its symlinks."""
     limit = 64 * 1024
     try:
         info = resolved.stat()
@@ -1072,7 +1077,9 @@ def _shim_target(resolved: Path) -> Path:
         for match in re.finditer(r"""(["'])\$basedir/([^"'\r\n]+)\1""", text):
             relative = match.group(2)
             if not Path(relative).is_absolute() and "/node_modules/" in "/" + relative:
-                return (resolved.parent / relative).resolve(strict=True)
+                target = Path(os.path.abspath(resolved.parent / relative))
+                target.resolve(strict=True)
+                return target
     except OSError, UnicodeError, RuntimeError:
         pass
     return resolved
@@ -1093,13 +1100,18 @@ def _evaluate(
     resolved = None
     with contextlib.suppress(OSError, RuntimeError):
         resolved = Path(launcher).resolve(strict=True)
+    method_path = resolved
     if resolved is not None:
-        resolved = _shim_target(resolved)
+        target = _shim_target(resolved)
+        with contextlib.suppress(OSError, RuntimeError):
+            resolved, method_path = target.resolve(strict=True), target
     row = replace(
         outcome.component, resolved_path=None if resolved is None else str(resolved)
     )
     if spec.updater is not None:
-        command, method = _update_command(spec, launcher, resolved, options)
+        command, method = _update_command(
+            spec, launcher, resolved, method_path, options
+        )
         row = replace(row, method=method)
         if row.status == UPDATE_AVAILABLE:
             row = replace(
