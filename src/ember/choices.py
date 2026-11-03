@@ -724,13 +724,15 @@ def _write(
     env: Mapping[str, str] | None,
     now: float,
     expect_generation: object,
-    change: Callable[[sqlite3.Connection], None],
+    change: Callable[[sqlite3.Connection], bool],
     reply: Callable[[sqlite3.Connection, int], dict[str, Any]],
 ) -> dict[str, Any]:
     """Run `change` in one write transaction and build the reply.
 
     The transaction checks `expect_generation`, stores expiry, runs `change`
-    and raises the generation by one when anything changed.
+    and raises the generation by one when `change` reports a settings or
+    pending one-time choice write. Claim-table writes and expiry do not
+    raise the generation.
     """
     expect = _check_expect(expect_generation)
     with db.translate_errors(), db.open_write(env) as conn, db.transaction(conn):
@@ -739,15 +741,13 @@ def _write(
             raise db.StaleGenerationError(
                 f"generation is {generation}, not {expect}; reload and try again"
             )
-        before = conn.total_changes
         conn.execute("DELETE FROM once WHERE set_at + ? <= ?", (ONCE_TTL, now))
         conn.execute(
             "UPDATE claims SET status = 'gone', copy = NULL "
             "WHERE status = 'claimed' AND at + ? <= ?",
             (CLAIM_TTL, now),
         )
-        change(conn)
-        if conn.total_changes != before:
+        if change(conn):
             generation = db.bump_generation(conn)
         return reply(conn, generation)
 
@@ -789,25 +789,26 @@ def claim(
 
     refused: list[bool] = []
 
-    def change(conn: sqlite3.Connection) -> None:
+    def change(conn: sqlite3.Connection) -> bool:
         known = conn.execute("SELECT 1 FROM claims WHERE id = ?", (run_id,)).fetchone()
         if known is not None:
-            return
+            return False
         row = conn.execute("SELECT value FROM once WHERE id = 1").fetchone()
         if row is not None and _decode_object(row[0], "one-time choice", []) is None:
             refused.append(True)
-            return
+            return False
         if row is None:
             conn.execute(
                 "INSERT INTO claims (id, status, at, copy) VALUES (?, 'none', ?, NULL)",
                 (run_id, at),
             )
-            return
+            return False
         conn.execute(
             "INSERT INTO claims (id, status, at, copy) VALUES (?, 'claimed', ?, ?)",
             (run_id, at, row[0]),
         )
         conn.execute("DELETE FROM once WHERE id = 1")
+        return True
 
     def reply(conn: sqlite3.Connection, generation: int) -> dict[str, Any]:
         state = _load(conn, generation, run_id, at, include_once=bool(refused))
@@ -842,13 +843,14 @@ def finish(
     run_id = check_id(id)
     at = _now(now)
 
-    def change(conn: sqlite3.Connection) -> None:
+    def change(conn: sqlite3.Connection) -> bool:
         conn.execute(
             "INSERT INTO claims (id, status, at, copy) VALUES (?, 'gone', ?, NULL) "
             "ON CONFLICT (id) DO UPDATE SET status = 'gone', copy = NULL, "
             "at = excluded.at WHERE status != 'gone'",
             (run_id, at),
         )
+        return False
 
     def reply(conn: sqlite3.Connection, generation: int) -> dict[str, Any]:
         return {
@@ -932,8 +934,9 @@ def set_settings(
     """
     values = _check_values(values, SETTING)
 
-    def change(conn: sqlite3.Connection) -> None:
+    def change(conn: sqlite3.Connection) -> bool:
         _check_shortlisted(values, {**_stored_settings(conn), **values})
+        before = conn.total_changes
         for name, value in values.items():
             conn.execute(
                 "INSERT INTO settings (key, value) VALUES (?, ?) "
@@ -941,6 +944,7 @@ def set_settings(
                 "WHERE value != excluded.value",
                 (name, _canonical(value)),
             )
+        return conn.total_changes != before
 
     return _write(env, _now(now), expect_generation, change, _settings_reply)
 
@@ -973,8 +977,13 @@ def clear_settings(
     for name in names:
         _get_key(name, SETTING)
 
-    def change(conn: sqlite3.Connection) -> None:
-        conn.executemany("DELETE FROM settings WHERE key = ?", [(n,) for n in names])
+    def change(conn: sqlite3.Connection) -> bool:
+        return (
+            conn.executemany(
+                "DELETE FROM settings WHERE key = ?", [(n,) for n in names]
+            ).rowcount
+            > 0
+        )
 
     return _write(env, _now(now), expect_generation, change, _settings_reply)
 
@@ -1009,12 +1018,13 @@ def set_once(
         raise InvalidChoiceError("a one-time choice needs at least one value")
     at = _now(now)
 
-    def change(conn: sqlite3.Connection) -> None:
+    def change(conn: sqlite3.Connection) -> bool:
         _check_shortlisted(values, _stored_settings(conn))
         conn.execute(
             "INSERT OR REPLACE INTO once (id, value, set_at) VALUES (1, ?, ?)",
             (_canonical(values), at),
         )
+        return True
 
     def reply(conn: sqlite3.Connection, generation: int) -> dict[str, Any]:
         return {"once": values, "generation": generation, "errors": []}
@@ -1043,8 +1053,8 @@ def clear_once(
             schema, or is at another generation than `expect_generation`.
     """
 
-    def change(conn: sqlite3.Connection) -> None:
-        conn.execute("DELETE FROM once WHERE id = 1")
+    def change(conn: sqlite3.Connection) -> bool:
+        return conn.execute("DELETE FROM once WHERE id = 1").rowcount > 0
 
     def reply(conn: sqlite3.Connection, generation: int) -> dict[str, Any]:
         return {"cleared": "one-time", "generation": generation, "errors": []}

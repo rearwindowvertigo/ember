@@ -1,3 +1,4 @@
+import fcntl
 import io
 import json
 import os
@@ -6,7 +7,9 @@ import subprocess
 import time
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1071,6 +1074,121 @@ with lock.hold(flow_id):
         if process.poll() is None:
             process.kill()
         process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("busy_lock", ["runner", "lifecycle"])
+@pytest.mark.parametrize("deadline_seconds", [60.0, 2.5])
+def test_cancel_deadline_and_retry(
+    flow: dict[str, Any],
+    env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    as_json: bool,
+    busy_lock: str,
+    deadline_seconds: float,
+) -> None:
+    flow_id = flow["id"]
+    elapsed = 0.0
+    polling = False
+    lifecycle_held = False
+    original_flock = fcntl.flock
+    requests: list[dict[str, Any]] = []
+
+    def flock(fd: int, operation: int) -> None:
+        if polling and os.readlink(f"/proc/self/fd/{fd}").endswith("lifecycle.lock"):
+            assert operation & fcntl.LOCK_NB
+        original_flock(fd, operation)
+
+    def signal_cancel(value: Mapping[str, Any], environment: Mapping[str, str]) -> None:
+        nonlocal elapsed, polling
+        request = record.cancel_request(flow_id, environment)
+        assert request is not None
+        requests.append(request)
+        elapsed += 1.0
+        polling = True
+
+    with ExitStack() as runner, ExitStack() as lifecycle:
+        runner.enter_context(lock.hold(flow_id, env))
+
+        def sleep(seconds: float) -> None:
+            nonlocal elapsed, lifecycle_held
+            elapsed += seconds
+            if busy_lock == "lifecycle" and not lifecycle_held:
+                lifecycle.enter_context(command.lifecycle(flow_id, env, blocking=False))
+                lifecycle_held = True
+                runner.close()
+
+        assert command.CANCEL_SECONDS == 60.0
+        monkeypatch.setattr(command, "CANCEL_SECONDS", deadline_seconds)
+        monkeypatch.setattr(command, "_signal_cancel", signal_cancel)
+        monkeypatch.setattr(command.fcntl, "flock", flock)
+        monkeypatch.setattr(
+            command,
+            "time",
+            SimpleNamespace(time=time.time, monotonic=lambda: elapsed, sleep=sleep),
+        )
+        options = ["--json"] if as_json else []
+        before = record.load(flow_id, env)
+        for attempt in range(2):
+            polling = False
+            code, out, err = invoke(
+                env,
+                "--cancel",
+                flow_id,
+                "--reason",
+                "first" if not attempt else "new",
+                *options,
+            )
+            assert code == 75 and not out
+            assert err == (
+                f"emb flow: the runner for {flow_id} is still running after "
+                f"{deadline_seconds:g} seconds\n"
+                f"next: emb flow --status {flow_id}\n"
+            )
+            assert elapsed == (attempt + 1) * deadline_seconds
+            assert record.load(flow_id, env) == before
+            assert record.cancel_request(flow_id, env) == requests[0]
+            assert requests[-1] == requests[0]
+            assert requests[0]["reason"] == "first"
+            lifecycle.close()
+            lifecycle_held = False
+            if busy_lock == "lifecycle":
+                runner.enter_context(lock.hold(flow_id, env))
+        runner.close()
+
+    polling = False
+    code, out, err = invoke(env, "--cancel", flow_id, "--reason", "new", "--json")
+    assert code == 0, err
+    assert json.loads(out)["reason"] == "first"
+    assert json.loads(out)["status"] == "cancelled"
+    assert record.cancel_request(flow_id, env) == requests[0]
+
+
+def test_cancel_runner_releases_during_last_sleep(
+    flow: dict[str, Any], env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    elapsed = 0.0
+    with ExitStack() as runner:
+        runner.enter_context(lock.hold(flow["id"], env))
+
+        def sleep(seconds: float) -> None:
+            nonlocal elapsed
+            assert record.cancel_request(flow["id"], env) is not None
+            elapsed += seconds
+            runner.close()
+
+        monkeypatch.setattr(command, "CANCEL_SECONDS", 0.5)
+        monkeypatch.setattr(
+            command,
+            "time",
+            SimpleNamespace(time=time.time, monotonic=lambda: elapsed, sleep=sleep),
+        )
+        code, out, err = invoke(env, "--cancel", flow["id"], "--json")
+
+    assert code == 0, err
+    assert elapsed == 0.5
+    assert json.loads(out)["status"] == "cancelled"
+    assert err == f"next: emb flow --resume {flow['id']}\n"
 
 
 def test_cancel_loses_race_to_completed_flow(

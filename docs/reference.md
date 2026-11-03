@@ -99,8 +99,11 @@ names the invalid values, `menu` is `null` and the exit code is 0.
 
 ### Generation
 
-Each write that changes the database raises `generation` by one. A write that
-changes nothing leaves it.
+`--set`, `--clear`, `--once` and `--clear-once` raise `generation` by one
+when they write a standing-setting or pending one-time-choice row. A claim
+that consumes a pending one-time choice also raises it by one. Other claims,
+claim reads, finishes, and expiry of claims or pending one-time choices leave
+it unchanged. A write that changes no row leaves it unchanged.
 
 ### Read reply
 
@@ -1255,10 +1258,11 @@ failure leaves the queued answer available for `--resume`.
 ### Cancellation
 
 `--cancel FLOW [--reason TEXT]` cancels a flow that is `starting`, `running`,
-`checking` or `stopped`. It stops the runner and waits for its lifetime lock
-to be released. A running flow check ends through the runner's signal stop
-path. Writer and reviewer turns keep running. Cancellation closes no task
-run and deletes no branch or worktree.
+`checking` or `stopped`. It stops the runner and waits up to 60 seconds from
+writing `cancel.json` for its lifetime lock to be released, then exits 75
+if the deadline passes. A running flow check ends through the runner's
+signal stop path. Writer and reviewer turns keep running. Cancellation
+closes no task run and deletes no branch or worktree.
 
 Under `lifecycle.lock`, cancellation clears the startup reservation and
 writes `cancel.json` with `at` (epoch seconds) and `reason` (text or null)
@@ -1272,7 +1276,11 @@ A `done`, `failed` or `cancelled` flow is refused with exit 75 and its record
 is unchanged. A flow that ends before cancellation takes the lifecycle lock
 is also refused. An unknown flow exits 65 for `--cancel`; other flow modes
 return 64 for an unknown flow. Invalid flow id syntax returns 64 in every
-mode. Cancellation waits until the runner releases its lifetime lock.
+mode. Cancellation exits 75 if the 60-second deadline passes, leaves
+`cancel.json` in place, and prints `emb flow: the runner for <id> is still
+running after 60 seconds` and `next: emb flow --status <id>` on standard
+error with nothing on standard output. A later `--cancel` waits again with
+the same request.
 
 `--resume` restarts a cancelled flow from its recorded task states. Startup
 clears the cancel request; the runner clears `reason` and `ended_at` when
@@ -1506,7 +1514,7 @@ every top-level field except `tasks`, then each task's state and reason.
 | 71 | Runner session failed to start | `next: emb flow --resume <id>` |
 | 72 | Runner lost before the flow ended | `next: emb flow --resume <id>` |
 | 74 | Interrupted watch; cursor unchanged | `next: emb flow --watch <id> --json` |
-| 75 | Runner live or starting, answer not allowed, flow already done, cancellation pending, cancellation of an ended flow, or a lead answer on a cancelled flow | `--status`, `--watch`, or `--resume` for a cancelled lead answer |
+| 75 | Runner live or starting, answer not allowed, flow already done, cancellation pending, cancellation of an ended flow, the 60-second cancellation deadline passed, or a lead answer on a cancelled flow | `--status` for the cancellation deadline, `--status`, `--watch`, or `--resume` for a cancelled lead answer |
 | 82 | Flow failed, was cancelled, or ended with tasks unmerged | The watch report's next action |
 
 Every nonzero exit prints an `emb flow:` diagnostic or watch report and
@@ -2121,15 +2129,16 @@ When the worktree exists and no open run uses it,
 `git -C <dir> worktree remove <path>` precedes branch deletion with `&&`.
 Paths and branch names are shell-quoted. Merged and absent branches have
 no branch-deletion command; their remaining worktrees still have worktree
-removal commands in text output. Prune never prints `emb cleanup`.
+removal commands. Prune never prints `emb cleanup`.
 
-`--json` prints an object with three arrays:
+`--json` prints an object with four arrays:
 
 | Field | Entries |
 |---|---|
 | `removed` | `{id, kind}`, where kind is `run`, `flow` or `panel`; dry runs list candidates here |
 | `skipped` | `{id, reason}` |
-| `branches` | `{branch, command}`, including worktree removal commands when a worktree exists |
+| `branches` | `{branch, command}`; a branch command already includes its worktree removal when listed in `worktrees` |
+| `worktrees` | `{branch, worktree, command}` for every worktree listed in text output, including merged and deleted branches; empty when there are none |
 
 Read, lock, repository-query and removal failures are reported as
 `emb prune: <message>` on standard error. Processing continues after each
