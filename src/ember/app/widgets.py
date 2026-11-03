@@ -5,6 +5,7 @@ repaint on `theme.signals.changed`. The other widgets are styled by the
 theme's style sheet through dynamic properties.
 """
 
+import math
 from collections.abc import Callable, Sequence
 from typing import cast
 
@@ -24,19 +25,23 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QColor,
+    QContextMenuEvent,
     QFont,
     QFontMetrics,
     QGuiApplication,
     QHideEvent,
     QIcon,
     QKeyEvent,
+    QKeySequence,
     QPainter,
     QPaintEvent,
     QPen,
+    QResizeEvent,
     QShowEvent,
     QStandardItem,
     QStandardItemModel,
     QTextCharFormat,
+    QTextDocument,
     QTextLayout,
 )
 from PySide6.QtWidgets import (
@@ -47,7 +52,9 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QStyle,
     QStyledItemDelegate,
@@ -817,6 +824,73 @@ class CommandLine(QFrame):
         set_icon(self.copy_button, icons.icon("copy", theme.color("text-primary"), 16))
 
 
+class _CommandLabel(QLabel):
+    """A selectable command with display-only break opportunities after slashes."""
+
+    def __init__(self, command: str) -> None:
+        super().__init__(command.replace("/", "/\u200b"))
+        self._command = command
+        self.setFont(theme.font("code"))
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setWordWrap(True)
+        self.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setMargin(8)
+        self.setAccessibleName(command)
+        self.setAccessibleDescription(command)
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802, D102
+        document = QTextDocument()
+        document.setDefaultFont(self.font())
+        document.setDocumentMargin(0)
+        document.setPlainText(self.text())
+        document.setTextWidth(max(1, width - 2 * self.margin()))
+        return math.ceil(document.size().height()) + 2 * self.margin()
+
+    def copy(self) -> None:
+        """Put the original command on the clipboard."""
+        QGuiApplication.clipboard().setText(self._command)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: D102
+        if event.matches(QKeySequence.StandardKey.Copy):
+            self.copy()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: D102
+        menu = QMenu(self)
+        copy = menu.addAction("Copy")
+        copy.setEnabled(self.hasSelectedText())
+        copy.triggered.connect(
+            lambda: QGuiApplication.clipboard().setText(
+                self.selectedText().replace("\u200b", "")
+            )
+        )
+        menu.exec(event.globalPos())
+        menu.deleteLater()
+
+
+class _CommandScrollArea(QScrollArea):
+    """Show a scrollbar only when the content exceeds the full viewport height."""
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: D102
+        content = self.widget()
+        if content is not None:
+            layout = content.layout()
+            assert layout is not None
+            height = layout.totalHeightForWidth(self.contentsRect().width())
+            self.setVerticalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+                if height > self.contentsRect().height()
+                else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            )
+        super().resizeEvent(event)
+
+
 class RunCommandDialog(QDialog):
     """Asks before a command runs in the owner's terminal (design J5).
 
@@ -839,26 +913,36 @@ class RunCommandDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(16)
-        title = QLabel(self.TITLE)
-        title.setFont(theme.font("title"))
-        layout.addWidget(title)
-        text = QLabel(self.TEXT)
-        text.setWordWrap(True)
-        text.setProperty("role", "secondary")
-        layout.addWidget(text)
-        self.command = QLabel(command)
-        self.command.setProperty("role", "command")
-        self.command.setFont(theme.font("code"))
-        self.command.setTextFormat(Qt.TextFormat.PlainText)
-        self.command.setWordWrap(True)
-        self.command.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        self.title = QLabel(self.TITLE)
+        self.title.setFont(theme.font("title"))
+        layout.addWidget(self.title)
+        self.scroll_area = _CommandScrollArea()
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        self.command.setAccessibleName("Command")
-        self.command.setAccessibleDescription(command)
-        layout.addWidget(self.command)
-        row = QHBoxLayout()
+        content = QWidget()
+        self._body = QVBoxLayout(content)
+        self._body.setContentsMargins(0, 0, 0, 0)
+        self._body.setSpacing(16)
+        self.text = QLabel(self.TEXT)
+        self.text.setWordWrap(True)
+        self.text.setProperty("role", "secondary")
+        self.command = _CommandLabel(command)
+        for label in (self.text, self.command):
+            label.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+            )
+            self._body.addWidget(label)
+        self.scroll_area.setWidget(content)
+        layout.addWidget(self.scroll_area)
+        self._row = QHBoxLayout()
+        self.copy_button = button("Copy", "secondary")
+        self.copy_button.setAutoDefault(False)
+        self.copy_button.clicked.connect(self.command.copy)
+        self._row.addWidget(self.copy_button)
+        row = self._row
         row.addStretch(1)
         self.cancel_button = button("Cancel", "secondary")
         self.cancel_button.clicked.connect(self.reject)
@@ -871,8 +955,45 @@ class RunCommandDialog(QDialog):
         self.cancel_button.setAutoDefault(True)
         self.cancel_button.setDefault(True)
         self.cancel_button.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._limit_size()
+
+    def _limit_size(self) -> None:
+        available = self.screen().availableGeometry().size() - QSize(96, 96)
+        self.setMaximumSize(available)
+
+    def sizeHint(self) -> QSize:  # noqa: D102
+        self.ensurePolished()
+        layout = self.layout()
+        assert layout is not None
+        margins = layout.contentsMargins()
+        horizontal = margins.left() + margins.right()
+        vertical = margins.top() + margins.bottom()
+        # Reserve title-bar controls on both sides of the window title.
+        title_bar = self.fontMetrics().horizontalAdvance(self.windowTitle()) + 4 * (
+            self.style().pixelMetric(QStyle.PixelMetric.PM_TitleBarHeight)
+        )
+        width = min(
+            self.maximumWidth(),
+            max(
+                title_bar,
+                horizontal + self.title.sizeHint().width(),
+                horizontal + self._row.sizeHint().width(),
+                horizontal + self.text.sizeHint().width(),
+                horizontal + self.command.sizeHint().width(),
+            ),
+        )
+        height = (
+            vertical
+            + self.title.sizeHint().height()
+            + self._body.totalHeightForWidth(width - horizontal)
+            + self._row.sizeHint().height()
+            + 2 * layout.spacing()
+        )
+        return QSize(width, min(height, self.maximumHeight()))
 
     def showEvent(self, event: QShowEvent) -> None:  # noqa: D102
+        self._limit_size()
+        self.resize(self.sizeHint())
         super().showEvent(event)
         self.cancel_button.setFocus(Qt.FocusReason.OtherFocusReason)
 
