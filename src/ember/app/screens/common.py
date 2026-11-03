@@ -250,6 +250,42 @@ def name_and_help(name: str, help_text: str) -> QWidget:
     return box
 
 
+class TooltipRow(QWidget):
+    """A setting's name over its help line, its control on the right, and a tooltip.
+
+    The tooltip explains the setting more fully than the help line; it shows on
+    the name, the help line and the control. `help` can be redrawn as the
+    control's value changes.
+    """
+
+    def __init__(
+        self, name: str, help_text: str, tooltip: str, control: QWidget
+    ) -> None:
+        """Lay out the row.
+
+        Args:
+            name: The setting's name.
+            help_text: One line of help under the name.
+            tooltip: The fuller explanation.
+            control: The picker, segmented control or switch.
+        """
+        super().__init__()
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(16)
+        column = QVBoxLayout()
+        column.setSpacing(2)
+        self.heading = QLabel(name)
+        self.heading.setFont(theme.font("label"))
+        self.help = label(help_text, "secondary")
+        column.addWidget(self.heading)
+        column.addWidget(self.help)
+        row.addLayout(column, 1)
+        row.addWidget(control, 0, Qt.AlignmentFlag.AlignVCenter)
+        for widget in (self.heading, self.help, control):
+            widget.setToolTip(tooltip)
+
+
 def titled_card(title: str) -> tuple[widgets.Card, QVBoxLayout]:
     """Return a card with a heading, and the layout under the heading.
 

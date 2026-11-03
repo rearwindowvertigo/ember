@@ -11,6 +11,11 @@ once; choosing the value already saved saves nothing. Multi-task work chooses
 Ask each time, Flow or Claude Workflow. Panel lists up to eight members with
 Add member and Remove. Panel controls wait for a save and refresh before
 accepting another edit. One-time choices are not shown.
+
+Planning sets the gap check: its reviewer, when it runs and which gaps reach
+the owner. Flows and Claude Workflows hold the settings of each kind of
+multi-task work; Flows shows unless Multi-task work is Claude Workflow, and
+Claude Workflows unless it is Flow. Every setting there has a tooltip.
 """
 
 from collections.abc import Mapping, Sequence
@@ -29,6 +34,7 @@ from ember import choices, db
 from ember.app import icons, theme, widgets
 from ember.app.screens.common import (
     ToneLine,
+    TooltipRow,
     chain_tab_order,
     clear_layout,
     engine_name,
@@ -75,12 +81,127 @@ ROLES = (
         "reviewer",
         "Reviewer",
         "Reads the writer's branch and reports. Never edits. "
-        "Used for read-only single runs, a flow's reviewer when its plan and "
-        "command name none, and every gap check that names no reviewer, "
-        "including the one before a flow.",
+        "Used for read-only single runs, and by the Gap check reviewer and "
+        "Flow reviewer while they are Same as Reviewer.",
     ),
 )
 """`(role, name, help)` for each row."""
+
+DERIVED = (
+    (
+        "gapcheck.reviewer",
+        "Gap check reviewer",
+        "Reads a plan before work starts and lists what it leaves open.",
+        "The model that checks a flow or Claude Workflow plan for gaps before "
+        "any worker starts. Same as Reviewer uses the single-task Reviewer.",
+        "Same as Reviewer",
+    ),
+    (
+        "flow.writer",
+        "Flow writer",
+        "Writes each flow task.",
+        "The model that writes every task of a flow. Same as Writer uses the "
+        "single-task Writer. A flow Claude starts with named workers uses those.",
+        "Same as Writer",
+    ),
+    (
+        "flow.reviewer",
+        "Flow reviewer",
+        "Reviews each flow task, and the whole flow when that is on.",
+        "The model that reviews every flow task and, with Review the whole "
+        "flow on, the whole flow once before Claude merges it. Same as "
+        "Reviewer uses the single-task Reviewer.",
+        "Same as Reviewer",
+    ),
+)
+"""`(key, name, help, tooltip, same text)` for each worker row with a Same choice."""
+
+WHEN = tuple(
+    (
+        value,
+        {"off": "Off", "always": "Always", "ask": "Ask each time"}.get(
+            value, f"{value}+ tasks"
+        ),
+    )
+    for value in choices.GAPCHECK_WHEN
+)
+WHEN_TIP = (
+    "When Claude has a plan checked for gaps before a flow or Claude Workflow "
+    "starts. A plan the setting skips starts without a check and without a "
+    "question; Claude's report says so."
+)
+ASKS = (("high", "High only"), ("medium", "High and medium"), ("all", "All"))
+ASKS_TIP = (
+    "Which gaps Claude brings to you. Gaps below the line take the default the "
+    "gap check proposes, written into the plan, and Claude lists them in its "
+    "report."
+)
+PARALLEL = tuple((value, value) for value in choices.FLOW_PARALLEL)
+STALL = tuple((value, f"{value} min") for value in choices.FLOW_STALL)
+AGENTS = tuple((value, value) for value in choices.WORKFLOW_AGENTS)
+LATE = (("ask", "Ask me"), ("wait", "Wait once more"), ("stop", "Stop"))
+SEGMENTS = (
+    (
+        "flow.parallel",
+        "Tasks at once",
+        "How many flow tasks run side by side.",
+        "The most flow tasks that run at the same time. A plan that sets its "
+        "own parallel count wins.",
+        PARALLEL,
+    ),
+    (
+        "flow.stall",
+        "Stall after",
+        "Minutes without screen changes before a task stops waiting.",
+        "How long a flow worker's screen may stay still before Ember stops "
+        "waiting on it and asks Claude.",
+        STALL,
+    ),
+    (
+        "workflow.agents",
+        "Agents at once",
+        "Agents use this session's Claude model.",
+        "The most Claude Workflow agents that run at the same time.",
+        AGENTS,
+    ),
+    (
+        "workflow.late",
+        "When an agent runs late",
+        "After its expected time plus half again, or 10 minutes.",
+        "What Claude does when a Claude Workflow agent runs past its "
+        "deadline: ask you, wait one more deadline, or stop the agent.",
+        LATE,
+    ),
+)
+"""`(key, name, help, tooltip, choices)` for each segmented setting."""
+
+WHOLE_TIP = (
+    "After every task of a flow merges, the Flow reviewer reads the whole "
+    "flow's changes once, with the review bar, before Claude merges the flow."
+)
+
+
+def when_help(value: str) -> str:
+    """Return the help line under Run the gap check for a value."""
+    if value == "off":
+        return "No gap check. Claude starts work straight from the plan."
+    if value == "always":
+        return "Before every flow and Claude Workflow."
+    if value == "ask":
+        return "Claude asks you before each plan."
+    least = int(value)
+    rest = "1 task" if least == 2 else f"1 to {least - 1} tasks"
+    return f"Plans of {least} or more tasks. Plans of {rest} start without one."
+
+
+def asks_help(value: str) -> str:
+    """Return the help line under Gaps Claude asks you about for a value."""
+    return {
+        "high": "Medium and low gaps take their default; Claude lists them.",
+        "medium": "Low gaps take their default; Claude lists them.",
+        "all": "High gaps one by one; medium and low together in one question.",
+    }.get(value, "")
+
 
 RUN_AS = (("cli", "CLI"), ("subagent", "Subagent"))
 """The choices of how a Claude model runs."""
@@ -236,6 +357,18 @@ class _Role:
         self.run_as_row = QWidget()
 
 
+class _Derived:
+    """A worker row with a Same choice: its picker and warning."""
+
+    def __init__(self, key: str, name: str, same: str) -> None:
+        self.key = key
+        self.same = same
+        self.picker = widgets.Picker()
+        self.picker.setAccessibleName(name)
+        self.picker.setMinimumWidth(280)
+        self.warning = ToneLine("warning")
+
+
 class MenuScreen(QWidget):
     """The standing choices for single tasks, multi-task work and panels."""
 
@@ -301,6 +434,47 @@ class MenuScreen(QWidget):
         empty_layout.addWidget(self.open_engines)
         layout.addWidget(self.empty)
 
+        self.derived: dict[str, _Derived] = {}
+        self.segments: dict[str, widgets.Segmented] = {}
+        rows: dict[str, TooltipRow] = {}
+        for key, name, help_text, tip, same in DERIVED:
+            derived = _Derived(key, name, same)
+            self.derived[key] = derived
+            rows[key] = TooltipRow(name, help_text, tip, derived.picker)
+            derived.picker.activated.connect(
+                lambda _index, derived=derived: self._derived_picked(derived)
+            )
+        for key, name, help_text, tip, values in SEGMENTS:
+            control = widgets.Segmented(values)
+            control.setAccessibleName(name)
+            control.changed.connect(
+                lambda value, key=key: self._segment_picked(key, value)
+            )
+            self.segments[key] = control
+            rows[key] = TooltipRow(name, help_text, tip, control)
+
+        planning_card, planning = titled_card("Planning")
+        planning.addWidget(rows["gapcheck.reviewer"])
+        planning.addWidget(self.derived["gapcheck.reviewer"].warning)
+        self.when = widgets.Picker()
+        self.when.setAccessibleName("Run the gap check")
+        self.when.setMinimumWidth(180)
+        for value, text in WHEN:
+            self.when.add_option(text, value)
+        self.when.activated.connect(self._when_picked)
+        self.when_row = TooltipRow("Run the gap check", "", WHEN_TIP, self.when)
+        planning.addWidget(self.when_row)
+        self.asks = widgets.Segmented(ASKS)
+        self.asks.setAccessibleName("Gaps Claude asks you about")
+        self.asks.changed.connect(
+            lambda value: self._segment_picked("gapcheck.ask", value)
+        )
+        self.asks_row = TooltipRow(
+            "Gaps Claude asks you about", "", ASKS_TIP, self.asks
+        )
+        planning.addWidget(self.asks_row)
+        layout.addWidget(planning_card)
+
         multi_card, multi_layout = titled_card("Work of several tasks")
         multi_row = QHBoxLayout()
         multi_row.addWidget(name_and_help("Multi-task work", MULTI_HELP), 1)
@@ -309,14 +483,43 @@ class MenuScreen(QWidget):
         self.multi.changed.connect(self._multi_picked)
         multi_row.addWidget(self.multi)
         multi_layout.addLayout(multi_row)
-        rounds_row = QHBoxLayout()
-        rounds_row.addWidget(name_and_help("Flow review rounds", ROUNDS_HELP), 1)
+        layout.addWidget(multi_card)
+
+        self.flow_card, flows = titled_card("Flows")
+        for key in ("flow.writer", "flow.reviewer"):
+            flows.addWidget(rows[key])
+            flows.addWidget(self.derived[key].warning)
         self.rounds = widgets.Segmented(ROUNDS)
         self.rounds.setAccessibleName("Flow review rounds")
         self.rounds.changed.connect(self._rounds_picked)
-        rounds_row.addWidget(self.rounds)
-        multi_layout.addLayout(rounds_row)
-        layout.addWidget(multi_card)
+        flows.addWidget(
+            TooltipRow(
+                "Flow review rounds",
+                "The most times a reviewer checks one flow task.",
+                ROUNDS_HELP,
+                self.rounds,
+            )
+        )
+        flows.addWidget(rows["flow.parallel"])
+        flows.addWidget(rows["flow.stall"])
+        self.whole = widgets.Switch()
+        self.whole.setAccessibleName("Review the whole flow")
+        self.whole.clicked.connect(self._whole_picked)
+        flows.addWidget(
+            TooltipRow(
+                "Review the whole flow",
+                "One review of all the flow's changes together, before Claude "
+                "merges it.",
+                WHOLE_TIP,
+                self.whole,
+            )
+        )
+        layout.addWidget(self.flow_card)
+
+        self.workflow_card, workflows = titled_card("Claude Workflows")
+        workflows.addWidget(rows["workflow.agents"])
+        workflows.addWidget(rows["workflow.late"])
+        layout.addWidget(self.workflow_card)
 
         panel_card, panel_layout = titled_card("Panel")
         panel_layout.addWidget(label(PANEL_HELP, "secondary"))
@@ -374,7 +577,24 @@ class MenuScreen(QWidget):
             panel = choices.panel_row(answers, connected)
             multi = choices.runs_as_row(answers)
         self.multi.set_value(multi["value"])
+        self.flow_card.setVisible(multi["value"] != "workflow")
+        self.workflow_card.setVisible(multi["value"] != "flow")
         self.rounds.set_value(answers["flow.review_rounds"]["value"])
+        for derived in self.derived.values():
+            self._fill_derived(derived, answers, groups)
+        when = str(answers["gapcheck.when"]["value"])
+        self.when.blockSignals(True)
+        try:
+            self.when.set_value(when)
+        finally:
+            self.when.blockSignals(False)
+        self.when_row.help.setText(when_help(when))
+        asks = str(answers["gapcheck.ask"]["value"])
+        self.asks.set_value(asks)
+        self.asks_row.help.setText(asks_help(asks))
+        for key, control in self.segments.items():
+            control.set_value(answers[key]["value"])
+        self.whole.setChecked(answers["flow.whole_review"]["value"] == "on")
         self._fill_panel(answers, panel)
         self._chain_focus()
 
@@ -455,8 +675,19 @@ class MenuScreen(QWidget):
             order.append(controls.picker)
             order.extend(controls.run_as.buttons())
         order.append(self.open_engines)
+        order.append(self.derived["gapcheck.reviewer"].picker)
+        order.append(self.when)
+        order.extend(self.asks.buttons())
         order.extend(self.multi.buttons())
+        order.extend(
+            (self.derived["flow.writer"].picker, self.derived["flow.reviewer"].picker)
+        )
         order.extend(self.rounds.buttons())
+        for key in ("flow.parallel", "flow.stall"):
+            order.extend(self.segments[key].buttons())
+        order.append(self.whole)
+        for key in ("workflow.agents", "workflow.late"):
+            order.extend(self.segments[key].buttons())
         order.extend(self.member_removes.values())
         order.extend((self.remove_all, self.add_member))
         chain_tab_order(order)
@@ -544,6 +775,30 @@ class MenuScreen(QWidget):
             controls.run_as.blockSignals(False)
         self._show_run_as(controls)
 
+    def _fill_derived(
+        self,
+        derived: _Derived,
+        answers: dict[str, Any],
+        groups: list[tuple[str, list[tuple[str, str | None]]]],
+    ) -> None:
+        value = answers[derived.key]["value"]
+        picker = derived.picker
+        picker.blockSignals(True)
+        try:
+            picker.clear()
+            picker.add_option(derived.same, choices.SAME)
+            missing = None if value == choices.SAME else orphan(value, answers)
+            if missing is not None:
+                picker.add_option(missing[0], value)
+            for engine, models in groups:
+                picker.add_header(ENGINE_LABELS[engine])
+                for model, effort in models:
+                    picker.add_option(option_text(model, effort), f"{engine}:{model}")
+            picker.set_value(value)
+        finally:
+            picker.blockSignals(False)
+        derived.warning.show_text(None if missing is None else missing[1])
+
     def _show_run_as(self, controls: _Role) -> None:
         parts = _split(controls.picker.value())
         controls.run_as_row.setVisible(parts is not None and parts[0] == "claude")
@@ -554,6 +809,30 @@ class MenuScreen(QWidget):
         """Save the multi-task choice only when it changed."""
         if value != self.context.setting("multi.runs_as"):
             self._save({"multi.runs_as": value})
+
+    def _derived_picked(self, derived: _Derived) -> None:
+        value = derived.picker.value()
+        if value is not None and value != self.context.setting(derived.key):
+            self._save({derived.key: value})
+
+    def _when_picked(self, _index: int) -> None:
+        value = self.when.value()
+        if value is not None:
+            self.when_row.help.setText(when_help(str(value)))
+            if value != self.context.setting("gapcheck.when"):
+                self._save({"gapcheck.when": value})
+
+    def _segment_picked(self, key: str, value: str) -> None:
+        """Save a segmented setting only when it changed."""
+        if key == "gapcheck.ask":
+            self.asks_row.help.setText(asks_help(value))
+        if value != self.context.setting(key):
+            self._save({key: value})
+
+    def _whole_picked(self, checked: bool) -> None:
+        value = "on" if checked else "off"
+        if value != self.context.setting("flow.whole_review"):
+            self._save({"flow.whole_review": value})
 
     def _rounds_picked(self, value: str) -> None:
         """Save the flow review rounds only when they changed."""

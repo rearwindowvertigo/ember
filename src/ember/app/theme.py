@@ -200,9 +200,9 @@ QMainWindow, QDialog {
     background: @bg-page;
 }
 QToolTip {
-    background: @bg-raised;
-    color: @text-primary;
-    border: 1px solid @border-strong;
+    background: @fill-primary;
+    color: @on-primary;
+    border: 1px solid @fill-primary;
     border-radius: 6px;
     padding: 4px 8px;
 }
