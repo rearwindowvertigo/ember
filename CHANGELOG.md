@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.9.0](https://github.com/rearwindowvertigo/ember/compare/v0.8.0...v0.9.0) (2026-11-03)
+
+
+### Added
+
+* **app:** Planning, Flows and Claude Workflows settings on Team ([cd6a171](https://github.com/rearwindowvertigo/ember/commit/cd6a171b90d40e864add403238e7e734adf1ebac)), closes [#62](https://github.com/rearwindowvertigo/ember/issues/62)
+* **app:** rename the Menu screen to Team ([2c15024](https://github.com/rearwindowvertigo/ember/commit/2c15024a6d0ecbb162561e0f61b612baf61aba9d)), closes [#61](https://github.com/rearwindowvertigo/ember/issues/61)
+* **app:** show an installed update in the sidebar, not as a top alert ([43c1ff8](https://github.com/rearwindowvertigo/ember/commit/43c1ff82b24edda3f21019828f4e191d5d883ecc)), closes [#59](https://github.com/rearwindowvertigo/ember/issues/59)
+* **flow:** gap check, flow and Workflow settings in emb choices ([b80548e](https://github.com/rearwindowvertigo/ember/commit/b80548e9c4e3064d89166c5493fbe4f150d1530d)), closes [#62](https://github.com/rearwindowvertigo/ember/issues/62)
+
+
+### Fixed
+
+* **app:** fit Dependencies columns to the scroll area's own size ([6a679ee](https://github.com/rearwindowvertigo/ember/commit/6a679eeb037cb3bb80104c9edefa4ac5c2d0e286)), closes [#60](https://github.com/rearwindowvertigo/ember/issues/60)
+* **app:** keep Dependencies tiles clear of the scroll bar ([0d40bbd](https://github.com/rearwindowvertigo/ember/commit/0d40bbdbc6e71a2dc1fae19bb402765a09df1df9)), closes [#60](https://github.com/rearwindowvertigo/ember/issues/60)
+* **flow:** ask about every gap when settings have a source error ([a326618](https://github.com/rearwindowvertigo/ember/commit/a32661855884cca0a4e34c6d6cc7160ca7aaa42a)), closes [#62](https://github.com/rearwindowvertigo/ember/issues/62)
+* **skill:** decide the gap check before any reviewer step ([ae05189](https://github.com/rearwindowvertigo/ember/commit/ae05189d09c4a8e1228e450e795d2a489c6e7c1e)), closes [#62](https://github.com/rearwindowvertigo/ember/issues/62)
+
 ## [0.8.0](https://github.com/rearwindowvertigo/ember/compare/v0.7.0...v0.8.0) (2026-11-03)
 
 
