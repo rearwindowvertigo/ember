@@ -4,10 +4,12 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import (
+    QClipboard,
     QContextMenuEvent,
     QGuiApplication,
     QIcon,
@@ -439,6 +441,47 @@ def test_run_command_dialog_copies_original(qtbot: QtBot) -> None:
     event = QContextMenuEvent(QContextMenuEvent.Reason.Mouse, QPoint(), QPoint())
     label.contextMenuEvent(event)
     assert QGuiApplication.clipboard().text() == "/opt/"
+
+
+@pytest.mark.parametrize("selection", ("mouse", "keyboard"))
+@pytest.mark.parametrize("backend", ("native", "double"))
+def test_run_command_dialog_primary_selection(
+    qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, selection: str, backend: str
+) -> None:
+    clipboard = QGuiApplication.clipboard()
+    if backend == "double":
+        contents: dict[QClipboard.Mode, str] = {}
+        clipboard = Mock(spec=QClipboard)
+        clipboard.supportsSelection.return_value = True
+        clipboard.setText.side_effect = lambda text, mode=QClipboard.Mode.Clipboard: (
+            contents.__setitem__(mode, text)
+        )
+        clipboard.text.side_effect = lambda mode=QClipboard.Mode.Clipboard: (
+            contents.get(mode, "")
+        )
+        monkeypatch.setattr(QGuiApplication, "clipboard", lambda: clipboard)
+    if not clipboard.supportsSelection():
+        pytest.skip("The platform does not support the primary selection")
+    command = "sudo npm install -g --prefix /usr/local @openai/codex@latest"
+    dialog = _dialog(qtbot, command)
+    label = dialog.command
+    clipboard.setText("ordinary clipboard")
+    label.setFocus()
+    if selection == "keyboard":
+        qtbot.keyClick(label, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+    else:
+        start = QPoint(
+            label.margin(), label.margin() + label.fontMetrics().height() // 2
+        )
+        end = QPoint(
+            label.width() - label.margin(), label.height() - label.margin() - 1
+        )
+        qtbot.mousePress(label, Qt.MouseButton.LeftButton, pos=start)
+        qtbot.mouseMove(label, pos=end)
+        qtbot.mouseRelease(label, Qt.MouseButton.LeftButton, pos=end)
+    assert label.selectedText() == command.replace("/", "/\u200b")
+    qtbot.waitUntil(lambda: clipboard.text(QClipboard.Mode.Selection) == command)
+    assert clipboard.text() == "ordinary clipboard"
 
 
 def _check_run_dialog_geometry(mode: str) -> None:

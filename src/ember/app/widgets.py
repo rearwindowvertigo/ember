@@ -24,6 +24,7 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
+    QClipboard,
     QColor,
     QContextMenuEvent,
     QFont,
@@ -33,6 +34,7 @@ from PySide6.QtGui import (
     QIcon,
     QKeyEvent,
     QKeySequence,
+    QMouseEvent,
     QPainter,
     QPaintEvent,
     QPen,
@@ -860,6 +862,21 @@ class _CommandLabel(QLabel):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def _copy_primary_selection(self) -> None:
+        clipboard = QGuiApplication.clipboard()
+        if self.hasSelectedText() and clipboard.supportsSelection():
+            clipboard.setText(
+                self.selectedText().replace("\u200b", ""), QClipboard.Mode.Selection
+            )
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: D102
+        super().mouseReleaseEvent(event)
+        self._copy_primary_selection()
+
+    def keyReleaseEvent(self, event: QKeyEvent) -> None:  # noqa: D102
+        super().keyReleaseEvent(event)
+        self._copy_primary_selection()
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: D102
         menu = QMenu(self)
