@@ -58,7 +58,7 @@ Read results from the Workflow tool's result, or single returns from the
 run's `journal.jsonl`; the background task's output file is not the
 result. For a large task, run a small slice first.
 
-Run at most the owner's Agents at once (`workflow.agents` in
+Run at most the owner's Max agents at once (`workflow.agents` in
 `emb choices --json` answers: 4, 8 or 16) at the same time. The runtime
 allows 16 concurrent agents, 4,096 items per call and 1,000 agents per run. Scripts cannot read files or `import()`; `Date.now()` and
 `Math.random()` throw, so the run can be replayed. A stopped run relaunches

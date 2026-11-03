@@ -3050,12 +3050,14 @@ Work of several tasks holds Multi-task work (`multi.runs_as`): Ask each time
 it is Claude Workflow, and Claude Workflows unless it is Flow.
 
 Flows holds Flow writer and Flow reviewer (`flow.writer`, `flow.reviewer`),
-pickers that start with Same as Writer and Same as Reviewer; Flow review
+pickers that start with Same as Writer and Same as Reviewer; Max review
 rounds (`flow.review_rounds`): 1, 2, 3 or 4, the most times a reviewer
-checks one flow task; Tasks at once (`flow.parallel`): 1, 2, 4, 6; Stall
+can check one flow task; Max tasks at once (`flow.parallel`): 1, 2, 4, 6,
+the most flow tasks that run at the same time; Stall
 after (`flow.stall`): 5, 10, 20 min; and Review the whole flow
-(`flow.whole_review`), a switch. Claude Workflows holds Agents at once
-(`workflow.agents`): 4, 8, 16; and When an agent runs late
+(`flow.whole_review`), a switch. Claude Workflows holds Max agents
+at once (`workflow.agents`): 4, 8, 16, the most agents that run at the
+same time; and When an agent runs late
 (`workflow.late`): Ask me, Wait once more, Stop. These are available even
 when no engine offers a model.
 

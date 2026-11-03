@@ -60,7 +60,7 @@ MULTI = (("ask", "Ask each time"), ("flow", "Flow"), ("workflow", "Claude Workfl
 MULTI_HELP = "How Claude runs two or more tasks that each need a worker."
 ROUNDS = tuple((value, value) for value in choices.REVIEW_ROUNDS)
 ROUNDS_HELP = (
-    "The most times a reviewer checks one flow task. "
+    "The most times a reviewer can check one flow task. "
     "A flow plan that sets its own rounds wins."
 )
 PANEL_HELP = "The models a panel asks when Claude is given no members."
@@ -143,8 +143,8 @@ LATE = (("ask", "Ask me"), ("wait", "Wait once more"), ("stop", "Stop"))
 SEGMENTS = (
     (
         "flow.parallel",
-        "Tasks at once",
-        "How many flow tasks run side by side.",
+        "Max tasks at once",
+        "No more than this many flow tasks run at the same time.",
         "The most flow tasks that run at the same time. A plan that sets its "
         "own parallel count wins.",
         PARALLEL,
@@ -159,9 +159,10 @@ SEGMENTS = (
     ),
     (
         "workflow.agents",
-        "Agents at once",
-        "Agents use this session's Claude model.",
-        "The most Claude Workflow agents that run at the same time.",
+        "Max agents at once",
+        "No more than this many Claude Workflow agents run at the same time.",
+        "The most Claude Workflow agents that run at the same time. Agents use "
+        "this session's Claude model.",
         AGENTS,
     ),
     (
@@ -490,12 +491,12 @@ class MenuScreen(QWidget):
             flows.addWidget(rows[key])
             flows.addWidget(self.derived[key].warning)
         self.rounds = widgets.Segmented(ROUNDS)
-        self.rounds.setAccessibleName("Flow review rounds")
+        self.rounds.setAccessibleName("Max review rounds")
         self.rounds.changed.connect(self._rounds_picked)
         flows.addWidget(
             TooltipRow(
-                "Flow review rounds",
-                "The most times a reviewer checks one flow task.",
+                "Max review rounds",
+                "The most times a reviewer can check one flow task.",
                 ROUNDS_HELP,
                 self.rounds,
             )

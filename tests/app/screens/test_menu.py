@@ -340,7 +340,7 @@ def test_review_rounds_show_saved_value_and_save_only_changes(
 ) -> None:
     choices.set_settings({"flow.review_rounds": value}, env=env)
     context, screen = _screen(env, qtbot)
-    assert screen.rounds.accessibleName() == "Flow review rounds"
+    assert screen.rounds.accessibleName() == "Max review rounds"
     assert screen.rounds.value() == value
     assert [label for _, label in menu.ROUNDS] == ["1", "2", "3", "4"]
     generation = choices.snapshot(env=env)["generation"]
@@ -352,7 +352,7 @@ def test_review_rounds_show_saved_value_and_save_only_changes(
         screen.rounds.buttons()[int(target) - 1].click()
     assert _stored(env, "flow.review_rounds") == target
     assert screen.rounds.value() == target
-    assert "Flow review rounds" in _texts(screen)
+    assert "Max review rounds" in _texts(screen)
 
 
 def test_review_rounds_default_to_three(env: dict[str, str], qtbot: QtBot) -> None:
@@ -969,6 +969,20 @@ def test_flow_settings_show_their_values(env: dict[str, str], qtbot: QtBot) -> N
     assert screen.segments["workflow.agents"].value() == "16"
     assert screen.segments["workflow.late"].value() == "stop"
     assert screen.derived["flow.writer"].picker.currentText() == "Same as Writer"
+
+
+def test_limit_settings_name_themselves_as_maximums(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    _context, screen = _screen(env, qtbot)
+    texts = [label.text() for label in screen.findChildren(QLabel)]
+    for name in ("Max tasks at once", "Max agents at once", "Max review rounds"):
+        assert name in texts
+    assert "No more than this many flow tasks run at the same time." in texts
+    assert (
+        "No more than this many Claude Workflow agents run at the same time." in texts
+    )
+    assert "The most times a reviewer can check one flow task." in texts
 
 
 def test_when_help_covers_every_value() -> None:

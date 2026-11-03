@@ -22,10 +22,10 @@ Write a JSON plan in the session scratchpad:
 
 - `dir`: the absolute checkout path; `base` only when other than `HEAD`.
 - `trailers`: the harness attribution trailer in a list.
-- `rounds`: leave it out; the flow then uses the owner's Flow review
+- `rounds`: leave it out; the flow then uses the owner's Max review
   rounds row. Set it only for a flow that needs a different count, and say
   why before the dry run. `parallel`: leave it out; the flow then uses the
-owner's Tasks at once row (`flow.parallel`). The stall time comes from
+owner's Max tasks at once row (`flow.parallel`). The stall time comes from
 Stall after (`flow.stall`) unless you pass `--stall`.
 - `check`: an argv list for the repository's full check.
 - `failure_model`: the cases that must work and those accepted.
