@@ -1008,7 +1008,7 @@ def test_record_keyboard_order_and_long_text(
 
 
 @pytest.mark.parametrize("mode", ["light", "dark"])
-def test_cancelled_parent_keeps_live_workers_and_their_controls(
+def test_cancelled_parent_moves_live_workers_to_live_with_their_controls(
     env: dict[str, str],
     context: AppContext,
     qtbot: QtBot,
@@ -1031,16 +1031,17 @@ def test_cancelled_parent_keeps_live_workers_and_their_controls(
         qtbot.waitUntil(lambda: len(context.runs.live()) == 2)
         screen = screen_for(context, qtbot)
         row = screen.flow_rows[FLOW]
-        assert screen.live_rows_layout.count() == 0
+        assert screen.live_rows_layout.count() == 2
         item = screen.finished_rows_layout.itemAt(0)
         assert item is not None
         assert item.widget() is row
         assert row.badge.text() == "Incomplete" and row.badge.tone() == "incomplete"
-        assert row.detail_label.text().startswith("2 live runs · ")
+        assert "live run" not in row.detail_label.text()
         assert "Owner stopped it" in row.detail_label.text()
         assert row.title_label.text().startswith("Flow · ")
-        assert row.nested.count() == 2
+        assert row.nested.count() == 0
         child = screen.live_rows[LIVE_A]
+        assert child.detail_label.text().startswith("Flow · ")
         assert child.badge.text() == "Waiting for Claude"
         assert child.open_button.isVisible()
         child.expand_button.click()
@@ -1052,7 +1053,7 @@ def test_cancelled_parent_keeps_live_workers_and_their_controls(
         qtbot.waitUntil(lambda: LIVE_A in screen.finished_rows)
         assert screen.expanded_live is None
         assert row.nested.indexOf(screen.finished_rows[LIVE_A]) >= 0
-        assert row.detail_label.text().startswith("1 live run · ")
+        assert screen.live_rows_layout.count() == 1
         assert screen.finished_rows[LIVE_A].badge.text() == "Done"
     finally:
         theme.apply(qapp, previous)
@@ -1160,6 +1161,44 @@ def test_mixed_order_uses_start_end_update_and_id(env: dict[str, str]) -> None:
     panel.record.update(status="incomplete", ended_at=None, updated_at=20)
     live, finished, _ = overview.sections([run], [panel, flow])
     assert not live and finished == [flow, run, panel]
+
+
+def test_live_worker_of_an_ended_parent_is_a_top_level_row(
+    env: dict[str, str],
+) -> None:
+    live_run = make_run(env, LIVE_A, status=record.RUNNING, started_at=10)
+    done_run = make_run(env, DONE_A, status=record.CLOSED, started_at=5, ended_at=8)
+    data = make_panel(env, started_at=1, status="done", ended_at=30)
+    panel = flows.PanelItem(data, "", False, False, frozenset({LIVE_A, DONE_A}))
+    live, finished, children = overview.sections([live_run, done_run], [panel])
+    assert live == [live_run]
+    assert finished == [panel]
+    assert children[PANEL] == [done_run]
+
+
+def test_live_worker_of_an_ended_panel_shows_in_live_with_its_parent(
+    env: dict[str, str], context: AppContext, qtbot: QtBot
+) -> None:
+    panel = make_panel(env, started_at=1, status="done", ended_at=2)
+    panel["members"][0]["run"] = LIVE_A
+    panel_record.save(panel, env)
+    for index, run_id in enumerate((DONE_A, DONE_B, "codex-20260101-110000-eeeeee")):
+        write_run(
+            make_run(
+                env, run_id, status=record.CLOSED, started_at=10 + index, ended_at=20
+            )
+        )
+    write_run(make_run(env, LIVE_A, status=record.RUNNING, started_at=1))
+    context.runs.reload()
+    qtbot.waitUntil(lambda: bool(context.runs.live()))
+    screen = screen_for(context, qtbot)
+    row = screen.live_rows[LIVE_A]
+    item = screen.live_rows_layout.itemAt(0)
+    assert item is not None and item.widget() is row
+    assert row.detail_label.text().startswith("Panel · 1 member · ")
+    assert PANEL not in [
+        key for key, panel_row in screen.panel_rows.items() if panel_row.isVisible()
+    ]
 
 
 def test_unreadable_line_combines_counts_inside_live(

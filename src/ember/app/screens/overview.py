@@ -292,6 +292,25 @@ def run_detail(run: Run, now: float | None = None) -> str:
     return f"{folder} · {run_result(run)} · {times}"
 
 
+def parent_label(parent: FlowItem | PanelItem) -> str:
+    """Return a parent's type and first fact: "Panel · 7 members", "Flow · ember"."""
+    title = (
+        flow_title(parent.record)
+        if isinstance(parent, FlowItem)
+        else panel_title(parent.record)
+    )
+    return " · ".join(title.split(" · ")[:2])
+
+
+def run_parents(parents: list[FlowItem | PanelItem]) -> dict[str, FlowItem | PanelItem]:
+    """Return each worker's oldest parent by run id."""
+    result: dict[str, FlowItem | PanelItem] = {}
+    for parent in sorted(parents, key=item_started):
+        for run_id in parent.run_ids:
+            result.setdefault(run_id, parent)
+    return result
+
+
 def record_rows(run: Run, now: float | None = None) -> list[tuple[str, str]]:
     """Return a run's record as label and value rows."""
     return [
@@ -363,16 +382,21 @@ def item_end_key(item: Item) -> tuple[float, float, str]:
 def sections(
     runs: list[Run], parents: list[FlowItem | PanelItem]
 ) -> tuple[list[Item], list[Item], dict[str, list[Run]]]:
-    """Select top-level rows and assign workers to their oldest parent."""
+    """Select top-level rows and assign workers to their oldest parent.
+
+    A live worker whose parent has ended is a top-level row, so it shows in
+    Live even when its parent is not among the shown Finished items.
+    """
     owners: dict[str, str] = {}
     children: dict[str, list[Run]] = {item_id(parent): [] for parent in parents}
+    ended = {item_id(parent) for parent in parents if item_ended(parent)}
     for parent in sorted(parents, key=item_started):
         for run_id in parent.run_ids:
             owners.setdefault(run_id, item_id(parent))
     top: list[Item] = list(parents)
     for run in sorted(runs, key=item_started):
         owner = owners.get(run.id)
-        if owner is None:
+        if owner is None or (owner in ended and not item_ended(run)):
             top.append(run)
         else:
             children[owner].append(run)
@@ -610,6 +634,7 @@ class _Row(_ExpandableRow):
         """Build a run row without drawing its values."""
         self.run = run
         self.nested = False
+        self.parent_label = ""
         self.details: QWidget | None = None
         self.detail_values: tuple[tuple[str, str], ...] = ()
         super().__init__(run.id, "run", "details")
@@ -621,7 +646,10 @@ class _Row(_ExpandableRow):
     def draw_time(self, now: float | None = None) -> None:
         """Draw the detail line and the right column's end time or "Live"."""
         ended = run_ended(self.run)
-        self.detail_label.setText(run_detail(self.run, now))
+        detail = run_detail(self.run, now)
+        if self.parent_label:
+            detail = f"{self.parent_label} · {detail}"
+        self.detail_label.setText(detail)
         self.time_label.setText(end_text(ended, now))
         self.time_label.setToolTip(end_tooltip(self.run.started_at, ended))
 
@@ -1053,6 +1081,7 @@ class OverviewScreen(QWidget):
         self.live_rows: dict[str, _LiveRow] = {}
         self.finished_rows: dict[str, _FinishedRow] = {}
         self._reading_order: list[_ExpandableRow] = []
+        self._parents: dict[str, FlowItem | PanelItem] = {}
         self.expanded_live: str | None = None
         self.expanded_finished: str | None = None
         self._stale = True
@@ -1109,6 +1138,12 @@ class OverviewScreen(QWidget):
             *self.records.panels(),
         ]
         live, finished, children = sections(runs.runs(), parents)
+        self._parents = run_parents(parents)
+        workers: dict[str, list[Run]] = {item_id(parent): [] for parent in parents}
+        for run in runs.runs():
+            owner = self._parents.get(run.id)
+            if owner is not None:
+                workers[item_id(owner)].append(run)
         total = len(finished)
         if self.finished_open:
             finished = [
@@ -1116,7 +1151,7 @@ class OverviewScreen(QWidget):
                 for item in finished
                 if matches_filters(
                     item,
-                    children.get(item_id(item), []),
+                    workers.get(item_id(item), []),
                     self.type_filter.currentText(),
                     self.status_filter.currentText(),
                     self.engine_filter.currentText().lower(),
@@ -1292,13 +1327,25 @@ class OverviewScreen(QWidget):
     def _draw_sections(
         self, live: list[Item], finished: list[Item], children: dict[str, list[Run]]
     ) -> None:
-        """Reuse rows and place every worker in its parent's section."""
+        """Reuse rows and place every worker in its parent's section.
+
+        A top-level worker of an ended parent names that parent first on its
+        detail line.
+        """
         shown_runs = [item for item in [*live, *finished] if isinstance(item, Run)]
         parents = [item for item in [*live, *finished] if not isinstance(item, Run)]
         for parent in parents:
             shown_runs.extend(children[item_id(parent)])
         self._draw_live([run for run in shown_runs if run.status in LIVE])
         self._draw_finished([run for run in shown_runs if run.status in DONE])
+        top_ids = {item.id for item in [*live, *finished] if isinstance(item, Run)}
+        for run in shown_runs:
+            row = self._run_row(run)
+            owner = self._parents.get(run.id) if run.id in top_ids else None
+            label = parent_label(owner) if owner is not None else ""
+            if label != row.parent_label:
+                row.parent_label = label
+                row.draw_time()
         for item in parents:
             rows = self.flow_rows if isinstance(item, FlowItem) else self.panel_rows
             key = item_id(item)

@@ -2883,7 +2883,10 @@ command line:
 ### Overview
 
 Overview shows Live and Finished. Live lists starting, running and waiting
-records, oldest first by start time and then id. Finished lists ended
+records, oldest first by start time and then id. A live run whose flow or
+panel has ended is a top-level Live row, not nested under that parent; its
+detail line starts with the parent's type and first fact, such as
+`Panel · 7 members`. Finished lists ended
 records, newest first by end time, update time and id, with update time used
 when end time is absent. Its cap of twenty applies to top-level rows across
 runs, flows and panels. Each empty section shows its empty state.
@@ -2901,7 +2904,7 @@ Finished filters this capped list by Type (all, Run, Flow, Panel), Status
 (all, Done, Incomplete, Failed) and Engine (all, Codex, OpenCode, Claude).
 The filters combine and test top-level rows: Run selects standalone runs,
 Status matches the parent's own chip, and a flow or panel matches Engine
-when any readable run nested under it used that engine. A parent without
+when any of its readable runs, nested or shown in Live, used that engine. A parent without
 readable nested runs matches only Engine=all. Filters start at all when
 the app starts and keep their values across reloads for the app session.
 
