@@ -58,24 +58,6 @@ TOKENS: dict[str, tuple[str, str]] = {
     "danger-fill": ("#ba2623", "#ba2623"),
     "danger-fill-hover": ("#cf2f2b", "#cf2f2b"),
     "on-danger": ("#ffffff", "#ffffff"),
-    "term-bg": ("#f7f7f7", "#141414"),
-    "term-fg": ("#1a1a1a", "#e0e0e0"),
-    "term-0": ("#3a3a3a", "#9a9a9a"),
-    "term-1": ("#b3261e", "#f17778"),
-    "term-2": ("#1d6b1f", "#72d071"),
-    "term-3": ("#7a5200", "#f2c14e"),
-    "term-4": ("#1b5fb4", "#6aabf1"),
-    "term-5": ("#9c2a8a", "#e38ae0"),
-    "term-6": ("#0b6a73", "#5ccfd6"),
-    "term-7": ("#5d5d5d", "#d6d6d6"),
-    "term-8": ("#555555", "#b4b4b4"),
-    "term-9": ("#a11d1d", "#ff9a9a"),
-    "term-10": ("#155a17", "#94e493"),
-    "term-11": ("#6a4600", "#ffd877"),
-    "term-12": ("#174f99", "#94c4f7"),
-    "term-13": ("#86207a", "#f0aaee"),
-    "term-14": ("#085a62", "#86e1e6"),
-    "term-15": ("#3a3a3a", "#ffffff"),
 }
 """Colour tokens as (light, dark); eight hex digits are `#rrggbbaa`.
 
@@ -119,7 +101,6 @@ TYPE = {
     "label": TypeStyle(14, 500),
     "caption": TypeStyle(12, 400),
     "code": TypeStyle(14, 400, mono=True),
-    "term": TypeStyle(12, 400, mono=True),
 }
 """The type scale, relative to the desktop's interface and monospace fonts."""
 
@@ -490,13 +471,6 @@ QScrollArea {
     background: transparent;
     border: none;
 }
-QScrollArea[role="mirror"] {
-    border: 2px solid transparent;
-    border-radius: 8px;
-}
-QScrollArea[role="mirror"][keyfocus="true"]:focus {
-    border: 2px solid @focus-ring;
-}
 QScrollBar:vertical, QScrollBar:horizontal {
     background: transparent;
     border: none;
@@ -607,27 +581,6 @@ def apply(app: QApplication, mode: str) -> None:
     app.setFont(body)
     app.setStyleSheet(style_sheet(mode))
     signals.changed.emit(mode)
-
-
-@dataclass(frozen=True)
-class MirrorPalette:
-    """The screen mirror's colours for one mode."""
-
-    bg: QColor
-    """The mirror's background, `term-bg`."""
-    fg: QColor
-    """The default text colour, `term-fg`."""
-    colors: tuple[QColor, ...]
-    """The sixteen terminal colours, `term-0` to `term-15`."""
-
-
-def mirror_palette(mode: str) -> MirrorPalette:
-    """Return the screen mirror's colours for a mode."""
-    return MirrorPalette(
-        bg=color("term-bg", mode),
-        fg=color("term-fg", mode),
-        colors=tuple(color(f"term-{i}", mode) for i in range(16)),
-    )
 
 
 def _as_color(value: QColor | str) -> QColor:

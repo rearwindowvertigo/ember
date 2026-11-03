@@ -30,7 +30,6 @@ from ember.panels import record as panel_record
 from ember.runs import record
 
 from ..test_flows import FLOW, PANEL, make_flow, make_member, make_panel  # pyrefly: ignore[missing-import]
-from ..test_mirror import stub_tmux  # pyrefly: ignore[missing-import]
 from ..test_runs import make_run, write_run  # pyrefly: ignore[missing-import]
 
 LIVE_A = "codex-20260101-120000-aaaaaa"
@@ -41,7 +40,6 @@ DONE_B = "codex-20260101-100000-dddddd"
 
 @pytest.fixture
 def context(env: dict[str, str], qtbot: QtBot) -> Iterator[AppContext]:
-    stub_tmux(env)
     result = AppContext(env)
     result.runs.start()
     qtbot.waitUntil(result.runs.loaded)
@@ -182,58 +180,49 @@ def test_single_expansion(
     first, second = screen.live_rows.values()
     qtbot.mouseClick(first.expand_button, Qt.MouseButton.LeftButton)
     assert screen.expanded_live == LIVE_A
-    mirror = screen.mirror()
-    assert mirror is not None
-    assert mirror.accessibleName() == f"Screen of run {LIVE_A}"
-    assert mirror.accessibleDescription() == (
-        f"Screen of run {LIVE_A}, read-only. Updates when the worker writes."
-    )
-    assert first.expand_button.accessibleName() == f"Hide screen of run {LIVE_A}"
-    qtbot.waitUntil(lambda: mirror.last_screen() is not None)
+    assert first.details is not None
+    assert first.expand_button.accessibleName() == f"Hide details of run {LIVE_A}"
+    rows = dict(overview.record_rows(first.run))
+    assert rows["Run"] == LIVE_A
+    assert rows["Ended"] == "Not yet"
 
     qtbot.mouseClick(second.expand_button, Qt.MouseButton.LeftButton)
     assert screen.expanded_live == LIVE_B
-    assert first.mirror is None
-    assert second.mirror is not None
-    assert first.expand_button.accessibleName() == f"Show screen of run {LIVE_A}"
+    assert first.details is None
+    assert second.details is not None
+    assert first.expand_button.accessibleName() == f"Show details of run {LIVE_A}"
 
     qtbot.mouseClick(second.expand_button, Qt.MouseButton.LeftButton)
     assert screen.expanded_live is None
-    assert second.mirror is None
+    assert second.details is None
 
 
-def test_mirror_closes_when_the_run_ends(
+def test_live_details_follow_the_run(
     env: dict[str, str], context: AppContext, qtbot: QtBot
 ) -> None:
     screen = loaded(env, context, qtbot)
     screen.toggle_live(LIVE_A)
-    assert screen.mirror() is not None
+    row = screen.live_rows[LIVE_A]
+    run = record.load(LIVE_A, env)
+    write_run(replace(run, turn=2, updated_at=run.started_at + 30))
+    context.runs.reload()
+    qtbot.waitUntil(
+        lambda: dict(row.detail_values).get("Turns and commits") == "2 turns, 0 commits"
+    )
+    assert row.details is not None
+
+
+def test_expanded_live_row_closes_when_the_run_ends(
+    env: dict[str, str], context: AppContext, qtbot: QtBot
+) -> None:
+    screen = loaded(env, context, qtbot)
+    screen.toggle_live(LIVE_A)
     run = record.load(LIVE_A, env)
     write_run(make_run(env, LIVE_A, status=record.CLOSED, ended_at=run.started_at + 60))
     context.runs.reload()
     qtbot.waitUntil(lambda: screen.expanded_live is None)
     assert LIVE_A not in screen.live_rows
     assert LIVE_A in screen.finished_rows
-
-
-def test_mirror_closes_when_the_screen_is_left(
-    env: dict[str, str], context: AppContext, qtbot: QtBot
-) -> None:
-    screen = loaded(env, context, qtbot)
-    screen.toggle_live(LIVE_A)
-    screen.hide()
-    assert screen.expanded_live is None
-    assert screen.live_rows[LIVE_A].mirror is None
-
-
-def test_mirror_closes_when_the_window_hides(
-    env: dict[str, str], context: AppContext, qtbot: QtBot
-) -> None:
-    screen = loaded(env, context, qtbot)
-    context.set_visible(True)
-    screen.toggle_live(LIVE_B)
-    context.set_visible(False)
-    assert screen.mirror() is None
 
 
 def test_hidden_screen_redraws_when_shown(
@@ -280,7 +269,6 @@ def test_finished_details(
     screen.toggle_finished(DONE_A)
     assert failed.details is None
     assert closed.details is not None
-    assert screen.mirror() is None
     screen.toggle_finished(DONE_A)
     assert closed.details is None
     assert screen.expanded_finished is None
@@ -1049,13 +1037,13 @@ def test_cancelled_parent_keeps_live_workers_and_their_controls(
         assert child.badge.text() == "Waiting for Claude"
         assert child.open_button.isVisible()
         child.expand_button.click()
-        assert screen.mirror() is not None
+        assert child.details is not None
         write_run(
             replace(child.run, status=record.CLOSED, ended_at=310, updated_at=310)
         )
         context.runs.reload()
         qtbot.waitUntil(lambda: LIVE_A in screen.finished_rows)
-        assert screen.mirror() is None
+        assert screen.expanded_live is None
         assert row.nested.indexOf(screen.finished_rows[LIVE_A]) >= 0
         assert row.detail_label.text().startswith("cancelled · 1 live run · ")
         assert screen.finished_rows[LIVE_A].badge.text() == "Done"
