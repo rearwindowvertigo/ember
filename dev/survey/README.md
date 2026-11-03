@@ -14,13 +14,21 @@ refers to this folder. A session fills the survey only when the owner asks.
 1. Copy `survey.md` to `entries/<yyyy-mm-dd>-<topic>.md`, where `<topic>` is
    a few lowercase words joined by hyphens naming the session's work. If the
    name is taken, add `-2`, `-3` and so on.
-2. Answer from this session only: its commands, exit codes, worker reports,
+2. Fill the front matter's version fields:
+   - `ember_version`: the output of `emb --version` at the session's start,
+     one `x.y.z` version.
+   - `ember_versions_built`: the version of each Ember release the session
+     made, oldest first; `[]` when it made none.
+   - `main_commit`: the short commit of `main` on GitHub when the entry is
+     written (`git rev-parse --short origin/main` after `git fetch`).
+3. Answer from this session only: its commands, exit codes, worker reports,
    owner questions and time spent. Cite them.
-3. Answer every question. An area the session did not use gets `not used`
+4. Answer every question. An area the session did not use gets `not used`
    as its score and the line `Not used in this session.` in place of its
    answers. A question with nothing to report gets `none`.
-4. Add a row for the entry to the index below.
-5. Commit the entry and the index row on their own branch, with a
+5. Add a row for the entry to the index below. Its Ember column is the
+   entry's `ember_version`.
+6. Commit the entry and the index row on their own branch, with a
    `chore(survey):` subject, and open a pull request for them alone.
 
 Entries are the filling session's own assessment. The rule that committed
@@ -63,9 +71,10 @@ document only when the owner accepts it.
 
 ## Index
 
-`n/u` in the table means not used.
+`n/u` in the table means not used. Ember is the entry's `ember_version`,
+the version at the session's start.
 
 | Date | Entry | Ember | Setup | Planning | Running | Review | Panels | Owner | App | Speed | Overall |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | 2026-11-02 | [0.2.1 build](entries/2026-11-02-0-2-1-build.md) | 0.2.0 | 4 | 4 | 3 | 4 | n/u | 3 | 2 | 4 | 3 |
-| 2026-11-03 | [0.3.0 to 0.5.0 builds](entries/2026-11-03-0-3-0-to-0-5-0-builds.md) | 0.2.1-0.5.0 | 4 | 3 | 2 | 3 | 4 | 3 | 3 | 3 | 3 |
+| 2026-11-03 | [0.3.0 to 0.5.0 builds](entries/2026-11-03-0-3-0-to-0-5-0-builds.md) | 0.2.1 | 4 | 3 | 2 | 3 | 4 | 3 | 3 | 3 | 3 |
