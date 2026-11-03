@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.8.0](https://github.com/rearwindowvertigo/ember/compare/v0.7.0...v0.8.0) (2026-11-03)
+
+
+### Added
+
+* **app:** replace the Clear caption with a tooltip ([76e84c9](https://github.com/rearwindowvertigo/ember/commit/76e84c9d222232b4b57cdeb626313012b6d85acd)), closes [#56](https://github.com/rearwindowvertigo/ember/issues/56)
+* **app:** show each run's result and times on its detail line ([76e84c9](https://github.com/rearwindowvertigo/ember/commit/76e84c9d222232b4b57cdeb626313012b6d85acd)), closes [#54](https://github.com/rearwindowvertigo/ember/issues/54)
+* **app:** show the restart offer on its own after an upgrade ([ad30a4c](https://github.com/rearwindowvertigo/ember/commit/ad30a4c59b1c25bbb94eee6c183a71a7cebee34c)), closes [#38](https://github.com/rearwindowvertigo/ember/issues/38)
+
 ## [0.7.0](https://github.com/rearwindowvertigo/ember/compare/v0.6.0...v0.7.0) (2026-11-03)
 
 

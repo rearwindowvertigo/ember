@@ -1,6 +1,6 @@
 [project]
 name = "ember-app"
-version = "0.7.0"
+version = "0.8.0"
 description = "Lets Claude lead AI coding workers on one Linux machine."
 readme = "README.md"
 license = "MIT"
