@@ -2600,24 +2600,39 @@ pressed in it never reach the run's session.
 
 ### Tray
 
-The tray icon shows whether any run is live, always in the drawings for a
-dark top bar. Its tooltip is `Ember · 2 runs live` or `Ember · No runs live`.
-The menu holds:
+The tray icon shows whether any run, flow or panel is live, always in the
+drawings for a dark top bar. Its tooltip prefixes the menu's status line
+with `Ember · `. The menu holds:
 
-- a status line: `No runs live`, `1 run live` or `2 runs live`;
-- one line per live run, `<Engine> · <repository folder> · <HH:MM>` with the
-  local start time, which opens a terminal window on the run as
+- a status line counting top-level items in run, flow, panel order, with
+  non-zero parts only: `1 run, 1 flow live`, `2 panels live`, or
+  `No runs live` when there are none;
+- one line per top-level live run, `<Engine> · <repository folder> · <HH:MM>`
+  with the local start time, which opens a terminal window on the run as
   `emb run --attach` does;
+- one line per live flow or panel, `<Flow|Panel> · <record id> · <HH:MM>`,
+  with the id elided to 40 characters including an ellipsis and the local
+  start time, which shows the window on Overview;
+- each flow or panel's live worker runs immediately below it, indented,
+  each opening its own terminal, without repeating or counting those runs
+  at the top level;
 - Open Ember and Quit Ember.
+
+Flows and panels follow Overview's Live states, including gone runners and
+panel processes. Top-level items and each parent's workers are oldest first
+by start time and then id. A run named by multiple parents belongs to the
+oldest parent by start time and then id. A live run whose parent is in
+Finished appears and counts as a top-level run in the tray.
 
 Clicking the icon also shows the window. Closing the window hides it to the
 tray. When the desktop has no tray, the window shows at start and closing it
 quits.
 
-While the menu is open it keeps its lines; a change to the live runs
-redraws it after it closes. Quit Ember hides the window and the tray icon at
-once, then waits up to 12 seconds for running background tasks to end before
-the app exits.
+A run, flow or panel change updates the icon and tooltip at once. The menu
+keeps its lines until it next opens, when it rebuilds them. A click from a
+stale menu still triggers its action after the menu closes. Quit Ember hides
+the window and the tray icon at once, then waits up to 12 seconds for running
+background tasks to end before the app exits.
 
 ### Run records
 
@@ -2729,9 +2744,10 @@ Worker runs are nested under their parent, in the parent's section, and
 keep their own status chip and controls. Their ids are collected from the
 same record fields and flow events as Clear uses. A run named by multiple
 parents appears under the oldest parent by start time and then id. A run
-with a parent never appears at the top level, including when that parent
-falls beyond the Finished cap. Every readable nested run of a shown parent
-appears, whatever its age. The parent's second line includes `1 live run`
+with a parent never appears at the top level in Overview, including when
+that parent falls beyond the Finished cap. A live worker under a Finished
+parent stays nested there; the tray and sidebar count it at the top level.
+Every readable nested run of a shown parent appears, whatever its age. The parent's second line includes `1 live run`
 or `<n> live runs` after the finer state when that count is above zero.
 
 A flow's title shows the repository folder, task count and merged count.
