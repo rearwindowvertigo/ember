@@ -2564,10 +2564,22 @@ they cannot be read it shows the reason and Try again.
 The window opens at 1100 by 720 pixels and is never smaller than 900 by 600.
 Its size and last screen are kept between starts. The sidebar shows the Ember
 mark and name, one row per screen (Overview, Menu, Engines, Dependencies,
-Settings) and `Ember <version>` at the bottom. Overview's row shows the
-number of live runs and Dependencies' row the number of components with an
-update available or missing, each only above zero. A screen is created the
-first time it is shown.
+Settings) and `Ember <version>` at the bottom. Overview's row counts
+top-level live items: standalone live runs plus every flow and panel in
+Live, including stopped flows waiting for Claude and gone runners or panel
+processes. Workers nested under a Live parent add nothing. A live worker
+whose parent is not in Live counts as a top-level run, including a running
+writer under a cancelled flow in Finished, as in the tray. The accessible
+description is `<n> live`; the count and description are hidden at zero.
+The count updates from the shared run, flow and panel models on every screen.
+
+This replaces the previous count of all live runs. It also replaces the
+failure model's additive rule of keeping that run count and adding waiting
+flows and panels: the count includes every Live parent once and excludes
+its nested workers.
+
+Dependencies' row shows the number of components with an update available
+or missing, only above zero. A screen is created the first time it is shown.
 
 Saves run one at a time: a change made while a save is in flight is sent
 after it, with the settings generation that save produced. Choosing the
