@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 from PySide6.QtCore import QPoint, QRect, Qt
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QFontMetricsF, QImage
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from pytestqt.qtbot import QtBot
 
@@ -467,6 +467,95 @@ def test_model_rows_share_columns_and_centres(
     assert not screen.grab().isNull()
 
 
+def _name_width(label: QLabel, text: str) -> int:
+    return math.ceil(
+        QFontMetricsF(label.font()).horizontalAdvance(text)
+        + label.width()
+        - label.contentsRect().width()
+    )
+
+
+@pytest.mark.parametrize("engine", status.ENGINES)
+@pytest.mark.parametrize(
+    "ids",
+    (
+        ("fable", "opus", "sonnet", "haiku"),
+        ("gpt-5", "gpt-5-codex", "gpt-5-mini"),
+        ("i",),
+        (),
+    ),
+)
+def test_name_column_fits_ids_and_header(
+    env: dict[str, str],
+    qtbot: QtBot,
+    stubs: dict[str, Any],
+    engine_theme: None,
+    engine: str,
+    ids: tuple[str, ...],
+) -> None:
+    stubs["lists"] = {
+        engine: models.ModelList(
+            tuple(models.Model(name, "A different display name") for name in ids),
+            models.CLI,
+            NOW,
+            None,
+        )
+    }
+    screen, context = _screen(env, qtbot)
+    panel = _open(screen, context, qtbot, engine)
+    screen.resize(1300, 1000)
+    screen.show()
+    QApplication.processEvents()
+    header_width = _name_width(panel.name_header, "Model")
+    expected = max(
+        [header_width, *(_name_width(row.name, row.model.id) for row in panel.rows)]
+    )
+    assert panel.name_width == expected < 320
+    assert panel.name_header.width() >= header_width
+    for row in panel.rows:
+        assert row.name.width() == expected
+        assert row.name.display_text() == row.model.id
+    if engine == "opencode":
+        assert panel.search is not None
+        panel.search.setText("no matching model")
+        panel._measure_names(panel.saved())
+        assert panel.name_width == expected
+        assert all(row.isHidden() for row in panel.rows)
+
+
+@pytest.mark.parametrize("widest", ("header", "row"))
+def test_name_width_uses_polished_fonts_margins_and_frames(
+    env: dict[str, str],
+    qtbot: QtBot,
+    stubs: dict[str, Any],
+    engine_theme: None,
+    widest: str,
+) -> None:
+    stubs["lists"] = {"codex": _codex_list()}
+    screen, context = _screen(env, qtbot)
+    panel = _open(screen, context, qtbot, "codex")
+    panel.name_header.setStyleSheet(
+        f"font-size: {30 if widest == 'header' else 10}px; "
+        "padding: 3px 11px; border: 2px solid red;"
+    )
+    for row in panel.rows:
+        row.name.setStyleSheet(
+            f"font-size: {30 if widest == 'row' else 10}px; "
+            "padding: 3px 7px; border: 3px solid red;"
+        )
+    panel._measure_names(panel.saved())
+    screen.resize(1300, 1000)
+    screen.show()
+    QApplication.processEvents()
+    header_width = _name_width(panel.name_header, "Model")
+    row_width = max(_name_width(row.name, row.model.id) for row in panel.rows)
+    assert (header_width > row_width) == (widest == "header")
+    assert panel.name_width == max(header_width, row_width)
+    assert panel.name_header.width() >= header_width
+    for row in panel.rows:
+        assert row.name.display_text() == row.model.id
+
+
 def test_name_width_measures_missing_ids_and_rebuilds(
     env: dict[str, str],
     qtbot: QtBot,
@@ -477,15 +566,15 @@ def test_name_width_measures_missing_ids_and_rebuilds(
     stubs["lists"] = {"codex": _codex_list()}
     screen, context = _screen(env, qtbot)
     panel = _open(screen, context, qtbot, "codex")
-    metrics = panel.rows[0].name.fontMetrics()
-    assert panel.name_width == metrics.horizontalAdvance("a-longer-missing-name")
+    assert panel.name_width == _name_width(panel.rows[0].name, "a-longer-missing-name")
     _save(context, qtbot, lambda: panel.remove("a-longer-missing-name"))
     assert not panel.missing
-    assert panel.name_width == metrics.horizontalAdvance("gpt-mini")
+    assert panel.name_width == _name_width(panel.rows[0].name, "gpt-mini")
     assert all(row.name.width() == panel.name_width for row in panel.rows)
     panel.show_list(models.ModelList((), models.CLI, NOW, None))
     assert panel.rows == [] and panel.missing == []
     assert panel.header.isHidden()
+    assert panel.name_width == _name_width(panel.name_header, "Model")
     assert not screen.grab().isNull()
 
 
