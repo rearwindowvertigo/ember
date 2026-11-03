@@ -337,17 +337,19 @@ def test_bring_forward_puts_a_token_where_qt_reads_it(
     env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     window, _context, _quit_app = _window(env, qtbot)
+    seen: list[str] = []
+
+    def activate() -> None:
+        environment = QProcessEnvironment.systemEnvironment()
+        seen.append(environment.value("XDG_ACTIVATION_TOKEN"))
+
+    monkeypatch.setattr(window, "activateWindow", activate)
     monkeypatch.delenv("XDG_ACTIVATION_TOKEN", raising=False)
     window.bring_forward("dock-token-2")
     assert window.isVisible()
-    assert QProcessEnvironment.systemEnvironment().value("XDG_ACTIVATION_TOKEN") in (
-        "dock-token-2",
-        "",
-    )
-    window.hide()
     monkeypatch.delenv("XDG_ACTIVATION_TOKEN", raising=False)
     window.bring_forward()
-    assert QProcessEnvironment.systemEnvironment().value("XDG_ACTIVATION_TOKEN") == ""
+    assert seen == ["dock-token-2", ""]
 
 
 @pytest.mark.parametrize("shown", [True, False])
