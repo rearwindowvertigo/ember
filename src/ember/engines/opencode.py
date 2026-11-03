@@ -31,7 +31,7 @@ import secrets
 import signal
 import socket
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -102,16 +102,53 @@ STOPPED = 1
 UNVERIFIED = 2
 
 
+START_SCREEN = "█▀▀█ █▀▀█"
+"""Part of the logo on OpenCode's start screen, which a shown session lacks."""
+
+SHOW_SECONDS = 120
+"""How long after a run starts Ember keeps the view on the run's session."""
+
+
 class _RefusedError(Exception):
     """The server's port refused the connection."""
 
 
-def run_config(model: str, read_only: bool) -> str:
+def external_directory(
+    read_only: bool, read: Sequence[str] = ()
+) -> str | dict[str, str]:
+    """Return the `external_directory` permission of a run.
+
+    OpenCode checks a path outside the checkout as `<folder>/*` and uses the
+    last matching rule, so a read-only run denies everything first and then
+    allows the folder of each read path: a folder itself, or a file's folder.
+    The sandbox still shows only the read paths themselves.
+
+    Args:
+        read_only: The run edits nothing.
+        read: The run's read paths, from `sandbox.read` and `--read`.
+
+    Returns:
+        "allow" for an editing run, "deny" for a read-only run without read
+        paths, otherwise the rules by pattern.
+    """
+    if not read_only:
+        return "allow"
+    folders = [path if Path(path).is_dir() else str(Path(path).parent) for path in read]
+    if not folders:
+        return "deny"
+    rules = {"*": "deny"}
+    for folder in dict.fromkeys(folders):
+        rules[f"{folder.rstrip('/')}/*"] = "allow"
+    return rules
+
+
+def run_config(model: str, read_only: bool, read: Sequence[str] = ()) -> str:
     """Return the OpenCode configuration of a run, as JSON.
 
     Args:
         model: The OpenRouter model id.
         read_only: The run edits nothing.
+        read: The run's read paths, which a read-only run may read.
 
     Returns:
         The configuration: OpenRouter with zero data retention for every
@@ -123,7 +160,7 @@ def run_config(model: str, read_only: bool) -> str:
         "write": "deny" if read_only else "allow",
         "patch": "deny" if read_only else "allow",
         "bash": bash,
-        "external_directory": "deny" if read_only else "allow",
+        "external_directory": external_directory(read_only, read),
         "question": "deny",
     }
     config = {
@@ -417,6 +454,24 @@ class OpenCodeDriver(Driver):
             messages = self._get(run, path, list)
         return messages
 
+    def _show_session(self, run: Run, session: str) -> None:
+        """Select the session again while the view shows its start screen.
+
+        Inside the sandbox, OpenCode's interactive view shows the selected
+        session and then returns to its start screen once it has loaded the
+        checkout. For the first `SHOW_SECONDS` of a run, each check selects
+        the session again while the start screen shows; later the view is
+        left alone, so an owner who moves it elsewhere keeps their view.
+        """
+        if time.time() - run.started_at > SHOW_SECONDS:
+            return
+        try:
+            screen = tmux.capture(run.id, env=run.env)
+        except tmux.TmuxError:
+            return
+        if START_SCREEN in screen:
+            self._select(run, session)
+
     def _view_drawn(self, run: Run) -> bool:
         """Return whether the interactive view has drawn anything in the pane."""
         try:
@@ -529,7 +584,9 @@ class OpenCodeDriver(Driver):
             "--agent", AGENT,
         )  # fmt: skip
         variables = {
-            "OPENCODE_CONFIG_CONTENT": run_config(model, run.read_only),
+            "OPENCODE_CONFIG_CONTENT": run_config(
+                model, run.read_only, run.read_effective
+            ),
             "OPENCODE_SERVER_PASSWORD": password,
             "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": self.env.get(
                 "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX", OUTPUT_TOKEN_MAX
@@ -661,6 +718,7 @@ class OpenCodeDriver(Driver):
         message_id = turns.get(str(run.turn)) if isinstance(turns, dict) else None
         if not isinstance(message_id, str):
             raise DriverError(f"no message was sent for turn {run.turn}")
+        self._show_session(run, session)
         statuses = self._get(run, "/session/status", dict)
         if statuses is None:
             time.sleep(self.poll_seconds)
