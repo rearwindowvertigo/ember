@@ -50,6 +50,14 @@ empty list.
 | `single.writer`, `single.reviewer` | `ask`, or `<engine>:<model>` with the model on that engine's shortlist when saved | `ask` | request, one-time, standing |
 | `multi.runs_as` | `ask`, `flow`, `workflow` | `ask` | request, one-time, standing |
 | `flow.review_rounds` | `1`, `2`, `3`, `4` | `3` | request, one-time, standing |
+| `gapcheck.reviewer`, `flow.writer`, `flow.reviewer` | `same`, or `<engine>:<model>` with the model on that engine's shortlist when saved | `same` | request, one-time, standing |
+| `gapcheck.when` | `off`, `always`, `2`, `3`, `4`, `5`, `6`, `8`, `10`, `ask` | `always` | request, one-time, standing |
+| `gapcheck.ask` | `high`, `medium`, `all` | `high` | request, one-time, standing |
+| `flow.parallel` | `1`, `2`, `4`, `6` | `4` | request, one-time, standing |
+| `flow.stall` | `5`, `10`, `20` | `10` | request, one-time, standing |
+| `flow.whole_review` | `on`, `off` | `on` | request, one-time, standing |
+| `workflow.agents` | `4`, `8`, `16` | `8` | request, one-time, standing |
+| `workflow.late` | `ask`, `wait`, `stop` | `ask` | request, one-time, standing |
 | `panel.members` | List of `<engine>:<model>` with each model on its engine's shortlist when saved, at most 8, no duplicates | `[]` | request, one-time, standing |
 | `single.writer_as`, `single.reviewer_as` | `cli`, `subagent` | `cli` | request, one-time, standing |
 | `sandbox.codex` | `on`, `off` | `on` when `bwrap` is on `PATH` or the `codex` on `PATH` has a bundled `bwrap`, else `off` | standing |
@@ -61,6 +69,21 @@ empty list.
 
 A shortlist lists each model once. A request or one-time value for a
 standing-only key is refused.
+
+`gapcheck.reviewer`, `flow.writer` and `flow.reviewer` follow their
+single-task row (`single.reviewer`, `single.writer`, `single.reviewer`)
+while `same`. `menu` reports each of them as a worker row with `same`
+true or false; a `same` row is its single-task row's. A Claude model in
+one of them runs as its single-task row's `_as` value says.
+`gapcheck.when` decides whether a plan gets a gap check: `off` never,
+`always` every plan, a number from that many steps up, `ask` after the
+owner says so. `gapcheck.ask` is the lowest gap harm put to the owner:
+`high`, `medium` (high and medium) or `all`. `flow.parallel` and
+`flow.stall` are the flow's tasks at once and stall minutes when the plan
+and the command give none. `flow.whole_review` records whether Claude runs
+one whole-flow review before merging a flow. `workflow.agents` and
+`workflow.late` are what the skill follows for a Claude Workflow: the most
+agents at once, and what to do when an agent runs past its deadline.
 
 ### Layers
 
@@ -644,7 +667,7 @@ claim to the run.
 |---|---|
 | `--plan FILE` | Required: the plan to review; an empty or blank file exits 64 |
 | `--dir DIR` | A folder in the checkout; defaults to the current folder. The brief and run use the checkout's top |
-| `--engine ENGINE` | Use `codex`, `opencode` or `claude`; otherwise use `single.reviewer` |
+| `--engine ENGINE` | Use `codex`, `opencode` or `claude`; otherwise use the `gapcheck.reviewer` row |
 | `--model MODEL` | Use this model, whether or not shortlisted; requires `--engine` |
 | `--effort EFFORT` | Use this effort; requires `--engine` |
 | `--claim ID` | Read choices with this claim and pass it to the run |
@@ -654,14 +677,29 @@ claim to the run.
 | `--json` | Print the result as JSON |
 | `--brief` | Print the brief and start nothing; accepts `--dir` |
 | `--reply FILE` | Read a reply from another worker and start nothing; accepts `--json` |
+| `--confirmed` | Run the check although `gapcheck.when` skips the plan or leaves it to the owner |
 | `--help` | Print the command's options |
 
 `--brief` and `--reply` cannot be combined. Neither accepts `--engine`,
 `--model`, `--effort`, `--claim`, `--read`, `--window` or `--stall`.
 `--brief` accepts no `--json`; `--reply` accepts no `--dir`.
 
-Without `--model`, the `single.reviewer` row must be `set`; when `--engine`
-is given it must match the row. A Claude row that runs as a subagent exits
+Before anything else is read, `gapcheck.when` decides the plan unless
+`--confirmed` is given (with `--reply` it is not applied). A plan it skips
+(`off`, or fewer steps than its number) starts no run: the command prints
+`gap check skipped: <reason>`, or JSON `{"plan", "status": "skipped",
+"reason"}`, and exits 0. With `ask` it prints the same with status `ask`,
+adds `owner: ask whether to run a gap check on this plan; to run it: …
+--confirmed` on standard error and exits 0. With `--brief`, either line
+goes to standard error and no brief is printed. A checked plan's result
+has `status` `run`, `ask` (the `gapcheck.ask` value) and, on every gap,
+`ask_owner`: whether its harm is at or above `gapcheck.ask`. Without
+readable settings every gap has `ask_owner` true and `ask` is `all`. In
+text, a gap whose default is taken reads `<harm> (default taken): …`.
+
+Without `--model`, the `gapcheck.reviewer` row must be `set` (while `same`,
+the `single.reviewer` row); its model and effort are the run's. When
+`--engine` is given it must match the row. A Claude row that runs as a subagent exits
 64 with the `--brief` and `--reply` route. With `--engine` and `--model`,
 the row may be `ask`. The run checks that the engine is on and connected
 and that its driver accepts the effort. A `gone` or `unknown` claim stops
@@ -852,7 +890,7 @@ existing reply exits 66. A successful turn with no reply file exits 81.
 |---|---|---|
 | 0 | The reply covers every step, or the brief was printed | A failed close prints a warning |
 | 1 | Settings database or run record cannot be read, or checkout discovery times out | `owner: repair or remove the settings database the message names`, `next: emb run --status <run>` or a new check |
-| 64 | Usage error, invalid claim, reviewer row not `set`, Claude subagent row, or a run start check | `next: emb gapcheck --help`, the claim's `emb choices` line, `owner: name the reviewer for this gap check, or set Reviewer on the Menu screen`, the `--brief`/`--reply` route, or the run's line |
+| 64 | Usage error, invalid claim, reviewer row not `set`, Claude subagent row, or a run start check | `next: emb gapcheck --help`, the claim's `emb choices` line, `owner: name the reviewer for this gap check, or set Gap check reviewer on the Team screen`, the `--brief`/`--reply` route, or the run's line |
 | 65 | `--dir` is not in a git checkout | `next: emb gapcheck --plan <plan> --dir <a folder in the checkout>` |
 | 66 | Plan or reply cannot be read, or `--dir` does not exist or is not a folder | `next: ls -l <path>` |
 | 69 | Git is unavailable, the runtime folder cannot be used, or the run exits 69 | `owner: install git`, the run's runtime-folder instruction, or the run's line |
@@ -949,7 +987,7 @@ is refused with code 64.
 | `trailers` | `[]` | List of non-blank strings without CR or LF |
 | `writer`, `reviewer` | Menu row | Objects with required `engine` and `model`, optional `effort`, and no other keys |
 | `rounds` | `flow.review_rounds` minus one | Integer from 0 to 3; fix rounds per task |
-| `parallel` | `4` | Integer from 1 to 8; maximum concurrent jobs within a wave |
+| `parallel` | `flow.parallel` (default `4`) | Integer from 1 to 8; maximum concurrent jobs within a wave |
 | `check` | No check | Non-empty argv list of strings; first argument non-blank; no NUL in any argument |
 | `check_timeout` | `1800` | Integer seconds, at least 1 |
 | `context`, `failure_model` | `""` | Strings |
@@ -993,15 +1031,16 @@ change plan validation. Git probes omit checkout override variables and
 ### Workers
 
 Each role resolves in this order: its `--writer` or `--reviewer` option,
-its plan object, then `single.writer` or `single.reviewer` in the choices
-reply. Options use `<engine>:<model>[@<effort>]`; model names may contain
+its plan object, then the `flow.writer` or `flow.reviewer` row in the
+choices reply, which is the `single.writer` or `single.reviewer` row while
+`same`. Options use `<engine>:<model>[@<effort>]`; model names may contain
 colons and slashes. The result records `engine`, `model`, `effort` and
 `source` (`option`, `plan`, `menu`, or `answer` for a lead answer).
 
 Menu resolution requires a readable settings source and a row in state
 `set`. A Claude row set to run as a subagent is refused: a flow runs CLI
 workers. These refusals give code 64 with an `owner:` line naming the
-role's explicit option and Menu screen. Explicit options and plan workers
+role's explicit option and Team screen. Explicit options and plan workers
 work when the rows are `ask`; they do not require a shortlist entry.
 
 The worker check requires its engine switch to be `on` (64), a connected
@@ -1357,9 +1396,10 @@ refused. `save` updates `updated_at` and atomically replaces `flow.json`.
 | `base_branch` | The local base branch at start, or null for a commit base or a record without this field |
 | `branch`, `worktree` | `ember/flow/<id>` and `<main>/.ember/worktrees/<id>` |
 | `writer`, `reviewer` | Stored worker objects: `engine`, `model`, `effort`, `source` |
-| `rounds`, `parallel`, `check_timeout` | Plan limits |
+| `rounds`, `parallel`, `check_timeout` | Plan limits; `parallel` is `flow.parallel` when the plan sets none |
 | `check`, `trailers`, `read` | Plan argv, commit trailers and readable paths; lists |
-| `stall_minutes` | Stall interval, default 10 |
+| `stall_minutes` | Stall interval: `--stall`, else `flow.stall` (default 10) |
+| `whole_review` | Whether `flow.whole_review` was on at start; the skill then runs one whole-flow review before merging |
 | `claim` | Claim id or null; information for the flow |
 | `status` | `starting`, `running`, `checking`, `stopped`, `failed`, `done` or `cancelled` |
 | `reason` | Stop, failure or cancellation reason, or null |
@@ -1435,12 +1475,22 @@ Data goes to standard output; diagnostics and action lines go to standard
 error. `--dry-run` text prints the resolved writer and reviewer with their
 sources, the base commit, `rounds <n> fix rounds, at most <n+1> reviews
 per task (<source>)`, the check as shell words (or `none`), numbered waves
-with each task's declared files, and `gap check: <command>`. The rounds
+with each task's declared files, `parallel <n> (<source>), stall <n> min,
+whole-flow review on|off`, and the gap check line: `gap check: <command>`,
+`gap check: skipped, <reason>`, or `gap check: ask the owner, then
+<command>`. The rounds
 source is `plan` when the plan sets `rounds`, otherwise `setting` (the
 owner's `flow.review_rounds` minus one). Warnings print as
 `WARNING: <text>`. JSON has `plan`, `dir`, `base`, `writer`, `reviewer`,
-`check`, `rounds`, `rounds_source`, `waves` (arrays of task ids),
-`warnings` and `gapcheck` (the shell command). Empty lists and zero finding counts remain
+`check`, `rounds`, `rounds_source`, `parallel`, `parallel_source` (`plan`
+or `setting`), `stall_minutes`, `whole_review`, `waves` (arrays of task
+ids), `warnings`, `gapcheck` (the shell command, or null when skipped),
+`gapcheck_status` (`run`, `skipped` or `ask`) and `gapcheck_reason`. The
+decision follows `gapcheck.when` and the plan's task count. The command
+names the flow's reviewer with `--engine`, `--model` and `--effort` when
+that reviewer came from `--reviewer` or the plan; otherwise it names none
+and `emb gapcheck` uses the `gapcheck.reviewer` row. With `ask` it carries
+`--confirmed`. Empty lists and zero finding counts remain
 in JSON.
 
 `--start` prints:
@@ -1606,7 +1656,7 @@ or checks the engine when no usable cache exists. No member left exits
 64; when every saved member was excluded, the diagnostic says
 `no panel member to run: every saved member was left out`. Exclusions
 are printed before the action line:
-`owner: name the members with --member <engine>:<model>[@<effort>], or set Panel on the Menu screen`.
+`owner: name the members with --member <engine>:<model>[@<effort>], or set Panel on the Team screen`.
 
 Effort comes from an explicit `@effort`, then a saved member's shortlist
 entry, then the driver's default for the model. A null default leaves
@@ -2661,9 +2711,11 @@ On every such connection, and 2 seconds after the folder holding the
 installed `ember-app` metadata (`ember_app-<version>.dist-info`) last
 changed, the running app reads the installed version from disk and compares
 it with the version it started as. An upgrade installed while Ember runs
-therefore shows the alert without another start. When they differ, its window shows an info alert, `Ember <version> is installed.
-Restart to use it.`, with a Restart button and no Dismiss; the alert stays
-until Ember restarts. Restart closes the socket, starts the installed app
+therefore shows the offer without another start. When they differ, the
+window shows a small info box in the sidebar, directly above the version
+line: `Ember <version> is installed.` with a Restart button and no Dismiss.
+The box stays until Ember restarts; a later installed version replaces its
+text. No alert shows above the screen for it. Restart closes the socket, starts the installed app
 with the running interpreter (`python -I -m ember.cli app`) and quits. Runs
 keep running in their tmux sessions.
 
@@ -2686,7 +2738,7 @@ they cannot be read it shows the reason and Try again.
 
 The window opens at 1100 by 720 pixels and is never smaller than 900 by 600.
 Its size and last screen are kept between starts. The sidebar shows the Ember
-mark and name, one row per screen (Overview, Menu, Engines, Dependencies,
+mark and name, one row per screen (Overview, Team, Engines, Dependencies,
 Settings) and `Ember <version>` at the bottom. Overview's row counts
 top-level live items: standalone live runs plus every flow and panel in
 Live, including stopped flows waiting for Claude and gone runners or panel
@@ -2719,7 +2771,7 @@ durations as `18 min`, `1 h 5 min` or `2 h`.
 
 | Keys | Do |
 |---|---|
-| Ctrl+1 to Ctrl+5 | Open Overview, Menu, Engines, Dependencies, Settings |
+| Ctrl+1 to Ctrl+5 | Open Overview, Team, Engines, Dependencies, Settings |
 | Ctrl+W | Hide the window to the tray; quit when there is no tray |
 | Ctrl+Q | Quit |
 
@@ -2964,10 +3016,10 @@ again in place of the sections. A failed flow and panel read shows an alert
 with Try again and keeps the previous records. The initial loading state
 waits for both record models.
 
-### Menu
+### Team
 
-Menu shows the standing worker menu in three cards: Single tasks, Work of
-several tasks and Panel. Single tasks holds the Writer and Reviewer pickers
+Team shows the standing worker menu in six cards: Single tasks, Planning,
+Work of several tasks, Flows, Claude Workflows and Panel. Single tasks holds the Writer and Reviewer pickers
 (`single.writer`, `single.reviewer`). Each lists Ask each time (`ask`), then,
 for Codex, OpenCode and Claude in that order, each engine that is on and has
 shortlisted models, under the engine's name, with its models as
@@ -2985,11 +3037,31 @@ settings snapshot reports. When no engine
 offers a model, the pickers hold Ask each time only and the screen shows
 "Shortlist models in Engines to offer them here." with Open Engines.
 
+Planning holds Gap check reviewer (`gapcheck.reviewer`), a picker of Same
+as Reviewer (`same`) and the same models as Reviewer; Run the gap check
+(`gapcheck.when`), a picker of Off, Always, 2+ tasks to 10+ tasks and Ask
+each time, whose help line states the effect of the chosen value, such as
+"Plans of 5 or more tasks. Plans of 1 to 4 tasks start without one."; and
+Gaps Claude asks you about (`gapcheck.ask`): High only, High and medium,
+All.
+
 Work of several tasks holds Multi-task work (`multi.runs_as`): Ask each time
-(`ask`), Flow (`flow`) or Claude Workflow (`workflow`), and Flow review
+(`ask`), Flow (`flow`) or Claude Workflow (`workflow`). Flows shows unless
+it is Claude Workflow, and Claude Workflows unless it is Flow.
+
+Flows holds Flow writer and Flow reviewer (`flow.writer`, `flow.reviewer`),
+pickers that start with Same as Writer and Same as Reviewer; Flow review
 rounds (`flow.review_rounds`): 1, 2, 3 or 4, the most times a reviewer
-checks one flow task. Both are available even when no engine offers a
-model.
+checks one flow task; Tasks at once (`flow.parallel`): 1, 2, 4, 6; Stall
+after (`flow.stall`): 5, 10, 20 min; and Review the whole flow
+(`flow.whole_review`), a switch. Claude Workflows holds Agents at once
+(`workflow.agents`): 4, 8, 16; and When an agent runs late
+(`workflow.late`): Ask me, Wait once more, Stop. These are available even
+when no engine offers a model.
+
+Every setting in Planning, Flows and Claude Workflows has a tooltip on its
+name, help line and control that explains it more fully. Tooltips draw in
+`fill-primary` with `on-primary`.
 
 Panel lists `panel.members` in saved order. A member shows
 `<Engine> · <model> · <effort>`, omitting effort when none is set. A member

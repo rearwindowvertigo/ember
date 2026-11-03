@@ -316,7 +316,10 @@ def test_cards_and_subtitle(env: dict[str, str], qtbot: QtBot) -> None:
     _context, screen = _screen(env, qtbot)
     assert [_texts(card)[0] for card in screen.findChildren(Card)] == [
         "Single tasks",
+        "Planning",
         "Work of several tasks",
+        "Flows",
+        "Claude Workflows",
         "Panel",
     ]
     assert menu.SUBTITLE in _texts(screen)
@@ -324,9 +327,8 @@ def test_cards_and_subtitle(env: dict[str, str], qtbot: QtBot) -> None:
     assert menu.PANEL_HELP in _texts(screen)
     assert (
         "Reads the writer's branch and reports. Never edits. "
-        "Used for read-only single runs, a flow's reviewer when its plan and "
-        "command name none, and every gap check that names no reviewer, "
-        "including the one before a flow."
+        "Used for read-only single runs, and by the Gap check reviewer and "
+        "Flow reviewer while they are Same as Reviewer."
     ) in _texts(screen)
     assert screen.multi.accessibleName() == "Multi-task work"
     assert screen.add_member.accessibleName() == "Add panel member"
@@ -910,3 +912,68 @@ def test_panel_stale_save_with_failed_reload_unlocks_after_a_read(
     assert list(screen.member_removes) == ["claude:opus"]
     assert screen.add_member.isEnabled()
     assert screen.member_removes["claude:opus"].isEnabled()
+
+
+def test_planning_rows_show_and_save_the_settings(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    choices.set_settings({"gapcheck.when": "5", "gapcheck.ask": "medium"}, env=env)
+    context, screen = _screen(env, qtbot)
+    assert screen.when.value() == "5"
+    assert screen.when_row.help.text() == (
+        "Plans of 5 or more tasks. Plans of 1 to 4 tasks start without one."
+    )
+    assert screen.asks.value() == "medium"
+    assert screen.derived["gapcheck.reviewer"].picker.value() == "same"
+    assert screen.derived["gapcheck.reviewer"].picker.currentText() == (
+        "Same as Reviewer"
+    )
+    assert screen.when.toolTip() == menu.WHEN_TIP
+    saved: list[dict[str, object]] = []
+    context.save_settings = lambda values, **_kwargs: saved.append(values)  # type: ignore[method-assign]
+    screen.when.set_value("off")
+    screen._when_picked(0)
+    assert saved == [{"gapcheck.when": "off"}]
+    assert screen.when_row.help.text().startswith("No gap check.")
+
+
+@pytest.mark.parametrize(
+    ("runs_as", "flows", "workflows"),
+    [("flow", True, False), ("workflow", False, True), ("ask", True, True)],
+)
+def test_flow_and_workflow_cards_follow_multi_task_work(
+    env: dict[str, str], qtbot: QtBot, runs_as: str, flows: bool, workflows: bool
+) -> None:
+    choices.set_settings({"multi.runs_as": runs_as}, env=env)
+    _context, screen = _screen(env, qtbot)
+    screen.show()
+    qtbot.waitUntil(lambda: screen.flow_card.isVisible() == flows, timeout=2000)
+    assert screen.workflow_card.isVisible() == workflows
+
+
+def test_flow_settings_show_their_values(env: dict[str, str], qtbot: QtBot) -> None:
+    choices.set_settings(
+        {
+            "flow.parallel": "2",
+            "flow.stall": "20",
+            "flow.whole_review": "off",
+            "workflow.agents": "16",
+            "workflow.late": "stop",
+        },
+        env=env,
+    )
+    _context, screen = _screen(env, qtbot)
+    assert screen.segments["flow.parallel"].value() == "2"
+    assert screen.segments["flow.stall"].value() == "20"
+    assert not screen.whole.isChecked()
+    assert screen.segments["workflow.agents"].value() == "16"
+    assert screen.segments["workflow.late"].value() == "stop"
+    assert screen.derived["flow.writer"].picker.currentText() == "Same as Writer"
+
+
+def test_when_help_covers_every_value() -> None:
+    for value, _text in menu.WHEN:
+        assert menu.when_help(value)
+    assert menu.when_help("2") == (
+        "Plans of 2 or more tasks. Plans of 1 task start without one."
+    )

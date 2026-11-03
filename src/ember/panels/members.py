@@ -16,7 +16,7 @@ from ember.flows.plan import (
 MAX_MEMBERS = 8
 NO_MEMBER_LINE = (
     "owner: name the members with --member <engine>:<model>[@<effort>], "
-    "or set Panel on the Menu screen"
+    "or set Panel on the Team screen"
 )
 HELP_LINE = "next: emb panel --help"
 

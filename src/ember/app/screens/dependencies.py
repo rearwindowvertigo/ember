@@ -10,7 +10,7 @@ installed versions, and newest versions when due.
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from ember import deps
@@ -49,6 +49,10 @@ BADGES = {
 """Each status's badge word and tone."""
 
 COLUMNS = 3
+"""The most tile columns; fewer are used when three do not fit."""
+
+GAP = 16
+"""Pixels between tiles."""
 """Tiles per row within a group."""
 
 NOT_READ = "Not read"
@@ -222,6 +226,8 @@ class DependenciesScreen(QWidget):
         super().__init__()
         self.context = context
         self.tiles: dict[str, DependencyTile] = {}
+        self.grids: list[tuple[QGridLayout, list[DependencyTile]]] = []
+        self.columns = COLUMNS
         self._checking = False
         self._dirty = True
         layout = QVBoxLayout(self)
@@ -257,6 +263,9 @@ class DependenciesScreen(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self.scroll_area.hide()
+        # The column count follows the scroll area's own size, which changes
+        # when it is first shown as well as when the window resizes.
+        self.scroll_area.installEventFilter(self)
         layout.addWidget(self.scroll_area, 1)
         self.groups: list[tuple[str, QLabel]] = []
 
@@ -355,6 +364,7 @@ class DependenciesScreen(QWidget):
         self.subtitle.setText(subtitle(report))
         self.tiles = {}
         self.groups = []
+        self.grids = []
         groups = ordered(report)
         if not groups:
             self._show_state()
@@ -374,19 +384,57 @@ class DependenciesScreen(QWidget):
             column.addWidget(heading)
             self.groups.append((key, heading))
             grid = QGridLayout()
-            grid.setHorizontalSpacing(16)
-            grid.setVerticalSpacing(16)
-            for index in range(COLUMNS):
-                grid.setColumnStretch(index, 1)
-            for index, item in enumerate(items):
+            grid.setHorizontalSpacing(GAP)
+            grid.setVerticalSpacing(GAP)
+            tiles = []
+            for item in items:
                 tile = DependencyTile(item, self.context)
                 self.tiles[item.id] = tile
-                grid.addWidget(tile, index // COLUMNS, index % COLUMNS)
+                tiles.append(tile)
+            self.grids.append((grid, tiles))
             column.addLayout(grid)
         column.addStretch(1)
+        self.columns = self.fitting_columns()
+        self._place()
         discard(self.scroll_area.takeWidget())
         self.scroll_area.setWidget(content)
         self.scroll_area.show()
+
+    def fitting_columns(self) -> int:
+        """Return the most columns, up to three, whose tiles fit beside the scroll bar.
+
+        Each tile is at least as wide as its longest unbroken text, such as a
+        long package version. Three such tiles can be wider than the screen;
+        the tiles then take two columns, or one.
+        """
+        if not self.tiles:
+            return COLUMNS
+        tile = max(t.minimumSizeHint().width() for t in self.tiles.values())
+        width = (
+            self.scroll_area.contentsRect().width()
+            - self.scroll_area.verticalScrollBar().sizeHint().width()
+        )
+        for count in range(COLUMNS, 1, -1):
+            if count * tile + (count - 1) * GAP <= width:
+                return count
+        return 1
+
+    def _place(self) -> None:
+        for grid, tiles in self.grids:
+            for tile in tiles:
+                grid.removeWidget(tile)
+            for index in range(COLUMNS):
+                grid.setColumnStretch(index, 1 if index < self.columns else 0)
+            for index, tile in enumerate(tiles):
+                grid.addWidget(tile, index // self.columns, index % self.columns)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: D102, N802
+        if watched is self.scroll_area and event.type() == QEvent.Type.Resize:
+            columns = self.fitting_columns()
+            if columns != self.columns:
+                self.columns = columns
+                self._place()
+        return super().eventFilter(watched, event)
 
     def order(self) -> list[tuple[str, list[str]]]:
         """Return the shown group keys with their component ids, in order."""

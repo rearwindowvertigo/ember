@@ -13,7 +13,7 @@ from ember.engines import Driver, DriverMissingError, status
 from ember.runs import exits
 
 ROLES = ("writer", "reviewer")
-ROW = {"writer": "single.writer", "reviewer": "single.reviewer"}
+ROW = {"writer": "flow.writer", "reviewer": "flow.reviewer"}
 SCHEMA_NAME = "flow-plan.schema.json"
 SUBJECT_LIMIT = 72
 TASK_ID = r"[a-z0-9][a-z0-9-]{0,39}"
@@ -104,6 +104,9 @@ class Plan:
     rounds_source: str = "plan"
     """Where `rounds` came from: `plan`, `setting`, or `default` before the
     owner's `flow.review_rounds` row is applied."""
+    parallel_source: str = "plan"
+    """Where `parallel` came from: `plan`, `setting`, or `default` before the
+    owner's `flow.parallel` row is applied."""
 
     def task(self, task_id: str) -> Task:
         """Find a task by id, raising KeyError if it is absent."""
@@ -273,6 +276,7 @@ def parse(text: str, path: Path) -> Plan:
         rounds=value.get("rounds", 2),
         rounds_source="plan" if "rounds" in value else "default",
         parallel=value.get("parallel", 4),
+        parallel_source="plan" if "parallel" in value else "default",
         check=tuple(value.get("check", [])),
         check_timeout=value.get("check_timeout", 1800),
         context=value.get("context", ""),
@@ -400,22 +404,23 @@ def resolve(
         return worker
     line = (
         f"owner: name the flow's {role} with --{role}, "
-        f"or set {role.title()} on the Menu screen"
+        f"or set Flow {role} on the Team screen"
     )
     menu = settings.get("menu")
     if settings.get("source_error") or menu is None:
         reason = "; ".join(settings.get("errors", [])) or "not valid"
         raise WorkerError(64, f"the settings cannot be read: {reason}", line)
     row = menu[ROW[role]]
+    # A flow row set to `same` reports the single-task row it follows.
+    name = f"single.{role}" if row.get("same") else ROW[role]
     if row["state"] != "set":
-        raise WorkerError(64, f"{ROW[role]} is {row['state']}: {row['reason']}", line)
+        raise WorkerError(64, f"{name} is {row['state']}: {row['reason']}", line)
     if row["engine"] == "claude" and row.get("run_as") == "subagent":
         raise WorkerError(
             64,
-            f"{ROW[role]} runs claude:{row['model']} as a subagent; "
-            "a flow runs CLI workers",
+            f"{name} runs claude:{row['model']} as a subagent; a flow runs CLI workers",
             f"owner: name the flow's {role} with --{role} claude:{row['model']}, "
-            f"or set {role.title()} to run as the CLI on the Menu screen",
+            f"or set Flow {role} to a CLI worker on the Team screen",
         )
     return Worker(row["engine"], row["model"], row["effort"], "menu")
 

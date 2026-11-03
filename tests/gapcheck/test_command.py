@@ -23,6 +23,8 @@ from runs.stub_engine import (  # pyrefly: ignore[missing-import]
 )
 
 RESULT_KEYS = {
+    "status",
+    "ask",
     "plan",
     "plan_steps",
     "failure_model",
@@ -696,3 +698,116 @@ def test_interrupt_while_waiting_keeps_the_run(
     assert err.splitlines()[-1].startswith("next: ")
     assert not list(paths.runtime_dir(env).glob("gapcheck-*.md"))
     assert record.load(data["run"]["id"], env).status != record.CLOSED
+
+
+def test_gap_check_reviewer_row_wins_over_the_single_reviewer(
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    driver: StubDriver,
+) -> None:
+    choices.set_settings(
+        {
+            "shortlist.codex": ["gpt-5@high", "gpt-5-mini@low"],
+            "single.reviewer": "codex:gpt-5",
+            "gapcheck.reviewer": "codex:gpt-5-mini",
+        },
+        env=env,
+    )
+    code, out, err = invoke(env, plan_file, "--dir", str(repo), "--json", driver=driver)
+    assert code == 0, err
+    reviewer = json.loads(out)["reviewer"]
+    assert (reviewer["model"], reviewer["effort"]) == ("gpt-5-mini", "low")
+
+
+@pytest.mark.parametrize(
+    ("when", "status"),
+    [("off", "skipped"), ("3", "skipped"), ("ask", "ask")],
+)
+def test_settings_skip_or_ask_without_a_run(
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    when: str,
+    status: str,
+) -> None:
+    choices.set_settings(
+        {"single.reviewer": "codex:gpt-5", "gapcheck.when": when}, env=env
+    )
+
+    def no_run(*_args: object, **_kwargs: object) -> Core:
+        raise AssertionError("no run may start")
+
+    code, out, err = invoke(
+        env, plan_file, "--dir", str(repo), "--json", factory=no_run
+    )
+    assert code == 0, err
+    data = json.loads(out)
+    assert data["status"] == status
+    assert data["reason"]
+    assert ("owner: ask whether to run a gap check" in err) == (status == "ask")
+
+
+def test_confirmed_runs_a_check_the_settings_skip(
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    driver: StubDriver,
+) -> None:
+    choices.set_settings(
+        {"single.reviewer": "codex:gpt-5", "gapcheck.when": "ask"}, env=env
+    )
+    code, out, err = invoke(
+        env, plan_file, "--dir", str(repo), "--confirmed", "--json", driver=driver
+    )
+    assert code == 0, err
+    assert json.loads(out)["status"] == "run"
+
+
+def test_plan_at_the_least_count_is_checked(
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    driver: StubDriver,
+) -> None:
+    choices.set_settings(
+        {"single.reviewer": "codex:gpt-5", "gapcheck.when": "2"}, env=env
+    )
+    code, out, err = invoke(env, plan_file, "--dir", str(repo), "--json", driver=driver)
+    assert code == 0, err
+    assert json.loads(out)["status"] == "run"
+
+
+def test_brief_of_a_skipped_plan_prints_no_brief(
+    env: dict[str, str], repo: Path, plan_file: Path
+) -> None:
+    choices.set_settings({"gapcheck.when": "off"}, env=env)
+    code, out, err = invoke(env, plan_file, "--dir", str(repo), "--brief")
+    assert code == 0, err
+    assert out == ""
+    assert err.startswith("gap check skipped: the gap check is off")
+
+
+def test_unreadable_settings_ask_about_every_gap() -> None:
+    gap = {"harm": "low"}
+    result: dict[str, Any] = {"steps": [{"gaps": [gap]}], "ranked": [gap]}
+    defaults = {"gapcheck.ask": {"value": "high", "layer": "default"}}
+    command._mark_asks(result, {"source_error": True, "answers": defaults})
+    assert result["ask"] == "all"
+    assert gap["ask_owner"] is True
+
+
+def test_confirmed_subagent_route_keeps_confirmed(
+    env: dict[str, str], repo: Path, plan_file: Path
+) -> None:
+    choices.set_settings(
+        {"single.reviewer_as": "subagent", "gapcheck.when": "ask"}, env=env
+    )
+    code, _out, err = invoke(env, plan_file, "--dir", str(repo), "--confirmed")
+    assert code == 64
+    assert "--brief --confirmed, then give the brief" in err
+    code, out, err = invoke(
+        env, plan_file, "--dir", str(repo), "--brief", "--confirmed"
+    )
+    assert code == 0, err
+    assert out.startswith("Gap check of the plan")

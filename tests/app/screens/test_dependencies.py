@@ -309,6 +309,47 @@ def test_tiles_take_the_whole_content_area(
     assert widget.scroll_area.geometry().top() < 200
 
 
+@pytest.mark.parametrize("width", [1100, 900, 700, 500])
+def test_tiles_never_run_under_the_scroll_bar(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, width: int
+) -> None:
+    widget, _context, _calls = _screen(env, qtbot, monkeypatch, _report(*SAMPLE))
+    widget.resize(width, 300)
+    area = widget.scroll_area
+    qtbot.waitUntil(lambda: area.widget() is not None, timeout=2000)
+    qtbot.wait(100)
+    content = area.widget()
+    assert content is not None
+    assert area.verticalScrollBar().isVisible()
+    assert content.width() <= area.viewport().width()
+    for tile in widget.tiles.values():
+        right = tile.mapTo(content, tile.rect().topRight()).x()
+        assert right < area.viewport().width()
+
+
+def test_first_report_in_a_wide_window_uses_three_columns(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    widget, _context, _calls = _screen(env, qtbot, monkeypatch, None)
+    widget.resize(1400, 600)
+    qtbot.wait(100)
+    widget.context.deps_changed.emit(_report(*SAMPLE))
+    qtbot.waitUntil(lambda: bool(widget.tiles), timeout=2000)
+    qtbot.waitUntil(lambda: widget.columns == 3, timeout=2000)
+
+
+def test_columns_drop_when_three_do_not_fit(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    widget, _context, _calls = _screen(env, qtbot, monkeypatch, _report(*SAMPLE))
+    widget.resize(1400, 600)
+    qtbot.waitUntil(lambda: widget.columns == 3, timeout=2000)
+    widget.resize(500, 600)
+    qtbot.waitUntil(lambda: widget.columns == 1, timeout=2000)
+    widget.resize(1400, 600)
+    qtbot.waitUntil(lambda: widget.columns == 3, timeout=2000)
+
+
 def test_subtitle_counts() -> None:
     now = time.time()
     current = _component("a", deps.CURRENT)

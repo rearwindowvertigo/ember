@@ -237,6 +237,11 @@ def _add_gapcheck(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="print a JSON result")
     parser.add_argument("--brief", action="store_true", help="print the brief only")
     parser.add_argument("--reply", metavar="FILE", help="read an existing reply")
+    parser.add_argument(
+        "--confirmed",
+        action="store_true",
+        help="run the check although the gap check settings skip or ask",
+    )
 
 
 def _add_flow(parser: argparse.ArgumentParser) -> None:

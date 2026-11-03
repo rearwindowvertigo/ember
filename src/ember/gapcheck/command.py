@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from ember import choices, db, paths
-from ember.gapcheck import brief, plan, reply
+from ember.gapcheck import brief, plan, policy, reply
 from ember.runs import exits, record
 from ember.runs.core import STALL_MINUTES, Core, StartOptions
 
@@ -33,7 +33,8 @@ GIT_LOCATION = (
     "GIT_PREFIX",
 )
 REVIEWER_LINE = (
-    "owner: name the reviewer for this gap check, or set Reviewer on the Menu screen"
+    "owner: name the reviewer for this gap check, "
+    "or set Gap check reviewer on the Team screen"
 )
 
 
@@ -108,52 +109,63 @@ def _checkout(directory: str | None, env: Mapping[str, str], command: str) -> st
     return result.stdout.strip()
 
 
-def _engine(args: argparse.Namespace, env: Mapping[str, str], command: str) -> str:
-    """Check the claim before inspecting the reviewer row."""
-    settings: dict[str, Any] | None = None
-    if args.claim is not None or args.model is None:
-        try:
-            settings = choices.read(args.claim, env=env)
-        except choices.InvalidChoiceError as error:
+def _settings(args: argparse.Namespace, env: Mapping[str, str]) -> dict[str, Any]:
+    """Read the choices, checking the claim when one is given."""
+    try:
+        settings = choices.read(args.claim, env=env)
+    except choices.InvalidChoiceError as error:
+        raise CommandError(
+            64, str(error), exits.line(64, "claim") or "", origin="run"
+        ) from error
+    except db.DatabaseError as error:
+        raise CommandError(1, str(error), exits.line(1, "database") or "") from error
+    if args.claim is not None:
+        state = settings["claim"]["status"]
+        if state in ("gone", "unknown"):
             raise CommandError(
-                64, str(error), exits.line(64, "claim") or "", origin="run"
-            ) from error
-        except db.DatabaseError as error:
-            raise CommandError(
-                1, str(error), exits.line(1, "database") or ""
-            ) from error
-        if args.claim is not None:
-            state = settings["claim"]["status"]
-            if state in ("gone", "unknown"):
-                raise CommandError(
-                    64,
-                    f"claim {args.claim} is {state}",
-                    exits.line(64, "claim") or "",
-                    origin="run",
-                )
+                64,
+                f"claim {args.claim} is {state}",
+                exits.line(64, "claim") or "",
+                origin="run",
+            )
+    return settings
+
+
+def _engine(args: argparse.Namespace, settings: Mapping[str, Any], command: str) -> str:
+    """Resolve the reviewer from the options, else the gap check reviewer row.
+
+    A row's model and effort are copied into `args`, so the run uses the gap
+    check reviewer rather than the single-task reviewer.
+    """
     if args.model is not None:
         return args.engine
-    assert settings is not None
     menu = settings.get("menu")
     if settings.get("source_error") or menu is None:
         reason = "; ".join(settings.get("errors") or []) or "the menu is unavailable"
         raise CommandError(64, f"the settings cannot be read: {reason}", REVIEWER_LINE)
-    row = menu["single.reviewer"]
+    row = menu["gapcheck.reviewer"]
+    name = "single.reviewer" if row["same"] else "gapcheck.reviewer"
     if row["state"] != "set":
         raise CommandError(
             64,
-            f"single.reviewer is {row['state']}: {row['reason']}",
+            f"{name} is {row['state']}: {row['reason']}",
             REVIEWER_LINE,
         )
     if row["engine"] == "claude" and row["run_as"] == "subagent":
         raise CommandError(
             64,
-            f"single.reviewer runs claude:{row['model']} as a subagent",
-            f"next: {command} --brief, then give the brief to a read-only Claude "
+            f"{name} runs claude:{row['model']} as a subagent",
+            f"next: {command} --brief{' --confirmed' if args.confirmed else ''}, "
+            "then give the brief to a read-only Claude "
             f"subagent on {row['model']} and read its answer with "
             f"{command} --reply <file>",
         )
-    return args.engine if args.engine is not None else row["engine"]
+    if args.engine is not None and args.engine != row["engine"]:
+        return args.engine
+    args.model = row["model"]
+    if args.effort is None:
+        args.effort = row["effort"]
+    return row["engine"]
 
 
 def _read_file(path: Path) -> str:
@@ -185,6 +197,62 @@ def _result(document: plan.Plan) -> dict[str, Any]:
     }
 
 
+def _print_decision(
+    document: plan.Plan,
+    decision: str,
+    why: str,
+    args: argparse.Namespace,
+    out: TextIO,
+    err: TextIO,
+) -> None:
+    """Report a plan the settings skip, or one that waits on the owner.
+
+    With `--brief` the report goes to standard error and no brief is printed.
+    """
+    if args.brief:
+        print(f"gap check {decision}: {why}", file=err)
+    elif args.json:
+        print(
+            json.dumps(
+                {"plan": str(document.path), "status": decision, "reason": why},
+                indent=2,
+            ),
+            file=out,
+        )
+    else:
+        print(f"gap check {decision}: {why}", file=out)
+
+
+def _settings_quietly(env: Mapping[str, str]) -> dict[str, Any] | None:
+    """Read the choices for a reply, or `None` when they cannot be read."""
+    try:
+        return choices.read(None, env=env)
+    except choices.InvalidChoiceError, db.DatabaseError:
+        return None
+
+
+def _mark_asks(result: dict[str, Any], settings: Mapping[str, Any] | None) -> None:
+    """Mark each gap the owner is asked about, per `gapcheck.ask`.
+
+    Without readable settings, including settings read with a source error
+    (whose answers are defaults), every gap is asked about.
+    """
+    answers = (
+        None
+        if settings is None or settings.get("source_error")
+        else settings.get("answers")
+    )
+    result["status"] = policy.RUN
+    result["ask"] = "all" if answers is None else answers["gapcheck.ask"]["value"]
+    for step in result["steps"]:
+        for gap in step["gaps"]:
+            gap["ask_owner"] = answers is None or policy.asks_owner(
+                answers, gap["harm"]
+            )
+    for gap in result["ranked"]:
+        gap["ask_owner"] = answers is None or policy.asks_owner(answers, gap["harm"])
+
+
 def _print_result(result: dict[str, Any], as_json: bool, out: TextIO) -> None:
     """Print the result as JSON or one block per covered step."""
     if as_json:
@@ -195,7 +263,8 @@ def _print_result(result: dict[str, Any], as_json: bool, out: TextIO) -> None:
         if not step["gaps"]:
             print("  no gaps", file=out)
         for gap in step["gaps"]:
-            print(f"  {gap['harm']}: {gap['gap']}", file=out)
+            asked = "" if gap.get("ask_owner", True) else " (default taken)"
+            print(f"  {gap['harm']}{asked}: {gap['gap']}", file=out)
             print(f"    why: {gap['why']}", file=out)
             print(f"    default: {gap['default']}", file=out)
     print(
@@ -377,6 +446,23 @@ def main(
             )
         problem = None
         reply_path = None
+        settings = _settings(args, environment) if args.reply is None else None
+        if settings is not None and not args.confirmed:
+            if settings.get("source_error"):
+                reason = "; ".join(settings.get("errors") or []) or "not valid"
+                raise CommandError(
+                    64, f"the settings cannot be read: {reason}", REVIEWER_LINE
+                )
+            decision, why = policy.decide(settings["answers"], len(document.steps))
+            if decision != policy.RUN:
+                _print_decision(document, decision, why, args, out, err)
+                if decision == policy.ASK:
+                    print(
+                        "owner: ask whether to run a gap check on this plan; "
+                        f"to run it: {command} ... --confirmed",
+                        file=err,
+                    )
+                return 0
         if args.reply is not None:
             reply_path = str(Path(args.reply).expanduser().absolute())
             result = _result(document)
@@ -387,7 +473,8 @@ def main(
             if args.brief:
                 print(brief.text(document, top), end="", file=out)
                 return 0
-            engine = _engine(args, environment, command)
+            assert settings is not None
+            engine = _engine(args, settings, command)
             result, code, problem = _run(
                 args,
                 document,
@@ -403,6 +490,7 @@ def main(
                 return code
             reply_path = result["run"]["reply"]
         code = code or (INVALID_REPLY if result["parse_error"] else 0)
+        _mark_asks(result, settings or _settings_quietly(environment))
         _print_result(result, args.json, out)
         if result["parse_error"]:
             print(f"emb gapcheck: {result['parse_error']}", file=err)

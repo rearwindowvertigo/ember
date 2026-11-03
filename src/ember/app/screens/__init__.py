@@ -32,7 +32,7 @@ ScreenClass = Callable[["AppContext"], QWidget]
 
 SCREENS: tuple[tuple[str, str, str, ScreenClass], ...] = (
     ("overview", "Overview", "layout-dashboard", OverviewScreen),
-    ("menu", "Menu", "list-checks", MenuScreen),
+    ("menu", "Team", "users", MenuScreen),
     ("engines", "Engines", "cpu", EnginesScreen),
     ("dependencies", "Dependencies", "package", DependenciesScreen),
     ("settings", "Settings", "settings", SettingsScreen),

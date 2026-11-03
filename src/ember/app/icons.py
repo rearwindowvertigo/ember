@@ -17,7 +17,7 @@ from ember.app import theme
 
 ICON_NAMES = (
     "layout-dashboard",
-    "list-checks",
+    "users",
     "cpu",
     "package",
     "settings",

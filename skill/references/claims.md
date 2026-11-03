@@ -109,7 +109,7 @@ same id.
 ## Owner options
 
 Do not run `--set`, `--clear`, `--once` or `--clear-once`. Standing
-settings change in Ember's Menu or Settings screen (`emb app`) or at the
+settings change in Ember's Team or Settings screen (`emb app`) or at the
 owner's terminal; one-time choices only at the terminal. Give the owner
 the exact command: `emb choices --set <key>=<value>` or
 `emb choices --once <key>=<value>`.
