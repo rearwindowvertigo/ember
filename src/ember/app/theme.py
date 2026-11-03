@@ -45,6 +45,8 @@ TOKENS: dict[str, tuple[str, str]] = {
     "success-bg": ("#caecc8", "#142a13"),
     "warning-text": ("#794c02", "#f2a600"),
     "warning-bg": ("#f9dca4", "#331d00"),
+    "incomplete-text": ("#7135a1", "#c994f0"),
+    "incomplete-bg": ("#ecdbfa", "#311544"),
     "danger-text": ("#a42528", "#f17778"),
     "danger-bg": ("#fbd4d4", "#470f10"),
     "danger-fill": ("#ba2623", "#ba2623"),
@@ -253,6 +255,10 @@ QLabel[role="badge"][tone="danger"] {
     background: @danger-bg;
     color: @danger-text;
 }
+QLabel[role="badge"][tone="incomplete"] {
+    background: @incomplete-bg;
+    color: @incomplete-text;
+}
 QLabel[role="badge"][tone="info"] {
     background: @bg-accent;
     color: @text-accent;
@@ -273,6 +279,9 @@ QFrame[role="alert"][tone="warning"] {
 }
 QFrame[role="alert"][tone="danger"] {
     background: @danger-bg;
+}
+QFrame[role="alert"][tone="incomplete"] {
+    background: @incomplete-bg;
 }
 QFrame[role="command"] {
     background: @bg-subtle;

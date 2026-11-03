@@ -245,6 +245,7 @@ def start(argv: list[str], env: Mapping[str, str] | None = None) -> EmberApp | i
     context.refresh_engines()
     context.refresh_deps(check_now=True)
     context.runs.start()
+    context.flows.set_active(True)
     return parts
 
 
@@ -262,6 +263,7 @@ def stop(parts: EmberApp) -> None:
     if parts.tray is not None:
         parts.tray.hide()
     parts.context.runs.stop()
+    parts.context.flows.set_active(False)
     parts.server.close()
     QCoreApplication.processEvents()
     parts.context.tasks.wait(QUIT_WAIT_MS)

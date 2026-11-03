@@ -677,3 +677,17 @@ def test_autostart_reason_is_kept_and_signalled(
         context.set_autostart_reason(None)
     assert blocker.args == [None]
     assert context.autostart_reason() is None
+
+
+def test_flows_default_inactive_and_injectable(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    context = AppContext(env)
+    assert not context.flows.active()
+    assert not context.flows.loaded()
+    assert context.tasks.pending() == 0
+    other = AppContext(env, flows=context.flows)
+    assert other.flows is context.flows
+    with qtbot.assertNotEmitted(context.flows.changed, wait=50):
+        context.flows.reload()
+    assert context.tasks.pending() == 0

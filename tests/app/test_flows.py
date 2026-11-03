@@ -1,4 +1,5 @@
 import fcntl
+import json
 import os
 import threading
 from collections.abc import Mapping
@@ -198,7 +199,9 @@ def test_missing_records_create_nothing(env: dict[str, str], proc_locks: Path) -
     assert not paths.runtime_dir(env).exists()
 
 
-def test_order_limits_and_broken_records(env: dict[str, str], proc_locks: Path) -> None:
+def test_order_all_ended_and_broken_records(
+    env: dict[str, str], proc_locks: Path
+) -> None:
     for n, status in enumerate(("stopped", "running", "starting") + ("done",) * 7):
         make_flow(
             env,
@@ -230,6 +233,8 @@ def test_order_limits_and_broken_records(env: dict[str, str], proc_locks: Path) 
         7,
         6,
         5,
+        4,
+        3,
     ]
     assert [int(item.record["id"][-6:], 16) for item in result.panels] == [
         2,
@@ -240,10 +245,13 @@ def test_order_limits_and_broken_records(env: dict[str, str], proc_locks: Path) 
         8,
         7,
         6,
+        5,
+        4,
+        3,
     ]
     assert result.unreadable_flows == result.unreadable_panels == 1
     assert result.panels[0].question == "A question"
-    assert len(result.watch) == 1 + 11 * 2 + 12 * 2
+    assert len(result.watch) == 1 + 11 * 2 + 12 * 2 + 10
 
 
 @pytest.mark.parametrize(
@@ -405,4 +413,67 @@ def test_folder_failure_and_recovery(
     with qtbot.waitSignal(model.changed, timeout=5000):
         model.reload()
     assert model.error() is None
+    model.set_active(False)
+
+
+@pytest.mark.parametrize("status", flow_record.ENDED)
+def test_all_ended_flow_states(
+    env: dict[str, str], proc_locks: Path, status: str
+) -> None:
+    make_flow(env, status=status, ended_at=None)
+    item = flows.read(env, proc_locks=proc_locks).flows[0]
+    assert item.record["status"] == status
+    assert not item.gone
+
+
+def test_nested_ids_match_prune(env: dict[str, str], proc_locks: Path) -> None:
+    flow = make_flow(env)
+    flow["tasks"][0]["writer_run"] = "writer"
+    flow["tasks"][0]["reviews"] = [{"reviewer_run": "old-review"}]
+    flow_record.save(flow, env)
+    events = flow_record.folder(FLOW, env) / flow_record.EVENTS_NAME
+    events.write_text(json.dumps({"seq": 1, "writer_run": "old-writer"}) + "\n")
+    panel = make_panel(env)
+    panel["members"][0].update(
+        run="member",
+        attempts=[{"kind": "start", "at": 100, "exit": 0, "run": "old-member"}],
+    )
+    panel_record.save(panel, env)
+    snapshot = flows.read(env, proc_locks=proc_locks)
+    assert snapshot.flows[0].run_ids == {"writer", "old-review", "old-writer"}
+    assert snapshot.panels[0].run_ids == {"member", "old-member"}
+    assert str(events) in snapshot.watch
+
+
+def test_event_only_change_and_atomic_replacement(
+    env: dict[str, str], proc_locks: Path, qtbot: QtBot
+) -> None:
+    make_flow(env)
+    tasks = TaskRunner()
+    model = flows.FlowsModel(env, tasks, proc_locks=proc_locks)
+    model.set_active(True)
+    qtbot.waitUntil(model.loaded)
+    events = flow_record.folder(FLOW, env) / flow_record.EVENTS_NAME
+    for run in ("first", "second"):
+        replacement = events.with_suffix(".new")
+        replacement.write_text(json.dumps({"seq": 1, "run": run}) + "\n")
+        replacement.replace(events)
+        qtbot.waitUntil(lambda run=run: model.flows()[0].run_ids == {run})
+        qtbot.waitUntil(lambda: str(events) in model.watched())
+    model.set_active(False)
+
+
+def test_panel_run_ids_emit_without_timestamp_change(
+    env: dict[str, str], proc_locks: Path, qtbot: QtBot
+) -> None:
+    panel = make_panel(env)
+    model = flows.FlowsModel(env, TaskRunner(), proc_locks=proc_locks)
+    model.set_active(True)
+    qtbot.waitUntil(model.loaded)
+    panel["members"][0]["attempts"] = [
+        {"kind": "retry", "at": 110, "exit": 0, "run": "previous"}
+    ]
+    with qtbot.waitSignal(model.changed, timeout=5000):
+        panel_record.save(panel, env)
+    assert model.panels()[0].run_ids == {"previous"}
     model.set_active(False)

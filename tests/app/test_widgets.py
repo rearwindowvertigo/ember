@@ -451,3 +451,29 @@ def test_set_icon_keeps_a_gap_and_the_accessible_name(qtbot: QtBot) -> None:
     widgets.set_icon(target, QIcon())
     assert target.text() == widgets.ICON_GAP + "Check now"
     assert target.accessibleName() == "Check now"
+
+
+@pytest.mark.parametrize("kind", ["Run", "Flow", "Panel"])
+def test_type_marker_follows_theme(qapp: QApplication, qtbot: QtBot, kind: str) -> None:
+    previous = theme.current_mode()
+    marker = widgets.TypeMarker(kind)
+    qtbot.addWidget(marker)
+    assert marker.label.text() == marker.accessibleName() == kind
+    assert marker.label.property("role") == "secondary"
+    try:
+        theme.apply(qapp, "light")
+        light = marker.icon_label.pixmap().toImage()
+        theme.apply(qapp, "dark")
+        dark = marker.icon_label.pixmap().toImage()
+        assert not light.isNull() and not dark.isNull()
+        assert light != dark
+    finally:
+        theme.apply(qapp, previous)
+        qapp.setStyleSheet("")
+
+
+def test_incomplete_badge(qtbot: QtBot) -> None:
+    badge = widgets.Badge("Incomplete", "incomplete")
+    qtbot.addWidget(badge)
+    assert badge.text() == "Incomplete"
+    assert badge.tone() == "incomplete"
