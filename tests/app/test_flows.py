@@ -477,3 +477,30 @@ def test_panel_run_ids_emit_without_timestamp_change(
         panel_record.save(panel, env)
     assert model.panels()[0].run_ids == {"previous"}
     model.set_active(False)
+
+
+@pytest.mark.parametrize("error", [PermissionError, IsADirectoryError])
+def test_unreadable_events_only_exclude_the_affected_flow(
+    env: dict[str, str],
+    proc_locks: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: type[OSError],
+) -> None:
+    make_flow(env)
+    other = make_flow(env, "flow-20260101-120000-cccccc")
+    make_panel(env)
+    events = flow_record.folder(FLOW, env) / flow_record.EVENTS_NAME
+    original = Path.read_bytes
+
+    def read_bytes(path: Path) -> bytes:
+        if path == events:
+            raise error("unreadable events")
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    snapshot = flows.read(env, proc_locks=proc_locks)
+    assert [item.record["id"] for item in snapshot.flows] == [other["id"]]
+    assert [item.record["id"] for item in snapshot.panels] == [PANEL]
+    assert snapshot.unreadable_flows == 1
+    assert snapshot.unreadable_panels == 0
+    assert str(events) in snapshot.watch

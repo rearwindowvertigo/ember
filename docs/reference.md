@@ -2702,11 +2702,6 @@ writer under a cancelled flow in Finished, as in the tray. The accessible
 description is `<n> live`; the count and description are hidden at zero.
 The count updates from the shared run, flow and panel models on every screen.
 
-This replaces the previous count of all live runs. It also replaces the
-failure model's additive rule of keeping that run count and adding waiting
-flows and panels: the count includes every Live parent once and excludes
-its nested workers.
-
 Dependencies' row shows the number of components with an update available
 or missing, only above zero. A screen is created the first time it is shown.
 
@@ -2925,9 +2920,9 @@ leaves the shown rows, Overview is left or the window hides. Expanding an
 ended run shows one record at a time. One flow and one panel can also have
 expanded details.
 
-The subtitle counts live runs, flows and panels. Above the sections, an
-alert names each enabled engine whose sandbox setting gives it no sandbox,
-with Open Engines. Live has one line naming the non-zero counts of unreadable
+The subtitle uses the tray status line, counting the same top-level live
+runs, flows and panels. Above the sections, an alert names each enabled
+engine whose sandbox setting gives it no sandbox, with Open Engines. Live has one line naming the non-zero counts of unreadable
 runs, flows and panels; the line is hidden when every count is zero.
 
 When the runs folder cannot be read, the screen shows the reason and Try

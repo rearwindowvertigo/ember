@@ -605,3 +605,63 @@ def test_release_notice_above_groups_opens_release_page(
     assert widget.release_alert is None
     assert widget.alert is None
     assert widget.order()
+
+
+@pytest.mark.parametrize(
+    ("command", "kind", "path", "shown"),
+    [
+        ("codex update", "update", "/tools/codex", True),
+        (None, "update", "/tools/codex", False),
+        ("install codex", "install", "/tools/codex", False),
+        ("codex update", None, "/tools/codex", False),
+        ("codex update", "update", None, False),
+        (None, None, "/tools/codex", False),
+    ],
+)
+def test_resolved_path_shown_only_with_update_command(
+    env: dict[str, str],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str | None,
+    kind: str | None,
+    path: str | None,
+    shown: bool,
+) -> None:
+    item = replace(
+        _component("codex", deps.CURRENT, command=command, command_kind=kind),
+        resolved_path=path,
+    )
+    widget, _context, _calls = _screen(env, qtbot, monkeypatch, _report(item))
+    assert widget.tiles["codex"].resolved_path.isVisible() is shown
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://github.com/rearwindowvertigo/ember/releases/tag/v0.3.0",
+        "https://example.com/release",
+        "https://github.com/rearwindowvertigo/ember-other/releases/tag/v0.3.0",
+        "https://github.com/other/ember/releases/tag/v0.3.0",
+        "file:///tmp/release",
+        "",
+    ],
+)
+def test_untrusted_release_url_has_no_download_button(
+    env: dict[str, str],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+) -> None:
+    opened: list[str] = []
+    monkeypatch.setattr(
+        screen_module.QDesktopServices,
+        "openUrl",
+        lambda value: opened.append(value.toString()),
+    )
+    report = replace(_report(*SAMPLE), ember_release=deps.EmberRelease("0.3.0", url))
+    widget, _context, _calls = _screen(env, qtbot, monkeypatch, report)
+    alert = widget.release_alert
+    assert alert is not None and alert.isVisible()
+    assert alert.title_label.text() == "Ember 0.3.0 is available"
+    assert alert.buttons == []
+    assert opened == []

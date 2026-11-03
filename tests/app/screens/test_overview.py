@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import QEvent, QObject, Qt, QUrl
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 from pytestqt.qtbot import QtBot
 
 from ember import paths, prune, sandbox
-from ember.app import flows, theme
+from ember.app import flows, theme, tray
 from ember.app.context import AppContext
 from ember.app.screens import overview
 from ember.app.screens.overview import OverviewScreen
@@ -550,7 +550,7 @@ def test_record_formatters(env: dict[str, str]) -> None:
     assert overview.panel_title(panel) == "Panel · 0 members · 0/0 answered"
 
 
-def test_flow_details_and_run_links(
+def test_flow_details_and_nested_runs(
     env: dict[str, str], context: AppContext, qtbot: QtBot
 ) -> None:
     write_run(make_run(env, LIVE_A))
@@ -589,21 +589,11 @@ def test_flow_details_and_run_links(
     assert "Choose a format" in labels(row)
     assert "1 review · last fix · 2 must, 1 should, 1 lead" in labels(row)
     assert "task-0 · Merged · round 0 · Codex · test-model" in labels(row)
-    assert row.links == []
     assert row.nested.count() == 2
     assert row.nested.indexOf(screen.finished_rows[DONE_A]) >= 0
     assert row.nested.indexOf(screen.live_rows[LIVE_A]) >= 0
     assert screen.finished_rows_layout.count() == 0
     assert screen.live_rows_layout.count() == 1
-    screen.show_run(DONE_A)
-    assert screen.expanded_finished == DONE_A
-    screen.show_run(LIVE_A)
-    assert screen.expanded_live == LIVE_A
-    mirror = screen.mirror()
-    assert mirror is not None
-    qtbot.waitUntil(lambda: mirror.last_screen() is not None)
-    screen.show_run(LIVE_A)
-    assert screen.mirror() is mirror
 
 
 @pytest.mark.parametrize("stored_waves", [False, True])
@@ -651,7 +641,6 @@ def test_panel_details(env: dict[str, str], context: AppContext, qtbot: QtBot) -
     assert "Left out claude:opus: engine off" in text
     assert not any(line.startswith("Summary:") for line in text)
     assert f"Run {LIVE_A}" not in text
-    assert row.links == []
     assert [
         button.text() for button in screen.finished_card.findChildren(QPushButton)
     ] == ["Clear", "", "Summary"]
@@ -812,7 +801,7 @@ def test_record_file_buttons_refresh_only_when_expanded(
     assert panel.file_buttons["Summary"].isEnabled()
 
 
-def test_record_rows_survive_other_changes_and_refresh_links(
+def test_record_rows_survive_other_changes_and_refresh_workers(
     env: dict[str, str], context: AppContext, qtbot: QtBot
 ) -> None:
     flow = make_flow(env, status="running")
@@ -1009,8 +998,6 @@ def test_record_keyboard_order_and_long_text(
         label.sizePolicy().hasHeightForWidth()
         for label in flow_row.details.findChildren(QLabel)
     )
-    screen.show_run(LIVE_A)
-    assert screen.expanded_live == LIVE_A
 
 
 @pytest.mark.parametrize("mode", ["light", "dark"])
@@ -1113,7 +1100,8 @@ def test_finished_cap_merges_types_and_keeps_all_nested_runs(
         assert isinstance(widget, overview._ExpandableRow)
         row_ids.append(widget._item_id)
     assert row_ids == top_ids[:3:-1]
-    assert not screen.has_run(hidden_child)
+    assert hidden_child not in screen.live_rows
+    assert hidden_child not in screen.finished_rows
     parent = screen.flow_rows[top_ids[21]]
     assert parent.nested.count() == 22
     assert all(
@@ -1494,3 +1482,99 @@ def test_prune_dialog_scrolls_and_lists_commands(
     finally:
         theme.apply(qapp, previous)
         qapp.setStyleSheet("")
+
+
+@pytest.fixture(params=["flow", "panel"])
+def nested_screen(
+    env: dict[str, str],
+    context: AppContext,
+    qtbot: QtBot,
+    request: pytest.FixtureRequest,
+) -> OverviewScreen:
+    for ident, status in ((LIVE_A, record.RUNNING), (DONE_A, record.CLOSED)):
+        write_run(make_run(env, ident, status=status))
+    if request.param == "flow":
+        flow = make_flow(env, status="running")
+        flow["tasks"][0]["writer_run"] = LIVE_A
+        flow["tasks"][1]["writer_run"] = DONE_A
+        flow_record.save(flow, env)
+    else:
+        make_panel(
+            env, members=[make_member(1, run=LIVE_A), make_member(2, run=DONE_A)]
+        )
+    context.runs.reload()
+    qtbot.waitUntil(lambda: len(context.runs.runs()) == 2)
+    return screen_for(context, qtbot)
+
+
+@pytest.mark.parametrize("finished", [False, True])
+def test_nested_button_keeps_focus_on_refresh(
+    nested_screen: OverviewScreen, qtbot: QtBot, finished: bool
+) -> None:
+    screen = nested_screen
+    row = screen.finished_rows[DONE_A] if finished else screen.live_rows[LIVE_A]
+    screen.activateWindow()
+    row.expand_button.setFocus()
+    qtbot.waitUntil(row.expand_button.hasFocus)
+    screen.refresh()
+    assert row.expand_button.hasFocus()
+
+
+@pytest.mark.parametrize("finished", [False, True])
+def test_nested_row_is_not_hidden_or_reparented_on_refresh(
+    nested_screen: OverviewScreen, finished: bool
+) -> None:
+    class Events(QObject):
+        def __init__(self) -> None:
+            super().__init__()
+            self.seen: list[QEvent.Type] = []
+
+        def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+            self.seen.append(event.type())
+            return False
+
+    screen = nested_screen
+    row = screen.finished_rows[DONE_A] if finished else screen.live_rows[LIVE_A]
+    events = Events()
+    row.installEventFilter(events)
+    screen.refresh()
+    assert QEvent.Type.ParentChange not in events.seen
+    assert QEvent.Type.Hide not in events.seen
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [("running", "1 flow, 1 panel live"), ("cancelled", "1 run, 1 panel live")],
+)
+def test_subtitle_matches_tray_top_level_counts(
+    env: dict[str, str], context: AppContext, qtbot: QtBot, status: str, expected: str
+) -> None:
+    flow = make_flow(env, status=status)
+    flow["tasks"][0]["writer_run"] = LIVE_A
+    flow_record.save(flow, env)
+    make_panel(env, members=[make_member(run=LIVE_B)])
+    for ident in (LIVE_A, LIVE_B):
+        write_run(make_run(env, ident))
+    context.runs.reload()
+    qtbot.waitUntil(lambda: len(context.runs.live()) == 2)
+    screen = screen_for(context, qtbot)
+    icon = tray.Tray(context, lambda: None, lambda: None, lambda: None)
+    assert screen.subtitle.text() == icon.lines()[0] == expected
+    icon.menu.deleteLater()
+
+
+def test_nested_worker_survives_removed_parent(
+    nested_screen: OverviewScreen, context: AppContext, qtbot: QtBot
+) -> None:
+    screen = nested_screen
+    child = screen.live_rows[LIVE_A]
+    parent = next(iter([*screen.flow_rows.values(), *screen.panel_rows.values()]))
+    shutil.rmtree(paths.runs_dir(context.env) / parent.item.record["id"])
+    context.flows.reload()
+    qtbot.waitUntil(lambda: not screen.flow_rows and not screen.panel_rows)
+    qtbot.waitUntil(lambda: context.tasks.pending() == 0)
+    assert screen.live_rows[LIVE_A] is child
+    assert child.isVisible()
+    assert screen.live_rows_layout.indexOf(child) == 0
+    child.expand_button.click()
+    assert screen.expanded_live == LIVE_A

@@ -160,17 +160,21 @@ def read(
         )
         return locked, gone
 
-    flow_items = [
-        FlowItem(
-            item,
-            *state(item, item["status"] in RUNNER_FLOW),
-            frozenset(
-                prune._run_ids(item)
-                | prune._run_ids(flow_record.read_events(item["id"], env))
-            ),
+    flow_items = []
+    unreadable_flows = len(flow_errors)
+    for item in _selected(flows, ACTIVE_FLOW, ENDED_FLOW):
+        try:
+            events = flow_record.read_events(item["id"], env)
+        except OSError:
+            unreadable_flows += 1
+            continue
+        flow_items.append(
+            FlowItem(
+                item,
+                *state(item, item["status"] in RUNNER_FLOW),
+                frozenset(prune._run_ids(item) | prune._run_ids(events)),
+            )
         )
-        for item in _selected(flows, ACTIVE_FLOW, ENDED_FLOW)
-    ]
     panel_items = [
         PanelItem(
             item,
@@ -201,7 +205,7 @@ def read(
         for name in names:
             if (folder / name).exists():
                 watch.append(str(folder / name))
-    return Snapshot(flow_items, panel_items, len(flow_errors), len(panel_errors), watch)
+    return Snapshot(flow_items, panel_items, unreadable_flows, len(panel_errors), watch)
 
 
 class FlowsModel(QObject):

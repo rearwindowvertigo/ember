@@ -444,7 +444,10 @@ def sandbox_warning(engine: str) -> str:
 
 
 class _ExpandableRow(QWidget):
-    """An expand arrow, badge, two lines, time, actions and optional body."""
+    """An arrow, type marker, badge, time, actions and optional body.
+
+    The header has title and detail lines and a third, elided question line.
+    """
 
     def __init__(self, item_id: str, kind: str, what: str) -> None:
         """Build the shared header and body layout."""
@@ -648,7 +651,6 @@ class _RecordRow(_ExpandableRow):
             policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
             label.setSizePolicy(policy)
         self.details: QWidget | None = None
-        self.links: list[QPushButton] = []
         self.file_buttons: dict[str, QPushButton] = {}
         self.file_paths: dict[str, Path | None] = {}
         self.shown_values: tuple[object, ...] = ()
@@ -658,12 +660,12 @@ class _RecordRow(_ExpandableRow):
         self.outer.addLayout(self.nested)
         self.set_item(item)
 
-    def entries(self) -> list[tuple[str, bool, str | None]]:
-        """Return body lines with secondary style and optional run id."""
+    def entries(self) -> list[tuple[str, bool]]:
+        """Return body lines with their secondary style flag."""
         raise NotImplementedError
 
     def set_item(self, item: FlowItem | PanelItem) -> None:
-        """Draw changed values and refresh available run links."""
+        """Draw changed values and refresh available file buttons."""
         self.item = item
         data = item.record
         if isinstance(item, FlowItem):
@@ -688,9 +690,6 @@ class _RecordRow(_ExpandableRow):
         )
         self.question_label.setVisible(bool(self.question_label.text()))
         entries = self.entries()
-        links = tuple(
-            run for _, _, run in entries if run and self.overview.has_run(run)
-        )
         values = (
             badge,
             title,
@@ -698,7 +697,6 @@ class _RecordRow(_ExpandableRow):
             data["started_at"],
             data["ended_at"],
             tuple(entries),
-            links,
         )
         self.update_elapsed()
         if values == self.shown_values:
@@ -727,18 +725,17 @@ class _RecordRow(_ExpandableRow):
         self.time_label.setText(item_time(data["started_at"], ended, now))
 
     def show_details(self, shown: bool) -> None:
-        """Expand or collapse the selectable body and its Show run buttons."""
+        """Expand or collapse the selectable body and its file buttons."""
         if self.details is not None:
             discard(self.details, self.body)
             self.details = None
-        self.links = []
         self.file_buttons = {}
         self.file_paths = {}
         if shown:
             details = QWidget()
             layout = QVBoxLayout(details)
             layout.setContentsMargins(0, 0, 0, 0)
-            for text, secondary, run_id in self.entries():
+            for text, secondary in self.entries():
                 line = QHBoxLayout()
                 label = QLabel(text)
                 label.setTextFormat(Qt.TextFormat.PlainText)
@@ -752,14 +749,6 @@ class _RecordRow(_ExpandableRow):
                 if secondary:
                     label.setProperty("role", "secondary")
                 line.addWidget(label, 1)
-                if run_id and self.overview.has_run(run_id):
-                    link = button("Show run", "secondary", size="sm")
-                    link.setAccessibleName(f"Show run {run_id}")
-                    link.clicked.connect(
-                        lambda _checked=False, key=run_id: self.overview.show_run(key)
-                    )
-                    line.addWidget(link)
-                    self.links.append(link)
                 layout.addLayout(line)
             actions = QHBoxLayout()
             names = (
@@ -816,38 +805,34 @@ class _RecordRow(_ExpandableRow):
 class _FlowRow(_RecordRow):
     """A flow with task status and review details."""
 
-    def entries(self) -> list[tuple[str, bool, str | None]]:
+    def entries(self) -> list[tuple[str, bool]]:
         """Return the runner pass count and each task's lines in plan order."""
-        result: list[tuple[str, bool, str | None]] = [
-            (f"passes {self.item.record['wave']}", True, None)
-        ]
+        result: list[tuple[str, bool]] = [(f"passes {self.item.record['wave']}", True)]
         for task in self.item.record["tasks"]:
-            result.append((task_line(self.item.record, task), False, None))
+            result.append((task_line(self.item.record, task), False))
             if task["reason"]:
-                result.append((task["reason"], True, None))
+                result.append((task["reason"], True))
             review = review_line(task)
             if review:
-                result.append((review, True, None))
+                result.append((review, True))
         return result
 
 
 class _PanelRow(_RecordRow):
     """A panel with member answers, omissions and a Summary button."""
 
-    def entries(self) -> list[tuple[str, bool, str | None]]:
+    def entries(self) -> list[tuple[str, bool]]:
         """Return member details followed by omissions."""
-        result: list[tuple[str, bool, str | None]] = []
+        result: list[tuple[str, bool]] = []
         data = self.item.record
         for member in data["members"]:
-            result.append((member_line(member), False, None))
+            result.append((member_line(member), False))
             if member["reason"]:
-                result.append((member["reason"], True, None))
+                result.append((member["reason"], True))
             if member["changed"]:
-                result.append(("Changed: " + ", ".join(member["changed"]), True, None))
+                result.append(("Changed: " + ", ".join(member["changed"]), True))
         for omitted in data["left_out"]:
-            result.append(
-                (f"Left out {omitted['value']}: {omitted['reason']}", True, None)
-            )
+            result.append((f"Left out {omitted['value']}: {omitted['reason']}", True))
         return result
 
 
@@ -1036,15 +1021,8 @@ class OverviewScreen(QWidget):
             )
             else "No finished runs, flows or panels yet."
         )
-        counts = [tray.status_line(len(runs.live()))]
-        for items, kind in (
-            (self.records.flows(), "flow"),
-            (self.records.panels(), "panel"),
-        ):
-            count = sum(not item_ended(item) for item in items)
-            if count:
-                counts.append(f"{plural(count, kind)} live")
-        self.subtitle.setText(" · ".join(counts))
+        tray_items, _children = tray.live_items(runs.live(), parents)
+        self.subtitle.setText(tray.status_line(*tray.counts(tray_items)))
         unreadable = (
             runs.unreadable()
             + self.records.unreadable_flows()
@@ -1182,13 +1160,6 @@ class OverviewScreen(QWidget):
             shown_runs.extend(children[item_id(parent)])
         self._draw_live([run for run in shown_runs if run.status in LIVE])
         self._draw_finished([run for run in shown_runs if run.status in DONE])
-        # Run rows are now outside parent rows that may be discarded.
-        for rows in (self.flow_rows, self.panel_rows):
-            for key in list(rows):
-                if key not in {item_id(item) for item in parents}:
-                    row = rows.pop(key)
-                    row.setParent(None)
-                    row.deleteLater()
         for item in parents:
             rows = self.flow_rows if isinstance(item, FlowItem) else self.panel_rows
             key = item_id(item)
@@ -1231,6 +1202,14 @@ class OverviewScreen(QWidget):
                 top_rows.append(row)
             _place(layout, top_rows)
             empty.setVisible(not items)
+        # Surviving workers have moved out of parents that are no longer shown.
+        parent_ids = {item_id(item) for item in parents}
+        for rows in (self.flow_rows, self.panel_rows):
+            for key in list(rows):
+                if key not in parent_ids:
+                    row = rows.pop(key)
+                    row.setParent(None)
+                    row.deleteLater()
         error = self.records.error()
         self.records_alert.setVisible(error is not None)
         if error is not None:
@@ -1253,25 +1232,6 @@ class OverviewScreen(QWidget):
         row.show_details(shown)
         self._chain_focus()
 
-    def has_run(self, run_id: str) -> bool:
-        """Return whether a live or finished row for this run is shown."""
-        return run_id in self.live_rows or run_id in self.finished_rows
-
-    def show_run(self, run_id: str) -> None:
-        """Expand a shown run's mirror or record and scroll to its row."""
-        row: QWidget | None = None
-        if run_id in self.live_rows:
-            if self.expanded_live != run_id:
-                self.toggle_live(run_id)
-            row = self.live_rows[run_id]
-        elif run_id in self.finished_rows:
-            if self.expanded_finished != run_id:
-                self.toggle_finished(run_id)
-            row = self.finished_rows[run_id]
-        area = self.findChild(QScrollArea)
-        if row is not None and area is not None:
-            area.ensureWidgetVisible(row)
-
     def _draw_live(self, live: list[Run]) -> None:
         wanted = {run.id for run in live}
         if self.expanded_live is not None and self.expanded_live not in wanted:
@@ -1290,8 +1250,6 @@ class OverviewScreen(QWidget):
                 self.live_rows[run.id] = row
             else:
                 row.set_run(run)
-        _place(self.live_rows_layout, [self.live_rows[run.id] for run in live])
-        self.live_empty.setVisible(not live)
 
     def _draw_finished(self, finished: list[Run]) -> None:
         """Draw the finished rows, reusing each run's row.
@@ -1315,11 +1273,9 @@ class OverviewScreen(QWidget):
             else:
                 row.set_run(run)
         self.finished_rows = {run.id: self.finished_rows[run.id] for run in finished}
-        _place(self.finished_rows_layout, list(self.finished_rows.values()))
         expanded = self.finished_rows.get(self.expanded_finished or "")
         if expanded is not None and expanded.details is None:
             expanded.show_details(True)
-        self.finished_empty.setVisible(not finished)
 
     def _chain_focus(self) -> None:
         """Keep Tab in reading order through alerts, records and runs."""
@@ -1342,7 +1298,6 @@ class OverviewScreen(QWidget):
             if isinstance(row, _LiveRow):
                 chain.append(row.open_button)
             elif isinstance(row, _RecordRow):
-                chain.extend(row.links)
                 chain.extend(row.file_buttons.values())
         chain.extend(filters)
         chain_tab_order(chain)
