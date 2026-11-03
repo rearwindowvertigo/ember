@@ -236,11 +236,13 @@ def test_stop_hides_everything_before_waiting_for_reads(
 
 
 def test_flows_start_and_stop_with_app(app_env: dict[str, str], qtbot: QtBot) -> None:
+    model = None
     for parts in _start([], app_env, qtbot):
         model = parts.context.flows
         assert model.active()
         qtbot.waitUntil(model.loaded)
         parts.window.hide()
         assert model.active()
+    assert model is not None
     assert not model.active()
     assert not model.watched()
