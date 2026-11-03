@@ -15,8 +15,9 @@
   when a commit is marked breaking. `docs`, `build`, `ci`, `test`,
   `refactor`, `style` and `chore` commits are not listed.
 - Pull requests merge into `main` with a merge commit that keeps GitHub's
-  default merge message, so Release Please reads only the pull request's own
-  commits.
+  default subject and has an empty body (`gh pr merge <n> --merge --body
+  ""`), so Release Please reads only the pull request's own commits. A body
+  holding the pull request's title is read as one more change.
 - The release pull request is merged only when the release's target in its
   design document is complete.
 - Release Please also sets the project's version in `uv.lock`

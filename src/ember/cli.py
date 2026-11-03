@@ -906,9 +906,6 @@ def _run_deps(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
     for item in report.components:
         for line in _deps_lines(item):
             print(line)
-    if report.ember_release is not None:
-        release = report.ember_release
-        print(f"Ember: version {release.version} available: {release.url}")
     return EX_OK
 
 

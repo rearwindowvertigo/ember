@@ -10,9 +10,6 @@ deadline of `TIMEOUT` seconds, in its own process group, which is killed whole
 at the deadline. Every network read has a timeout of `TIMEOUT` seconds. A
 component read that fails gives `check failed` with a reason, never an exception.
 
-The report also includes a newer Ember release from GitHub when one is found.
-Failed release reads give no notice and are retried on the next due check.
-
 The last reads are cached in `dependencies.json` in Ember's cache folder.
 Newest versions are read again when their cached read is `MAX_AGE` seconds old
 or older, or when asked.
@@ -58,11 +55,6 @@ CACHE_NAME = "dependencies.json"
 
 PYPI_URL = "https://pypi.org/pypi/{package}/json"
 """Where a Python package's newest version is read."""
-
-EMBER_RELEASE_URL = (
-    "https://api.github.com/repos/rearwindowvertigo/ember/releases/latest"
-)
-"""Where Ember's latest published release is read."""
 
 MISSING = "missing"
 CHECK_FAILED = "check failed"
@@ -242,14 +234,6 @@ class Component:
 
 
 @dataclass(frozen=True)
-class EmberRelease:
-    """A newer Ember release and its download page."""
-
-    version: str
-    url: str
-
-
-@dataclass(frozen=True)
 class DepsReport:
     """Every component's status, in the order `components.toml` lists them."""
 
@@ -263,9 +247,6 @@ class DepsReport:
     newest_read_at: Mapping[str, float | None]
     """When each component's reported newest version was read, by id; `None`
     when none is reported."""
-
-    ember_release: EmberRelease | None = None
-    """A newer Ember release, or `None` when none is reported."""
 
     def counts(self) -> int:
         """Return how many components need the owner.
@@ -317,7 +298,7 @@ class DepsReport:
 
         Returns:
             `components` as a list, both read-time mappings, `counts`,
-            `newest_read_oldest`, `newest_read_complete` and `ember_release`.
+            `newest_read_oldest` and `newest_read_complete`.
         """
         return {
             "components": [item.to_json() for item in self.components],
@@ -326,9 +307,6 @@ class DepsReport:
             "counts": self.counts(),
             "newest_read_oldest": self.oldest_newest_read(),
             "newest_read_complete": self.newest_read_complete(),
-            "ember_release": (
-                dataclasses.asdict(self.ember_release) if self.ember_release else None
-            ),
         }
 
 
@@ -958,8 +936,6 @@ def _load_cache(
 def _save_cache(
     entries: dict[str, tuple[_Installed | None, _Newest | None]],
     env: Mapping[str, str],
-    release: _Release | None,
-    release_retry: bool,
 ) -> None:
     components: dict[str, dict[str, Any]] = {}
     for key, (installed, newest) in entries.items():
@@ -970,68 +946,8 @@ def _save_cache(
             entry["newest"] = newest.to_json()
         components[key] = entry
     data: dict[str, Any] = {"components": components}
-    if release is not None:
-        data["ember_release"] = dataclasses.asdict(release)
-        if release_retry:
-            data["ember_release_retry"] = True
     with contextlib.suppress(OSError, KeyError):
         status.save_cache_file(cache_path(env), data, env)
-
-
-@dataclass(frozen=True)
-class _Release:
-    tag_name: str
-    url: str
-    read_at: float
-
-
-def _load_release(env: Mapping[str, str]) -> tuple[_Release | None, bool]:
-    try:
-        value = status.load_cache_file(cache_path(env))
-    except OSError, KeyError:
-        return None, False
-    if not isinstance(value, dict):
-        return None, False
-    entry = value.get("ember_release")
-    if not isinstance(entry, dict):
-        return None, False
-    tag, url = entry.get("tag_name"), entry.get("url")
-    read_at = status.finite_number(entry.get("read_at"))
-    if (
-        not isinstance(tag, str)
-        or not tag
-        or not isinstance(url, str)
-        or not url
-        or read_at is None
-    ):
-        return None, False
-    return _Release(tag, url, read_at), value.get("ember_release_retry") is True
-
-
-def _ember_release(
-    options: _Options,
-) -> tuple[EmberRelease | None, _Release | None, bool]:
-    held, retry = _load_release(options.env)
-    newest = None if held is None else _Newest(held.tag_name, held.read_at)
-    if _due(newest, options) or (retry and options.newest != "never"):
-        try:
-            body = _fetch(EMBER_RELEASE_URL, options.fetch)
-            tag = _json_field(EMBER_RELEASE_URL, body, ("tag_name",))
-            url = _json_field(EMBER_RELEASE_URL, body, ("html_url",))
-            dotted(tag)
-        except ReadError:
-            return None, held, True
-        held = _Release(tag, url, options.now)
-        retry = False
-    if held is None:
-        return None, held, retry
-    try:
-        installed = importlib.metadata.version("ember-app")
-        newer = dotted(installed) < dotted(held.tag_name)
-    except importlib.metadata.PackageNotFoundError, ReadError:
-        return None, held, retry
-    release = EmberRelease(held.tag_name.removeprefix("v"), held.url) if newer else None
-    return release, held, retry
 
 
 # Status
@@ -1313,7 +1229,7 @@ def read(
     deadline: float = TIMEOUT,
     components: tuple[Spec, ...] | None = None,
 ) -> DepsReport:
-    """Read every component's versions and status, and Ember's latest release.
+    """Read every component's versions and status.
 
     Reads that ran are written to the cache; a newest read that failed is not,
     so the next due read tries again. A cache that cannot be read is treated
@@ -1351,15 +1267,13 @@ def read(
         deadline=deadline,
     )
     held = _load_cache(env)
-    with ThreadPoolExecutor(max_workers=len(specs) + 1) as pool:
-        release_read = pool.submit(_ember_release, options)
+    with ThreadPoolExecutor(max_workers=len(specs)) as pool:
         outcomes = list(
             pool.map(
                 lambda spec: _evaluate(spec, held.get(spec.id, (None, None)), options),
                 specs,
             )
         )
-        release, held_release, release_retry = release_read.result()
     entries = {
         spec.id: (
             outcome.installed,
@@ -1370,9 +1284,8 @@ def read(
         for spec, outcome in zip(specs, outcomes, strict=True)
     }
     if installed or newest != "never":
-        _save_cache(entries, env, held_release, release_retry)
+        _save_cache(entries, env)
     return DepsReport(
-        ember_release=release,
         components=tuple(outcome.component for outcome in outcomes),
         installed_read_at={
             outcome.component.id: None
