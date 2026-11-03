@@ -564,6 +564,40 @@ def test_ancestry_uses_saved_base_after_checkout_switches(
         assert "branch -D" in result.branches[0]["command"]
 
 
+def test_run_whose_repo_folder_is_gone_uses_the_main_checkout(
+    env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    main = tmp_path / "main"
+    worktree = main / ".ember" / "worktrees" / "codex-run"
+    worktree.mkdir(parents=True)
+    child = run(env, base_branch="main")
+    runs.save(
+        replace(
+            child,
+            repo=str(tmp_path / "removed-flow-worktree"),
+            worktree=str(worktree),
+            branch=f"ember/codex/{child.id}",
+            read_only=False,
+        )
+    )
+    folders: list[str] = []
+
+    def git(
+        directory: str, *args: str, env: Mapping[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        folders.append(directory)
+        return subprocess.CompletedProcess(args, int(args[0] == "merge-base"), "", "")
+
+    monkeypatch.setattr(prune, "_git", git)
+    result = prune.remove(0, dry_run=True, env=env)
+    assert not result.errors
+    assert set(folders) == {str(main)}
+    assert (
+        f"git -C {main} branch -D ember/codex/{child.id}"
+        in (result.branches[0]["command"])
+    )
+
+
 def test_busy_member_prevents_panel_removal(env: dict[str, str]) -> None:
     child = run(env)
     parent = panel(env, child)

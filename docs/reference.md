@@ -2131,6 +2131,12 @@ Paths and branch names are shell-quoted. Merged and absent branches have
 no branch-deletion command; their remaining worktrees still have worktree
 removal commands. Prune never prints `emb cleanup`.
 
+`<dir>` is the first of these folders that exists: the record's `repo` (a
+run) or `dir` (a flow), the run's `main`, and the main checkout above a
+`.ember/worktrees/<id>` worktree path. A run started in a flow worktree
+that cleanup has removed is checked from the main checkout. When none
+exists, the recorded folder is used and its git error is reported.
+
 `--json` prints an object with four arrays:
 
 | Field | Entries |

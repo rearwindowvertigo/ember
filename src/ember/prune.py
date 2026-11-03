@@ -332,6 +332,27 @@ def _target_branch(
     return None
 
 
+def _checkout(data: Mapping[str, Any], kind: str) -> str:
+    """Return the first folder of the record's repository that still exists.
+
+    A run's `repo` can be a flow worktree that cleanup has removed, so the
+    run's `main` and the main checkout above its `.ember/worktrees/<id>`
+    worktree are tried after it. When none exists, the recorded folder is
+    returned and the git commands report it.
+    """
+    candidates = [data.get("repo") if kind == "run" else data.get("dir")]
+    candidates.append(data.get("main"))
+    worktree = data.get("worktree")
+    if worktree:
+        folder = Path(worktree)
+        if folder.parent.name == "worktrees" and folder.parent.parent.name == ".ember":
+            candidates.append(str(folder.parent.parent.parent))
+    for candidate in candidates:
+        if candidate and Path(candidate).is_dir():
+            return candidate
+    return str(candidates[0])
+
+
 def _artifacts(
     entry: Entry,
     env: Mapping[str, str],
@@ -343,7 +364,7 @@ def _artifacts(
     data = entry.data
     if entry.kind == "panel":
         return
-    directory = data["repo"] if entry.kind == "run" else data["dir"]
+    directory = _checkout(data, entry.kind)
     candidates = [(data.get("branch"), data.get("worktree"), data.get("base_branch"))]
     if entry.kind == "flow":
         candidates += [
