@@ -317,6 +317,59 @@ def test_hand_over_after_an_upgrade_offers_a_restart(
         assert restarts == [parts]
 
 
+def test_package_change_offers_a_restart_without_a_second_launch(
+    app_env: dict[str, str],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "site-packages"
+    (package / "ember_app-0.4.0.dist-info").mkdir(parents=True)
+    version = {"value": "0.4.0"}
+    monkeypatch.setattr(main, "installed_version", lambda: version["value"])
+    monkeypatch.setattr(main, "package_folder", lambda: package)
+    monkeypatch.setattr(main, "UPGRADE_SETTLE_MS", 50)
+    for parts in _start([], app_env, qtbot):
+        (package / "ember_app-0.4.0.dist-info").rename(
+            package / "ember_app-0.5.0.dist-info"
+        )
+        version["value"] = "0.5.0"
+        qtbot.waitUntil(
+            lambda parts=parts: parts.window.restart_alert is not None, timeout=5000
+        )
+        alert = parts.window.restart_alert
+        assert alert is not None
+        assert alert.title_label.text() == (
+            "Ember 0.5.0 is installed. Restart to use it."
+        )
+
+
+def test_package_change_with_the_same_version_offers_no_restart(
+    app_env: dict[str, str],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "site-packages"
+    package.mkdir()
+    monkeypatch.setattr(main, "installed_version", lambda: "0.4.0")
+    monkeypatch.setattr(main, "package_folder", lambda: package)
+    monkeypatch.setattr(main, "UPGRADE_SETTLE_MS", 50)
+    for parts in _start([], app_env, qtbot):
+        (package / "other").mkdir()
+        qtbot.wait(400)
+        assert parts.window.restart_alert is None
+
+
+def test_package_folder_is_the_installed_metadata_folder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.undo()  # The app conftest replaces package_folder.
+    folder = main.package_folder()
+    assert folder is not None
+    assert any(folder.glob("ember_app-*.dist-info"))
+
+
 def test_restart_closes_the_socket_starts_the_app_and_quits(
     app_env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
 ) -> None:

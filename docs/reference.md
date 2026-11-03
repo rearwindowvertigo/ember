@@ -2657,9 +2657,11 @@ connects to it, sends `show` (nothing with `--hidden`) and exits 0; the
 running app then shows, raises and activates its window. A socket file with
 no app listening is removed and the start goes on.
 
-On every such connection the running app reads the installed `ember-app`
-version from disk and compares it with the version it started as. When they
-differ, its window shows an info alert, `Ember <version> is installed.
+On every such connection, and 2 seconds after the folder holding the
+installed `ember-app` metadata (`ember_app-<version>.dist-info`) last
+changed, the running app reads the installed version from disk and compares
+it with the version it started as. An upgrade installed while Ember runs
+therefore shows the alert without another start. When they differ, its window shows an info alert, `Ember <version> is installed.
 Restart to use it.`, with a Restart button and no Dismiss; the alert stays
 until Ember restarts. Restart closes the socket, starts the installed app
 with the running interpreter (`python -I -m ember.cli app`) and quits. Runs
@@ -2842,8 +2844,8 @@ when any readable run nested under it used that engine. A parent without
 readable nested runs matches only Engine=all. Filters start at all when
 the app starts and keep their values across reloads for the app session.
 
-Clear is a red outline button with a trash icon, and the caption `Remove
-shown records` under it. Clear is disabled when no records are shown or a
+Clear is a red outline button with a trash icon. Its tooltip and accessible
+description are `Remove shown records`. Clear is disabled when no records are shown or a
 clear is pending. It
 captures the shown top-level ids and calls `prune.remove` with
 `older_than=0` and those ids, first as a dry run and then, after confirmation,
@@ -2897,8 +2899,7 @@ that parent falls beyond the Finished cap. A live worker under a Finished
 parent stays nested there; the tray and sidebar count it at the top level.
 Every readable nested run of a shown parent appears, whatever its age,
 oldest first by start time and then id, indented one column. A nested row
-shows `Started <time> · <duration>`: its run time once ended, its elapsed
-time while live. In Finished, a parent's nested runs are hidden until its
+shows its times as any run row does. In Finished, a parent's nested runs are hidden until its
 details are expanded, and its second line adds `1 run` or `<n> runs`; a
 Finished parent with a live nested run keeps them shown. The parent's
 second line starts with `1 live run` or `<n> live runs` when that count is
@@ -2925,14 +2926,27 @@ Buttons pass a file URL to `QDesktopServices.openUrl` for the desktop's
 default viewer. If it returns false, a warning names the path and says no
 viewer opened it.
 
-A run's title, after `Run`, shows engine, model and effort. A live run's second line includes
-the repository folder, branch or `read-only`, and turn number; an ended
-run's includes its subject and branch. Live runs have Open terminal, which
+A run's title, after `Run`, shows engine, model and effort. Its second line
+shows the repository folder, the result and the times:
+
+- live: `turn <n>` and the commits so far (`1 commit`, `<n> commits`), or
+  `read-only`; then `started <start> · <elapsed>`, the elapsed time to the
+  second, such as `4 min 12 s`;
+- done: the commit count or `read-only`; failed: the last reason, or
+  `No reason recorded`; then `<start> to <end> · <duration>`, such as
+  `08:17 to 08:33 · 16 min`.
+
+The start names its day only when it falls on an earlier day than the end,
+or than now while live: `yesterday 23:50 to 00:10 · 20 min`. Flow and panel
+rows end their second line with the same times. The right column of every
+row shows the end time (`Today 08:33`), or `Live`; its tooltip names it:
+`Ended at 08:33 on 3 Nov`, or `Started at 08:01 on 3 Nov` while live. The
+subject and branch are in the expanded record. Live runs have Open terminal, which
 opens a terminal window on the run as `emb run --attach` does. Expanding a
 run shows its record, including last exit and reason; a live run's Ended is
 `Not yet`. Rows and expanded
-details survive unrelated record changes. Elapsed times update every thirty
-seconds while shown.
+details survive unrelated record changes. Elapsed times update every second
+while shown.
 
 One live run and one ended run can be expanded at a time. An expanded live
 run's record follows the run while it is live, and collapses when the run

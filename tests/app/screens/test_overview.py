@@ -1,3 +1,4 @@
+import datetime
 import json
 import os
 import shutil
@@ -145,17 +146,23 @@ def test_rows_and_badges(
     )
     assert first.title_label.text() == "Run · Codex · gpt-5 · high"
     assert second.title_label.text() == "Run · Claude · opus"
-    assert first.detail_label.text() == f"project · ember/codex/{LIVE_A} · turn 1"
-    assert second.detail_label.text() == "beta · read-only · turn 3"
-    assert first.time_label.text().endswith(("min", "h"))
+    assert first.detail_label.text().startswith(
+        "project · turn 1 · 0 commits · started "
+    )
+    assert second.detail_label.text().startswith("beta · turn 3 · read-only · started ")
+    assert first.time_label.text() == "Live"
+    assert first.time_label.toolTip().startswith("Started at ")
 
     assert list(screen.finished_rows) == [DONE_B, DONE_A]
     failed, closed = screen.finished_rows.values()
     assert (failed.badge.text(), failed.badge.tone()) == ("Failed", "danger")
     assert (closed.badge.text(), closed.badge.tone()) == ("Done", "success")
     assert closed.title_label.text() == "Run · OpenCode · openrouter/x · high"
-    assert closed.detail_label.text() == f"Fix the bug · ember/codex/{DONE_A}"
-    assert closed.time_label.text().endswith("· 8 min")
+    assert closed.detail_label.text().startswith("project · 1 commit · ")
+    assert closed.detail_label.text().endswith(" · 8 min")
+    assert failed.detail_label.text().startswith("project · sign-in needed · ")
+    assert not closed.time_label.text().endswith("min")
+    assert closed.time_label.toolTip().startswith("Ended at ")
     assert not screen.state_view.empty.isVisible()
 
 
@@ -485,7 +492,7 @@ def test_finished_row_redraws_when_its_values_change(
     # place, so wait for the record the test wrote rather than one signal.
     qtbot.waitUntil(lambda: row.run.subject == "Fix it", timeout=5000)
     assert screen.finished_rows[DONE_A] is row
-    assert row.detail_label.text().startswith("Fix it · ")
+    assert row.detail_label.text().startswith("project · 1 commit · ")
     assert row.details is not None
     assert dict(overview.record_rows(row.run))["Subject"] == "Fix it"
     texts = [label.text() for label in row.details.findChildren(QLabel)]
@@ -535,8 +542,6 @@ def test_record_formatters(env: dict[str, str]) -> None:
     item = flows.PanelItem(panel, "x" * 100, None, False)
     assert overview.panel_detail(item) == "project"
     assert overview.panel_detail(replace(item, question="")) == "project"
-    assert overview.item_time(0, None, 180) == "3 min"
-    assert overview.item_time(0, 120, 180).endswith(" · 2 min")
     flow["tasks"] = []
     assert overview.flow_title(flow) == "Flow · project · 0 tasks · 0/0 merged"
     panel["members"] = []
@@ -573,7 +578,7 @@ def test_flow_details_and_nested_runs(
     row = screen.flow_rows[FLOW]
     assert row.badge.text() == "Waiting for Claude"
     assert row.title_label.text() == "Flow · project · 2 tasks · 1/2 merged"
-    assert row.detail_label.text() == (
+    assert row.base_detail == (
         f"1 live run · ember/flow/{FLOW} · wave 2 of 2 · Needs an answer"
     )
     qtbot.mouseClick(row.expand_button, Qt.MouseButton.LeftButton)
@@ -602,7 +607,9 @@ def test_flow_without_plan_wave_shows_passes_zero(
         path.write_text(json.dumps(flow))
     screen = screen_for(context, qtbot)
     row = screen.flow_rows[FLOW]
-    assert row.detail_label.text() == f"runner gone · ember/flow/{FLOW} · Waiting"
+    assert row.detail_label.text().startswith(
+        f"runner gone · ember/flow/{FLOW} · Waiting · started "
+    )
     row.expand_button.click()
     assert row.details is not None
     assert labels(row.details)[0] == "passes 0"
@@ -624,7 +631,8 @@ def test_panel_details(env: dict[str, str], context: AppContext, qtbot: QtBot) -
     row = screen.panel_rows[PANEL]
     assert row.badge.text() == "Incomplete"
     assert row.title_label.text() == "Panel · 3 members · 1/3 answered"
-    assert row.detail_label.text() == "project"
+    assert row.detail_label.text().startswith("project · ")
+    assert row.detail_label.text().endswith(" · 2 min")
     assert row.question_label.text() == "A question"
     qtbot.mouseClick(row.expand_button, Qt.MouseButton.LeftButton)
     text = labels(row)
@@ -822,7 +830,8 @@ def test_record_rows_survive_other_changes_and_refresh_workers(
     assert screen.flow_rows[FLOW] is row and row.details is details and row.expanded
     assert panel_row.expanded
     row.update_elapsed(flow["started_at"] + 600)
-    assert row.time_label.text() == "10 min"
+    assert row.time_label.text() == "Live"
+    assert row.detail_label.text().endswith(" · 10 min 0 s")
     assert row.details is details
     write_run(make_run(env, LIVE_A))
     context.runs.reload()
@@ -837,7 +846,8 @@ def test_record_rows_survive_other_changes_and_refresh_workers(
     flow_record.save(flow, env)
     qtbot.waitUntil(lambda: row.badge.text() == "Done")
     assert row.expanded
-    assert row.time_label.text().endswith(" · 2 min")
+    assert row.detail_label.text().endswith(" · 2 min")
+    assert row.time_label.toolTip().startswith("Ended at ")
     screen.flow_rows[other["id"]].expand_button.click()
     assert not row.expanded
     assert panel_row.expanded
@@ -1692,13 +1702,14 @@ def test_nested_runs_are_oldest_first(
         assert isinstance(widget, overview._Row)
         order.append(widget.run.id)
         assert widget.nested
-        assert widget.time_label.text() == overview.started_time(widget.run)
+        assert widget.time_label.text() == overview.end_text(
+            overview.run_ended(widget.run)
+        )
     assert order == [early, late]
-    assert screen.finished_rows[early].time_label.text().startswith("Started ")
-    assert "· 1 h 6 min" in screen.finished_rows[early].time_label.text()
+    assert screen.finished_rows[early].detail_label.text().endswith(" · 1 h 6 min")
 
 
-def test_clear_is_a_red_outline_with_its_caption(
+def test_clear_is_a_red_outline_with_its_tooltip(
     env: dict[str, str], context: AppContext, qtbot: QtBot
 ) -> None:
     screen = loaded(env, context, qtbot)
@@ -1707,30 +1718,71 @@ def test_clear_is_a_red_outline_with_its_caption(
     assert screen.clear_button.accessibleName() == "Clear"
     assert screen.clear_button.accessibleDescription() == "Remove shown records"
     assert not screen.clear_button.icon().isNull()
-    assert screen.clear_caption.text() == "Remove shown records"
-    assert screen.clear_caption.isVisible()
-    clear = screen.clear_button.mapTo(screen, screen.clear_button.rect().topLeft())
-    caption = screen.clear_caption.mapTo(screen, screen.clear_caption.rect().topLeft())
-    assert caption.y() > clear.y()
+    assert screen.clear_button.toolTip() == "Remove shown records"
+    assert not hasattr(screen, "clear_caption")
 
 
-def test_top_level_rows_keep_their_time_text(
+def test_rows_show_the_end_time_on_the_right(
     env: dict[str, str], context: AppContext, qtbot: QtBot
 ) -> None:
     screen = loaded(env, context, qtbot)
-    for row in (*screen.live_rows.values(), *screen.finished_rows.values()):
-        assert not row.nested
-        assert not row.time_label.text().startswith("Started ")
+    for row in screen.live_rows.values():
+        assert row.time_label.text() == "Live"
     for row in screen.finished_rows.values():
-        assert row.time_label.text() == overview.finished_time(row.run)
+        ended = overview.run_ended(row.run)
+        assert ended is not None
+        assert row.time_label.text() == overview.when(ended)
 
 
-def test_started_time_of_live_and_finished_runs(env: dict[str, str]) -> None:
-    live = make_run(env, status=record.RUNNING, started_at=1000)
-    assert overview.started_time(live, now=1000 + 125).endswith("· 2 min")
-    done = make_run(env, status=record.CLOSED, started_at=1000, ended_at=1000 + 600)
-    assert overview.started_time(done, now=99_999).startswith("Started ")
-    assert overview.started_time(done, now=99_999).endswith("· 10 min")
+def _stamp(day: int, hour: int, minute: int, second: int = 0) -> float:
+    return datetime.datetime(2026, 11, day, hour, minute, second).timestamp()
+
+
+def test_span_text() -> None:
+    now = _stamp(3, 12, 0)
+    assert overview.span_text(_stamp(3, 8, 17), _stamp(3, 8, 33), now) == (
+        "08:17 to 08:33 · 16 min"
+    )
+    assert overview.span_text(_stamp(2, 23, 50), _stamp(3, 0, 10), now) == (
+        "yesterday 23:50 to 00:10 · 20 min"
+    )
+    assert overview.span_text(_stamp(3, 11, 55, 48), None, now) == (
+        "started 11:55 · 4 min 12 s"
+    )
+    assert overview.span_text(_stamp(2, 23, 0), None, now).startswith(
+        "started yesterday 23:00 · 13 h 0 min 0 s"
+    )
+
+
+def test_elapsed() -> None:
+    assert overview.elapsed(0) == "0 s"
+    assert overview.elapsed(45.9) == "45 s"
+    assert overview.elapsed(252) == "4 min 12 s"
+    assert overview.elapsed(3600) == "1 h 0 min 0 s"
+    assert overview.elapsed(-5) == "0 s"
+
+
+def test_end_text_and_tooltip() -> None:
+    now = _stamp(3, 12, 0)
+    assert overview.end_text(None, now) == "Live"
+    assert overview.end_text(_stamp(3, 8, 33), now) == "Today 08:33"
+    assert overview.end_tooltip(_stamp(3, 8, 17), _stamp(3, 8, 33)) == (
+        "Ended at 08:33 on 3 Nov"
+    )
+    assert overview.end_tooltip(_stamp(3, 8, 17), None) == "Started at 08:17 on 3 Nov"
+
+
+def test_run_result(env: dict[str, str]) -> None:
+    live = make_run(env, status=record.RUNNING, turn=2, commits=["a"])
+    assert overview.run_result(live) == "turn 2 · 1 commit"
+    reader = make_run(env, status=record.WAITING, read_only=True, turn=1)
+    assert overview.run_result(reader) == "turn 1 · read-only"
+    done = make_run(env, status=record.CLOSED, commits=["a", "b", "c"])
+    assert overview.run_result(done) == "3 commits"
+    failed = make_run(env, status=record.FAILED, last_reason="Sign-in needed")
+    assert overview.run_result(failed) == "Sign-in needed"
+    unknown = make_run(env, status=record.FAILED, last_reason=None)
+    assert overview.run_result(unknown) == "No reason recorded"
 
 
 def test_finished_parent_hides_its_runs_until_expanded(
