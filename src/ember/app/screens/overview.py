@@ -12,6 +12,9 @@ from typing import TYPE_CHECKING, Any
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QHideEvent
 from PySide6.QtWidgets import (
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -22,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ember import sandbox
+from ember import prune, sandbox
 from ember.app import icons, theme, tray
 from ember.app.flows import FlowItem, PanelItem, plan_wave
 from ember.app.mirror import MirrorView
@@ -294,6 +297,113 @@ def sections(
         (item for item in top if item_ended(item)), key=item_end_key, reverse=True
     )[:FINISHED_LIMIT]
     return live, finished, children
+
+
+def matches_filters(
+    item: Item, children: list[Run], kind: str, status: str, engine: str
+) -> bool:
+    """Match a top-level row's type, chip and readable workers' engines."""
+    if isinstance(item, Run):
+        item_kind = "Run"
+        chip = BADGES[item.status][0]
+        workers = [item]
+    else:
+        item_kind = "Flow" if isinstance(item, FlowItem) else "Panel"
+        badges = FLOW_BADGES if isinstance(item, FlowItem) else PANEL_BADGES
+        chip = badges["gone" if item.gone else item.record["status"]][0]
+        workers = children
+    return (
+        (kind == "all" or kind == item_kind)
+        and (status == "all" or status == chip)
+        and (engine == "all" or any(run.engine == engine for run in workers))
+    )
+
+
+def prune_text(result: prune.Result, *, dry_run: bool = False) -> str:
+    """List records, skips, retained branches and worktrees, then errors."""
+    verb = "Would remove" if dry_run else "Removed"
+    lines = [f"{verb} {item['kind']} {item['id']}" for item in result.removed]
+    if not lines:
+        lines.append("No records removed." if not dry_run else "No records to remove.")
+    lines.extend(f"Skipped {item['id']}: {item['reason']}" for item in result.skipped)
+    printed: set[str] = set()
+    for item in result.branches:
+        lines.append(f"Branch {item['branch']}: {item['command']}")
+        printed.add(item["branch"])
+        for worktree in result.worktrees:
+            if worktree["branch"] == item["branch"]:
+                lines.append(
+                    f"  Worktree {worktree['worktree']}: {worktree['command']}"
+                )
+    for item in result.worktrees:
+        if item["branch"] not in printed:
+            lines.extend(
+                [
+                    f"Branch {item['branch']}",
+                    f"  Worktree {item['worktree']}: {item['command']}",
+                ]
+            )
+    lines.extend(f"Error: {error}" for error in result.errors)
+    return "\n".join(lines)
+
+
+class _PruneDialog(QDialog):
+    """A selectable pruning report with a screen-height-capped scroll area."""
+
+    def __init__(
+        self, title: str, text: str, parent: QWidget, *, confirm: bool = False
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        layout = QVBoxLayout(self)
+        self.area = QScrollArea()
+        self.area.setWidgetResizable(True)
+        self.report = QLabel(text)
+        self.report.setTextFormat(Qt.TextFormat.PlainText)
+        self.report.setWordWrap(True)
+        self.report.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.report.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.report.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        self.area.setWidget(self.report)
+        layout.addWidget(self.area)
+        self.buttons = QDialogButtonBox()
+        if confirm:
+            remove = self.buttons.addButton(
+                "Remove", QDialogButtonBox.ButtonRole.AcceptRole
+            )
+            remove.setAutoDefault(False)
+            cancel = self.buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+            cancel.setDefault(True)
+            cancel.setFocus()
+        else:
+            self.buttons.addButton(QDialogButtonBox.StandardButton.Ok).setDefault(True)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        available = self.screen().availableGeometry()
+        width = min(
+            max(680, self.fontMetrics().horizontalAdvance(title) + 100),
+            available.width() - 80,
+        )
+        margins = layout.contentsMargins()
+        overhead = (
+            margins.top()
+            + margins.bottom()
+            + layout.spacing()
+            + self.buttons.sizeHint().height()
+        )
+        content_width = width - margins.left() - margins.right() - 30
+        height = min(
+            self.report.heightForWidth(content_width) + overhead + 12,
+            available.height() - 80,
+        )
+        self.setMaximumSize(available.width() - 80, available.height() - 80)
+        self.resize(width, height)
 
 
 def read_failure(reason: str) -> str:
@@ -738,6 +848,32 @@ class OverviewScreen(QWidget):
             "Finished"
         )
         self.finished_empty.setText("No finished runs, flows or panels yet.")
+        filters = QHBoxLayout()
+        self.type_filter = QComboBox()
+        self.status_filter = QComboBox()
+        self.engine_filter = QComboBox()
+        for label, combo, values in (
+            ("Type", self.type_filter, ("all", "Run", "Flow", "Panel")),
+            ("Status", self.status_filter, ("all", "Done", "Incomplete", "Failed")),
+            ("Engine", self.engine_filter, ("all", "Codex", "OpenCode", "Claude")),
+        ):
+            name = QLabel(label)
+            name.setBuddy(combo)
+            combo.setAccessibleName(label)
+            combo.addItems(values)
+            filters.addWidget(name)
+            filters.addWidget(combo)
+            combo.currentTextChanged.connect(self.refresh)
+        filters.addStretch(1)
+        self.clear_button = button("Clear", "secondary", size="sm")
+        self.clear_button.clicked.connect(self.clear_finished)
+        filters.addWidget(self.clear_button)
+        finished_layout = self.finished_card.layout()
+        assert isinstance(finished_layout, QVBoxLayout)
+        finished_layout.insertLayout(1, filters)
+        self._shown_finished: tuple[str, ...] = ()
+        self._clearing = False
+        self._prune_dialog: _PruneDialog | None = None
         layout.addWidget(self.finished_card)
         layout.addStretch(1)
 
@@ -808,6 +944,27 @@ class OverviewScreen(QWidget):
             *self.records.panels(),
         ]
         live, finished, children = sections(runs.runs(), parents)
+        finished = [
+            item
+            for item in finished
+            if matches_filters(
+                item,
+                children.get(item_id(item), []),
+                self.type_filter.currentText(),
+                self.status_filter.currentText(),
+                self.engine_filter.currentText().lower(),
+            )
+        ]
+        self._shown_finished = tuple(item_id(item) for item in finished)
+        self._update_clear()
+        self.finished_empty.setText(
+            "No finished records match the filters."
+            if any(
+                combo.currentText() != "all"
+                for combo in (self.type_filter, self.status_filter, self.engine_filter)
+            )
+            else "No finished runs, flows or panels yet."
+        )
         counts = [tray.status_line(len(runs.live()))]
         for items, kind in (
             (self.records.flows(), "flow"),
@@ -851,6 +1008,8 @@ class OverviewScreen(QWidget):
 
     def _show_state(self) -> None:
         """Hide the cards and give the state view their place."""
+        self._shown_finished = ()
+        self._update_clear()
         self.records_alert.hide()
         self.live_card.hide()
         self.finished_card.hide()
@@ -864,6 +1023,83 @@ class OverviewScreen(QWidget):
     def retry_records(self) -> None:
         """Read the flow and panel records again now."""
         self.records.reload()
+
+    def _update_clear(self) -> None:
+        """Enable Clear only when shown records exist and no clear is pending."""
+        self.clear_button.setEnabled(bool(self._shown_finished) and not self._clearing)
+
+    def clear_finished(self) -> None:
+        """Preview removal of the ids shown at the time Clear is clicked."""
+        if self._clearing or not self._shown_finished:
+            return
+        ids = self._shown_finished
+        self._clearing = True
+        self._update_clear()
+        env = self.context.env
+
+        def previewed(result: prune.Result) -> None:
+            if result.errors or not result.removed:
+                self._show_prune_result(result, dry_run=True)
+                return
+            dialog = _PruneDialog(
+                "Remove finished records?",
+                "Remove these records and their logs? "
+                "Branches and worktrees are kept.\n\n"
+                + prune_text(result, dry_run=True),
+                self,
+                confirm=True,
+            )
+            self._prune_dialog = dialog
+
+            def confirmed(answer: int) -> None:
+                self._prune_dialog = None
+                dialog.deleteLater()
+                if answer != QDialog.DialogCode.Accepted:
+                    self._clearing = False
+                    self._update_clear()
+                    return
+                self.context.tasks.run(
+                    lambda: prune.remove(older_than=0, record_ids=ids, env=env),
+                    self._show_prune_result,
+                    self._prune_failed,
+                )
+
+            dialog.finished.connect(confirmed)
+            dialog.open()
+
+        self.context.tasks.run(
+            lambda: prune.remove(older_than=0, record_ids=ids, dry_run=True, env=env),
+            previewed,
+            self._prune_failed,
+        )
+
+    def _prune_failed(self, error: Exception) -> None:
+        """Report a failed pruning task without starting another removal."""
+        self._show_prune_result(prune.Result(errors=[str(error)]))
+
+    def _show_prune_result(
+        self, result: prune.Result, *, dry_run: bool = False
+    ) -> None:
+        """Show removal results or a warning, then reload both record models."""
+        dialog = _PruneDialog(
+            "Warning: could not clear all records"
+            if result.errors
+            else "Clear finished records",
+            prune_text(result, dry_run=dry_run),
+            self,
+        )
+        self._prune_dialog = dialog
+
+        def closed(_answer: int) -> None:
+            self._prune_dialog = None
+            dialog.deleteLater()
+            self.context.runs.reload()
+            self.records.reload()
+
+        dialog.finished.connect(closed)
+        dialog.open()
+        self._clearing = False
+        self._update_clear()
 
     def _draw_sections(
         self, live: list[Item], finished: list[Item], children: dict[str, list[Run]]
@@ -1021,12 +1257,22 @@ class OverviewScreen(QWidget):
             chain.extend(alert.buttons)
         if not self.records_alert.isHidden():
             chain.extend(self.records_alert.buttons)
+        filters: list[QWidget] = [
+            self.type_filter,
+            self.status_filter,
+            self.engine_filter,
+            self.clear_button,
+        ]
         for row in self._reading_order:
+            if row._item_id in self._shown_finished and filters:
+                chain.extend(filters)
+                filters = []
             chain.append(row.expand_button)
             if isinstance(row, _LiveRow):
                 chain.append(row.open_button)
             elif isinstance(row, _RecordRow):
                 chain.extend(row.links)
+        chain.extend(filters)
         chain_tab_order(chain)
 
     def _update_elapsed(self) -> None:

@@ -1,16 +1,24 @@
 import json
 import shutil
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QScrollArea, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QDialogButtonBox,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QWidget,
+)
 from pytestqt.qtbot import QtBot
 
-from ember import paths, sandbox
+from ember import paths, prune, sandbox
 from ember.app import flows
 from ember.app.context import AppContext
 from ember.app.screens import overview
@@ -377,11 +385,19 @@ def test_keyboard_reach(
     assert len(screen.sandbox_alerts) == 3
     with qtbot.waitActive(screen):
         screen.activateWindow()
-    controls: list[QPushButton] = []
+    controls: list[QWidget] = []
     for alert in screen.sandbox_alerts.values():
         controls.extend(alert.buttons)
     for row in screen.live_rows.values():
         controls.extend((row.expand_button, row.open_button))
+    controls.extend(
+        (
+            screen.type_filter,
+            screen.status_filter,
+            screen.engine_filter,
+            screen.clear_button,
+        )
+    )
     controls.extend(row.expand_button for row in screen.finished_rows.values())
     controls[0].setFocus()
     seen = [QApplication.focusWidget()]
@@ -636,7 +652,7 @@ def test_panel_details(env: dict[str, str], context: AppContext, qtbot: QtBot) -
     assert row.links == []
     assert [
         button.text() for button in screen.finished_card.findChildren(QPushButton)
-    ] == [""]
+    ] == ["Clear", ""]
 
 
 def test_record_rows_survive_other_changes_and_refresh_links(
@@ -1037,3 +1053,287 @@ def test_flow_status_chips(
     row = screen.flow_rows[FLOW]
     assert (row.badge.text(), row.badge.tone()) == (text, tone)
     assert row.detail_label.text().startswith(status + " · ")
+
+
+def test_finished_filters_combine_and_persist(
+    env: dict[str, str], context: AppContext, qtbot: QtBot
+) -> None:
+    screen = loaded(env, context, qtbot)
+    flow = make_flow(env, status="cancelled", ended_at=1_800_000_600)
+    flow["tasks"][0]["writer_run"] = DONE_A
+    flow_record.save(flow, env)
+    panel = make_panel(env, status="done", ended_at=1_800_000_700)
+    panel["members"][0]["run"] = LIVE_B
+    panel_record.save(panel, env)
+    context.flows.reload()
+    qtbot.waitUntil(lambda: FLOW in screen.flow_rows and PANEL in screen.panel_rows)
+    screen.engine_filter.setCurrentText("OpenCode")
+    assert screen._shown_finished == (FLOW,)
+    assert DONE_A in screen.finished_rows
+    screen.status_filter.setCurrentText("Done")
+    assert not screen._shown_finished
+    assert screen.finished_empty.isVisible() and not screen.clear_button.isEnabled()
+    screen.status_filter.setCurrentText("Incomplete")
+    assert screen._shown_finished == (FLOW,)
+    screen.type_filter.setCurrentText("Run")
+    assert not screen._shown_finished
+    screen.type_filter.setCurrentText("Flow")
+    screen.hide()
+    context.runs.reload()
+    context.flows.reload()
+    qtbot.waitUntil(lambda: context.tasks.pending() == 0)
+    screen.show()
+    screen.shown()
+    assert screen._shown_finished == (FLOW,)
+    assert screen.type_filter.currentText() == "Flow"
+    assert screen.status_filter.currentText() == "Incomplete"
+    assert screen.engine_filter.currentText() == "OpenCode"
+    screen.type_filter.setCurrentText("Panel")
+    screen.status_filter.setCurrentText("Done")
+    screen.engine_filter.setCurrentText("Claude")
+    assert screen._shown_finished == (PANEL,)
+    assert LIVE_B in screen.live_rows
+    screen.type_filter.setCurrentText("Run")
+    screen.status_filter.setCurrentText("Failed")
+    screen.engine_filter.setCurrentText("Codex")
+    assert screen._shown_finished == (DONE_B,)
+    fresh = OverviewScreen(context)
+    qtbot.addWidget(fresh)
+    assert all(
+        combo.currentText() == "all"
+        for combo in (fresh.type_filter, fresh.status_filter, fresh.engine_filter)
+    )
+
+
+def test_filters_apply_after_cap_and_ignore_unreadable_workers(
+    env: dict[str, str], context: AppContext, qtbot: QtBot
+) -> None:
+    flow = make_flow(env, status="done", ended_at=1000)
+    flow["tasks"][0]["writer_run"] = DONE_A
+    flow_record.save(flow, env)
+    folder = paths.runs_dir(env) / DONE_A
+    folder.mkdir()
+    (folder / "run.json").write_text("broken")
+    for n in range(20):
+        write_run(
+            make_run(
+                env, f"codex-20260101-120000-{n:06x}", status=record.CLOSED, ended_at=n
+            )
+        )
+    screen = screen_for(context, qtbot)
+    context.runs.reload()
+    qtbot.waitUntil(lambda: len(context.runs.runs()) == 20)
+    screen.type_filter.setCurrentText("Run")
+    assert len(screen._shown_finished) == 19
+    screen.type_filter.setCurrentText("Flow")
+    assert screen._shown_finished == (FLOW,)
+    screen.engine_filter.setCurrentText("Codex")
+    assert not screen._shown_finished
+    screen.engine_filter.setCurrentText("OpenCode")
+    assert not screen._shown_finished
+    screen.engine_filter.setCurrentText("all")
+    assert screen._shown_finished == (FLOW,)
+
+
+def wait_prune_dialog(screen: OverviewScreen, qtbot: QtBot) -> overview._PruneDialog:
+    qtbot.waitUntil(lambda: screen._prune_dialog is not None)
+    dialog = screen._prune_dialog
+    assert dialog is not None
+    return dialog
+
+
+@pytest.mark.parametrize("cancel", [True, False])
+def test_clear_uses_frozen_ids_and_background_tasks(
+    env: dict[str, str],
+    context: AppContext,
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel: bool,
+) -> None:
+    screen = loaded(env, context, qtbot)
+    screen.engine_filter.setCurrentText("Codex")
+    calls: list[tuple[int, tuple[str, ...], bool]] = []
+    release = threading.Event()
+
+    def remove(
+        older_than: int,
+        record_ids: Sequence[str] | None = None,
+        *,
+        dry_run: bool = False,
+        env: Mapping[str, str] | None = None,
+    ) -> prune.Result:
+        assert threading.current_thread() is not threading.main_thread()
+        assert env == context.env
+        calls.append((older_than, tuple(record_ids or ()), dry_run))
+        assert release.wait(5)
+        return prune.Result(removed=[dict(kind="run", id=DONE_B)])
+
+    monkeypatch.setattr(prune, "remove", remove)
+    screen.clear_button.click()
+    assert not screen.clear_button.isEnabled()
+    screen.engine_filter.setCurrentText("OpenCode")
+    screen.refresh()
+    assert not screen.clear_button.isEnabled()
+    screen.clear_finished()
+    release.set()
+    dialog = wait_prune_dialog(screen, qtbot)
+    assert dialog.windowTitle() == "Remove finished records?"
+    assert DONE_B in dialog.report.text() and DONE_A not in dialog.report.text()
+    assert dialog.buttons.button(QDialogButtonBox.StandardButton.Cancel).isDefault()
+    if cancel:
+        qtbot.keyClick(dialog, Qt.Key.Key_Escape)
+        assert screen._prune_dialog is None
+    else:
+        release.clear()
+        dialog.accept()
+        assert not screen.clear_button.isEnabled()
+        release.set()
+        result = wait_prune_dialog(screen, qtbot)
+        assert result.report.text() == f"Removed run {DONE_B}"
+        reloaded: list[str] = []
+        monkeypatch.setattr(context.runs, "reload", lambda: reloaded.append("runs"))
+        monkeypatch.setattr(context.flows, "reload", lambda: reloaded.append("parents"))
+        result.accept()
+        assert reloaded == ["runs", "parents"]
+    assert calls == [(0, (DONE_B,), True)] + ([] if cancel else [(0, (DONE_B,), False)])
+    assert screen.engine_filter.currentText() == "OpenCode"
+    assert screen.clear_button.isEnabled()
+
+
+@pytest.mark.parametrize("failure", ["skipped", "exception", "errors", "remove_error"])
+def test_clear_reports_skips_and_errors(
+    env: dict[str, str],
+    context: AppContext,
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    screen = loaded(env, context, qtbot)
+    calls: list[bool] = []
+
+    def remove(
+        older_than: int,
+        record_ids: Sequence[str] | None = None,
+        *,
+        dry_run: bool = False,
+        env: Mapping[str, str] | None = None,
+    ) -> prune.Result:
+        calls.append(dry_run)
+        if failure == "exception" or (failure == "remove_error" and not dry_run):
+            raise OSError("read refused")
+        if failure == "skipped":
+            return prune.Result(skipped=[dict(id=DONE_B, reason="busy")])
+        return prune.Result(
+            removed=[dict(kind="run", id=DONE_B)],
+            errors=["read refused"] if failure == "errors" else [],
+        )
+
+    monkeypatch.setattr(prune, "remove", remove)
+    screen.clear_button.click()
+    dialog = wait_prune_dialog(screen, qtbot)
+    if failure == "remove_error":
+        dialog.accept()
+        dialog = wait_prune_dialog(screen, qtbot)
+    assert dialog.buttons.button(QDialogButtonBox.StandardButton.Cancel) is None
+    assert (
+        f"Skipped {DONE_B}: busy" if failure == "skipped" else "read refused"
+    ) in dialog.report.text()
+    assert calls == ([True, False] if failure == "remove_error" else [True])
+    assert screen.clear_button.isEnabled()
+    dialog.accept()
+
+
+def test_clear_prunes_nested_records_and_rechecks_state(
+    env: dict[str, str],
+    context: AppContext,
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Artifact inspection is covered by prune's repository tests.
+    monkeypatch.setattr(prune, "_artifacts", lambda *_args, **_kwargs: prune.Result())
+    flow = make_flow(env, status="done", ended_at=200)
+    flow["tasks"][0]["writer_run"] = DONE_A
+    flow_record.save(flow, env)
+    for ident in (DONE_A, DONE_B):
+        run = write_run(make_run(env, ident, status=record.CLOSED, ended_at=200))
+        (run.folder / "worker.log").write_text("log")
+    context.runs.reload()
+    qtbot.waitUntil(lambda: len(context.runs.runs()) == 2)
+    screen = screen_for(context, qtbot)
+    screen.clear_button.click()
+    dialog = wait_prune_dialog(screen, qtbot)
+    assert all(ident in dialog.report.text() for ident in (FLOW, DONE_A, DONE_B))
+    write_run(replace(record.load(DONE_B, env), status=record.WAITING, ended_at=None))
+    dialog.accept()
+    result = wait_prune_dialog(screen, qtbot)
+    assert f"Removed flow {FLOW}" in result.report.text()
+    assert f"Removed run {DONE_A}" in result.report.text()
+    assert f"Skipped {DONE_B}: not ended" in result.report.text()
+    assert not (paths.runs_dir(env) / FLOW).exists()
+    assert not (paths.runs_dir(env) / DONE_A).exists()
+    assert (paths.runs_dir(env) / DONE_B / "worker.log").exists()
+    result.accept()
+    qtbot.waitUntil(lambda: not screen._shown_finished)
+    assert not screen.clear_button.isEnabled()
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_prune_dialog_scrolls_and_lists_commands(
+    qapp: QApplication, qtbot: QtBot, mode: str
+) -> None:
+    from ember.app import theme
+
+    result = prune.Result(
+        removed=[dict(kind="run", id=f"run-{n}") for n in range(100)],
+        skipped=[dict(id="busy-id", reason="busy")],
+        branches=[dict(branch="worker", command="git -C /repo branch -D worker")],
+        worktrees=[
+            dict(
+                branch="worker",
+                worktree="/repo/tree",
+                command="git -C /repo worktree remove /repo/tree",
+            ),
+            dict(
+                branch="other",
+                worktree="/repo/other",
+                command="git -C /repo worktree remove /repo/other",
+            ),
+        ],
+        errors=["read error"],
+    )
+    text = overview.prune_text(result, dry_run=True)
+    assert (
+        text.index("Would remove run run-99")
+        < text.index("Skipped busy-id: busy")
+        < text.index("Branch worker:")
+    )
+    assert (
+        "Branch worker: git -C /repo branch -D worker\n"
+        "  Worktree /repo/tree: git -C /repo worktree remove /repo/tree" in text
+    )
+    assert "Branch other\n  Worktree /repo/other:" in text
+    assert text.endswith("Error: read error")
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    previous = theme.current_mode()
+    try:
+        theme.apply(qapp, mode)
+        dialog = overview._PruneDialog(
+            "Remove finished records?", text, parent, confirm=True
+        )
+        dialog.show()
+        qtbot.waitUntil(lambda: dialog.area.verticalScrollBar().maximum() > 0)
+        assert (
+            dialog.frameGeometry().height()
+            <= dialog.screen().availableGeometry().height()
+        )
+        assert dialog.area.horizontalScrollBar().maximum() == 0
+        assert sorted(button.text() for button in dialog.buttons.buttons()) == [
+            "Cancel",
+            "Remove",
+        ]
+        qtbot.keyClick(dialog, Qt.Key.Key_Return)
+        assert dialog.result() == QDialog.DialogCode.Rejected
+    finally:
+        theme.apply(qapp, previous)
+        qapp.setStyleSheet("")

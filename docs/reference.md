@@ -2680,6 +2680,31 @@ records, newest first by end time, update time and id, with update time used
 when end time is absent. Its cap of twenty applies to top-level rows across
 runs, flows and panels. Each empty section shows its empty state.
 
+Finished filters this capped list by Type (all, Run, Flow, Panel), Status
+(all, Done, Incomplete, Failed) and Engine (all, Codex, OpenCode, Claude).
+The filters combine and test top-level rows: Run selects standalone runs,
+Status matches the parent's own chip, and a flow or panel matches Engine
+when any readable run nested under it used that engine. A parent without
+readable nested runs matches only Engine=all. Filters start at all when
+the app starts and keep their values across reloads for the app session.
+
+Clear is disabled when no records are shown or a clear is pending. It
+captures the shown top-level ids and calls `prune.remove` with
+`older_than=0` and those ids, first as a dry run and then, after confirmation,
+for removal. Both calls run off the GUI thread. The confirmation lists the
+dry run's records, including nested runs, skipped ids with their reasons,
+and retained branches with removal commands. Worktree commands appear under
+their branches. Remove confirms; Cancel is the default and Escape cancels.
+Clear removes records and logs, retaining branches and worktrees. Prune
+rechecks records and skips those that are busy or no longer ended.
+
+A dry run with no removable records shows its report without confirmation.
+A dry-run error shows a warning naming the error and removes nothing.
+After removal a message lists removed records, skipped ids with reasons,
+and errors. Closing the message reloads both record models and reapplies
+the filters. Confirmation and result lists scroll within the available
+screen height.
+
 Each row has an expand arrow, a grey icon and the word Run, Flow or Panel,
 then one of six status chips:
 
