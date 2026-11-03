@@ -1,12 +1,15 @@
 import datetime
 import threading
 import time
+from dataclasses import replace
 
 import pytest
-from PySide6.QtWidgets import QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QWidget
 from pytestqt.qtbot import QtBot
 
 from ember import deps
+from ember.app import theme
 from ember.app.context import AppContext
 from ember.app.screens import dependencies as screen_module
 from ember.app.screens.dependencies import DependenciesScreen, subtitle
@@ -433,3 +436,40 @@ def test_an_earlier_read_keeps_the_check_spinner(
     assert widget.spinner.isHidden()
     assert widget.checking_label.isHidden()
     assert widget.order() == [("system", ["tmux"])]
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_unidentified_install_shows_path_command_and_note(
+    env: dict[str, str],
+    qtbot: QtBot,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    theme.apply(qapp, mode)
+    item = replace(
+        _component(
+            "codex",
+            deps.UPDATE_AVAILABLE,
+            group="apps",
+            newest="2.0",
+            command="/tools/bin/codex update",
+            command_kind="update",
+            note="Ember could not tell how the tool was installed.",
+        ),
+        resolved_path="/tools/unknown/codex",
+    )
+    widget, _context, calls = _screen(env, qtbot, monkeypatch, _report(item))
+    tile = widget.tiles["codex"]
+    assert tile.badge.text() == "Update"
+    assert tile.resolved_path.text() == item.resolved_path
+    assert not tile.resolved_path.isHidden()
+    assert (
+        tile.resolved_path.textInteractionFlags()
+        & Qt.TextInteractionFlag.TextSelectableByMouse
+    )
+    assert tile.note is not None and tile.note.text() == item.note
+    assert not tile.note.isHidden()
+    assert tile.command is not None and tile.command.command() == item.command
+    tile.command.run_button.click()
+    assert calls.commands == [item.command]

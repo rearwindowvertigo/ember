@@ -2308,9 +2308,9 @@ The list is `ember/data/components.toml` in the package:
 
 | id | Label | Group | Installed version | Newest version | Update | Install |
 |---|---|---|---|---|---|---|
-| `codex` | Codex | `apps` | `codex --version`, `codex-cli (\S+)` | `version` of `https://registry.npmjs.org/@openai/codex/latest` | `codex update` | `npm install -g @openai/codex` |
-| `opencode` | OpenCode | `apps` | `opencode --version`, `^(\S+)$` | `version` of `https://registry.npmjs.org/opencode-ai/latest` | `opencode upgrade` | `curl -fsSL https://opencode.ai/install \| bash` |
-| `claude` | Claude Code | `apps` | `claude --version`, `^(\S+) \(Claude Code\)$` | the text of `https://downloads.claude.ai/claude-code-releases/latest` | `claude update` | `curl -fsSL https://claude.ai/install.sh \| bash` |
+| `codex` | Codex | `apps` | `codex --version`, `codex-cli (\S+)` | `version` of `https://registry.npmjs.org/@openai/codex/latest` | Detected install method | `npm install -g @openai/codex` |
+| `opencode` | OpenCode | `apps` | `opencode --version`, `^(\S+)$` | `version` of `https://registry.npmjs.org/opencode-ai/latest` | Detected install method | `curl -fsSL https://opencode.ai/install \| bash` |
+| `claude` | Claude Code | `apps` | `claude --version`, `^(\S+) \(Claude Code\)$` | the text of `https://downloads.claude.ai/claude-code-releases/latest` | Detected install method | `curl -fsSL https://claude.ai/install.sh \| bash` |
 | `claude-desktop` | Claude Desktop | `apps` | apt `claude-desktop` | apt | `sudo apt install --only-upgrade claude-desktop` | none; note "Not installed." |
 | `tmux` | tmux | `system` | apt `tmux` | apt | `sudo apt install --only-upgrade tmux` | `sudo apt install tmux` |
 | `bubblewrap` | bubblewrap | `system` | apt `bubblewrap` | apt | `sudo apt install --only-upgrade bubblewrap` | `sudo apt install bubblewrap` |
@@ -2334,9 +2334,72 @@ not valid:
 | `installed` | `kind = "apt"` with `package`; `kind = "command"` with `pattern`, a regular expression whose group 1 is the version, and either `engine` (the engine's CLI run with `--version`) or `argv`; or `kind = "python"` with `package` |
 | `newest` | `kind = "apt"` with `package` (only with an apt `installed`); `kind = "json"` with `url` and `field`; `kind = "text"` with `url`; or `kind = "pypi"` with `package` |
 | `update` | Optional: the command shown while an update is available |
+| `methods` | Optional: ordered `[[components.methods]]` tables with `path` and `update`, or `kind = "dpkg"` and `update`; replaces `update` for engines |
+| `updater` | Required with engine methods: `codex update`, `opencode upgrade` or `claude update`, used when no method matches |
 | `install` | Optional: the command shown while the component is missing |
 | `update_note` | Optional: shown while an update is available and there is no `update` |
 | `install_note` | Optional: shown while the component is missing and there is no `install` |
+
+### Update methods
+
+For Codex, OpenCode and Claude Code, Ember finds the launcher on `PATH`, or
+at an engine's known location outside `PATH` (`~/.opencode/bin/opencode` for
+OpenCode), and follows its symlinks. It matches this resolved path against
+`[[components.methods]]` in order. The first matching path supplies the
+update command. The dpkg method is tried after all path methods.
+
+For a regular script of at most 64 KiB whose first line starts with `#!`,
+Ember reads the first quoted `$basedir/<relative path>` containing
+`/node_modules/`. It makes that path absolute against the script's folder
+and normalizes it without following symlinks for path-method matching.
+The fully resolved target supplies `resolved_path`, dpkg's ownership lookup,
+and the permission check outside npm. This covers
+pnpm's global shell shims, such as a launcher in `$PNPM_HOME` pointing to
+`$basedir/global/5/node_modules/@openai/codex/bin/codex.js`. ELF binaries
+are not read as scripts. A read or resolution failure, or no such quoted
+path, leaves the launcher as the path to match. Updater commands keep the
+original launcher name.
+
+| Path pattern | Update template |
+|---|---|
+| `{prefix}/lib/node_modules/{package}` | `npm install -g --prefix {prefix} {package}@latest` |
+| `{prefix}/global/*/node_modules/{package}` | `pnpm add -g {package}@latest` |
+| `{prefix}/install/global/node_modules/{package}` | `bun add -g {package}@latest` |
+| `{prefix}/Cellar/{formula}` | `brew upgrade {formula}` |
+| `~/.local/share/claude/versions/*` (Claude Code) | `{launcher} update` |
+| `~/.opencode/bin/opencode` (OpenCode) | `{launcher} upgrade` |
+| `kind = "dpkg"`, no path | `sudo apt install --only-upgrade {package}` |
+
+A pattern starts at the beginning of the candidate path and matches either
+the whole path or a leading part ending at a `/` boundary. `{prefix}`
+captures any path, `{package}` captures a name or exactly two segments for
+an `@scope/name`, `{formula}` captures one segment, and `*` stays within one
+segment. Package names cannot start with `.`, so `.pnpm` store folders do
+not match as packages. `~` uses the owner's home folder after resolving its
+symlinks. Captured values are shell-quoted in the command. `{launcher}` is the full unresolved launcher path.
+
+The dpkg method runs `dpkg-query -S <resolved path>` with the shared command
+deadline. One package owning that path supplies `{package}`; a failed,
+timed-out, malformed or ambiguous lookup is no match. This lookup runs only
+when installed versions are being read, including `emb deps` and the
+Dependencies screen's Check now action.
+
+Ember tests `os.access(folder, W_OK)` on `{prefix}/lib/node_modules` for npm,
+and on the resolved file's parent otherwise. If that folder is not writable,
+it prefixes the command with `sudo`, unless it already starts with `sudo`.
+Ember itself runs no `sudo`; the command runs in the owner's terminal.
+
+With no match, an available update keeps status `update available` and
+`command_kind` `update`. Its command is the full unresolved launcher path
+with the `updater` arguments. The CLI and Dependencies screen show the
+resolved path and, with that update command, "Ember could not tell how the
+tool was installed." Codex has no vendor path method. When no executable
+is found, the component shows its existing install command and both
+`resolved_path` and `method` are null.
+
+The resolved path and method are read again on every read and are not
+cached. On a read using cached installed versions, path methods are still
+matched; dpkg is skipped and its method remains null.
 
 ### Reads
 
@@ -2374,7 +2437,8 @@ compared as text.
 `command` is the update command while an update is available and the install
 command while missing, with `command_kind` `update` or `install`; otherwise
 both are null. `note` is `update_note` or `install_note` for that status when
-there is no command for it; otherwise null.
+there is no command for it, or the could-not-tell note alongside an update
+command when no install method matched; otherwise null.
 
 ### Cache
 
@@ -2393,7 +2457,9 @@ it was.
 Text output has one line per component, in the order of the list:
 `<label>: <status>[, installed <version>][, newest <version>][: <error>]`,
 then an indented `update: <command>` or `install: <command>` line when there
-is a command.
+is a command. An engine shows `resolved path: <path>` only with an update
+command, alongside the could-not-tell note when no method matched. JSON
+keeps `resolved_path` and `method` for every component.
 
 `--json` prints one object:
 
@@ -2410,7 +2476,9 @@ is a command.
       "error": null,
       "command": "sudo apt install --only-upgrade tmux",
       "command_kind": "update",
-      "note": null
+      "note": null,
+      "resolved_path": null,
+      "method": null
     }
   ],
   "installed_read_at": {"tmux": 1800000000.0},
@@ -2423,6 +2491,8 @@ is a command.
 
 | Key | Holds |
 |---|---|
+| `components[].resolved_path` | Engine launcher target after following symlinks; null when no executable is found or for other components |
+| `components[].method` | Matched method table (`path` and `update`, or `kind = "dpkg"` and `update`); null when none matched |
 | `installed_read_at` | When each component's installed version was read, by id; null when it was never read |
 | `newest_read_at` | When each component's reported newest version was read, by id; null when none is reported |
 | `counts` | How many components are `update available` or `missing` |

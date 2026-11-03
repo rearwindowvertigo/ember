@@ -177,13 +177,19 @@ class DependencyTile(widgets.Card):
         self.error.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.error)
         self.error.setVisible(bool(item.error))
+        self.resolved_path = label(item.resolved_path or "", "muted")
+        self.resolved_path.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        layout.addWidget(self.resolved_path)
+        self.resolved_path.setVisible(bool(item.resolved_path))
         self.command: widgets.CommandLine | None = None
         self.note: QLabel | None = None
         if item.command is not None:
             self.command = widgets.CommandLine(item.command)
             self.command.run_requested.connect(self._run)
             layout.addWidget(self.command)
-        elif item.note:
+        if item.note:
             self.note = label(item.note, "secondary")
             layout.addWidget(self.note)
         layout.addStretch(1)
