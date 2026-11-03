@@ -269,3 +269,20 @@ def test_flow_and_panel_folders_are_not_watched(
     assert not [item for item in watched if "/flow-" in item or "/panel-" in item]
     assert model.unreadable() == 0
     model.stop()
+
+
+def test_finished_ties_use_id(env: dict[str, str], qtbot: QtBot) -> None:
+    for ident in ("bbbbbb", "aaaaaa"):
+        write_run(
+            make_run(
+                env,
+                f"codex-20260101-120000-{ident}",
+                status=record.CLOSED,
+                started_at=100,
+                ended_at=200,
+                updated_at=200,
+            )
+        )
+    model = _model(env, qtbot)
+    assert [run.id[-6:] for run in model.finished()] == ["bbbbbb", "aaaaaa"]
+    model.stop()

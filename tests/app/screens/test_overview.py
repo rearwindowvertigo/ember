@@ -37,6 +37,7 @@ def context(env: dict[str, str], qtbot: QtBot) -> Iterator[AppContext]:
     qtbot.waitUntil(result.runs.loaded)
     yield result
     result.runs.stop()
+    result.flows.set_active(False)
 
 
 def screen_for(context: AppContext, qtbot: QtBot) -> OverviewScreen:
@@ -45,6 +46,7 @@ def screen_for(context: AppContext, qtbot: QtBot) -> OverviewScreen:
     proc_locks = Path(context.env["HOME"]) / "proc-locks"
     proc_locks.write_text("")
     screen.records._proc_locks = proc_locks
+    context.flows.set_active(True)
     screen.resize(1000, 900)
     screen.show()
     screen.shown()
@@ -109,11 +111,10 @@ def loaded(env: dict[str, str], context: AppContext, qtbot: QtBot) -> OverviewSc
 def test_empty(context: AppContext, qtbot: QtBot) -> None:
     screen = screen_for(context, qtbot)
     assert screen.subtitle.text() == "No runs live"
-    assert screen.state_view.empty.isVisible()
-    assert screen.state_view.empty_title.text() == "No runs yet"
-    assert "emb run" in screen.state_view.empty_line.text()
-    assert not screen.live_card.isVisible()
-    assert not screen.finished_card.isVisible()
+    assert screen.live_empty.isVisible()
+    assert screen.finished_empty.isVisible()
+    assert screen.live_card.isVisible()
+    assert screen.finished_card.isVisible()
 
 
 def test_rows_and_badges(
@@ -130,16 +131,19 @@ def test_rows_and_badges(
     )
     assert first.title_label.text() == "Codex · gpt-5 · high"
     assert second.title_label.text() == "Claude · opus"
-    assert first.detail_label.text() == f"project · ember/codex/{LIVE_A} · turn 1"
-    assert second.detail_label.text() == "beta · read-only · turn 3"
+    assert (
+        first.detail_label.text()
+        == f"starting · project · ember/codex/{LIVE_A} · turn 1"
+    )
+    assert second.detail_label.text() == "waiting · beta · read-only · turn 3"
     assert first.time_label.text().endswith(("min", "h"))
 
     assert list(screen.finished_rows) == [DONE_B, DONE_A]
     failed, closed = screen.finished_rows.values()
     assert (failed.badge.text(), failed.badge.tone()) == ("Failed", "danger")
-    assert (closed.badge.text(), closed.badge.tone()) == ("Closed", "success")
+    assert (closed.badge.text(), closed.badge.tone()) == ("Done", "success")
     assert closed.title_label.text() == "OpenCode · openrouter/x · high"
-    assert closed.detail_label.text() == f"Fix the bug · ember/codex/{DONE_A}"
+    assert closed.detail_label.text() == f"closed · Fix the bug · ember/codex/{DONE_A}"
     assert closed.time_label.text().endswith("· 8 min")
     assert not screen.state_view.empty.isVisible()
 
@@ -355,9 +359,7 @@ def test_unreadable_records(env: dict[str, str], qtbot: QtBot) -> None:
     qtbot.waitUntil(context.runs.loaded)
     screen = screen_for(context, qtbot)
     assert screen.unreadable_alert.isVisible()
-    assert screen.unreadable_alert.title_label.text() == (
-        "1 run record could not be read."
-    )
+    assert screen.unreadable_alert.title_label.text() == ("1 run could not be read.")
     assert screen.unreadable_alert.buttons == []
     context.runs.stop()
 
@@ -430,8 +432,8 @@ def test_empty_state_after_the_last_run_goes(
     shutil.rmtree(paths.runs_dir(env) / LIVE_A)
     context.runs.reload()
     qtbot.waitUntil(lambda: not context.runs.runs())
-    assert screen.state_view.empty.isVisible()
-    assert not screen.live_card.isVisible()
+    assert screen.live_empty.isVisible()
+    assert screen.live_card.isVisible()
 
 
 def test_finished_rows_survive_a_live_run_saving(
@@ -472,7 +474,7 @@ def test_finished_row_redraws_when_its_values_change(
     # place, so wait for the record the test wrote rather than one signal.
     qtbot.waitUntil(lambda: row.run.subject == "Fix it", timeout=5000)
     assert screen.finished_rows[DONE_A] is row
-    assert row.detail_label.text().startswith("Fix it · ")
+    assert row.detail_label.text().startswith("closed · Fix it · ")
     assert row.details is not None
     assert dict(overview.record_rows(row.run))["Subject"] == "Fix it"
     texts = [label.text() for label in row.details.findChildren(QLabel)]
@@ -520,7 +522,7 @@ def test_record_formatters(env: dict[str, str]) -> None:
     )
     assert overview.member_line(make_member(seconds=12.6)).endswith("13s")
     item = flows.PanelItem(panel, "x" * 100, None, False)
-    assert overview.panel_detail(item) == "project · " + "x" * 80
+    assert overview.panel_detail(item) == "project"
     assert overview.panel_detail(replace(item, question="")) == "project"
     assert overview.item_time(0, None, 180) == "3 min"
     assert overview.item_time(0, 120, 180).endswith(" · 2 min")
@@ -555,13 +557,13 @@ def test_flow_details_and_run_links(
     context.runs.reload()
     qtbot.waitUntil(lambda: len(context.runs.runs()) == 2)
     screen = screen_for(context, qtbot)
-    assert screen.flows_card.isVisible()
-    assert screen.panels_card.isHidden()
+    assert screen.live_card.isVisible()
+    assert screen.finished_empty.isVisible()
     row = screen.flow_rows[FLOW]
     assert row.badge.text() == "Waiting for Claude"
     assert row.title_label.text() == "project · 2 tasks · 1/2 merged"
     assert row.detail_label.text() == (
-        f"ember/flow/{FLOW} · wave 2 of 2 · Needs an answer"
+        f"stopped · 1 live run · ember/flow/{FLOW} · wave 2 of 2 · Needs an answer"
     )
     qtbot.mouseClick(row.expand_button, Qt.MouseButton.LeftButton)
     assert row.details is not None
@@ -569,26 +571,21 @@ def test_flow_details_and_run_links(
     assert "Choose a format" in labels(row)
     assert "1 review · last fix · 2 must, 1 should, 1 lead" in labels(row)
     assert "task-0 · Merged · round 0 · Codex · test-model" in labels(row)
-    assert len(row.links) == 2
-    assert [link.accessibleName() for link in row.links] == [
-        f"Show run {DONE_A}",
-        f"Show run {LIVE_A}",
-    ]
-    qtbot.mouseClick(row.links[0], Qt.MouseButton.LeftButton)
+    assert row.links == []
+    assert row.nested.count() == 2
+    assert row.nested.indexOf(screen.finished_rows[DONE_A]) >= 0
+    assert row.nested.indexOf(screen.live_rows[LIVE_A]) >= 0
+    assert screen.finished_rows_layout.count() == 0
+    assert screen.live_rows_layout.count() == 1
+    screen.show_run(DONE_A)
     assert screen.expanded_finished == DONE_A
-    qtbot.mouseClick(row.links[1], Qt.MouseButton.LeftButton)
+    screen.show_run(LIVE_A)
     assert screen.expanded_live == LIVE_A
     mirror = screen.mirror()
     assert mirror is not None
     qtbot.waitUntil(lambda: mirror.last_screen() is not None)
     screen.show_run(LIVE_A)
     assert screen.mirror() is mirror
-    assert set(
-        button.text() for button in screen.flows_card.findChildren(QPushButton)
-    ) == {
-        "",
-        "Show run",
-    }
 
 
 @pytest.mark.parametrize("stored_waves", [False, True])
@@ -604,7 +601,7 @@ def test_flow_without_plan_wave_shows_passes_zero(
         path.write_text(json.dumps(flow))
     screen = screen_for(context, qtbot)
     row = screen.flow_rows[FLOW]
-    assert row.detail_label.text() == f"ember/flow/{FLOW} · Waiting"
+    assert row.detail_label.text() == f"runner gone · ember/flow/{FLOW} · Waiting"
     row.expand_button.click()
     assert row.details is not None
     assert labels(row.details)[0] == "passes 0"
@@ -626,7 +623,8 @@ def test_panel_details(env: dict[str, str], context: AppContext, qtbot: QtBot) -
     row = screen.panel_rows[PANEL]
     assert row.badge.text() == "Incomplete"
     assert row.title_label.text() == "Panel · 3 members · 1/3 answered"
-    assert row.detail_label.text() == "project · A question"
+    assert row.detail_label.text() == "incomplete · project"
+    assert row.question_label.text() == "A question"
     qtbot.mouseClick(row.expand_button, Qt.MouseButton.LeftButton)
     text = labels(row)
     assert all(overview.member_line(member) in text for member in panel["members"])
@@ -634,10 +632,10 @@ def test_panel_details(env: dict[str, str], context: AppContext, qtbot: QtBot) -
     assert "Changed: a.py" in text
     assert "Left out claude:opus: engine off" in text
     assert f"Summary: {panel_record.folder(PANEL, env) / 'summary.md'}" in text
-    assert f"Run {LIVE_A}" in text
+    assert f"Run {LIVE_A}" not in text
     assert row.links == []
     assert [
-        button.text() for button in screen.panels_card.findChildren(QPushButton)
+        button.text() for button in screen.finished_card.findChildren(QPushButton)
     ] == [""]
 
 
@@ -670,11 +668,12 @@ def test_record_rows_survive_other_changes_and_refresh_links(
     assert row.details is details
     write_run(make_run(env, LIVE_A))
     context.runs.reload()
-    qtbot.waitUntil(lambda: len(row.links) == 1 and len(panel_row.links) == 1)
-    assert row.details is not details
+    qtbot.waitUntil(lambda: row.nested.count() == 1)
+    assert panel_row.nested.count() == 0
+    assert "1 live run" in row.detail_label.text()
     shutil.rmtree(paths.runs_dir(env) / LIVE_A)
     context.runs.reload()
-    qtbot.waitUntil(lambda: not row.links and not panel_row.links)
+    qtbot.waitUntil(lambda: row.nested.count() == 0)
     flow["status"] = "done"
     flow["ended_at"] = 220
     flow_record.save(flow, env)
@@ -696,28 +695,35 @@ def test_gone_records_and_unreadable_counts(
         folder.mkdir()
         (folder / f"{kind}.json").write_text("broken")
     screen = screen_for(context, qtbot)
-    assert screen.flow_rows[FLOW].badge.text() == "Runner gone"
-    assert screen.panel_rows[PANEL].badge.text() == "Process gone"
-    assert screen.flows_unreadable.text() == "1 flow record could not be read."
-    assert screen.panels_unreadable.text() == "1 panel record could not be read."
+    assert screen.flow_rows[FLOW].badge.text() == "Failed"
+    assert screen.flow_rows[FLOW].detail_label.text().startswith("runner gone · ")
+    assert screen.panel_rows[PANEL].badge.text() == "Failed"
+    assert (
+        screen.panel_rows[PANEL].detail_label.text().startswith("panel process gone · ")
+    )
+    assert (
+        screen.unreadable_alert.title_label.text()
+        == "1 flow, 1 panel could not be read."
+    )
+    assert screen.live_rows_layout.count() == 2
     assert not screen.state_view.empty.isVisible()
 
 
-def test_records_hide_and_reactivate(
+def test_records_remain_active_while_hidden(
     env: dict[str, str], context: AppContext, qtbot: QtBot
 ) -> None:
     make_flow(env)
     screen = screen_for(context, qtbot)
     assert screen.records.active() and screen.records.watched()
     screen.hide()
-    assert not screen.records.active() and not screen.records.watched()
+    assert screen.records.active() and screen.records.watched()
     screen.show()
     context.set_visible(True)
     screen.shown()
     assert not screen.records._queued
     qtbot.waitUntil(lambda: bool(screen.records.watched()))
     context.set_visible(False)
-    assert not screen.records.active() and not screen.records.watched()
+    assert screen.records.active() and screen.records.watched()
     assert not screen._elapsed.isActive()
 
 
@@ -738,20 +744,20 @@ def test_records_error_retry_and_runs_error_precedence(
     with qtbot.waitSignal(screen.records.failed, timeout=5000):
         screen.records.reload()
     assert screen.records_alert.isVisible()
-    assert not screen.flows_card.isVisible()
+    assert screen.live_card.isVisible()
     assert screen.records_alert.title_label.text() == (
         "Ember could not read the flow and panel records: flow read refused."
     )
     monkeypatch.setattr(flow_record, "list_flows", original)
     with qtbot.waitSignal(screen.records.changed, timeout=5000):
         screen.records_alert.buttons[0].click()
-    assert screen.flows_card.isVisible()
+    assert screen.live_card.isVisible()
     assert not screen.records_alert.isVisible()
     monkeypatch.setattr(record, "list_runs", refuse)
     with qtbot.waitSignal(context.runs.failed, timeout=5000):
         context.runs.reload()
     assert screen.state_view.error.isVisible()
-    assert not screen.flows_card.isVisible()
+    assert not screen.live_card.isVisible()
     assert not screen.records_alert.isVisible()
 
 
@@ -774,17 +780,14 @@ def test_initial_load_waits_for_records(
     screen = OverviewScreen(context)
     qtbot.addWidget(screen)
     screen.show()
+    context.flows.set_active(True)
     screen.shown()
     assert not screen.state_view.empty.isVisible()
-    assert not screen.flows_card.isVisible()
+    assert not screen.live_card.isVisible()
     release.set()
     qtbot.waitUntil(screen.records.loaded)
-    assert screen.state_view.empty.isVisible()
-    assert screen.state_view.empty_line.text() == (
-        "Runs, flows and panels appear here when Claude starts them with "
-        "`emb run`, `emb flow` or `emb panel`."
-    )
-    assert not screen.panels_card.isVisible()
+    assert screen.live_empty.isVisible()
+    assert screen.finished_empty.isVisible()
 
 
 def test_record_keyboard_order_and_long_text(
@@ -809,11 +812,9 @@ def test_record_keyboard_order_and_long_text(
         screen.activateWindow()
     controls = [
         flow_row.expand_button,
-        *flow_row.links,
-        panel_row.expand_button,
-        *panel_row.links,
         screen.live_rows[LIVE_A].expand_button,
         screen.live_rows[LIVE_A].open_button,
+        panel_row.expand_button,
     ]
     qtbot.waitUntil(lambda: all(control.isVisible() for control in controls))
     controls[0].setFocus()
@@ -836,4 +837,190 @@ def test_record_keyboard_order_and_long_text(
         for label in flow_row.details.findChildren(QLabel)
     )
     screen.show_run(LIVE_A)
-    qtbot.waitUntil(lambda: area.verticalScrollBar().value() > 0)
+    assert screen.expanded_live == LIVE_A
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_cancelled_parent_keeps_live_workers_and_their_controls(
+    env: dict[str, str],
+    context: AppContext,
+    qtbot: QtBot,
+    qapp: QApplication,
+    mode: str,
+) -> None:
+    from ember.app import theme
+
+    previous = theme.current_mode()
+    try:
+        theme.apply(qapp, mode)
+        flow = make_flow(
+            env, status="cancelled", reason="Owner stopped it", ended_at=300
+        )
+        for ident, task in zip((LIVE_A, LIVE_B), flow["tasks"], strict=True):
+            write_run(make_run(env, ident, status=record.WAITING))
+            task["writer_run"] = ident
+        flow_record.save(flow, env)
+        context.runs.reload()
+        qtbot.waitUntil(lambda: len(context.runs.live()) == 2)
+        screen = screen_for(context, qtbot)
+        row = screen.flow_rows[FLOW]
+        assert screen.live_rows_layout.count() == 0
+        assert screen.finished_rows_layout.itemAt(0).widget() is row
+        assert row.badge.text() == "Incomplete" and row.badge.tone() == "incomplete"
+        assert row.detail_label.text().startswith("cancelled · 2 live runs · ")
+        assert "Owner stopped it" in row.detail_label.text()
+        assert row.type_marker.label.text() == "Flow"
+        assert row.nested.count() == 2
+        child = screen.live_rows[LIVE_A]
+        assert child.badge.text() == "Waiting for Claude"
+        assert child.open_button.isVisible()
+        child.expand_button.click()
+        assert screen.mirror() is not None
+        write_run(
+            replace(child.run, status=record.CLOSED, ended_at=310, updated_at=310)
+        )
+        context.runs.reload()
+        qtbot.waitUntil(lambda: LIVE_A in screen.finished_rows)
+        assert screen.mirror() is None
+        assert row.nested.indexOf(screen.finished_rows[LIVE_A]) >= 0
+        assert row.detail_label.text().startswith("cancelled · 1 live run · ")
+        assert screen.finished_rows[LIVE_A].badge.text() == "Done"
+    finally:
+        theme.apply(qapp, previous)
+        qapp.setStyleSheet("")
+
+
+def test_finished_cap_merges_types_and_keeps_all_nested_runs(
+    env: dict[str, str], context: AppContext, qtbot: QtBot
+) -> None:
+    top_ids = []
+    for n in range(24):
+        kind = ("flow", "panel", "codex")[n % 3]
+        ident = f"{kind}-20260101-120000-{n:06x}"
+        top_ids.append(ident)
+        if kind == "flow":
+            make_flow(env, ident, status="done", started_at=1, ended_at=1000 + n)
+        elif kind == "panel":
+            make_panel(env, ident, status="done", started_at=1, ended_at=1000 + n)
+        else:
+            write_run(
+                make_run(
+                    env, ident, status=record.CLOSED, started_at=1, ended_at=1000 + n
+                )
+            )
+    hidden_child = "codex-20260101-120000-ff0000"
+    write_run(make_run(env, hidden_child, status=record.CLOSED, ended_at=9000))
+    hidden = flow_record.load(top_ids[0], env)
+    hidden["tasks"][0]["writer_run"] = hidden_child
+    flow_record.save(hidden, env)
+    events = flow_record.folder(top_ids[21], env) / flow_record.EVENTS_NAME
+    nested_ids = []
+    for n in range(22):
+        ident = f"codex-20260101-120000-ff{n + 1:04x}"
+        nested_ids.append(ident)
+        write_run(make_run(env, ident, status=record.CLOSED, started_at=1, ended_at=2))
+    events.write_text(
+        "".join(
+            json.dumps({"seq": n + 1, "writer_run": ident}) + "\n"
+            for n, ident in enumerate(nested_ids)
+        )
+    )
+    context.runs.reload()
+    qtbot.waitUntil(lambda: len(context.runs.runs()) == 31)
+    screen = screen_for(context, qtbot)
+    layout = screen.finished_rows_layout
+    assert layout.count() == 20
+    assert [layout.itemAt(n).widget()._item_id for n in range(20)] == top_ids[:3:-1]
+    assert not screen.has_run(hidden_child)
+    parent = screen.flow_rows[top_ids[21]]
+    assert parent.nested.count() == 22
+    assert all(
+        parent.nested.indexOf(screen.finished_rows[ident]) >= 0 for ident in nested_ids
+    )
+    assert all(
+        screen.finished_rows_layout.indexOf(screen.finished_rows[ident]) == -1
+        for ident in nested_ids
+    )
+
+
+@pytest.mark.parametrize("panel_start", [99, 100, 101])
+def test_multiple_parents_choose_oldest_then_id(
+    env: dict[str, str], context: AppContext, qtbot: QtBot, panel_start: int
+) -> None:
+    flow = make_flow(env, status="stopped", started_at=100)
+    flow["tasks"][0]["writer_run"] = LIVE_A
+    flow_record.save(flow, env)
+    panel = make_panel(env, started_at=panel_start)
+    panel["members"][0]["run"] = LIVE_A
+    panel_record.save(panel, env)
+    write_run(make_run(env, LIVE_A))
+    context.runs.reload()
+    qtbot.waitUntil(lambda: bool(context.runs.live()))
+    screen = screen_for(context, qtbot)
+    flow_row, panel_row = screen.flow_rows[FLOW], screen.panel_rows[PANEL]
+    owner, other = (panel_row, flow_row) if panel_start < 100 else (flow_row, panel_row)
+    assert owner.nested.count() == 1 and other.nested.count() == 0
+    assert owner.nested.itemAt(0).widget() is screen.live_rows[LIVE_A]
+    assert "1 live run" in owner.detail_label.text()
+    assert "live run" not in other.detail_label.text()
+    assert screen.live_rows_layout.count() == 2
+    assert screen.live_rows_layout.itemAt(0).widget() is owner
+
+
+def test_mixed_order_uses_start_end_update_and_id(env: dict[str, str]) -> None:
+    run = make_run(env, LIVE_A, status=record.RUNNING, started_at=10)
+    flow = flows.FlowItem(make_flow(env, status="stopped", started_at=10), False, False)
+    panel = flows.PanelItem(make_panel(env, started_at=9), "", False, False)
+    live, finished, _ = overview.sections([run], [flow, panel])
+    assert live == [panel, run, flow] and not finished
+    run = replace(run, status=record.CLOSED, ended_at=20, updated_at=30)
+    flow.record.update(status="cancelled", ended_at=20, updated_at=30)
+    panel.record.update(status="incomplete", ended_at=None, updated_at=20)
+    live, finished, _ = overview.sections([run], [panel, flow])
+    assert not live and finished == [flow, run, panel]
+
+
+def test_unreadable_line_combines_counts_inside_live(
+    env: dict[str, str], context: AppContext, qtbot: QtBot
+) -> None:
+    for kind, filename in (("codex", "run"), ("flow", "flow"), ("panel", "panel")):
+        folder = paths.runs_dir(env) / f"{kind}-20260101-120000-abcdef"
+        folder.mkdir()
+        (folder / f"{filename}.json").write_text("broken")
+    context.runs.reload()
+    qtbot.waitUntil(lambda: context.runs.unreadable() == 1)
+    screen = screen_for(context, qtbot)
+    assert screen.unreadable_alert.isVisible()
+    assert screen.live_card.isAncestorOf(screen.unreadable_alert)
+    assert (
+        screen.unreadable_alert.title_label.text()
+        == "1 run, 1 flow, 1 panel could not be read."
+    )
+    assert screen.live_empty.isVisible() and screen.finished_empty.isVisible()
+    assert overview.unreadable_line(0, 2, 0) == "2 flows could not be read."
+
+
+@pytest.mark.parametrize(
+    ("status", "text", "tone"),
+    [
+        ("starting", "Starting", "neutral"),
+        ("checking", "Running", "info"),
+        ("stopped", "Waiting for Claude", "warning"),
+        ("done", "Done", "success"),
+        ("cancelled", "Incomplete", "incomplete"),
+        ("failed", "Failed", "danger"),
+    ],
+)
+def test_flow_status_chips(
+    env: dict[str, str],
+    context: AppContext,
+    qtbot: QtBot,
+    status: str,
+    text: str,
+    tone: str,
+) -> None:
+    make_flow(env, status=status, updated_at=9_000_000_000)
+    screen = screen_for(context, qtbot)
+    row = screen.flow_rows[FLOW]
+    assert (row.badge.text(), row.badge.tone()) == (text, tone)
+    assert row.detail_label.text().startswith(status + " · ")

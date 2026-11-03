@@ -2551,7 +2551,7 @@ At start the app:
   scheme;
 - reads the settings, the engine status (checking every engine), the
   dependency report (installed versions now, newest versions when due) and
-  the run records, each off the window's thread;
+  the run, flow and panel records, each off the window's thread;
 - once the settings are read, applies `app.theme` and writes or removes the
   autostart entry to match `app.autostart`; it does so again each time
   either setting changes.
@@ -2633,12 +2633,12 @@ app keeps the records it read last and Overview shows the reason with Try
 again, which reads the folder again at once. A run whose turn failed since
 the last read makes the app check the engines again.
 
-While Overview is shown, the app also reads `flow.json` and `panel.json`
+The app also reads `flow.json`, each flow's `events.jsonl` and `panel.json`
 off the window's thread and watches their folders and record files, with
 the same sixty-second backstop and coalesced reads. It takes no lock and
-reads lifetime lock ownership from `/proc/locks`. It stops these reads and
-watches when Overview is left or the window is hidden. Unreadable flow and
-panel folders are counted in their cards.
+reads lifetime lock ownership from `/proc/locks`. One shared flow and panel
+model stays active until the app stops, including while Overview or the
+window is hidden.
 
 ### Commands
 
@@ -2674,90 +2674,73 @@ command line:
 
 ### Overview
 
-Overview's subtitle is the tray's status line. Above the lists, an alert
-names each engine that is on and whose `sandbox.<engine>` setting gives it
-no sandbox, read from the last settings snapshot, with Open Engines; an
-alert counts run records that could not be read. The cards appear in order:
-Flows, Panels, Live, Finished. Flows and Panels are hidden when they have
-neither readable nor unreadable records.
+Overview shows Live and Finished. Live lists starting, running and waiting
+records, oldest first by start time and then id. Finished lists ended
+records, newest first by end time, update time and id, with update time used
+when end time is absent. Its cap of twenty applies to top-level rows across
+runs, flows and panels. Each empty section shows its empty state.
 
-The Flows card lists every active flow (`starting`, `running`, `checking`,
-`stopped`), oldest first, followed by the last five ended flows (`done`,
-`failed`), newest end time first. Each row shows an expand arrow, a badge,
-`<repository folder> · <n> tasks · <merged>/<n> merged`,
-`ember/flow/<id> · wave <n>` with its reason when set, and elapsed time or
-end time and duration.
+Each row has an expand arrow, a grey icon and the word Run, Flow or Panel,
+then one of six status chips:
 
-| Flow status | Badge |
-|---|---|
-| `starting` | Starting |
-| `running` | Running |
-| `checking` | Checking |
-| `stopped` | Waiting for Claude |
-| `done` | Done |
-| `failed` | Failed |
-| Runner missing after the grace period | Runner gone |
+| Chip | States | Colour |
+|---|---|---|
+| Starting | A run or flow's `starting` | Grey |
+| Running | `running`, a flow's `checking` | Blue |
+| Waiting for Claude | A run's `waiting`, a flow's `stopped` | Amber |
+| Done | A run's `closed`, a flow or panel's `done` | Green |
+| Incomplete | A panel's `incomplete`, a flow's `cancelled` | Purple |
+| Failed | `failed`, a gone flow runner or panel process | Red |
 
-Expanded, a flow shows its tasks in plan order: task id, status, round,
-writer engine and model, reason, number of reviews, last verdict and its
-must, should and lead counts. A task-specific writer overrides the flow's
-writer. Current writer and review run ids are selectable text. Show run
-appears beside an id with a live or finished row on Overview; it expands
-that row and scrolls to it.
+The second line includes the finer state and any flow reason. A cancelled
+flow appears in Finished with `cancelled` and its reason. A starting,
+running or checking flow whose lifetime lock is not held and whose record
+has not changed for more than sixty seconds stays in Live with Failed and
+`runner gone`. A running panel uses Failed and `panel process gone` under
+the same conditions. A stopped flow needs no runner. An unreadable lock
+table or runtime folder leaves the stored status on screen.
 
-The Panels card lists every running panel, oldest first, followed by the
-last five ended panels (`done`, `incomplete`), newest end time first. A row
-shows the badge Running, Done, Incomplete or Process gone,
-`Panel · <n> members · <answered>/<n> answered`, the repository folder and
-the first non-empty question line cut to eighty characters, and elapsed
-time or end time and duration. Expanded, it shows each member's number,
-engine, model, effort (or default), status, seconds, reason and changed
-paths, with its run id and Show run when available. It then lists left-out
-members and their reasons and the selectable path to `summary.md`.
+Worker runs are nested under their parent, in the parent's section, and
+keep their own status chip and controls. Their ids are collected from the
+same record fields and flow events as Clear uses. A run named by multiple
+parents appears under the oldest parent by start time and then id. A run
+with a parent never appears at the top level, including when that parent
+falls beyond the Finished cap. Every readable nested run of a shown parent
+appears, whatever its age. The parent's second line includes `1 live run`
+or `<n> live runs` after the finer state when that count is above zero.
 
-A starting, running or checking flow shows Runner gone, and a running
-panel shows Process gone, when its lifetime lock is not held and its
-record has not been updated for more than sixty seconds. A stopped flow
-needs no runner. An unreadable lock table or runtime folder leaves the
-stored status on screen. The app never takes these locks or creates lock
-files. Flow and panel rows are read-only; one row per card can be expanded.
-Rows and expanded details survive unrelated record changes. Elapsed times
-update every thirty seconds while shown, without rereading records or
-rebuilding expanded details.
+A flow's title shows the repository folder, task count and merged count.
+Its second line includes its branch, active plan wave and reason. Expanded,
+it shows the pass count and task, writer and review details. A panel's title
+shows its member and answer counts; its second line includes the repository
+folder. The first non-empty question line appears on a third line, elided
+to fit, with its full text in the tooltip. Expanded, a panel shows member
+status, worker, duration, reason and changed paths, left-out members and
+the selectable path to `summary.md`.
 
-The Live card holds one row per live run, oldest first: an expand arrow,
-the status badge (Starting, Running, Waiting for Claude),
-`<Engine> · <model> · <effort>`, `<repository folder> · <branch or
-read-only> · turn <n>`, the time since the start, redrawn every 30 seconds
-while the screen shows, and Open terminal, which opens a terminal window on
-the run as `emb run --attach` does. The Finished card holds the last twenty
-finished runs, newest first: the badge (Closed, Failed), the same first
-line, `<subject> · <branch or read-only>`, and the end time with the
-duration. Expanding a finished row shows its record: run, subject, engine,
-repository, branch, sandbox, turns and commits, start, end, last exit and
-last reason. One row of each card is expanded at a time.
+Run rows show engine, model and effort. A live run's second line includes
+the repository folder, branch or `read-only`, and turn number; an ended
+run's includes its subject and branch. Live runs have Open terminal, which
+opens a terminal window on the run as `emb run --attach` does. Expanding an
+ended run shows its record, including last exit and reason. Rows and expanded
+details survive unrelated record changes. Elapsed times update every thirty
+seconds while shown.
 
-Rows are kept per run id across reloads. A finished row is redrawn only
-when a value it shows changes, so focus, an expanded record and selected
-text stay when another run saves its record.
+Expanding a live run shows its read-only tmux screen mirror. One mirror is
+open at a time. It closes when the row collapses, the run ends or its parent
+leaves the shown rows, Overview is left or the window hides. Expanding an
+ended run shows one record at a time. One flow and one panel can also have
+expanded details.
 
-Expanding a live row shows the run's screen mirror. The mirror is a tmux
-control-mode client attached to the run's session with the `read-only` and
-`ignore-size` flags, so it cannot type into the pane or change its size.
-After the pane writes output it captures the pane with its colours and
-cursor and redraws; nothing runs on a timer. It closes
-when the row collapses, the run leaves the live list, the screen is left or
-the window hides, and shows "Session ended" when the session ends.
+The subtitle counts live runs, flows and panels. Above the sections, an
+alert names each enabled engine whose sandbox setting gives it no sandbox,
+with Open Engines. Live has one line naming the non-zero counts of unreadable
+runs, flows and panels; the line is hidden when every count is zero.
 
 When the runs folder cannot be read, the screen shows the reason and Try
-again in place of the cards. When only the flow and panel read fails, an
-alert replaces those two cards: "Ember could not read the flow and panel
-records: <reason>." Try again reads them again. Unreadable individual
-records are counted inside their card, such as "1 flow record could not be
-read." The initial loading state waits for both record models. When there
-are no runs, flows or panels, Overview shows "No runs yet" and "Runs, flows
-and panels appear here when Claude starts them with `emb run`, `emb flow`
-or `emb panel`."
+again in place of the sections. A failed flow and panel read shows an alert
+with Try again and keeps the previous records. The initial loading state
+waits for both record models.
 
 ### Menu
 
