@@ -66,7 +66,14 @@ ADD_BLOCKED = (
 
 ROLES = (
     ("writer", "Writer", "Writes the code for a single task."),
-    ("reviewer", "Reviewer", "Reads the writer's branch and reports. Never edits."),
+    (
+        "reviewer",
+        "Reviewer",
+        "Reads the writer's branch and reports. Never edits. "
+        "Used for read-only single runs, a flow's reviewer when its plan and "
+        "command name none, and every gap check that names no reviewer, "
+        "including the one before a flow.",
+    ),
 )
 """`(role, name, help)` for each row."""
 

@@ -104,12 +104,14 @@ def _merge(
     *,
     target: str = "main",
     verdict: str | None = "keep",
+    note: str | None = None,
     as_json: bool = False,
 ) -> int:
     return branches.merge(
         branch,
         target,
         verdict,
+        note=note,
         directory=directory,
         as_json=as_json,
         env=env,
@@ -271,6 +273,64 @@ def test_merge_json(
     assert item["next"] is None
 
 
+def test_merge_note_prints_first_and_becomes_a_trailer(
+    tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    run = _start(tmp_path, env, repo, driver)
+    assert run.branch is not None
+    streams = Streams()
+    note = "Keep, with a docstring fix"
+    assert _merge(env, driver, streams, run.branch, repo, note=note) == 0
+    lines = streams.take()[0].splitlines()
+    assert lines[0] == f"Verdict: {note}"
+    assert lines[1].startswith(f"merged {run.branch} at ")
+    body = git(repo, "log", "-1", "--format=%B", env=env)
+    assert body.splitlines()[0] == f"Merge branch '{run.branch}'"
+    assert (
+        git(
+            repo,
+            "log",
+            "-1",
+            "--format=%(trailers:key=Ember-Verdict,valueonly)",
+            env=env,
+        )
+        == note
+    )
+
+
+def test_merge_note_in_json_and_for_a_contained_branch(
+    tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    run = _start(tmp_path, env, repo, driver)
+    assert run.branch is not None
+    git(repo, "branch", "kept", run.branch, env=env)
+    streams = Streams()
+    assert (
+        _merge(env, driver, streams, run.branch, repo, note="Keep", as_json=True) == 0
+    )
+    assert json.loads(streams.take()[0])["note"] == "Keep"
+    head = git(repo, "rev-parse", "HEAD", env=env)
+    assert _merge(env, driver, streams, "kept", repo, note="Keep again") == 0
+    lines = streams.take()[0].splitlines()
+    assert lines[0] == "Verdict: Keep again"
+    assert lines[1].startswith("already contained: kept at ")
+    assert git(repo, "rev-parse", "HEAD", env=env) == head
+
+
+def test_merge_from_inside_the_run_worktree_cleans_it_up(
+    tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    run = _start(tmp_path, env, repo, driver)
+    assert run.branch is not None
+    streams = Streams()
+    code = _merge(env, driver, streams, run.branch, Path(run.worktree), note="Keep")
+    out, err = streams.take()
+    assert code == 0, err
+    assert out.splitlines()[2].startswith(f"removed {run.branch}: contained in main")
+    assert not _branch_exists(repo, run.branch, env)
+    assert not Path(run.worktree).exists()
+
+
 @pytest.mark.parametrize("verdict", [None, "drop", "Keep"])
 def test_merge_without_keep_verdict_is_64(
     tmp_path: Path,
@@ -289,7 +349,7 @@ def test_merge_without_keep_verdict_is_64(
     assert "only --verdict keep merges" in err
     assert err.splitlines()[-1] == (
         f"next: review {run.branch}, then emb merge {run.branch} --into main "
-        "--verdict keep"
+        "--verdict keep --note '<verdict line>'"
     )
     assert git(repo, "rev-parse", "HEAD", env=env) == head
     assert _branch_exists(repo, run.branch, env)
@@ -484,7 +544,7 @@ def test_merge_refuses_a_target_with_an_unfinished_operation(
     assert f"the main tree at {repo} has an unfinished {operation}" in err
     assert err.splitlines()[-1] == (
         f"next: git -C {repo} status; finish or abort the {operation}, then "
-        f"emb merge {run.branch} --into main --verdict keep"
+        f"emb merge {run.branch} --into main --verdict keep --note '<verdict line>'"
     )
     assert marker.exists()
     assert git(repo, "rev-parse", "HEAD", env=env) == head
@@ -533,6 +593,20 @@ def test_cleanup_removes_a_squash_merged_branch(
     assert record.load(run.id, env).status == record.CLOSED
 
 
+def test_cleanup_from_inside_the_run_worktree_removes_it(
+    tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    run = _start(tmp_path, env, repo, driver)
+    assert run.branch is not None
+    _squash(repo, run.branch, env)
+    streams = Streams()
+    assert _cleanup(env, driver, streams, Path(run.worktree)) == 0
+    out, err = streams.take()
+    assert out.startswith(f"removed {run.branch}: contained in main"), err
+    assert not _branch_exists(repo, run.branch, env)
+    assert not Path(run.worktree).exists()
+
+
 def test_cleanup_keeps_a_branch_not_contained(
     tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
 ) -> None:
@@ -543,7 +617,7 @@ def test_cleanup_keeps_a_branch_not_contained(
     out, _ = streams.take()
     assert out == (
         f"kept {run.branch}: not contained in main; next: emb merge {run.branch} "
-        "--into main --verdict keep (after a Keep verdict)\n"
+        "--into main --verdict keep --note '<verdict line>' (after a Keep verdict)\n"
     )
     assert _branch_exists(repo, run.branch, env)
     assert _session_live(tmp_path, run.id)
@@ -980,6 +1054,11 @@ def test_cli_merge_and_cleanup(
     monkeypatch.setattr(engines, "load_driver", lambda name, env=None: driver)
     monkeypatch.setattr(core, "POLL_SECONDS", 0.02)
     argv = ["merge", run.branch, "--into", "main", "--dir", str(repo)]
+    for note in ([], ["--note", " "], ["--note", "two\nlines"]):
+        with pytest.raises(SystemExit) as exit_info:
+            main([*argv, "--verdict", "keep", *note], env=env)
+        assert exit_info.value.code == 64
+    argv += ["--note", "Keep"]
     assert main(argv, env=env) == 64
     capsys.readouterr()
     assert main([*argv, "--verdict", "keep", "--json"], env=env) == 0

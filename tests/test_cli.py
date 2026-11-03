@@ -175,13 +175,13 @@ def test_owner_writes_and_claim(
     assert code == 0
     assert data == {
         "claim": {"id": "run-000001", "status": "gone"},
-        "generation": 4,
+        "generation": 3,
         "errors": [],
     }
     code, data, _ = _run(["--clear", "single.writer"], env, capsys)
     assert data["settings"] == {"shortlist.codex": ["gpt-5@high", "o3@low"]}
     code, data, _ = _run(["--clear-once"], env, capsys)
-    assert data == {"cleared": "one-time", "generation": 5, "errors": []}
+    assert data == {"cleared": "one-time", "generation": 4, "errors": []}
 
 
 def test_empty_list_value(
@@ -515,7 +515,7 @@ def test_deps_text(
     captured = capsys.readouterr()
     assert captured.err == ""
     lines = captured.out.splitlines()
-    assert lines[:8] == [
+    assert lines[:10] == [
         "Codex: current, installed 1.0.0, newest 1.0.0",
         "OpenCode: missing",
         "  install: curl -fsSL https://opencode.ai/install | bash",
@@ -523,9 +523,12 @@ def test_deps_text(
         "  install: curl -fsSL https://claude.ai/install.sh | bash",
         "Claude Desktop: update available, installed 1.0, newest 1.1",
         "  update: sudo apt install --only-upgrade claude-desktop",
+        "ember skill: missing",
+        "  install: emb skill install",
         "tmux: update available, installed 1.0, newest 1.1",
     ]
     assert lines[-1].startswith("PySide6: ")
+    assert "resolved path:" not in captured.out
 
 
 def test_deps_json_and_refresh(
@@ -541,6 +544,8 @@ def test_deps_json_and_refresh(
         "claude",
     ]
     assert data["components"][0]["status"] == "current"
+    assert data["components"][0]["resolved_path"] == f"{env['PATH']}/codex"
+    assert data["components"][0]["method"] is None
     assert deps_fetch.calls.count(codex) == 1
     assert main(["deps", "--json"], env=env) == 0
     capsys.readouterr()
@@ -898,6 +903,7 @@ def test_flow_help_and_order(capsys: pytest.CaptureFixture[str]) -> None:
     assert result.value.code == 0
     output = capsys.readouterr().out
     assert "--lead FLOW TASK" in output and "--resume FLOW" in output
+    assert "--cancel FLOW" in output and "--reason TEXT" in output
     with pytest.raises(SystemExit) as result:
         main(["--help"])
     assert result.value.code == 0
@@ -933,6 +939,8 @@ def test_panel_help_and_command_order(capsys: pytest.CaptureFixture[str]) -> Non
         "--dry-run",
         "--status",
         "--recover",
+        "--retry",
+        "--close",
         "--json",
     ):
         assert option in help_text
@@ -998,3 +1006,150 @@ def test_parser_errors_end_with_a_next_line(
         main(argv)
     assert exit_info.value.code == 64
     assert capsys.readouterr().err.splitlines()[-1] == f"next: {prog} --help"
+
+
+@pytest.mark.parametrize("options", [["--retry", "bad", "1"], ["--close", "bad"]])
+def test_panel_retry_close_dispatch(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str], options: list[str]
+) -> None:
+    assert main(["panel", *options, "--json"], env=env) == 65
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert "invalid panel id: bad" in captured.err
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--retry", "x", "1", "--close", "x"],
+        ["--retry", "x", "1", "--member", "codex:x"],
+        ["--retry", "x", "1", "--dry-run"],
+        ["--close", "x", "--timeout", "1"],
+        ["--close", "x", "--stall", "1"],
+        ["--close", "x", "--read", "."],
+    ],
+)
+def test_panel_retry_close_usage(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str], options: list[str]
+) -> None:
+    assert main(["panel", *options], env=env) == 64
+    assert capsys.readouterr().err.endswith("next: emb panel --help\n")
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        [],
+        ["--older-than"],
+        ["--older-than", "-1"],
+        ["--older-than", "1.5"],
+        ["--older-than", "word"],
+        ["--older-than", "+1"],
+    ],
+)
+def test_prune_invalid_age_exits_64(
+    arguments: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as raised:
+        main(["prune", *arguments])
+    assert raised.value.code == 64
+    assert "--older-than" in capsys.readouterr().err
+
+
+def test_prune_help(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as raised:
+        main(["prune", "--help"])
+    assert raised.value.code == 0
+    output = capsys.readouterr().out
+    assert all(option in output for option in ("--older-than", "--dry-run", "--json"))
+
+
+def test_prune_empty_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    env = {
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+    }
+    assert main(["prune", "--older-than", "0", "--dry-run", "--json"], env=env) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "removed": [],
+        "skipped": [],
+        "branches": [],
+        "worktrees": [],
+    }
+    assert captured.err == ""
+
+
+def test_deps_unknown_install_text_and_json(
+    env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    deps_fetch: _DepsFetch,
+) -> None:
+    _deps_stubs(env)
+    _stub(env, "codex", "echo codex-cli 0.9.0\n")
+    assert main(["deps"], env=env) == 0
+    output = capsys.readouterr().out
+    launcher = str(Path(env["PATH"]) / "codex")
+    assert output.startswith("Codex: update available, installed 0.9.0, newest 1.0.0\n")
+    assert f"  resolved path: {launcher}\n" in output
+    assert f"  update: {launcher} update\n" in output
+    assert "  Ember could not tell how the tool was installed.\n" in output
+    assert main(["deps", "--json"], env=env) == 0
+    item = json.loads(capsys.readouterr().out)["components"][0]
+    assert item["resolved_path"] == launcher
+    assert item["method"] is None
+    assert item["command_kind"] == "update"
+    assert item["note"] == "Ember could not tell how the tool was installed."
+
+
+def test_deps_failed_check_hides_path(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str], deps_fetch: _DepsFetch
+) -> None:
+    _deps_stubs(env)
+    _stub(env, "codex", "echo unrecognised-version\n")
+    assert main(["deps"], env=env) == 0
+    output = capsys.readouterr().out
+    assert output.startswith("Codex: check failed")
+    assert "resolved path:" not in output
+    assert "Ember could not tell" not in output
+    assert main(["deps", "--json"], env=env) == 0
+    item = json.loads(capsys.readouterr().out)["components"][0]
+    assert item["resolved_path"] == f"{env['PATH']}/codex"
+    assert item["method"] is None
+
+
+@pytest.mark.parametrize("newer", [True, False])
+def test_deps_ember_release_output(
+    env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    deps_fetch: _DepsFetch,
+    newer: bool,
+) -> None:
+    _deps_stubs(env)
+    original_fetch = deps.fetch_text
+    url = "https://github.com/rearwindowvertigo/ember/releases/tag/v999.0.0"
+
+    def fetch(address: str, timeout: float) -> str:
+        if address == deps.EMBER_RELEASE_URL:
+            return json.dumps(
+                {"tag_name": "v999.0.0" if newer else "v0.0.0", "html_url": url}
+            )
+        return original_fetch(address, timeout)
+
+    monkeypatch.setattr(deps, "fetch_text", fetch)
+    assert main(["deps"], env=env) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    if newer:
+        assert (
+            captured.out.splitlines()[-1] == f"Ember: version 999.0.0 available: {url}"
+        )
+    else:
+        assert "Ember: version" not in captured.out
+    assert main(["deps", "--json"], env=env) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out)["ember_release"] == (
+        {"version": "999.0.0", "url": url} if newer else None
+    )

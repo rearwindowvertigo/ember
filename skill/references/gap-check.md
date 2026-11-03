@@ -58,6 +58,11 @@ proposed default as the recommended answer. Then offer all `medium` and
 `low` gaps together as one question whose recommended answer accepts their
 defaults into the failure model. An empty gap list needs no question.
 
+Before putting a `high` gap to the owner, check its factual premise
+against a live source, such as a log, a rollout file, a record file or the
+code it names. When the premise cannot be checked, the question to the
+owner says so.
+
 With the owner away and no answer possible, work waits. Do not take a
 default for a `high` gap yourself. Write the answers into the failure
 model, context or task text before `--start` or the Workflow. If answers

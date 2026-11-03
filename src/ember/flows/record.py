@@ -35,8 +35,17 @@ TASK_STATUSES = (
     "blocked",
     "dropped",
 )
-FLOW_STATUSES = ("starting", "running", "checking", "stopped", "failed", "done")
-ENDED = ("done", "failed")
+FLOW_STATUSES = (
+    "starting",
+    "running",
+    "checking",
+    "stopped",
+    "failed",
+    "done",
+    "cancelled",
+)
+ENDED = ("done", "failed", "cancelled")
+CANCEL_NAME = "cancel.json"
 ANSWER_KINDS = ("send", "accept", "review", "worker", "drop")
 
 # A trailing question mark permits null; brackets require a list of that type.
@@ -47,6 +56,7 @@ _FLOW_FIELDS = {
     "dir": "str",
     "main": "str",
     "base": "str",
+    "base_branch": "str?",
     "branch": "str",
     "worktree": "str",
     "tip": "str",
@@ -153,6 +163,7 @@ def new_flow(
     stall_minutes: float,
     claim: str | None,
     now: float | None = None,
+    base_branch: str | None = None,
 ) -> dict[str, Any]:
     """Build the initial flow record without creating any files."""
     if not is_flow_id(flow_id):
@@ -165,6 +176,7 @@ def new_flow(
         "dir": top,
         "main": main,
         "base": base,
+        "base_branch": base_branch,
         "branch": f"ember/flow/{flow_id}",
         "worktree": str(Path(main) / ".ember" / "worktrees" / flow_id),
         "tip": base,
@@ -302,6 +314,7 @@ def load(flow_id: str, env: Mapping[str, str] | None = None) -> dict[str, Any]:
         raise FlowError(flow_id, f"cannot read flow.json: {error}") from error
     if isinstance(value, dict):
         value.setdefault("plan_waves", [])
+        value.setdefault("base_branch", None)
     _validate(flow_id, value)
     return value
 
@@ -312,6 +325,37 @@ def save(flow: dict[str, Any], env: Mapping[str, str] | None = None) -> None:
     _validate(flow["id"], flow)
     flow["updated_at"] = time.time()
     record.write_private(path, json.dumps(flow, indent=2) + "\n")
+
+
+def cancel_request(
+    flow_id: str, env: Mapping[str, str] | None = None
+) -> dict[str, Any] | None:
+    """Read a pending cancellation written under lifecycle.lock."""
+    try:
+        value = json.loads((folder(flow_id, env) / CANCEL_NAME).read_text())
+    except FileNotFoundError:
+        return None
+    _fields(flow_id, value, {"at": "number", "reason": "str?"}, CANCEL_NAME)
+    return value
+
+
+def finish_cancel(
+    flow: dict[str, Any], request: Mapping[str, Any], env: Mapping[str, str]
+) -> None:
+    """Save cancellation and its end event while lifecycle.lock is held."""
+    flow.update(status="cancelled", reason=request["reason"], ended_at=request["at"])
+    save(flow, env)
+    append_event(
+        flow["id"],
+        {
+            "kind": "end",
+            "attempt": flow.get("attempt", 0),
+            "status": "cancelled",
+            "reason": request["reason"],
+            "exit": 82,
+        },
+        env,
+    )
 
 
 def _lines(data: bytes) -> list[dict[str, Any] | None]:

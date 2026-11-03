@@ -174,6 +174,14 @@ class _Runner:
     def finish(self, status: str, reason: str | None = None) -> None:
         """Record the terminal outcome outside signal handlers."""
         with self.mutex:
+            request = record.cancel_request(self.id, self.env)
+            if request is not None:
+                if self.flow["status"] != "cancelled":
+                    if self.flow["runner"]:
+                        self.flow["runner"]["exiting"] = True
+                    record.finish_cancel(self.flow, request, self.env)
+                self.finished = True
+                return
             self.flow.update(status=status, reason=reason)
             self.flow["runner"]["exiting"] = True
             if status in record.ENDED:
@@ -1141,6 +1149,7 @@ class _Runner:
             self.flow.update(
                 runner={
                     "pid": os.getpid(),
+                    "start": _process_start(os.getpid()),
                     "started_at": time.time(),
                     "exiting": False,
                 },
@@ -1205,7 +1214,14 @@ class _Runner:
             try:
                 if not begun:
                     begun = True
-                    self.begin()
+                    with contextlib.ExitStack() as startup:
+                        startup.enter_context(_lifecycle_guard(self.folder))
+                        self.flow = record.load(self.id, self.env)
+                        if record.cancel_request(self.id, self.env) is not None:
+                            closing.enter_context(startup.pop_all())
+                            self.finish("cancelled")
+                            return 0
+                        self.begin()
                 if continuing:
                     self.answers()
                 status, reason = self.drive()
@@ -1225,7 +1241,9 @@ class _Runner:
             with contextlib.ExitStack() as lifecycle:
                 lifecycle.enter_context(_lifecycle_guard(self.folder))
                 if (
-                    len(record.read_answers(self.id, self.env))
+                    not self.shutdown.is_set()
+                    and record.cancel_request(self.id, self.env) is None
+                    and len(record.read_answers(self.id, self.env))
                     > self.flow["answers_seen"]
                 ):
                     continuing = True

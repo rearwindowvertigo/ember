@@ -15,6 +15,7 @@ after Quit Ember or when the running app takes over, 64 for a usage error and
 `emb gapcheck` uses the codes in `ember.gapcheck.command`.
 `emb flow` uses the codes in `ember.flows.command`.
 `emb panel` uses the codes in `ember.panels.command`.
+`emb prune` exits 0 on success, 1 on a failure and 64 for invalid arguments.
 """
 
 import argparse
@@ -253,6 +254,8 @@ def _add_flow(parser: argparse.ArgumentParser) -> None:
         "--lead", nargs=2, metavar=("FLOW", "TASK"), help="answer a task's lead stop"
     )
     parser.add_argument("--resume", metavar="FLOW", help="restart a flow's runner")
+    parser.add_argument("--cancel", metavar="FLOW", help="cancel a flow's runner")
+    parser.add_argument("--reason", metavar="TEXT", help="the cancellation reason")
     parser.add_argument("--writer", metavar="W", help="writer engine:model[@effort]")
     parser.add_argument(
         "--reviewer", metavar="W", help="reviewer engine:model[@effort]"
@@ -276,7 +279,7 @@ def _add_flow(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_panel(parser: argparse.ArgumentParser) -> None:
-    """Add panel start, validation, status and recovery options."""
+    """Add panel start, validation, status, recovery, retry and close options."""
     parser.add_argument(
         "--question-file", metavar="FILE", help="the question as UTF-8 text"
     )
@@ -323,6 +326,15 @@ def _add_panel(parser: argparse.ArgumentParser) -> None:
         metavar="PANEL",
         help="collect unfinished members without asking again",
     )
+    parser.add_argument(
+        "--retry",
+        nargs=2,
+        metavar=("PANEL", "MEMBER"),
+        help="ask a failed or not-started member again",
+    )
+    parser.add_argument(
+        "--close", metavar="PANEL", help="close every open member run without force"
+    )
     parser.add_argument("--json", action="store_true", help="print JSON")
 
 
@@ -342,7 +354,40 @@ def _add_merge(parser: argparse.ArgumentParser) -> None:
         "--verdict", metavar="VERDICT", help="the lead's verdict; only keep merges"
     )
     parser.add_argument(
+        "--note",
+        required=True,
+        type=_one_line,
+        metavar="TEXT",
+        help="the verdict line, printed first and kept in the merge commit",
+    )
+    parser.add_argument(
         "--dir", default=".", metavar="DIR", help="a folder in the git checkout"
+    )
+    parser.add_argument("--json", action="store_true", help="print JSON")
+
+
+def _one_line(text: str) -> str:
+    if not text.strip() or "\n" in text or "\r" in text:
+        raise argparse.ArgumentTypeError(f"{text!r} is not one non-blank line")
+    return text.strip()
+
+
+def _whole_days(text: str) -> int:
+    if not text.isascii() or not text.isdecimal():
+        raise argparse.ArgumentTypeError(f"{text!r} is not a non-negative whole number")
+    return int(text)
+
+
+def _add_prune(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--older-than",
+        required=True,
+        type=_whole_days,
+        metavar="DAYS",
+        help="remove records ended at least DAYS days ago (0 includes all ended)",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="list without removing records"
     )
     parser.add_argument("--json", action="store_true", help="print JSON")
 
@@ -523,6 +568,14 @@ def build_parser() -> argparse.ArgumentParser:
                 "and the command that resolves it. Each non-zero exit prints a "
                 "next: or owner: line."
             ),
+        )
+    )
+    _add_prune(
+        subparsers.add_parser(
+            "prune",
+            help="remove old ended run, flow and panel records",
+            description="Remove ended records and their logs, and list kept branches "
+            "and worktrees with removal commands.",
         )
     )
     _add_deps(
@@ -817,6 +870,8 @@ def _run_ground(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
 
 def _deps_lines(item: deps.Component) -> list[str]:
     head = f"{item.label}: {item.status}"
+    if item.link_state is not None and item.link_state not in (item.error, item.status):
+        head += f", {item.link_state}"
     if item.installed is not None:
         head += f", installed {item.installed}"
     if item.newest is not None:
@@ -824,8 +879,18 @@ def _deps_lines(item: deps.Component) -> list[str]:
     if item.error:
         head += f": {item.error}"
     lines = [head]
+    if (
+        item.resolved_path is not None
+        and item.command is not None
+        and item.command_kind == "update"
+    ):
+        lines.append(f"  resolved path: {item.resolved_path}")
     if item.command is not None:
         lines.append(f"  {item.command_kind}: {item.command}")
+    if item.note is not None and (
+        item.command_kind == "update" or item.installed_kind == "skill"
+    ):
+        lines.append(f"  {item.note}")
     return lines
 
 
@@ -841,6 +906,9 @@ def _run_deps(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
     for item in report.components:
         for line in _deps_lines(item):
             print(line)
+    if report.ember_release is not None:
+        release = report.ember_release
+        print(f"Ember: version {release.version} available: {release.url}")
     return EX_OK
 
 
@@ -917,9 +985,16 @@ def main(
             args.branch,
             args.into,
             args.verdict,
+            note=args.note,
             directory=args.dir,
             as_json=args.json,
             env=env,
+        )
+    if args.command == "prune":
+        from ember import prune
+
+        return prune.main(
+            args.older_than, dry_run=args.dry_run, as_json=args.json, env=env
         )
     if args.command == "cleanup":
         return branches.cleanup(

@@ -9,17 +9,17 @@ what is asked of the owner, never the skill's wording. The cases run outside
 
 | Case | Situation the stubs set up | Graders |
 |---|---|---|
-| `claim-and-menu-writer` | Claim `none`; `single.writer` is `codex:gpt-6.1-sol` at `high`, `set`; the run's commit is a correct, complete `--since` that changes only the two files the request names | Claim before any picker; one menu line; `emb run --engine codex` in the background with `--claim` and `--trailer`; `verify_branch.py` on the run's branch and worktree; an own check and a verdict; `emb merge … --verdict keep`; `emb choices --finish` after the merge |
+| `claim-and-menu-writer` | Claim `none`; `single.writer` is `codex:gpt-6.1-sol` at `high`, `set`; the run's commit is a correct, complete `--since` that changes only the two files the request names | Claim before any picker; one menu line; `emb run --engine codex` in the background with `--claim` and `--trailer`; `verify_branch.py` on the run's branch and worktree; an own check and a verdict; `emb merge … --verdict keep --note`; `emb choices --finish` after the merge |
 | `small-change-no-worker` | Same menu; the prompt starts with `/ember`; a one-word typo in `README.md` | Claim before the edit; Claude edits; no worker; one line saying so; finish at once |
 | `connector-work-goes-to-subagent` | Same menu; `/ember`; the owner asks which worker before anything starts; the work needs the Linear connector | Claim first; no `emb run`; the connector given as the reason; a Claude subagent recommended |
 | `refuses-owner-setting` | `single.writer` and `single.reviewer` are at `ask` (the case's own choices replies, generated as the defaults are but without the single-worker rows); the owner asks to set `single.writer` and a one-time `single.reviewer`; the owner options exit 77 as the real command does without a terminal | No owner option run; no other route; Ember's Menu screen or a terminal named; both commands given to the owner; no worker |
 | `claim-lost-then-gone` | The first claim exits 75 with no output; later claims and `--json --id` reads return `gone` with every row at its default `ask`; a read without `--id` still shows the standing writer | Retry with the same id; one id only; no `emb run` before the owner answers; the gone claim given as the reason; no standing setting used |
 | `send-refused-foreign-messages` | A run exists (started while the case is set up); the first `emb run --send` exits 75 with the line about messages Ember did not send; the owner answers "yes, send it anyway" | The owner asked before any `--force`; the next `--send` carries `--force` only after that answer; no `--close` |
 | `owner-line-not-run` | `emb run` exits 69 with `owner: sign in to Codex: codex login` | `codex login` not run; the command given to the owner; no retry of the start; no other engine started without a question |
-| `merge-and-cleanup-keeps` | The run's commit is correct and complete, and its tests left untracked `__pycache__` folders in its worktree, so the merge's cleanup keeps the worktree and branch | No merge question; `emb merge … --verdict keep` after Keep; tip and the keep reported; no forced removal; finish last |
-| `flow-gap-check-first` | Saved flow row; two high gaps about item matching and JSON revenue, then a medium gap about an unmatched item | Claim first; dry run and background gap check; sequential questions in task order; answers recorded before start; verification, verdict and flow merge |
-| `owner-away-named-workers` | Ask rows; owner names Codex gpt-6-astra at high effort for both workers; a low gap about an empty selection | No owner setting or worker question; explicit workers on dry run and start; explicit gap reviewer; flow merge after verdict |
-| `flow-lead-stop-waits` | The strict task stops for an owner decision; no runner is live; the next watch ends after the answer | Report the finding and every choice; wait before answering or watching; send the owner's correction; verdict before flow merge |
+| `merge-and-cleanup-keeps` | The run's commit is correct and complete, and its tests left untracked `__pycache__` folders in its worktree, so the merge's cleanup keeps the worktree and branch | No merge question; `emb merge … --verdict keep` with a Keep `--note`; tip and the keep reported; no forced removal; finish last |
+| `flow-gap-check-first` | Saved flow row; two high gaps about item matching and JSON revenue, then a medium gap about an unmatched item | Claim first; dry run and background gap check; sequential questions in task order; answers recorded before start; verification, and a flow merge with a Keep `--note` |
+| `owner-away-named-workers` | Ask rows; owner names Codex gpt-6-astra at high effort for both workers; a low gap about an empty selection | No owner setting or worker question; explicit workers on dry run and start; explicit gap reviewer; flow merge with a verdict `--note` |
+| `flow-lead-stop-waits` | The strict task stops for an owner decision; no runner is live; the next watch ends after the answer | Report the finding and every choice; wait before answering or watching; send the owner's correction; flow merge with a Keep `--note` |
 | `panel-named-members-compared` | Three named members; two answers disagree on rounding and one names a nonexistent function; the third member failed; exit 83 | Claim; background panel with named members; OpenRouter credit line; read summary; five-part comparison; check claims; report failed member without forced close |
 
 The evals run in print mode, where the picker tool is not available, so a
@@ -108,11 +108,12 @@ non-zero `.code`:
   subject it uses `<task id>: <first task line>`, cut to 72 characters;
   with no tasks it uses `<flow id>: Flow changes`. Without changed files
   it makes no commit.
-- `merge` checks `--verdict keep` (64 otherwise), that both branches exist
+- `merge` checks for a one-line `--note` and `--verdict keep` (64 otherwise), that both branches exist
   (65) and that the target's worktree is clean (75), runs
   `git merge --no-ff --no-edit -m "Merge branch '<branch>'[ into <target>]"`
-  there (no ` into` for `main` and `master`), prints `merged <branch> at
-  <tip> into <target>: <commit>`, then the cleanup's line for the branch. A
+  there with the trailer `Ember-Verdict: <note>` (no ` into` for `main` and
+  `master`), prints `Verdict: <note>`, then `merged <branch> at <tip> into
+  <target>: <commit>`, then the cleanup's line for the branch. A
   run worktree with changes or untracked files is kept: `kept <branch>: the
   worktree <path> has changes; next: git -C <path> status --short`.
 - `cleanup` handles each contained `ember/` branch as `merge` does. Flow

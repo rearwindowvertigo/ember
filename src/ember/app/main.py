@@ -229,8 +229,13 @@ def start(argv: list[str], env: Mapping[str, str] | None = None) -> EmberApp | i
         app.quit()
 
     window = MainWindow(context, has_tray=has_tray, quit_app=quit_app)
+
+    def open_overview() -> None:
+        window.show_screen("overview")
+        window.bring_forward()
+
     tray = (
-        tray_module.Tray(context, window.bring_forward, window.quit_app)
+        tray_module.Tray(context, window.bring_forward, open_overview, window.quit_app)
         if has_tray
         else None
     )
@@ -245,6 +250,7 @@ def start(argv: list[str], env: Mapping[str, str] | None = None) -> EmberApp | i
     context.refresh_engines()
     context.refresh_deps(check_now=True)
     context.runs.start()
+    context.flows.set_active(True)
     return parts
 
 
@@ -262,6 +268,7 @@ def stop(parts: EmberApp) -> None:
     if parts.tray is not None:
         parts.tray.hide()
     parts.context.runs.stop()
+    parts.context.flows.set_active(False)
     parts.server.close()
     QCoreApplication.processEvents()
     parts.context.tasks.wait(QUIT_WAIT_MS)

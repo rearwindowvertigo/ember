@@ -99,8 +99,11 @@ names the invalid values, `menu` is `null` and the exit code is 0.
 
 ### Generation
 
-Each write that changes the database raises `generation` by one. A write that
-changes nothing leaves it.
+`--set`, `--clear`, `--once` and `--clear-once` raise `generation` by one
+when they write a standing-setting or pending one-time-choice row. A claim
+that consumes a pending one-time choice also raises it by one. Other claims,
+claim reads, finishes, and expiry of claims or pending one-time choices leave
+it unchanged. A write that changes no row leaves it unchanged.
 
 ### Read reply
 
@@ -547,6 +550,7 @@ UTC. It is also the tmux session's name.
 | `worktree` | string | The worker's working folder: its worktree, or the checkout for a read-only run |
 | `branch` | string or null | `ember/<engine>/<id>`; null for a read-only run |
 | `base` | string or null | The commit the run started from |
+| `base_branch` | string or null | The source branch at start; null for a detached checkout or a record without this field |
 | `sandbox` | string | Who provides the sandbox: `codex`, `bubblewrap` or `none` |
 | `network` | boolean | Whether `worker.network` was `on` at the start |
 | `read` | list of strings | The `--read` paths |
@@ -864,6 +868,7 @@ emb flow --watch FLOW [--json]
 emb flow --status [FLOW] [--json]
 emb flow --lead FLOW TASK (--send FILE | --accept [--commit SHA] | --review [--reviewer W] | --worker W | --drop)
 emb flow --resume FLOW
+emb flow --cancel FLOW [--reason TEXT] [--json]
 ```
 
 | Option | Does |
@@ -1101,9 +1106,9 @@ explicit request is persisted for recovery; automatic recovery of a failed
 writer turn still stops the task.
 
 SIGHUP and SIGTERM request shutdown without writing from the signal
-handler. The runner terminates an active check group, records `failed`
-with a resume instruction and an end event with exit 82, and releases its
-lock. Worker sessions remain. Each start aborts a recorded unfinished
+handler. The runner terminates an active check group, records `cancelled`
+when a cancel request is pending, or `failed` with a resume instruction
+otherwise. It appends an end event with exit 82 and releases its lock. Worker sessions remain. Each start aborts a recorded unfinished
 merge, resets and cleans the flow worktree, and reconciles merging tasks
 using the same containment rules as `emb merge`. Recovered merges set
 `check_pending`. Writer metadata comes from its run record; recovered
@@ -1115,7 +1120,7 @@ together, and pending closes can be repeated after a crash.
 
 A flow waiting on stopped or conflicting tasks ends `stopped`, with no
 end event. Otherwise it ends `done`, with end exit 0 when every task
-merged or 82 when some were dropped or remain blocked. Failed flows also
+merged or 82 when some were dropped or remain blocked. Failed and cancelled flows also
 emit end exit 82. Flow folders, check logs and briefs remain on disk.
 
 ### Reviews
@@ -1250,6 +1255,61 @@ completed flows refuse answers with 75. With no live runner or pending
 startup, `--lead` starts a runner after queueing the answer. A launch
 failure leaves the queued answer available for `--resume`.
 
+### Cancellation
+
+`--cancel FLOW [--reason TEXT]` cancels a flow that is `starting`, `running`,
+`checking` or `stopped`. It stops the runner and waits up to 60 seconds from
+writing `cancel.json` for its lifetime lock to be released, then exits 75
+if the deadline passes. A running flow check ends through the runner's
+signal stop path. Writer and reviewer turns keep running. Cancellation
+closes no task run and deletes no branch or worktree.
+
+Under `lifecycle.lock`, cancellation clears the startup reservation and
+writes `cancel.json` with `at` (epoch seconds) and `reason` (text or null)
+before signalling the runner. The runner reads that request when finishing
+and records `status=cancelled`, `reason` and `ended_at`, then appends an
+`end` event with the reason and exit 82. A runner that finds a pending
+request at startup finishes without running a wave. If the runner releases
+its lock without recording cancellation, the cancel command records it.
+
+A `done`, `failed` or `cancelled` flow is refused with exit 75 and its record
+is unchanged. A flow that ends before cancellation takes the lifecycle lock
+is also refused. An unknown flow exits 65 for `--cancel`; other flow modes
+return 64 for an unknown flow. Invalid flow id syntax returns 64 in every
+mode. Cancellation exits 75 if the 60-second deadline passes, leaves
+`cancel.json` in place, and prints `emb flow: the runner for <id> is still
+running after 60 seconds` and `next: emb flow --status <id>` on standard
+error with nothing on standard output. A later `--cancel` waits again with
+the same request.
+
+`--resume` restarts a cancelled flow from its recorded task states. Startup
+clears the cancel request; the runner clears `reason` and `ended_at` when
+it begins. `--lead` is refused with exit 75 on a cancelled flow, with
+`next: emb flow --resume <id>`. Cancelled flows count as ended.
+
+Cancellation output contains the flow id, `cancelled`, the reason, the flow
+branch, each retained task branch and each open run's task, role and id.
+Text prints one line per item; the `reason` line is left out when no reason
+was supplied. `--json` prints:
+
+| Field | Value |
+|---|---|
+| `flow`, `status`, `reason` | Flow id, `cancelled`, and the supplied reason or null |
+| `branch` | The flow branch |
+| `task_branches` | Objects with `task` and `branch`; includes abandoned branches, with a null task when the record no longer identifies it |
+| `open_runs` | Objects with `task`, `role` (`writer` or `reviewer`) and `run` |
+
+Run ids come from the flow record's current writers and reviewers, previous
+reviews, cleanup entries and pending writer replacement or drop effects. Each run's stored
+record is read; `starting`, `running` and `waiting` count as open. A run
+whose record does not load is left out of the listing, and a `WARNING:` line
+on standard error names its task, role and id. Successful
+cancellation exits 0 and prints `next: emb flow --resume <id>` on standard
+error. A cancelled watch exits 82 with the same action. Status shows
+`cancelled`; its separate `reason` field is null when no reason was supplied.
+The text listing adds `: <reason>` after `cancelled` only when a reason is
+present.
+
 ### Flow records
 
 Flow folders share `$XDG_STATE_HOME/ember/runs/` with run folders. A flow id
@@ -1260,8 +1320,10 @@ Both listings sort oldest first.
 
 | File | Holds |
 |---|---|
-| `flow.json` | The flow record, replaced atomically; written at creation, then by the runner |
+| `flow.json` | The flow record, replaced atomically; written at creation, by the runner, or by cancellation after the runner releases its lock |
 | `plan.json` | The plan's original source text |
+| `cancel.json` | Pending cancellation time and reason; cleared when a runner is restarted |
+| `lifecycle.lock` | Serializes startup, answers, cancellation and runner shutdown |
 | `events.jsonl` | Numbered event objects, one per line |
 | `answers.jsonl` | Numbered answer objects, one per line |
 | `answers/<n>.md` | Private copy of the correction for answer `n` |
@@ -1282,21 +1344,22 @@ refused. `save` updates `updated_at` and atomically replaces `flow.json`.
 | `id`, `plan` | Flow id and absolute source plan path |
 | `dir`, `main` | Checkout top and main checkout |
 | `base`, `tip` | Resolved base commit and current flow branch tip |
+| `base_branch` | The local base branch at start, or null for a commit base or a record without this field |
 | `branch`, `worktree` | `ember/flow/<id>` and `<main>/.ember/worktrees/<id>` |
 | `writer`, `reviewer` | Stored worker objects: `engine`, `model`, `effort`, `source` |
 | `rounds`, `parallel`, `check_timeout` | Plan limits |
 | `check`, `trailers`, `read` | Plan argv, commit trailers and readable paths; lists |
 | `stall_minutes` | Stall interval, default 10 |
 | `claim` | Claim id or null; information for the flow |
-| `status` | `starting`, `running`, `checking`, `stopped`, `failed` or `done` |
-| `reason` | Stop or failure reason, or null |
+| `status` | `starting`, `running`, `checking`, `stopped`, `failed`, `done` or `cancelled` |
+| `reason` | Stop, failure or cancellation reason, or null |
 | `wave` | Last wave started; initially 0 |
 | `check_pending` | Whether a merge lacks a durably recorded passing check |
 | `checks` | Entries with `wave`, `exit`, `log`, `at`; one per attempt |
 | `answers_seen` | Complete answer lines already consumed; initially 0 |
 | `halted` | Reason new runs are halted, or null |
 | `abandoned` | Retained branches from dropped or replaced writers |
-| `runner` | Last runner's `pid` and `started_at`, or null |
+| `runner` | Last runner's `pid`, `started_at`, process start ticks (`start`) and `exiting` flag, or null; older records may omit the latter two fields |
 | `started_at`, `updated_at`, `ended_at` | Epoch seconds; `ended_at` is null until an end |
 | `tasks` | Task records in plan order |
 
@@ -1424,7 +1487,7 @@ Retained abandoned branches print separately.
 At a lead stop the action says to report every stop and choice to the
 owner, then watch again if a runner is live; otherwise an answer starts
 the runner. At a successful end it says to review the flow branch and run
-`emb merge <flow branch> --into <your branch> --verdict keep --dir <dir>`.
+`emb merge <flow branch> --into <your branch> --verdict keep --note '<verdict line>' --dir <dir>`.
 An end with unmerged tasks first says to report them to the owner. A failed
 pending check says to fix the flow branch with an `emb run` and merge,
 then resume. Other failures name `--status`; runner loss names `--resume`.
@@ -1441,18 +1504,18 @@ every top-level field except `tasks`, then each task's state and reason.
 
 | Code | Meaning | Action line |
 |---|---|---|
-| 0 | Dry run printed, flow started, answer queued, runner resumed, lead stop reported, or every task merged | Watch reports give their next action |
+| 0 | Dry run printed, flow started, answer queued, runner resumed, flow cancelled, lead stop reported, or every task merged | Watch reports give their next action |
 | 1 | Unexpected error or unreadable settings database | `next: emb flow --status`; database errors name an owner action |
 | 64 | Invalid option combination, plan, flow, task, worker, commit or claim | `next: emb flow --help`, a worker's owner action, the claim action or `--status` |
-| 65 | The plan directory is not in a checkout | Repeat `--dry-run` with `dir` inside a checkout |
+| 65 | The plan directory is not in a checkout, or `--cancel` names an unknown flow | Repeat `--dry-run` with `dir` inside a checkout, or `next: emb flow --status` |
 | 66 | Unreadable plan or correction, or missing plan directory | `next: ls -l <path>` |
 | 69 | Missing git, tmux, engine or driver, disconnected engine, or unusable runtime folder | `owner:` naming the fix |
 | 70 | Flow branch or worktree creation failed | Prune worktrees, then repeat the start |
 | 71 | Runner session failed to start | `next: emb flow --resume <id>` |
 | 72 | Runner lost before the flow ended | `next: emb flow --resume <id>` |
 | 74 | Interrupted watch; cursor unchanged | `next: emb flow --watch <id> --json` |
-| 75 | Runner live or starting, answer not allowed, or flow already done | `--status` or `--watch` |
-| 82 | Flow failed, or ended with tasks unmerged | The watch report's next action |
+| 75 | Runner live or starting, answer not allowed, flow already done, cancellation pending, cancellation of an ended flow, the 60-second cancellation deadline passed, or a lead answer on a cancelled flow | `--status` for the cancellation deadline, `--status`, `--watch`, or `--resume` for a cancelled lead answer |
+| 82 | Flow failed, was cancelled, or ended with tasks unmerged | The watch report's next action |
 
 Every nonzero exit prints an `emb flow:` diagnostic or watch report and
 one `next:` or `owner:` line. Flow folders, queued answers and unmerged
@@ -1464,6 +1527,8 @@ Asks members the same question in parallel read-only `emb run` runs.
 Each run is closed after its answer is read. Ember writes `summary.md`
 with the question, member outcomes and every available answer.
 `--recover` collects unfinished turns without asking the question again.
+`--retry` asks one failed or not-started member again. `--close` closes
+open member runs without force.
 
 ### Options
 
@@ -1475,16 +1540,19 @@ with the question, member outcomes and every available answer.
 | `--claim ID` | Resolve saved members with this claim's choices; member runs receive no claim |
 | `--read PATH` | An additional path members may read; repeatable; each path must exist |
 | `--stall MINUTES` | Positive minutes without a member's screen changing before a stall; default 10 |
-| `--timeout MINUTES` | Positive minutes from the first start or recovery until the panel stops waiting; default 30 |
+| `--timeout MINUTES` | Positive minutes from the first start, recovery or retry until the panel stops waiting; default 30 |
 | `--dry-run` | Validate inputs and members, print their resolved efforts and sources, and start nothing |
 | `--status [PANEL]` | Print one panel record, or list panels oldest first |
 | `--recover PANEL` | Collect unfinished members under the panel's lifetime lock |
+| `--retry PANEL MEMBER` | Ask one failed or not-started member again, by its printed number |
+| `--close PANEL` | Close every open current or retained member run without force |
 | `--json` | Print JSON in every mode |
 
-Exactly one mode is required: `--question-file`, `--status` or `--recover`.
+Exactly one mode is required: `--question-file`, `--status`, `--recover`,
+`--retry` or `--close`.
 `--dir`, `--member`, `--claim`, `--read` and `--dry-run` require
 `--question-file`. `--stall` and `--timeout` apply to a start without
-`--dry-run`, or to `--recover`. Minutes must be finite and greater than zero.
+`--dry-run`, or to `--recover` or `--retry`. Minutes must be finite and greater than zero.
 Invalid combinations exit 64 with `next: emb panel --help`.
 
 Before a start, Ember reads the question, resolves the checkout, checks that
@@ -1643,12 +1711,12 @@ updates `updated_at` and atomically replaces `panel.json`.
 |---|---|
 | `schema_version` | Integer 1 |
 | `id` | Panel id |
-| `status` | `running`, `done` when no member is unfinished, or `incomplete` |
+| `status` | `running`, `done` or `incomplete`; retry requires every member to be answered for `done`, start and recovery require no unfinished members |
 | `dir` | Absolute checkout top |
 | `question_file` | Absolute source question path |
 | `read` | Absolute additional read paths |
 | `claim` | Claim used to select members, or null; not passed to runs |
-| `stall_minutes`, `timeout_minutes` | Limits of the latest start or recovery |
+| `stall_minutes`, `timeout_minutes` | Limits of the latest start, recovery or retry |
 | `started_at`, `updated_at`, `ended_at` | Epoch seconds; `ended_at` is null until finalization |
 | `exit` | Null while running, then 0, 83 or 74 |
 | `members` | Member records in start order |
@@ -1663,9 +1731,9 @@ updates `updated_at` and atomically replaces `panel.json`.
 | `exit`, `reason` | Last attempt's exit and failure reason, or null |
 | `reply`, `bytes` | Reply path or null, and its UTF-8 byte count, initially 0 |
 | `changed` | Changed paths without duplicates, initially empty |
-| `seconds` | Elapsed time across member jobs, including collection and closing; null before a job begins |
-| `closed`, `close_error` | Whether the run was closed, and any close refusal reason |
-| `attempts` | Attempts with `kind` (`start`, `stall`, `recover`), epoch `at` and `exit` |
+| `seconds` | Elapsed time across member jobs for the current run, including collection and closing; reset on retry, null before a job begins |
+| `closed`, `close_error` | Whether the run was closed, and any close refusal reason; panel close tracks remaining open current and retained runs |
+| `attempts` | Attempts with `kind` (`start`, `stall`, `recover`, `retry`), epoch `at` and `exit`; optional `run` holds a retained run id or null |
 
 Loading rejects missing or unknown fields, wrong types and unknown status
 values. Panel listing returns panels oldest first by `started_at`, then
@@ -1692,7 +1760,8 @@ Recovery requires the panel's lifetime lock. It collects members in
 without start spacing. Pending members left by a crash and unfinished
 members without a saved run id become `failed` with reason
 `the panel ended before this member's run started`; recovery starts no new
-run. Failed and not-started members are not asked again.
+run. Failed and not-started members are not asked again. Runs retained
+only in retry attempts are not recovered.
 
 An already closed run is read without calling `Core.recover`. Its stored
 terminal exit classifies the outcome: a successful nonblank reply is
@@ -1716,6 +1785,69 @@ When there is nothing to collect, recovery still saves no-run failures,
 reconciles the panel's terminal status and exit, and rebuilds the summary
 before reporting that nothing remains to recover (75).
 
+### Retry
+
+`emb panel --retry PANEL MEMBER` holds the panel's lifetime lock for the
+whole operation. `MEMBER` is the one-based number printed on member lines.
+A failed, stalled, timed-out, interrupted or not-started member can be
+retried. Answered, pending, starting and running members are refused (75).
+An unknown panel or member number exits 65.
+
+Before launching, retry closes the member's old run without force, even
+when its record is failed or closed. A refused close exits 75 and names
+that run; no new run starts. Each close result updates `closed` and
+`close_error` and saves the panel. A successful close is followed by a
+`retry` attempt with `at`, `exit` initially null and `run` (the old id, or
+null when no run started). Its exit is filled when the new start returns.
+Existing attempts remain. Records without the optional attempt `run`
+field still load.
+
+Retry starts one read-only run using the saved brief, checkout, engine,
+model, effort and read paths. It waits as a panel start does, including
+stall recovery and the panel deadline. `--stall` and `--timeout` have the
+same defaults as start and recovery. While it runs, the panel is `running`
+with `ended_at` and `exit` null. The member's previous outcome, reply,
+changed paths and elapsed time are replaced; other members are not retried.
+
+Afterward, retry sets `ended_at` to the current time and rewrites
+`summary.md`. Its panel is `done` only when every member answered,
+otherwise `incomplete`. Start and recovery retain their rule: `done` when
+no member is unfinished, even when a member failed or never started.
+Retry returns the recomputed panel exit: 74 if interrupted, 0 if every
+member answered without changed paths, otherwise 83.
+
+### Close
+
+`emb panel --close PANEL` holds the panel's lifetime lock for the whole
+operation. It inspects the current run and ids retained in `retry`
+attempts. A run is open when its record status is neither `closed` nor
+`failed`; the saved member `closed` flag does not determine this.
+Each open run is closed as `emb run --close RUN`, without force. A refusal
+does not stop attempts to close other runs. Duplicate ids within a member
+are closed once. After each close, the member's `closed` flag reflects
+whether any current or retained run remains open, `close_error` holds
+refusal reasons or null, and the panel is saved. A missing or unreadable
+run record is reported as a refusal. Member outcomes and the panel's
+status and result exit are unchanged.
+
+Text output has one line for each open run, with the member number, run
+id and `closed` or the refusal reason:
+
+```text
+member 1 · run codex-20261102-101500-a1b2c3 · closed
+```
+
+JSON contains `panel`, the close command's `exit`, `members` and `next`.
+Each `members` entry has `n`, `run`, `closed` and `close_error`. A member
+with multiple open runs has multiple entries. Closed and failed runs are
+omitted. No open runs prints no result lines, or an empty `members` list.
+The command exits 0 when every open run closed or none was open, and 75
+when any close was refused. An unknown panel exits 65. The next action is
+`next: emb panel --status PANEL`, also printed on standard error.
+
+Retry and close refuse a held panel lock with 75 and
+`next: emb panel --status PANEL`.
+
 ### Output
 
 Data goes to standard output. Diagnostics go to standard error as
@@ -1724,8 +1856,8 @@ start or dry-run result. Each failed command prints one `next:` or `owner:`
 line. Member diagnostics stay in their logs except the warnings described
 under Running.
 
-A start or recovery in text mode first prints `panel <id>` and flushes it.
-After waiting, it prints one line per member, in member order:
+A start, recovery or retry in text mode first prints `panel <id>` and
+flushes it. After waiting, it prints one line per member, in member order:
 
 ```text
 member <n> <engine>:<model> · <effort or default> · <status> · <seconds>s · exit <exit or -> · <bytes> bytes · run <run or ->
@@ -1736,7 +1868,7 @@ without a seconds suffix. Exit zero is printed as `0`. These lines are
 followed by `left out <value>: <reason>` for each excluded member and
 `summary <absolute path to summary.md>`.
 
-With `--json`, a start or recovery prints one object, without an id
+With `--json`, a start, recovery or retry prints one object, without an id
 announcement before it:
 
 ```json
@@ -1800,14 +1932,14 @@ artifacts remain available.
 
 | Code | Meaning | Line |
 |---|---|---|
-| 0 | Every member answered and changed nothing, or a dry run or status printed | The result's next action; none for dry run or status |
+| 0 | Every member answered and changed nothing, a dry run or status printed, or close left no open runs | The result's next action; none for dry run or status |
 | 1 | Unexpected error, broken panel record, persistence failure, or unreadable settings database | `next: emb panel --status [<id>]`; for the database, `owner: repair or remove the settings database the message names` |
-| 64 | Usage error, empty question, invalid or repeated or ninth member, no member to run, explicit engine off or effort refused, invalid or gone or unknown claim, or unknown panel | `next: emb panel --help`, the member or engine owner action, the claim action, or `next: emb panel --status` |
-| 65 | `--dir` is outside a git checkout | `next: emb panel --question-file <file> --dir <a folder in the checkout>` |
+| 64 | Usage error, empty question, invalid or repeated or ninth member, no member to run, explicit engine off or effort refused, invalid or gone or unknown claim, or unknown panel in status or recovery | `next: emb panel --help`, the member or engine owner action, the claim action, or `next: emb panel --status` |
+| 65 | `--dir` is outside a git checkout, or retry/close names an unknown panel or retry names an unknown member | `next: emb panel --question-file <file> --dir <a folder in the checkout>` or `next: emb panel --status [<id>]` |
 | 66 | Unreadable question, missing or non-directory `--dir`, or nonexistent `--read` path | `next: ls -l <path>` |
 | 69 | Explicit engine disconnected or without a driver, git or tmux missing, unusable runtime folder, or panel creation fails with an operating-system error | `owner:` naming the fix; runtime and creation errors name `XDG_RUNTIME_DIR` |
 | 74 | Ctrl+C, SIGTERM or SIGHUP while members ran; member turns keep running | The recovery action, or panel and run status when no run id is known |
-| 75 | Recovery while the panel lock is held, or no unfinished member to collect | `next: emb panel --status <id>` |
+| 75 | Recovery, retry or close while the panel lock is held; no unfinished member to collect; member cannot be retried; or a close was refused | `next: emb panel --status <id>` |
 | 83 | A member did not answer or changed paths | The result's next action above |
 
 ## `emb ground`
@@ -1871,13 +2003,20 @@ Managed settings are not read.
 ## `emb merge`
 
 ```
-emb merge BRANCH --into TARGET --verdict keep [--dir DIR] [--json]
+emb merge BRANCH --into TARGET --verdict keep --note TEXT [--dir DIR] [--json]
 ```
 
 Merges a reviewed branch into a local branch, then cleans it up as
 `emb cleanup --merged-into TARGET --branch BRANCH` does. `DIR` is a folder in
-the git checkout; the default is the current folder.
+the git checkout; the default is the current folder. `DIR` may be inside
+`BRANCH`'s own worktree: `emb merge` and `emb cleanup` run their git commands
+from the repository's main checkout, which cleanup never removes.
 
+- `--note TEXT` is the lead's verdict line, such as `Keep, with a docstring
+  fix`. It is required, and it must be one non-blank line (64 otherwise).
+  The output starts with `Verdict: TEXT`, before the merge line, also when
+  the branch is already contained. A merge commit carries it as the trailer
+  `Ember-Verdict: TEXT`, and `--json` gives it as `note`.
 - Without `--verdict keep` it changes nothing and exits 64.
 - `BRANCH` and `TARGET` must be existing local branches (65), and different
   (64).
@@ -1919,9 +2058,111 @@ the same rules.
 |---|---|
 | `branch` | `BRANCH` |
 | `target` | `TARGET` |
+| `note` | `TEXT` from `--note` |
 | `merge_commit` | The merge commit; null when the branch was already contained |
 | `contained_before` | Whether the branch was already contained |
 | `cleanup` | The cleanup's list, as `emb cleanup --json` prints it |
+
+## `emb prune`
+
+```
+emb prune --older-than DAYS [--dry-run] [--json]
+```
+
+Removes ended run, flow and panel folders under `runs_dir()`, including
+logs inside those folders. `--older-than` is required and accepts a whole
+number of days, zero or greater. Age is measured from `ended_at`, or
+`updated_at` when there is no end time. A record qualifies at an age of at
+least `DAYS × 86400` seconds; zero includes every ended record.
+
+Ended runs are `closed` or `failed`. Ended flows are `done`, `failed` or
+`cancelled`. Panels must be `done` or `incomplete`. A flow or panel is kept
+when any current or former task or member run is open (`starting`,
+`running` or `waiting`), busy or unreadable. The parent is reported as
+skipped with the run id and reason. Missing child records do not count as
+open. This guard includes cancelled flows with running writers or reviewers.
+
+A flow or panel includes its ended task or member run records, regardless
+of those runs' ages. Flow run ids are collected from the record and every
+event with a `run` field, including check, fix and previous review runs.
+Panel retry history is included. A run named by any parent record is
+removed only together with all its parents, and only when those parents
+qualify. For a parent that does not load, prune scans the files inside its
+folder for run ids, including malformed records, events and logs. Those
+runs are kept with the broken parent; unrelated runs are still pruned.
+Symlinks are not followed when scanning these files.
+
+Before removal, prune takes each record's lock without waiting and reloads
+it. Flows use both `lifecycle.lock` and the lifetime lock; panels use their
+panel lock; runs use their record lock. Busy records and records that no
+longer qualify are skipped. Parent and child locks stay held through child
+removal, including child records shared with a parent that is being kept.
+Unreadable records are kept and reported on standard error. Folder names
+outside the timestamped record id format are ignored. Record-folder
+symlinks are refused. Files named by a record outside its folder are kept.
+
+`--dry-run` lists the records that would be removed and removes nothing.
+Text output has `removed <kind> <id>` lines (`would remove` for a dry run),
+`skipped <id>: <reason>` lines, and kept branch and worktree lines with
+removal commands. Text output lists every remaining worktree of a removed
+record unless an open run uses it. Each worktree appears under its branch
+line with its removal command, including when the branch is merged or
+already deleted. When an open run uses the worktree, an unmerged branch's
+deletion command is still listed, without a worktree-removal step.
+Prune deletes no branch, worktree or tmux session.
+
+Prune lists branch-deletion commands only for branches that exist and are
+unmerged. A branch is unmerged
+when it is not an ancestor of its target. Task branches are checked against
+their flow branch. Run and flow records save
+`base_branch` at creation and use it even if the source checkout switches
+branches. If the target branch has been deleted, prune checks against the
+owning flow's `base_branch`. If that branch is also absent, or the record
+has no base branch, the branch is listed as unmerged. Missing target refs
+are not errors and do not change the exit code. Saved commits are not used
+as targets. This check does not treat a squash merge as ancestry.
+
+Every listed unmerged run, task and flow branch gets
+`git -C <dir> branch -D <branch>`. Records with a null or missing
+`base_branch` list their existing branches as unmerged using this command.
+When the worktree exists and no open run uses it,
+`git -C <dir> worktree remove <path>` precedes branch deletion with `&&`.
+Paths and branch names are shell-quoted. Merged and absent branches have
+no branch-deletion command; their remaining worktrees still have worktree
+removal commands. Prune never prints `emb cleanup`.
+
+`<dir>` is the first of these folders that exists: the record's `repo` (a
+run) or `dir` (a flow), the run's `main`, and the main checkout above a
+`.ember/worktrees/<id>` worktree path. A run started in a flow worktree
+that cleanup has removed is checked from the main checkout. When none
+exists, the recorded folder is used and its git error is reported.
+
+`--json` prints an object with four arrays:
+
+| Field | Entries |
+|---|---|
+| `removed` | `{id, kind}`, where kind is `run`, `flow` or `panel`; dry runs list candidates here |
+| `skipped` | `{id, reason}` |
+| `branches` | `{branch, command}`; a branch command already includes its worktree removal when listed in `worktrees` |
+| `worktrees` | `{branch, worktree, command}` for every worktree listed in text output, including merged and deleted branches; empty when there are none |
+
+Read, lock, repository-query and removal failures are reported as
+`emb prune: <message>` on standard error. Processing continues after each
+failure. Exit 0 means processing completed without failures, including an
+empty runs folder, no matches or busy skips. Exit 1 means one or more
+operations failed; the output includes completed removals. Missing,
+negative or non-whole `--older-than` values exit 64.
+
+`ember.prune.select(older_than, record_ids=None, *, env=None, now=None)`
+selects records without changing files.
+`ember.prune.remove(older_than, record_ids=None, *, dry_run=False, env=None, now=None)`
+selects and removes them with the lock checks above. Explicit ids ignore
+age but still require ended records and qualifying selected parents.
+Missing, unreadable and unfinished explicit ids are returned in `skipped`
+with reasons. Supplying an empty id list selects nothing.
+
+No pruning happens automatically. Settings and the app's state file are
+not pruned.
 
 ## `emb cleanup`
 
@@ -1984,7 +2225,7 @@ Everything else is kept, with a reason and what resolves it:
 |---|---|---|
 | `TARGET` itself | `the merge target` | `next: emb cleanup --merged-into <the branch it was merged into>` |
 | A branch that is not a run branch (with `--branch`) | `not an Ember run branch` | `next: git branch -d BRANCH` |
-| A branch not contained | `not contained in TARGET` | `next: emb merge BRANCH --into TARGET --verdict keep (after a Keep verdict)` |
+| A branch not contained | `not contained in TARGET` | `next: emb merge BRANCH --into TARGET --verdict keep --note '<verdict line>' (after a Keep verdict)` |
 | A flow branch whose runner is live | `the flow <id> is running` | `next: emb flow --status <id>` |
 | A flow branch whose runner lock cannot be checked | The lock error | `next: emb flow --status <id>` |
 | A run record that is not this branch's | `the run record <run> is not this branch's: ...` | `next: emb run --status <run>` |
@@ -2050,7 +2291,8 @@ emb deps [--refresh] [--json]
 Shows each component Ember depends on: its installed version, the newest
 version its source offers, its status and the command that updates or
 installs it. It reads installed versions every time and newest versions when
-due. It installs and updates nothing.
+due. The `ember` skill link shows its state in place of a version. It installs
+and updates nothing.
 
 | Option | Does |
 |---|---|
@@ -2067,10 +2309,11 @@ The list is `ember/data/components.toml` in the package:
 
 | id | Label | Group | Installed version | Newest version | Update | Install |
 |---|---|---|---|---|---|---|
-| `codex` | Codex | `apps` | `codex --version`, `codex-cli (\S+)` | `version` of `https://registry.npmjs.org/@openai/codex/latest` | `codex update` | `npm install -g @openai/codex` |
-| `opencode` | OpenCode | `apps` | `opencode --version`, `^(\S+)$` | `version` of `https://registry.npmjs.org/opencode-ai/latest` | `opencode upgrade` | `curl -fsSL https://opencode.ai/install \| bash` |
-| `claude` | Claude Code | `apps` | `claude --version`, `^(\S+) \(Claude Code\)$` | the text of `https://downloads.claude.ai/claude-code-releases/latest` | `claude update` | `curl -fsSL https://claude.ai/install.sh \| bash` |
+| `codex` | Codex | `apps` | `codex --version`, `codex-cli (\S+)` | `version` of `https://registry.npmjs.org/@openai/codex/latest` | Detected install method | `npm install -g @openai/codex` |
+| `opencode` | OpenCode | `apps` | `opencode --version`, `^(\S+)$` | `version` of `https://registry.npmjs.org/opencode-ai/latest` | Detected install method | `curl -fsSL https://opencode.ai/install \| bash` |
+| `claude` | Claude Code | `apps` | `claude --version`, `^(\S+) \(Claude Code\)$` | the text of `https://downloads.claude.ai/claude-code-releases/latest` | Detected install method | `curl -fsSL https://claude.ai/install.sh \| bash` |
 | `claude-desktop` | Claude Desktop | `apps` | apt `claude-desktop` | apt | `sudo apt install --only-upgrade claude-desktop` | none; note "Not installed." |
+| `ember-skill` | ember skill | `apps` | `emb skill status` link state | none | none | By link state, below |
 | `tmux` | tmux | `system` | apt `tmux` | apt | `sudo apt install --only-upgrade tmux` | `sudo apt install tmux` |
 | `bubblewrap` | bubblewrap | `system` | apt `bubblewrap` | apt | `sudo apt install --only-upgrade bubblewrap` | `sudo apt install bubblewrap` |
 | `git` | git | `system` | apt `git` | apt | `sudo apt install --only-upgrade git` | `sudo apt install git` |
@@ -2090,12 +2333,102 @@ not valid:
 | `id` | Unique, `[a-z0-9-]+` |
 | `label` | The shown name |
 | `group` | `apps`, `system` or `libraries` |
-| `installed` | `kind = "apt"` with `package`; `kind = "command"` with `pattern`, a regular expression whose group 1 is the version, and either `engine` (the engine's CLI run with `--version`) or `argv`; or `kind = "python"` with `package` |
-| `newest` | `kind = "apt"` with `package` (only with an apt `installed`); `kind = "json"` with `url` and `field`; `kind = "text"` with `url`; or `kind = "pypi"` with `package` |
+| `installed` | `kind = "apt"` with `package`; `kind = "command"` with `pattern`, a regular expression whose group 1 is the version, and either `engine` (the engine's CLI run with `--version`) or `argv`; `kind = "python"` with `package`; or `kind = "skill"` with an optional `commands` map from link states to install commands |
+| `newest` | `kind = "apt"` with `package` (only with an apt `installed`); `kind = "json"` with `url` and `field`; `kind = "text"` with `url`; `kind = "pypi"` with `package`; or `kind = "none"` for no newest version (required for `skill`) |
 | `update` | Optional: the command shown while an update is available |
+| `methods` | Optional: ordered `[[components.methods]]` tables with `path` and `update`, or `kind = "dpkg"` and `update`; replaces `update` for engines |
+| `updater` | Required with engine methods: `codex update`, `opencode upgrade` or `claude update`, used when no method matches |
 | `install` | Optional: the command shown while the component is missing |
 | `update_note` | Optional: shown while an update is available and there is no `update` |
 | `install_note` | Optional: shown while the component is missing and there is no `install` |
+
+### Skill link
+
+The `ember-skill` component uses the same source candidates and link path as
+`emb skill status`, including `CLAUDE_CONFIG_DIR`. Its installed source kind
+is `skill`; its newest source kind is `none`.
+
+| Link state | Status | Command or note |
+|---|---|---|
+| `installed` | `current` | none |
+| `missing` | `missing` | `emb skill install` |
+| `broken link` | `check failed` | `emb skill install` |
+| `other link` | `check failed` | `emb skill install --force` |
+| `folder` | `check failed` | Move the link path, then run `emb skill install`; no command button |
+| `file` | `check failed` | Move the link path, then run `emb skill install`; no command button |
+
+When no source is found, every link state shows `Reinstall Ember.` with no
+command. For `check failed`, `error` is the link state. The installed source's
+`commands` map supplies commands for `missing`, `broken link` and `other link`
+before status-based command selection.
+
+The CLI and Dependencies screen show the link state in place of versions.
+JSON includes `link_state`, with null `installed` and `newest` versions. Every
+skill status except `current` counts in `counts` and the sidebar badge;
+other components count only when missing or when an update is available.
+Components with newest kind `none` are skipped in every newest mode,
+including `--refresh`, and excluded from newest-read summaries.
+
+### Update methods
+
+For Codex, OpenCode and Claude Code, Ember finds the launcher on `PATH`, or
+at an engine's known location outside `PATH` (`~/.opencode/bin/opencode` for
+OpenCode), and follows its symlinks. It matches this resolved path against
+`[[components.methods]]` in order. The first matching path supplies the
+update command. The dpkg method is tried after all path methods.
+
+For a regular script of at most 64 KiB whose first line starts with `#!`,
+Ember reads the first quoted `$basedir/<relative path>` containing
+`/node_modules/`. It makes that path absolute against the script's folder
+and normalizes it without following symlinks for path-method matching.
+The fully resolved target supplies `resolved_path`, dpkg's ownership lookup,
+and the permission check outside npm. This covers
+pnpm's global shell shims, such as a launcher in `$PNPM_HOME` pointing to
+`$basedir/global/5/node_modules/@openai/codex/bin/codex.js`. ELF binaries
+are not read as scripts. A read or resolution failure, or no such quoted
+path, leaves the launcher as the path to match. Updater commands keep the
+original launcher name.
+
+| Path pattern | Update template |
+|---|---|
+| `{prefix}/lib/node_modules/{package}` | `npm install -g --prefix {prefix} {package}@latest` |
+| `{prefix}/global/*/node_modules/{package}` | `pnpm add -g {package}@latest` |
+| `{prefix}/install/global/node_modules/{package}` | `bun add -g {package}@latest` |
+| `{prefix}/Cellar/{formula}` | `brew upgrade {formula}` |
+| `~/.local/share/claude/versions/*` (Claude Code) | `{launcher} update` |
+| `~/.opencode/bin/opencode` (OpenCode) | `{launcher} upgrade` |
+| `kind = "dpkg"`, no path | `sudo apt install --only-upgrade {package}` |
+
+A pattern starts at the beginning of the candidate path and matches either
+the whole path or a leading part ending at a `/` boundary. `{prefix}`
+captures any path, `{package}` captures a name or exactly two segments for
+an `@scope/name`, `{formula}` captures one segment, and `*` stays within one
+segment. Package names cannot start with `.`, so `.pnpm` store folders do
+not match as packages. `~` uses the owner's home folder after resolving its
+symlinks. Captured values are shell-quoted in the command. `{launcher}` is the full unresolved launcher path.
+
+The dpkg method runs `dpkg-query -S <resolved path>` with the shared command
+deadline. One package owning that path supplies `{package}`; a failed,
+timed-out, malformed or ambiguous lookup is no match. This lookup runs only
+when installed versions are being read, including `emb deps` and the
+Dependencies screen's Check now action.
+
+Ember tests `os.access(folder, W_OK)` on `{prefix}/lib/node_modules` for npm,
+and on the resolved file's parent otherwise. If that folder is not writable,
+it prefixes the command with `sudo`, unless it already starts with `sudo`.
+Ember itself runs no `sudo`; the command runs in the owner's terminal.
+
+With no match, an available update keeps status `update available` and
+`command_kind` `update`. Its command is the full unresolved launcher path
+with the `updater` arguments. The CLI and Dependencies screen show the
+resolved path and, with that update command, "Ember could not tell how the
+tool was installed." Codex has no vendor path method. When no executable
+is found, the component shows its existing install command and both
+`resolved_path` and `method` are null.
+
+The resolved path and method are read again on every read and are not
+cached. On a read using cached installed versions, path methods are still
+matched; dpkg is skipped and its method remains null.
 
 ### Reads
 
@@ -2132,8 +2465,9 @@ compared as text.
 
 `command` is the update command while an update is available and the install
 command while missing, with `command_kind` `update` or `install`; otherwise
-both are null. `note` is `update_note` or `install_note` for that status when
-there is no command for it; otherwise null.
+both are null, except for skill commands and notes described above. `note` is `update_note` or `install_note` for that status when
+there is no command for it, or the could-not-tell note alongside an update
+command when no install method matched; otherwise null.
 
 ### Cache
 
@@ -2145,14 +2479,44 @@ seconds since the epoch. A newest version is read again when its cached read
 is missing or six hours old or more; `--refresh` reads it now. A newest read
 that fails is reported and not cached, so the next run reads it again. A cache
 that cannot be read is treated as empty; one that cannot be written is left as
-it was.
+it was. The skill installed read caches its link state and note.
+
+### Ember releases
+
+The dependency check reads
+`https://api.github.com/repos/rearwindowvertigo/ember/releases/latest`, which
+excludes drafts and pre-releases, with the same ten-second network timeout.
+It compares `importlib.metadata.version('ember-app')` with the release's
+`tag_name` using dotted numbers, removing a leading `v`. The download link
+is the release's `html_url`. When the installed package is not found, either
+version cannot be parsed, or the release is the same or older, no notice is
+shown. Ember does not install the release.
+
+The cache's top-level `ember_release` entry holds `tag_name`, `url` and
+`read_at`, separate from `components`. Every read compares the cached tag
+with the currently installed version. The `due` mode reads after six hours,
+`always` (`--refresh`) fetches every time, and `never` uses only the cache.
+A failed read shows no notice or error dialog, keeps the cached entry
+unchanged and is retried on the next due check. `ember_release_retry` records
+a pending retry when a cached entry exists. Failed reads are not cached.
+
+The Dependencies screen shows an info alert above the component groups
+with the newer version and a Download button opening the release page.
+The release check runs with the screen's dependency check, with no separate
+timer. Release reads are excluded from component counts and every
+newest-read summary.
 
 ### Output
 
 Text output has one line per component, in the order of the list:
 `<label>: <status>[, installed <version>][, newest <version>][: <error>]`,
 then an indented `update: <command>` or `install: <command>` line when there
-is a command.
+is a command. An engine shows `resolved path: <path>` only with an update
+command, alongside the could-not-tell note when no method matched. JSON
+keeps `resolved_path` and `method` for every component. Skill rows show the
+link state and any move-path or reinstall note.
+When a newer Ember release exists, standard output ends with
+`Ember: version <version> available: <url>` after the components.
 
 `--json` prints one object:
 
@@ -2169,24 +2533,30 @@ is a command.
       "error": null,
       "command": "sudo apt install --only-upgrade tmux",
       "command_kind": "update",
-      "note": null
+      "note": null,
+      "resolved_path": null,
+      "method": null
     }
   ],
   "installed_read_at": {"tmux": 1800000000.0},
   "newest_read_at": {"tmux": 1800000000.0},
   "counts": 1,
   "newest_read_oldest": 1800000000.0,
-  "newest_read_complete": true
+  "newest_read_complete": true,
+  "ember_release": null
 }
 ```
 
 | Key | Holds |
 |---|---|
+| `components[].resolved_path` | Engine launcher target after following symlinks; null when no executable is found or for other components |
+| `components[].method` | Matched method table (`path` and `update`, or `kind = "dpkg"` and `update`); null when none matched |
+| `ember_release` | Always present: `{"version": "0.3.0", "url": "https://github.com/rearwindowvertigo/ember/releases/tag/v0.3.0"}` when newer, otherwise null |
 | `installed_read_at` | When each component's installed version was read, by id; null when it was never read |
 | `newest_read_at` | When each component's reported newest version was read, by id; null when none is reported |
-| `counts` | How many components are `update available` or `missing` |
-| `newest_read_oldest` | The oldest `newest_read_at` among components that are not missing; null when there is none |
-| `newest_read_complete` | Whether every component that is not missing has a newest version read |
+| `counts` | Non-current skill components, plus other components that are `update available` or `missing` |
+| `newest_read_oldest` | The oldest `newest_read_at` among components that are not missing and have a newest source other than `none`; null when there is none |
+| `newest_read_complete` | Whether every component that is not missing and has a newest source other than `none` has a newest version read |
 
 ## `emb skill`
 
@@ -2310,7 +2680,7 @@ At start the app:
   scheme;
 - reads the settings, the engine status (checking every engine), the
   dependency report (installed versions now, newest versions when due) and
-  the run records, each off the window's thread;
+  the run, flow and panel records, each off the window's thread;
 - once the settings are read, applies `app.theme` and writes or removes the
   autostart entry to match `app.autostart`; it does so again each time
   either setting changes.
@@ -2323,10 +2693,17 @@ they cannot be read it shows the reason and Try again.
 The window opens at 1100 by 720 pixels and is never smaller than 900 by 600.
 Its size and last screen are kept between starts. The sidebar shows the Ember
 mark and name, one row per screen (Overview, Menu, Engines, Dependencies,
-Settings) and `Ember <version>` at the bottom. Overview's row shows the
-number of live runs and Dependencies' row the number of components with an
-update available or missing, each only above zero. A screen is created the
-first time it is shown.
+Settings) and `Ember <version>` at the bottom. Overview's row counts
+top-level live items: standalone live runs plus every flow and panel in
+Live, including stopped flows waiting for Claude and gone runners or panel
+processes. Workers nested under a Live parent add nothing. A live worker
+whose parent is not in Live counts as a top-level run, including a running
+writer under a cancelled flow in Finished, as in the tray. The accessible
+description is `<n> live`; the count and description are hidden at zero.
+The count updates from the shared run, flow and panel models on every screen.
+
+Dependencies' row shows the number of components with an update available
+or missing, only above zero. A screen is created the first time it is shown.
 
 Saves run one at a time: a change made while a save is in flight is sent
 after it, with the settings generation that save produced. Choosing the
@@ -2359,24 +2736,39 @@ pressed in it never reach the run's session.
 
 ### Tray
 
-The tray icon shows whether any run is live, always in the drawings for a
-dark top bar. Its tooltip is `Ember · 2 runs live` or `Ember · No runs live`.
-The menu holds:
+The tray icon shows whether any run, flow or panel is live, always in the
+drawings for a dark top bar. Its tooltip prefixes the menu's status line
+with `Ember · `. The menu holds:
 
-- a status line: `No runs live`, `1 run live` or `2 runs live`;
-- one line per live run, `<Engine> · <repository folder> · <HH:MM>` with the
-  local start time, which opens a terminal window on the run as
+- a status line counting top-level items in run, flow, panel order, with
+  non-zero parts only: `1 run, 1 flow live`, `2 panels live`, or
+  `No runs live` when there are none;
+- one line per top-level live run, `<Engine> · <repository folder> · <HH:MM>`
+  with the local start time, which opens a terminal window on the run as
   `emb run --attach` does;
+- one line per live flow or panel, `<Flow|Panel> · <record id> · <HH:MM>`,
+  with the id elided to 40 characters including an ellipsis and the local
+  start time, which shows the window on Overview;
+- each flow or panel's live worker runs immediately below it, indented,
+  each opening its own terminal, without repeating or counting those runs
+  at the top level;
 - Open Ember and Quit Ember.
+
+Flows and panels follow Overview's Live states, including gone runners and
+panel processes. Top-level items and each parent's workers are oldest first
+by start time and then id. A run named by multiple parents belongs to the
+oldest parent by start time and then id. A live run whose parent is in
+Finished appears and counts as a top-level run in the tray.
 
 Clicking the icon also shows the window. Closing the window hides it to the
 tray. When the desktop has no tray, the window shows at start and closing it
 quits.
 
-While the menu is open it keeps its lines; a change to the live runs
-redraws it after it closes. Quit Ember hides the window and the tray icon at
-once, then waits up to 12 seconds for running background tasks to end before
-the app exits.
+A run, flow or panel change updates the icon and tooltip at once. The menu
+keeps its lines until it next opens, when it rebuilds them. A click from a
+stale menu still triggers its action after the menu closes. Quit Ember hides
+the window and the tray icon at once, then waits up to 12 seconds for running
+background tasks to end before the app exits.
 
 ### Run records
 
@@ -2392,12 +2784,12 @@ app keeps the records it read last and Overview shows the reason with Try
 again, which reads the folder again at once. A run whose turn failed since
 the last read makes the app check the engines again.
 
-While Overview is shown, the app also reads `flow.json` and `panel.json`
+The app also reads `flow.json`, each flow's `events.jsonl` and `panel.json`
 off the window's thread and watches their folders and record files, with
 the same sixty-second backstop and coalesced reads. It takes no lock and
-reads lifetime lock ownership from `/proc/locks`. It stops these reads and
-watches when Overview is left or the window is hidden. Unreadable flow and
-panel folders are counted in their cards.
+reads lifetime lock ownership from `/proc/locks`. One shared flow and panel
+model stays active until the app stops, including while Overview or the
+window is hidden.
 
 ### Commands
 
@@ -2433,90 +2825,111 @@ command line:
 
 ### Overview
 
-Overview's subtitle is the tray's status line. Above the lists, an alert
-names each engine that is on and whose `sandbox.<engine>` setting gives it
-no sandbox, read from the last settings snapshot, with Open Engines; an
-alert counts run records that could not be read. The cards appear in order:
-Flows, Panels, Live, Finished. Flows and Panels are hidden when they have
-neither readable nor unreadable records.
+Overview shows Live and Finished. Live lists starting, running and waiting
+records, oldest first by start time and then id. Finished lists ended
+records, newest first by end time, update time and id, with update time used
+when end time is absent. Its cap of twenty applies to top-level rows across
+runs, flows and panels. Each empty section shows its empty state.
 
-The Flows card lists every active flow (`starting`, `running`, `checking`,
-`stopped`), oldest first, followed by the last five ended flows (`done`,
-`failed`), newest end time first. Each row shows an expand arrow, a badge,
-`<repository folder> · <n> tasks · <merged>/<n> merged`,
-`ember/flow/<id> · wave <n>` with its reason when set, and elapsed time or
-end time and duration.
+Finished filters this capped list by Type (all, Run, Flow, Panel), Status
+(all, Done, Incomplete, Failed) and Engine (all, Codex, OpenCode, Claude).
+The filters combine and test top-level rows: Run selects standalone runs,
+Status matches the parent's own chip, and a flow or panel matches Engine
+when any readable run nested under it used that engine. A parent without
+readable nested runs matches only Engine=all. Filters start at all when
+the app starts and keep their values across reloads for the app session.
 
-| Flow status | Badge |
-|---|---|
-| `starting` | Starting |
-| `running` | Running |
-| `checking` | Checking |
-| `stopped` | Waiting for Claude |
-| `done` | Done |
-| `failed` | Failed |
-| Runner missing after the grace period | Runner gone |
+Clear is disabled when no records are shown or a clear is pending. It
+captures the shown top-level ids and calls `prune.remove` with
+`older_than=0` and those ids, first as a dry run and then, after confirmation,
+for removal. Both calls run off the GUI thread. The confirmation lists the
+dry run's records, including nested runs, skipped ids with their reasons,
+and retained branches with removal commands. Worktree commands appear under
+their branches. Remove confirms; Cancel is the default and Escape cancels.
+Clear removes records and logs, retaining branches and worktrees. Prune
+rechecks records and skips those that are busy or no longer ended.
 
-Expanded, a flow shows its tasks in plan order: task id, status, round,
-writer engine and model, reason, number of reviews, last verdict and its
-must, should and lead counts. A task-specific writer overrides the flow's
-writer. Current writer and review run ids are selectable text. Show run
-appears beside an id with a live or finished row on Overview; it expands
-that row and scrolls to it.
+A dry run with no removable records shows its report without confirmation.
+A dry-run error shows a warning naming the error and removes nothing.
+After removal a message lists removed records, skipped ids with reasons,
+and errors. Closing the message reloads both record models and reapplies
+the filters. Confirmation and result lists scroll within the available
+screen height.
 
-The Panels card lists every running panel, oldest first, followed by the
-last five ended panels (`done`, `incomplete`), newest end time first. A row
-shows the badge Running, Done, Incomplete or Process gone,
-`Panel · <n> members · <answered>/<n> answered`, the repository folder and
-the first non-empty question line cut to eighty characters, and elapsed
-time or end time and duration. Expanded, it shows each member's number,
-engine, model, effort (or default), status, seconds, reason and changed
-paths, with its run id and Show run when available. It then lists left-out
-members and their reasons and the selectable path to `summary.md`.
+Each row has an expand arrow, a grey icon and the word Run, Flow or Panel,
+then one of six status chips:
 
-A starting, running or checking flow shows Runner gone, and a running
-panel shows Process gone, when its lifetime lock is not held and its
-record has not been updated for more than sixty seconds. A stopped flow
-needs no runner. An unreadable lock table or runtime folder leaves the
-stored status on screen. The app never takes these locks or creates lock
-files. Flow and panel rows are read-only; one row per card can be expanded.
-Rows and expanded details survive unrelated record changes. Elapsed times
-update every thirty seconds while shown, without rereading records or
-rebuilding expanded details.
+| Chip | States | Colour |
+|---|---|---|
+| Starting | A run or flow's `starting` | Grey |
+| Running | `running`, a flow's `checking` | Blue |
+| Waiting for Claude | A run's `waiting`, a flow's `stopped` | Amber |
+| Done | A run's `closed`, a flow or panel's `done` | Green |
+| Incomplete | A panel's `incomplete`, a flow's `cancelled` | Purple |
+| Failed | `failed`, a gone flow runner or panel process | Red |
 
-The Live card holds one row per live run, oldest first: an expand arrow,
-the status badge (Starting, Running, Waiting for Claude),
-`<Engine> · <model> · <effort>`, `<repository folder> · <branch or
-read-only> · turn <n>`, the time since the start, redrawn every 30 seconds
-while the screen shows, and Open terminal, which opens a terminal window on
-the run as `emb run --attach` does. The Finished card holds the last twenty
-finished runs, newest first: the badge (Closed, Failed), the same first
-line, `<subject> · <branch or read-only>`, and the end time with the
-duration. Expanding a finished row shows its record: run, subject, engine,
-repository, branch, sandbox, turns and commits, start, end, last exit and
-last reason. One row of each card is expanded at a time.
+The second line includes the finer state and any flow reason. A cancelled
+flow appears in Finished with `cancelled` and its reason. A starting,
+running or checking flow whose lifetime lock is not held and whose record
+has not changed for more than sixty seconds stays in Live with Failed and
+`runner gone`. A running panel uses Failed and `panel process gone` under
+the same conditions. A stopped flow needs no runner. An unreadable lock
+table or runtime folder leaves the stored status on screen.
 
-Rows are kept per run id across reloads. A finished row is redrawn only
-when a value it shows changes, so focus, an expanded record and selected
-text stay when another run saves its record.
+Worker runs are nested under their parent, in the parent's section, and
+keep their own status chip and controls. Their ids are collected from the
+same record fields and flow events as Clear uses. A run named by multiple
+parents appears under the oldest parent by start time and then id. A run
+with a parent never appears at the top level in Overview, including when
+that parent falls beyond the Finished cap. A live worker under a Finished
+parent stays nested there; the tray and sidebar count it at the top level.
+Every readable nested run of a shown parent appears, whatever its age. The parent's second line includes `1 live run`
+or `<n> live runs` after the finer state when that count is above zero.
 
-Expanding a live row shows the run's screen mirror. The mirror is a tmux
-control-mode client attached to the run's session with the `read-only` and
-`ignore-size` flags, so it cannot type into the pane or change its size.
-After the pane writes output it captures the pane with its colours and
-cursor and redraws; nothing runs on a timer. It closes
-when the row collapses, the run leaves the live list, the screen is left or
-the window hides, and shows "Session ended" when the session ends.
+A flow's title shows the repository folder, task count and merged count.
+Its second line includes its branch, active plan wave and reason. Expanded,
+it shows the pass count and task, writer and review details. A panel's title
+shows its member and answer counts; its second line includes the repository
+folder. The first non-empty question line appears on a third line, elided
+to fit, with its full text in the tooltip. Expanded, a panel shows member
+status, worker, duration, reason and changed paths, and left-out members.
+
+Expanded panel details have a Summary button for `summary.md`. Expanded
+flow details have Briefs for the `briefs/` folder and one Check logs button.
+Check logs considers only files matching `check-*.log` directly in the flow
+folder. It selects the highest integer `(wave, attempt)` from
+`check-<wave>-<attempt>.log`; if no name parses, it selects the newest file
+by modification time. Buttons are disabled when their file or folder is
+absent. Targets are checked when details expand and on every model reload
+while those details are drawn. Collapsed rows do not check targets.
+Buttons pass a file URL to `QDesktopServices.openUrl` for the desktop's
+default viewer. If it returns false, a warning names the path and says no
+viewer opened it.
+
+Run rows show engine, model and effort. A live run's second line includes
+the repository folder, branch or `read-only`, and turn number; an ended
+run's includes its subject and branch. Live runs have Open terminal, which
+opens a terminal window on the run as `emb run --attach` does. Expanding an
+ended run shows its record, including last exit and reason. Rows and expanded
+details survive unrelated record changes. Elapsed times update every thirty
+seconds while shown.
+
+Expanding a live run shows its read-only tmux screen mirror. One mirror is
+open at a time. It closes when the row collapses, the run ends or its parent
+leaves the shown rows, Overview is left or the window hides. Expanding an
+ended run shows one record at a time. One flow and one panel can also have
+expanded details.
+
+The subtitle uses the tray status line, counting the same top-level live
+runs, flows and panels. Above the sections, an alert names each enabled
+engine whose sandbox setting gives it no sandbox, with Open Engines. Live
+has one line naming the non-zero counts of unreadable runs, flows and
+panels; the line is hidden when every count is zero.
 
 When the runs folder cannot be read, the screen shows the reason and Try
-again in place of the cards. When only the flow and panel read fails, an
-alert replaces those two cards: "Ember could not read the flow and panel
-records: <reason>." Try again reads them again. Unreadable individual
-records are counted inside their card, such as "1 flow record could not be
-read." The initial loading state waits for both record models. When there
-are no runs, flows or panels, Overview shows "No runs yet" and "Runs, flows
-and panels appear here when Claude starts them with `emb run`, `emb flow`
-or `emb panel`."
+again in place of the sections. A failed flow and panel read shows an alert
+with Try again and keeps the previous records. The initial loading state
+waits for both record models.
 
 ### Menu
 
@@ -2636,7 +3049,7 @@ skill into Claude Code; `emb skill install` does.
 ## Exit codes
 
 These are the exit codes of `emb choices` and `emb engines`; `emb run`,
-`emb gapcheck`, `emb flow`, `emb panel`, `emb ground`, `emb merge`, `emb cleanup`, `emb deps`, `emb skill` and
+`emb gapcheck`, `emb flow`, `emb panel`, `emb ground`, `emb merge`, `emb cleanup`, `emb prune`, `emb deps`, `emb skill` and
 `emb app` have their own tables above.
 
 | Code | Meaning |

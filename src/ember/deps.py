@@ -7,8 +7,11 @@ offers, compares them and gives one status: `missing`, `check failed`,
 
 Every command runs with `LC_ALL=C`, standard input from `/dev/null` and a
 deadline of `TIMEOUT` seconds, in its own process group, which is killed whole
-at the deadline. Every network read has a timeout of `TIMEOUT` seconds. A read
-that fails gives `check failed` with a reason, never an exception.
+at the deadline. Every network read has a timeout of `TIMEOUT` seconds. A
+component read that fails gives `check failed` with a reason, never an exception.
+
+The report also includes a newer Ember release from GitHub when one is found.
+Failed release reads give no notice and are retried on the next due check.
 
 The last reads are cached in `dependencies.json` in Ember's cache folder.
 Newest versions are read again when their cached read is `MAX_AGE` seconds old
@@ -19,6 +22,7 @@ and supplies `HOME`, the XDG variables and `PATH`.
 """
 
 import contextlib
+import dataclasses
 import http.client
 import importlib.metadata
 import json
@@ -27,18 +31,20 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import time
 import tomllib
 import urllib.request
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path
+from string import Formatter
 from typing import Any
 
-from ember import paths
+from ember import paths, skill
 from ember.engines import status
 
 TIMEOUT = 10
@@ -53,6 +59,11 @@ CACHE_NAME = "dependencies.json"
 PYPI_URL = "https://pypi.org/pypi/{package}/json"
 """Where a Python package's newest version is read."""
 
+EMBER_RELEASE_URL = (
+    "https://api.github.com/repos/rearwindowvertigo/ember/releases/latest"
+)
+"""Where Ember's latest published release is read."""
+
 MISSING = "missing"
 CHECK_FAILED = "check failed"
 UPDATE_AVAILABLE = "update available"
@@ -63,10 +74,10 @@ STATUSES = (MISSING, CHECK_FAILED, UPDATE_AVAILABLE, CURRENT)
 GROUPS = ("apps", "system", "libraries")
 """The component groups: engines and apps, system tools, Ember's libraries."""
 
-INSTALLED_KINDS = ("apt", "command", "python")
+INSTALLED_KINDS = ("apt", "command", "python", "skill")
 """How an installed version can be read."""
 
-NEWEST_KINDS = ("apt", "json", "text", "pypi")
+NEWEST_KINDS = ("apt", "json", "text", "pypi", "none")
 """How a newest version can be read."""
 
 NEWEST_MODES = ("due", "always", "never")
@@ -114,6 +125,28 @@ class Source:
     field: str | None = None
     """The JSON object's key that holds the version, for `json`."""
 
+    commands: Mapping[str, str] = dataclasses.field(default_factory=dict)
+    """Install commands by link state, for `skill`."""
+
+
+@dataclass(frozen=True)
+class Method:
+    """An install path pattern and its update command, or a dpkg lookup."""
+
+    update: str
+    path: str | None = None
+    kind: str = "path"
+
+    def to_json(self) -> dict[str, str]:
+        """Return the method's component-table fields.
+
+        Returns:
+            The update template and path, or the dpkg kind.
+        """
+        if self.path is None:
+            return {"kind": self.kind, "update": self.update}
+        return {"path": self.path, "update": self.update}
+
 
 @dataclass(frozen=True)
 class Spec:
@@ -128,6 +161,8 @@ class Spec:
     install: str | None
     update_note: str | None
     install_note: str | None
+    methods: tuple[Method, ...] = ()
+    updater: str | None = None
 
 
 @dataclass(frozen=True)
@@ -153,23 +188,37 @@ class Component:
     """The newest version, or `None` when it was not read."""
 
     error: str | None
-    """Why the status is `check failed`, naming the read; `None` otherwise."""
+    """Why the check failed: a read error or skill link state; `None` otherwise."""
 
     command: str | None
-    """The update command while an update is available, the install command
-    while missing, else `None`."""
+    """The update, install or skill repair command, or `None`."""
 
     command_kind: str | None
     """`update`, `install` or `None`, as `command`."""
 
     note: str | None
-    """The note for the status when there is no command for it."""
+    """The status note, including an unidentified install method."""
+
+    resolved_path: str | None = None
+    """The engine launcher's target after following symlinks."""
+
+    method: Method | None = None
+    """The matched install method, or `None` when none matched."""
+
+    installed_kind: str | None = None
+    """The installed source kind."""
+
+    newest_kind: str | None = None
+    """The newest source kind; `none` has no newest reads."""
+
+    link_state: str | None = None
+    """The skill link state, in place of a version."""
 
     def to_json(self) -> dict[str, Any]:
         """Return the component as a JSON-ready dict.
 
         Returns:
-            Every field.
+            The report fields, including `link_state` for a skill.
         """
         return {
             "id": self.id,
@@ -182,7 +231,22 @@ class Component:
             "command": self.command,
             "command_kind": self.command_kind,
             "note": self.note,
+            "resolved_path": self.resolved_path,
+            "method": None if self.method is None else self.method.to_json(),
+            **(
+                {"link_state": self.link_state}
+                if self.installed_kind == "skill"
+                else {}
+            ),
         }
+
+
+@dataclass(frozen=True)
+class EmberRelease:
+    """A newer Ember release and its download page."""
+
+    version: str
+    url: str
 
 
 @dataclass(frozen=True)
@@ -200,25 +264,35 @@ class DepsReport:
     """When each component's reported newest version was read, by id; `None`
     when none is reported."""
 
+    ember_release: EmberRelease | None = None
+    """A newer Ember release, or `None` when none is reported."""
+
     def counts(self) -> int:
         """Return how many components need the owner.
 
         Returns:
-            The number with status `update available` or `missing`.
+            Non-current skills and other components that are missing or outdated.
         """
         return sum(
-            item.status in (UPDATE_AVAILABLE, MISSING) for item in self.components
+            item.status != CURRENT
+            if item.installed_kind == "skill"
+            else item.status in (UPDATE_AVAILABLE, MISSING)
+            for item in self.components
         )
 
     def _needs_newest(self) -> list[str]:
-        return [item.id for item in self.components if item.status != MISSING]
+        return [
+            item.id
+            for item in self.components
+            if item.status != MISSING and item.newest_kind != "none"
+        ]
 
     def oldest_newest_read(self) -> float | None:
         """Return the oldest newest-version read among installed components.
 
         Returns:
             The earliest `newest_read_at` of a component that is not missing,
-            or `None` when none was read.
+            excluding newest kind `none`, or `None` when none was read.
         """
         times = [
             stamp
@@ -232,7 +306,7 @@ class DepsReport:
 
         Returns:
             True when every component that is not missing has a
-            `newest_read_at`.
+            `newest_read_at`, excluding newest kind `none`.
         """
         return all(
             self.newest_read_at.get(key) is not None for key in self._needs_newest()
@@ -243,7 +317,7 @@ class DepsReport:
 
         Returns:
             `components` as a list, both read-time mappings, `counts`,
-            `newest_read_oldest` and `newest_read_complete`.
+            `newest_read_oldest`, `newest_read_complete` and `ember_release`.
         """
         return {
             "components": [item.to_json() for item in self.components],
@@ -252,6 +326,9 @@ class DepsReport:
             "counts": self.counts(),
             "newest_read_oldest": self.oldest_newest_read(),
             "newest_read_complete": self.newest_read_complete(),
+            "ember_release": (
+                dataclasses.asdict(self.ember_release) if self.ember_release else None
+            ),
         }
 
 
@@ -259,11 +336,13 @@ class DepsReport:
 
 
 _REQUIRED = ("id", "label", "group", "installed", "newest")
-_OPTIONAL = ("update", "install", "update_note", "install_note")
+_OPTIONAL = ("update", "install", "update_note", "install_note", "updater")
 _SOURCE_FIELDS: dict[tuple[str, str], tuple[tuple[str, ...], tuple[str, ...]]] = {
     ("installed", "apt"): (("package",), ()),
     ("installed", "command"): (("pattern",), ("engine", "argv")),
     ("installed", "python"): (("package",), ()),
+    ("installed", "skill"): ((), ("commands",)),
+    ("newest", "none"): ((), ()),
     ("newest", "apt"): (("package",), ()),
     ("newest", "json"): (("url", "field"), ()),
     ("newest", "text"): (("url",), ()),
@@ -296,6 +375,14 @@ def _source(where: str, role: str, value: object) -> Source:
         if name not in value:
             raise ComponentsError(f"{where}: missing field {name}")
         _text(where, name, value[name])
+    if kind == "skill":
+        commands = value.get("commands", {})
+        states = {skill.MISSING, skill.BROKEN_LINK, skill.OTHER_LINK}
+        if not isinstance(commands, dict) or set(commands) - states:
+            raise ComponentsError(f"{where}: commands must map repairable link states")
+        for state, command in commands.items():
+            _text(where, state, command)
+        return Source(kind=kind, commands=commands)
     if kind != "command":
         url = value.get("url")
         if url is not None and not url.startswith("https://"):
@@ -328,11 +415,66 @@ def _source(where: str, role: str, value: object) -> Source:
     return Source(kind=kind, engine=engine, argv=tuple(argv), pattern=pattern)
 
 
+def _fields(template: str) -> set[str]:
+    fields = set()
+    for _literal, field, format_spec, conversion in Formatter().parse(template):
+        if field is not None:
+            if field not in {"prefix", "package", "formula", "launcher"}:
+                raise ValueError(f"unknown placeholder {field!r}")
+            if format_spec or conversion:
+                raise ValueError("placeholders cannot have formats or conversions")
+            fields.add(field)
+    return fields
+
+
+def _path_pattern(pattern: str) -> re.Pattern[str]:
+    captures = {
+        "prefix": r".*",
+        "package": r"(?:@[^/]+/[^/.][^/]*|[^/@.][^/]*)",
+        "formula": r"[^/]+",
+    }
+    parts = []
+    for literal, field, _format_spec, _conversion in Formatter().parse(pattern):
+        parts.append(re.escape(literal).replace(r"\*", "[^/]*"))
+        if field is not None:
+            parts.append(f"(?P<{field}>{captures[field]})")
+    return re.compile("^" + "".join(parts) + r"(?=/|$)")
+
+
+def _methods(where: str, value: object) -> tuple[Method, ...]:
+    if not isinstance(value, list):
+        raise ComponentsError(f"{where}: methods must be a list of tables")
+    methods = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            raise ComponentsError(f"{where}: each method must be a table")
+        kind = entry.get("kind", "path")
+        if kind not in ("path", "dpkg"):
+            raise ComponentsError(f"{where}: method kind must be path or dpkg")
+        allowed = {"kind", "update"} | ({"path"} if kind == "path" else set())
+        if set(entry) - allowed:
+            raise ComponentsError(f"{where}: unknown method field")
+        update = _text(where, "method update", entry.get("update"))
+        pattern = (
+            _text(where, "method path", entry.get("path")) if kind == "path" else None
+        )
+        try:
+            fields = {"package"} if pattern is None else _fields(pattern)
+            if pattern is not None:
+                _path_pattern(pattern)
+            if _fields(update) - (fields | {"launcher"}):
+                raise ValueError("update uses a placeholder absent from the path")
+        except (ValueError, KeyError, re.error) as error:
+            raise ComponentsError(f"{where}: invalid method: {error}") from None
+        methods.append(Method(update=update, path=pattern, kind=kind))
+    return tuple(methods)
+
+
 def _spec(index: int, value: object) -> Spec:
     where = f"components[{index}]"
     if not isinstance(value, dict):
         raise ComponentsError(f"{where} must be a table")
-    unknown = sorted(set(value) - {*_REQUIRED, *_OPTIONAL})
+    unknown = sorted(set(value) - {*_REQUIRED, *_OPTIONAL, "methods"})
     if unknown:
         raise ComponentsError(f"{where}: unknown field {', '.join(unknown)}")
     for name in _REQUIRED:
@@ -350,6 +492,8 @@ def _spec(index: int, value: object) -> Spec:
         )
     installed = _source(where, "installed", value["installed"])
     newest = _source(where, "newest", value["newest"])
+    if installed.kind == "skill" and newest.kind != "none":
+        raise ComponentsError(f"{where}: a skill needs newest kind none")
     if newest.kind == "apt" and installed.kind != "apt":
         raise ComponentsError(
             f"{where}: an apt newest read needs an apt installed read"
@@ -358,6 +502,20 @@ def _spec(index: int, value: object) -> Spec:
         name: _text(where, name, value[name]) if name in value else None
         for name in _OPTIONAL
     }
+    methods = _methods(where, value.get("methods", []))
+    if methods or optional["updater"] is not None:
+        if installed.engine is None or optional["updater"] is None:
+            raise ComponentsError(f"{where}: methods need an engine and updater")
+        if optional["update"] is not None:
+            raise ComponentsError(f"{where}: give methods instead of update")
+        try:
+            updater = shlex.split(optional["updater"] or "")
+        except ValueError as error:
+            raise ComponentsError(f"{where}: invalid updater: {error}") from None
+        if len(updater) < 2 or updater[0] != installed.engine:
+            raise ComponentsError(
+                f"{where}: updater must name the engine and arguments"
+            )
     return Spec(
         id=ident,
         label=label,
@@ -368,6 +526,8 @@ def _spec(index: int, value: object) -> Spec:
         install=optional["install"],
         update_note=optional["update_note"],
         install_note=optional["install_note"],
+        methods=methods,
+        updater=optional["updater"],
     )
 
 
@@ -521,6 +681,8 @@ class _Installed:
     missing: bool
     error: str | None
     read_at: float
+    link_state: str | None = None
+    note: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -528,6 +690,11 @@ class _Installed:
             "missing": self.missing,
             "error": self.error,
             "read_at": self.read_at,
+            **(
+                {"link_state": self.link_state, "note": self.note}
+                if self.link_state is not None
+                else {}
+            ),
         }
 
 
@@ -591,6 +758,19 @@ def _read_installed(
     spec: Spec, env: Mapping[str, str], deadline: float, now: float
 ) -> _Installed:
     source = spec.installed
+    if source.kind == "skill":
+        current = skill.status(env, skill.source_candidates())
+        note = None
+        if current.source is None:
+            note = "Reinstall Ember."
+        elif current.state in (skill.FOLDER, skill.FILE):
+            note = f"Move {current.link}, then run emb skill install."
+        error = (
+            None if current.state in (skill.INSTALLED, skill.MISSING) else current.state
+        )
+        return _Installed(
+            None, current.state == skill.MISSING, error, now, current.state, note
+        )
     try:
         if source.kind == "apt":
             version = _installed_apt(source.package or "", env, deadline)
@@ -733,9 +913,16 @@ def _installed_from_json(value: object) -> _Installed | None:
         return None
     if not (error is None or isinstance(error, str)):
         return None
-    if not missing and version is None and error is None:
+    link_state, note = value.get("link_state"), value.get("note")
+    if not (link_state is None or isinstance(link_state, str)):
         return None
-    return _Installed(None if missing else version, missing, error, read_at)
+    if not (note is None or isinstance(note, str)):
+        return None
+    if not missing and version is None and error is None and link_state is None:
+        return None
+    return _Installed(
+        None if missing else version, missing, error, read_at, link_state, note
+    )
 
 
 def _newest_from_json(value: object) -> _Newest | None:
@@ -771,6 +958,8 @@ def _load_cache(
 def _save_cache(
     entries: dict[str, tuple[_Installed | None, _Newest | None]],
     env: Mapping[str, str],
+    release: _Release | None,
+    release_retry: bool,
 ) -> None:
     components: dict[str, dict[str, Any]] = {}
     for key, (installed, newest) in entries.items():
@@ -780,8 +969,69 @@ def _save_cache(
         if newest is not None:
             entry["newest"] = newest.to_json()
         components[key] = entry
+    data: dict[str, Any] = {"components": components}
+    if release is not None:
+        data["ember_release"] = dataclasses.asdict(release)
+        if release_retry:
+            data["ember_release_retry"] = True
     with contextlib.suppress(OSError, KeyError):
-        status.save_cache_file(cache_path(env), {"components": components}, env)
+        status.save_cache_file(cache_path(env), data, env)
+
+
+@dataclass(frozen=True)
+class _Release:
+    tag_name: str
+    url: str
+    read_at: float
+
+
+def _load_release(env: Mapping[str, str]) -> tuple[_Release | None, bool]:
+    try:
+        value = status.load_cache_file(cache_path(env))
+    except OSError, KeyError:
+        return None, False
+    if not isinstance(value, dict):
+        return None, False
+    entry = value.get("ember_release")
+    if not isinstance(entry, dict):
+        return None, False
+    tag, url = entry.get("tag_name"), entry.get("url")
+    read_at = status.finite_number(entry.get("read_at"))
+    if (
+        not isinstance(tag, str)
+        or not tag
+        or not isinstance(url, str)
+        or not url
+        or read_at is None
+    ):
+        return None, False
+    return _Release(tag, url, read_at), value.get("ember_release_retry") is True
+
+
+def _ember_release(
+    options: _Options,
+) -> tuple[EmberRelease | None, _Release | None, bool]:
+    held, retry = _load_release(options.env)
+    newest = None if held is None else _Newest(held.tag_name, held.read_at)
+    if _due(newest, options) or (retry and options.newest != "never"):
+        try:
+            body = _fetch(EMBER_RELEASE_URL, options.fetch)
+            tag = _json_field(EMBER_RELEASE_URL, body, ("tag_name",))
+            url = _json_field(EMBER_RELEASE_URL, body, ("html_url",))
+            dotted(tag)
+        except ReadError:
+            return None, held, True
+        held = _Release(tag, url, options.now)
+        retry = False
+    if held is None:
+        return None, held, retry
+    try:
+        installed = importlib.metadata.version("ember-app")
+        newer = dotted(installed) < dotted(held.tag_name)
+    except importlib.metadata.PackageNotFoundError, ReadError:
+        return None, held, retry
+    release = EmberRelease(held.tag_name.removeprefix("v"), held.url) if newer else None
+    return release, held, retry
 
 
 # Status
@@ -818,9 +1068,16 @@ def _row(
     installed: str | None,
     newest: str | None,
     error: str | None,
+    *,
+    link_state: str | None = None,
+    note: str | None = None,
 ) -> Component:
-    command = kind = note = None
-    if state == UPDATE_AVAILABLE:
+    command = kind = None
+    if spec.installed.kind == "skill":
+        if note is None:
+            command = spec.installed.commands.get(link_state or "")
+            kind = "install"
+    elif state == UPDATE_AVAILABLE:
         command, kind = spec.update, "update"
         note = spec.update_note
     elif state == MISSING:
@@ -841,10 +1098,13 @@ def _row(
         command=command,
         command_kind=kind,
         note=note,
+        installed_kind=spec.installed.kind,
+        newest_kind=spec.newest.kind,
+        link_state=link_state,
     )
 
 
-def _evaluate(
+def _evaluate_versions(
     spec: Spec,
     held: tuple[_Installed | None, _Newest | None],
     options: _Options,
@@ -854,6 +1114,24 @@ def _evaluate(
         found = _read_installed(spec, options.env, options.deadline, options.now)
     else:
         found = held_installed
+    if spec.newest.kind == "none":
+        state = CHECK_FAILED
+        error = "installed version: not read and nothing cached"
+        if found is not None:
+            state = (
+                MISSING if found.missing else CHECK_FAILED if found.error else CURRENT
+            )
+            error = found.error
+        row = _row(
+            spec,
+            state,
+            None if found is None else found.version,
+            None,
+            error,
+            link_state=None if found is None else found.link_state,
+            note=None if found is None else found.note,
+        )
+        return _Outcome(row, found, None)
     if found is not None and found.missing:
         newest = held_newest.version if held_newest else None
         row = _row(spec, MISSING, None, newest, None)
@@ -888,6 +1166,143 @@ def _evaluate(
     return _Outcome(row, found, reported)
 
 
+def _dpkg_owner(resolved: Path, options: _Options) -> str | None:
+    if not options.installed:
+        return None
+    try:
+        binary = _tool("dpkg-query", options.env)
+        code, out, _err = run_command(
+            [binary, "-S", str(resolved)], options.env, options.deadline
+        )
+    except ReadError:
+        return None
+    lines = out.strip().splitlines()
+    if code != 0 or len(lines) != 1:
+        return None
+    package, separator, owned = lines[0].partition(": ")
+    if (
+        not separator
+        or owned != str(resolved)
+        or not re.fullmatch(r"[a-z0-9][a-z0-9+.-]*(?::[a-z0-9-]+)?", package)
+    ):
+        return None
+    return package
+
+
+def _update_command(
+    spec: Spec,
+    launcher: str,
+    resolved: Path | None,
+    method_path: Path | None,
+    options: _Options,
+) -> tuple[str, Method | None]:
+    command = shlex.join([launcher, *shlex.split(spec.updater or "")[1:]])
+    matched = None
+    folder = Path(launcher).parent if resolved is None else resolved.parent
+    # Path methods retain their listed order; dpkg is always last.
+    for method in sorted(spec.methods, key=lambda method: method.kind == "dpkg"):
+        if resolved is None:
+            break
+        values = {"launcher": launcher}
+        if method.path is not None:
+            candidate_path = method_path or resolved
+            candidate = str(candidate_path)
+            if method.path.startswith("~/"):
+                try:
+                    relative = candidate_path.relative_to(
+                        paths.home_dir(options.env).resolve()
+                    )
+                except OSError, RuntimeError, ValueError:
+                    continue
+                candidate = "~/" + str(relative)
+            match = _path_pattern(method.path).match(candidate)
+            if match is None:
+                continue
+            values.update(match.groupdict())
+            if "prefix" in values:
+                values["prefix"] = values["prefix"] or "/"
+            if method.path == "{prefix}/lib/node_modules/{package}":
+                folder = Path(values["prefix"]) / "lib" / "node_modules"
+        else:
+            package = _dpkg_owner(resolved, options)
+            if package is None:
+                continue
+            values["package"] = package
+        command = method.update.format_map(
+            {name: shlex.quote(value) for name, value in values.items()}
+        )
+        matched = method
+        break
+    if not os.access(folder, os.W_OK) and shlex.split(command)[0] != "sudo":
+        command = "sudo " + command
+    return command, matched
+
+
+def _shim_target(resolved: Path) -> Path:
+    """Return a script's normalized target path without following its symlinks."""
+    limit = 64 * 1024
+    try:
+        info = resolved.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            return resolved
+        with resolved.open("rb") as stream:
+            content = stream.read(limit + 1)
+        if len(content) > limit or not content.startswith(b"#!"):
+            return resolved
+        text = content.decode("utf-8")
+        for match in re.finditer(r"""(["'])\$basedir/([^"'\r\n]+)\1""", text):
+            relative = match.group(2)
+            if not Path(relative).is_absolute() and "/node_modules/" in "/" + relative:
+                target = Path(os.path.abspath(resolved.parent / relative))
+                target.resolve(strict=True)
+                return target
+    except OSError, UnicodeError, RuntimeError:
+        pass
+    return resolved
+
+
+def _evaluate(
+    spec: Spec,
+    held: tuple[_Installed | None, _Newest | None],
+    options: _Options,
+) -> _Outcome:
+    outcome = _evaluate_versions(spec, held, options)
+    if spec.installed.engine is None:
+        return outcome
+    launcher = status.locate(spec.installed.engine, options.env)
+    if launcher is None:
+        row = _row(spec, MISSING, None, outcome.component.newest, None)
+        return replace(outcome, component=row)
+    resolved = None
+    with contextlib.suppress(OSError, RuntimeError):
+        resolved = Path(launcher).resolve(strict=True)
+    method_path = resolved
+    if resolved is not None:
+        target = _shim_target(resolved)
+        with contextlib.suppress(OSError, RuntimeError):
+            resolved, method_path = target.resolve(strict=True), target
+    row = replace(
+        outcome.component, resolved_path=None if resolved is None else str(resolved)
+    )
+    if spec.updater is not None:
+        command, method = _update_command(
+            spec, launcher, resolved, method_path, options
+        )
+        row = replace(row, method=method)
+        if row.status == UPDATE_AVAILABLE:
+            row = replace(
+                row,
+                command=command,
+                command_kind="update",
+                note=(
+                    "Ember could not tell how the tool was installed."
+                    if method is None
+                    else None
+                ),
+            )
+    return replace(outcome, component=row)
+
+
 def read(
     env: Mapping[str, str] | None = None,
     *,
@@ -898,7 +1313,7 @@ def read(
     deadline: float = TIMEOUT,
     components: tuple[Spec, ...] | None = None,
 ) -> DepsReport:
-    """Read every component's versions and status.
+    """Read every component's versions and status, and Ember's latest release.
 
     Reads that ran are written to the cache; a newest read that failed is not,
     so the next due read tries again. A cache that cannot be read is treated
@@ -936,23 +1351,28 @@ def read(
         deadline=deadline,
     )
     held = _load_cache(env)
-    with ThreadPoolExecutor(max_workers=max(1, len(specs))) as pool:
+    with ThreadPoolExecutor(max_workers=len(specs) + 1) as pool:
+        release_read = pool.submit(_ember_release, options)
         outcomes = list(
             pool.map(
                 lambda spec: _evaluate(spec, held.get(spec.id, (None, None)), options),
                 specs,
             )
         )
+        release, held_release, release_retry = release_read.result()
     entries = {
         spec.id: (
             outcome.installed,
-            outcome.newest or held.get(spec.id, (None, None))[1],
+            None
+            if spec.newest.kind == "none"
+            else outcome.newest or held.get(spec.id, (None, None))[1],
         )
         for spec, outcome in zip(specs, outcomes, strict=True)
     }
     if installed or newest != "never":
-        _save_cache(entries, env)
+        _save_cache(entries, env, held_release, release_retry)
     return DepsReport(
+        ember_release=release,
         components=tuple(outcome.component for outcome in outcomes),
         installed_read_at={
             outcome.component.id: None

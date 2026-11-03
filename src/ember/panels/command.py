@@ -43,12 +43,15 @@ def _usage(args: argparse.Namespace) -> str:
     """Require one mode and reject options that do not apply to it."""
     modes = [
         name
-        for name in ("question_file", "status", "recover")
+        for name in ("question_file", "status", "recover", "retry", "close")
         if getattr(args, name) is not None
     ]
     problem = None
     if len(modes) != 1:
-        problem = "give exactly one of --question-file, --status or --recover"
+        problem = (
+            "give exactly one of --question-file, --status, --recover, "
+            "--retry or --close"
+        )
     elif modes[0] != "question_file" and (
         args.dir is not None
         or args.member
@@ -58,9 +61,11 @@ def _usage(args: argparse.Namespace) -> str:
     ):
         problem = "--dir, --member, --claim, --read and --dry-run need --question-file"
     elif (args.stall is not None or args.timeout is not None) and (
-        modes[0] == "status" or args.dry_run
+        modes[0] in ("status", "close") or args.dry_run
     ):
-        problem = "--stall and --timeout need a start without --dry-run, or --recover"
+        problem = (
+            "--stall and --timeout need a start without --dry-run, --recover or --retry"
+        )
     if problem:
         raise CommandError(exits.USAGE, problem, members.HELP_LINE)
     return modes[0]
@@ -251,16 +256,46 @@ def _result(
     return panel["exit"]
 
 
-def _load(panel_id: str, env: Mapping[str, str]) -> dict[str, Any]:
-    """Report invalid or missing panel ids as usage errors."""
+def _load(
+    panel_id: str, env: Mapping[str, str], missing_code: int = 64
+) -> dict[str, Any]:
+    """Report invalid or missing panel ids with the mode's exit code."""
     if not record.is_panel_id(panel_id):
         raise CommandError(
-            64, f"invalid panel id: {panel_id}", "next: emb panel --status"
+            missing_code, f"invalid panel id: {panel_id}", "next: emb panel --status"
         )
     try:
         return record.load(panel_id, env)
     except record.PanelMissingError as error:
-        raise CommandError(64, str(error), "next: emb panel --status") from error
+        raise CommandError(
+            missing_code, str(error), "next: emb panel --status"
+        ) from error
+
+
+def _close_result(
+    panel_id: str,
+    results: list[dict[str, Any]],
+    as_json: bool,
+    out: TextIO,
+    err: TextIO,
+) -> int:
+    """Print each open run's close result and the aggregate exit."""
+    code = 0 if all(item["closed"] for item in results) else exits.REFUSED
+    line = f"next: emb panel --status {panel_id}"
+    if as_json:
+        print(
+            json.dumps(
+                {"panel": panel_id, "exit": code, "members": results, "next": line},
+                indent=2,
+            ),
+            file=out,
+        )
+    else:
+        for item in results:
+            result = "closed" if item["closed"] else item["close_error"]
+            print(f"member {item['n']} · run {item['run']} · {result}", file=out)
+    print(line, file=err)
+    return code
 
 
 def _status(
@@ -397,9 +432,17 @@ def main(
                 left_out=selection.left_out,
             )
         else:
-            panel_id = args.recover
-            _load(panel_id, environment)
+            panel_id = args.retry[0] if mode == "retry" else getattr(args, mode)
+            _load(panel_id, environment, 65 if mode in ("retry", "close") else 64)
         with record.hold(panel_id, environment), stop_handlers(stop):
+            if mode == "close":
+                return _close_result(
+                    panel_id,
+                    run.close(panel_id, environment, core_factory=core_factory),
+                    args.json,
+                    out,
+                    err,
+                )
             if mode == "question_file":
                 assert panel is not None
                 try:
@@ -422,6 +465,18 @@ def main(
                     poll_seconds=poll_seconds,
                     err=err,
                 )
+            elif mode == "retry":
+                outcome = run.retry(
+                    panel_id,
+                    args.retry[1],
+                    environment,
+                    stall_minutes=stall,
+                    timeout_minutes=timeout,
+                    core_factory=core_factory,
+                    stop=stop,
+                    poll_seconds=poll_seconds,
+                    err=err,
+                )
             else:
                 outcome = run.recover(
                     panel_id,
@@ -440,11 +495,17 @@ def main(
     except CommandError as error:
         code, message, line = error.code, str(error), error.line
     except record.Busy:
-        code = exits.REFUSED if mode == "recover" else exits.UNEXPECTED
+        code = (
+            exits.REFUSED if mode in ("recover", "retry", "close") else exits.UNEXPECTED
+        )
         message = f"the panel {panel_id} is still running"
         line = f"next: emb panel --status {panel_id}"
     except run.NothingToRecover as error:
         code, message = exits.REFUSED, str(error)
+        line = f"next: emb panel --status {panel_id}"
+    except (run.RetryRefused, run.MemberMissingError) as error:
+        code = 65 if isinstance(error, run.MemberMissingError) else exits.REFUSED
+        message = str(error)
         line = f"next: emb panel --status {panel_id}"
     except (record.LockError, paths.RuntimeDirError) as error:
         code, message, line = exits.UNAVAILABLE, str(error), exits.line(69, "runtime")

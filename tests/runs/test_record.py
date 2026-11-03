@@ -82,7 +82,7 @@ def test_save_and_load_round_trip(env: dict[str, str]) -> None:
     assert stored["commits"] == []
     assert set(stored) == {
         "id", "engine", "model", "effort", "read_only", "repo", "worktree",
-        "branch", "base", "sandbox", "network", "read", "read_effective",
+        "branch", "base", "base_branch", "sandbox", "network", "read", "read_effective",
         "trailers", "claim", "status",
         "turn", "turn_state", "reply", "expected_head", "started_at",
         "updated_at", "ended_at", "last_exit", "last_reason", "commits",
@@ -190,3 +190,11 @@ def test_list_runs_skips_panel_folders(env: dict[str, str]) -> None:
     record.save(run)
     record.make_run_dir("panel-20260101-120000-abcdef", env)
     assert record.list_runs(env) == ([run], [])
+
+
+def test_record_without_base_branch_loads(env: dict[str, str]) -> None:
+    run = _run(env)
+    document = run.to_json()
+    del document["base_branch"]
+    (run.folder / "run.json").write_text(json.dumps(document))
+    assert record.load(run.id, env).base_branch is None

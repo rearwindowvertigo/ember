@@ -505,11 +505,11 @@ def test_finish_marks_gone_and_is_idempotent(env: dict[str, str]) -> None:
     reply = choices.finish("run-000001", env=env)
     assert reply == {
         "claim": {"id": "run-000001", "status": "gone"},
-        "generation": generation + 1,
+        "generation": generation,
         "errors": [],
     }
     again = choices.finish("run-000001", env=env)
-    assert again["generation"] == generation + 1
+    assert again["generation"] == generation
     reply = choices.read(
         "run-000001", request={"single.reviewer_as": "subagent"}, env=env
     )
@@ -521,7 +521,7 @@ def test_finish_marks_gone_and_is_idempotent(env: dict[str, str]) -> None:
 def test_finish_of_unknown_id_records_gone(env: dict[str, str]) -> None:
     reply = choices.finish("run-000002", env=env)
     assert reply["claim"]["status"] == "gone"
-    assert reply["generation"] == 1
+    assert reply["generation"] == 0
     assert choices.read("run-000002", env=env)["claim"]["status"] == "gone"
     choices.set_once({"single.writer_as": "subagent"}, env=env)
     assert choices.claim("run-000002", env=env)["claim"]["status"] == "gone"
@@ -561,6 +561,7 @@ def test_once_expires_at_exactly_24_hours(env: dict[str, str]) -> None:
     assert choices.snapshot(env=env, now=T0 + DAY)["once"] is None
     reply = choices.claim("run-000001", env=env, now=T0 + DAY)
     assert reply["claim"]["status"] == "none"
+    assert reply["generation"] == snap["generation"]
 
 
 def test_once_just_before_expiry_is_claimed(env: dict[str, str]) -> None:
@@ -575,7 +576,8 @@ def test_expiry_is_projected_by_reads_and_stored_by_next_write(
     choices.set_once({"single.writer_as": "subagent"}, env=env, now=T0)
     generation = _generation(env)
     assert choices.snapshot(env=env, now=T0 + DAY)["generation"] == generation
-    choices.set_settings({"app.theme": "dark"}, env=env, now=T0 + DAY)
+    reply = choices.set_settings({}, env=env, now=T0 + DAY)
+    assert reply["generation"] == generation
     conn = sqlite3.connect(_db_path(env))
     assert conn.execute("SELECT count(*) FROM once").fetchone()[0] == 0
     conn.close()
@@ -592,11 +594,12 @@ def test_claim_expires_at_exactly_7_days(env: dict[str, str]) -> None:
     ]
     after = choices.read("run-000001", env=env, now=T0 + week)
     assert after["claim"]["status"] == "gone"
+    assert after["generation"] == before["generation"]
     assert _answer(after, "single.writer_as") == ("cli", "default")
     assert choices.snapshot(env=env, now=T0 + week)["claims"] == []
     generation = _generation(env)
     choices.clear_once(env=env, now=T0 + week)
-    assert _generation(env) == generation + 1
+    assert _generation(env) == generation
     conn = sqlite3.connect(_db_path(env))
     row = conn.execute("SELECT status, copy FROM claims").fetchone()
     conn.close()
@@ -624,7 +627,7 @@ def test_reads_never_write(env: dict[str, str]) -> None:
     conn.close()
 
 
-def test_generation_rises_by_one_per_changing_write(env: dict[str, str]) -> None:
+def test_generation_rises_for_settings_and_once_writes(env: dict[str, str]) -> None:
     assert choices.set_settings({"app.theme": "dark"}, env=env)["generation"] == 1
     reply = choices.set_settings(
         {"app.theme": "light", "worker.network": "on"}, env=env
@@ -632,11 +635,12 @@ def test_generation_rises_by_one_per_changing_write(env: dict[str, str]) -> None
     assert reply["generation"] == 2
     assert choices.set_once({"single.writer": "ask"}, env=env)["generation"] == 3
     assert choices.claim("run-000001", env=env)["generation"] == 4
-    assert choices.claim("run-000002", env=env)["generation"] == 5
-    assert choices.finish("run-000002", env=env)["generation"] == 6
-    assert choices.clear_settings(["app.theme"], env=env)["generation"] == 7
+    assert choices.claim("run-000002", env=env)["generation"] == 4
+    assert choices.read("run-000002", env=env)["generation"] == 4
+    assert choices.finish("run-000002", env=env)["generation"] == 4
+    assert choices.clear_settings(["app.theme"], env=env)["generation"] == 5
     choices.set_once({"single.writer": "ask"}, env=env)
-    assert choices.clear_once(env=env)["generation"] == 9
+    assert choices.clear_once(env=env)["generation"] == 7
 
 
 def test_no_op_writes_keep_the_generation(env: dict[str, str]) -> None:
@@ -646,9 +650,37 @@ def test_no_op_writes_keep_the_generation(env: dict[str, str]) -> None:
     assert choices.clear_settings(["worker.network"], env=env)["generation"] == 1
     assert choices.clear_once(env=env)["generation"] == 1
     choices.finish("run-000001", env=env)
-    assert choices.finish("run-000001", env=env)["generation"] == 2
+    assert choices.finish("run-000001", env=env)["generation"] == 1
     choices.claim("run-000003", env=env)
-    assert choices.claim("run-000003", env=env)["generation"] == 3
+    assert choices.claim("run-000003", env=env)["generation"] == 1
+
+
+def test_replacing_once_with_the_same_values_raises_generation(
+    env: dict[str, str],
+) -> None:
+    values = {"single.writer": "ask"}
+    assert choices.set_once(values, env=env, now=T0)["generation"] == 1
+    assert choices.set_once(values, env=env, now=T0)["generation"] == 2
+
+
+def test_consuming_once_refuses_a_save_with_the_old_generation(
+    env: dict[str, str],
+) -> None:
+    generation = choices.set_once({"single.writer": "ask"}, env=env)["generation"]
+    assert choices.claim("run-000001", env=env)["generation"] == generation + 1
+    with pytest.raises(db.StaleGenerationError):
+        choices.set_settings({"app.theme": "dark"}, generation, env=env)
+    assert choices.snapshot(env=env)["settings"] == {}
+
+
+def test_existing_database_keeps_its_generation(env: dict[str, str]) -> None:
+    choices.set_settings({"app.theme": "dark"}, env=env)
+    _raw(env, "UPDATE meta SET value = '42' WHERE key = 'generation'")
+    assert choices.snapshot(env=env)["generation"] == 42
+    assert choices.claim("run-000001", env=env)["generation"] == 42
+    assert choices.finish("run-000001", env=env)["generation"] == 42
+    reply = choices.set_settings({"app.theme": "light"}, 42, env=env)
+    assert reply["generation"] == 43
 
 
 def test_stale_generation_changes_nothing(env: dict[str, str]) -> None:
@@ -816,7 +848,7 @@ def test_first_claims_from_processes_on_a_new_database(
 ) -> None:
     assert not _db_path(env).exists()
     assert _claim_in_processes(env, 6) == ["none"] * 6
-    assert _generation(env) == 6
+    assert _generation(env) == 0
 
 
 def test_claims_from_processes_take_a_pending_once_once(
@@ -825,6 +857,7 @@ def test_claims_from_processes_take_a_pending_once_once(
     choices.set_once({"single.writer_as": "subagent"}, env=env)
     statuses = _claim_in_processes(env, 6)
     assert sorted(statuses) == ["claimed"] + ["none"] * 5
+    assert _generation(env) == 2
 
 
 # An invalid pending once

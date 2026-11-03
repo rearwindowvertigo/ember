@@ -99,6 +99,37 @@ def test_missing(flow: dict[str, Any], env: dict[str, str]) -> None:
         record.load(flow["id"], env)
 
 
+@pytest.mark.parametrize("status", record.FLOW_STATUSES)
+def test_status_round_trip(
+    flow: dict[str, Any], created: Path, env: dict[str, str], status: str
+) -> None:
+    flow["status"] = status
+    record.save(flow, env)
+    assert record.load(flow["id"], env)["status"] == status
+    assert record.cancel_request(flow["id"], env) is None
+
+
+@pytest.mark.parametrize("reason", [None, "the scope changed"])
+def test_cancel_request_and_end(
+    flow: dict[str, Any], created: Path, env: dict[str, str], reason: str | None
+) -> None:
+    request = {"at": 123.0, "reason": reason}
+    runs.write_private(created / record.CANCEL_NAME, json.dumps(request))
+    assert record.cancel_request(flow["id"], env) == request
+    record.finish_cancel(flow, request, env)
+    loaded = record.load(flow["id"], env)
+    assert loaded["status"] == "cancelled"
+    assert loaded["status"] in record.ENDED
+    assert loaded["reason"] == reason and loaded["ended_at"] == 123.0
+    event = record.read_events(flow["id"], env)[-1]
+    assert (event["kind"], event["status"], event["reason"], event["exit"]) == (
+        "end",
+        "cancelled",
+        reason,
+        82,
+    )
+
+
 def test_load_without_plan_waves(
     flow: dict[str, Any], created: Path, env: dict[str, str]
 ) -> None:
@@ -424,3 +455,11 @@ def test_correction_creation_refuses_existing_file(
         )
     assert target.read_text() == "existing correction"
     assert record.read_answers(flow["id"], env) == []
+
+
+def test_record_without_base_branch_loads(
+    flow: dict[str, Any], created: Path, env: dict[str, str]
+) -> None:
+    del flow["base_branch"]
+    (created / record.FLOW_NAME).write_text(json.dumps(flow))
+    assert record.load(flow["id"], env)["base_branch"] is None

@@ -730,6 +730,7 @@ class Core:
             raise RunError(exits.NOT_A_CHECKOUT, f"cannot find the git folder of {top}")
         common = Path(common_dir)
         base = self._git_out(top, "rev-parse", "-q", "--verify", "HEAD^{commit}")
+        base_branch = self._git_out(top, "symbolic-ref", "-q", "--short", "HEAD")
         run_id = record.new_id(engine)
         if options.read_only:
             main, worktree, branch = None, top, None
@@ -758,6 +759,7 @@ class Core:
                 worktree=worktree,
                 branch=branch,
                 base=base,
+                base_branch=base_branch,
                 sandbox=provider,
                 network=answers["worker.network"]["value"] == "on",
                 read=read,

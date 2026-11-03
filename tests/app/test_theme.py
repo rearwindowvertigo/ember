@@ -233,3 +233,14 @@ def test_font_step_survives_apply(
     finally:
         theme.apply(qapp, previous)
         qapp.setStyleSheet("")
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+@pytest.mark.parametrize("tone", ["warning", "danger", "incomplete"])
+def test_status_tones_meet_text_contrast(mode: str, tone: str) -> None:
+    assert (
+        theme.contrast(
+            theme.color(f"{tone}-text", mode), theme.color(f"{tone}-bg", mode)
+        )
+        >= 4.5
+    )

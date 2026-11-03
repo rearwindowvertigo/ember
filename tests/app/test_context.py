@@ -95,6 +95,30 @@ def test_save_settings_calls_back_after_success(
     assert order == ["settings", "done", "result"]
 
 
+def test_save_after_another_caller_claims_and_finishes(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    choices.set_settings({"app.theme": "light"}, env=env)
+    context = _ready(env, qtbot)
+    snapshot = context.settings()
+    assert snapshot["once"] is None
+    claim = choices.claim("run-000001", env=env)
+    assert claim["claim"]["status"] == "none"
+    choices.finish("run-000001", env=env)
+    assert context.settings() is snapshot
+    saved: list[dict[str, Any]] = []
+    with (
+        qtbot.assertNotEmitted(context.stale),
+        qtbot.assertNotEmitted(context.error),
+        qtbot.waitSignal(context.settings_changed, timeout=5000),
+    ):
+        context.save_settings({"app.theme": "dark"}, saved.append)
+    assert saved == [context.settings()]
+    assert context.setting("app.theme") == "dark"
+    assert context.settings()["generation"] == snapshot["generation"] + 1
+    assert choices.snapshot(env=env)["settings"]["app.theme"] == "dark"
+
+
 @pytest.mark.parametrize(
     "error",
     [
@@ -653,3 +677,17 @@ def test_autostart_reason_is_kept_and_signalled(
         context.set_autostart_reason(None)
     assert blocker.args == [None]
     assert context.autostart_reason() is None
+
+
+def test_flows_default_inactive_and_injectable(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    context = AppContext(env)
+    assert not context.flows.active()
+    assert not context.flows.loaded()
+    assert context.tasks.pending() == 0
+    other = AppContext(env, flows=context.flows)
+    assert other.flows is context.flows
+    with qtbot.assertNotEmitted(context.flows.changed, wait=50):
+        context.flows.reload()
+    assert context.tasks.pending() == 0

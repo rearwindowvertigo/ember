@@ -98,9 +98,27 @@ after the owner answers, and run recovery in the background. Exit 77 also
 covers `git add failed`: repair that failure and use `--recover`; the hook
 output send applies only when `git commit was refused`.
 
+## Cancellation
+
+You may cancel a flow for any reason you state. State the reason and run:
+
+```bash
+emb flow --cancel <id> --reason "<reason>" --json
+```
+
+Report the cancellation to the owner with the reason, every kept branch
+(the flow branch and every `task_branches` entry), and every `open_runs`
+entry with its task, role and run id. Cancellation stops the flow runner;
+writer and reviewer turns keep running. It closes no task run and deletes
+no branch or worktree. `emb flow --resume <id>` restarts from the recorded
+task states. A cancelled watch exits 82; `--lead` requires a resume first.
+Exit 75 from `--cancel` means the flow had already ended or the 60-second
+deadline from writing `cancel.json` passed with the request still pending;
+follow `next: emb flow --status <id>`.
+
 ## Exits
 
-Exit 82 means failed or ended with tasks unmerged. Report every task's
+Exit 82 means cancelled, failed or ended with tasks unmerged. Report every task's
 status and reason and leave unmerged work to the owner. Do not merge the
 flow branch until the owner decides what to do with it.
 
@@ -120,10 +138,9 @@ python3 scripts/verify_branch.py --repo <repo> --base <session branch> --branch 
 Omit `--expect-files`. Run your own checks and apply the skill's exact
 review bar to the whole flow diff. Inspect each task's `outside_files`,
 every retained `should` and `lead` finding, and every retained branch.
-Give one verdict for the flow branch, written as reply text such as
-`Verdict: Keep.` in the same message as the `emb merge` call and before
-it; a verdict only in thinking does not count. Run that call on its
-own, with no other command chained before or after it.
+Give one verdict for the flow branch as the `--note` of the `emb merge`
+call, such as `--note 'Keep.'`. Run that call on its own, with no other
+command chained before or after it.
 
 If verification rejects the result, keep the flow branch and claim open,
 name the failed check, and make a separately reviewed correction on the
@@ -132,18 +149,19 @@ the flow worktree, review its result and merge that correction into the
 flow branch through `emb merge`; do not answer a completed flow with
 `--lead` or merge the rejected result into the session branch. When that
 correction fails too, the verdict is `Keep, with <fix>` naming what is
-missing, or Discard; write it right before the merge, and leave a
+missing, or Discard; give it as the merge's `--note`, and leave a
 Discard unmerged. Merge a `Keep, with <fix>` at once, then make and check
 the fix yourself on the session branch; it needs no question to the owner.
 
-After `Verdict: Keep.` or `Verdict: Keep, with <fix>.`, merge under the skill's merge and cleanup rules:
+For a Keep or a Keep, with <fix>, merge under the skill's merge and
+cleanup rules:
 
 ```bash
-emb merge ember/flow/<id> --into <session branch> --verdict keep --dir <dir>
+emb merge ember/flow/<id> --into <session branch> --verdict keep --note '<verdict line>' --dir <dir>
 ```
 
 Report `flow <id> · <writer> / <reviewer> · exit <n> · <merged> of
 <tasks> merged · ember/flow/<id>`, one line per task with id, status,
-rounds and reason, then the verdict already written before the merge.
+rounds and reason, then the verdict given as the merge's note.
 Include the verified tip and cleanup keeps. Finish with `emb choices --finish <id>` after the merge or the
 owner's decision on unmerged work, using the claim id, not the flow id.

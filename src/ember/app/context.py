@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QDialog, QWidget
 
 from ember import choices, db, terminals
 from ember import deps as dependencies
+from ember.app.flows import FlowsModel
 from ember.app.runs import RunsModel
 from ember.app.tasks import TaskRunner
 from ember.app.widgets import RunCommandDialog
@@ -92,6 +93,7 @@ class AppContext(QObject):
         *,
         tasks: TaskRunner | None = None,
         runs: RunsModel | None = None,
+        flows: FlowsModel | None = None,
         parent: QObject | None = None,
     ) -> None:
         """Create the context; nothing is read until asked.
@@ -100,12 +102,16 @@ class AppContext(QObject):
             env: The environment every read and command uses.
             tasks: The task runner; `None` creates one on the global pool.
             runs: The run model; `None` creates one.
+            flows: The flow and panel model; `None` creates an inactive one.
             parent: The parent object.
         """
         super().__init__(parent)
         self.env = env
         self.tasks = TaskRunner(parent=self) if tasks is None else tasks
         self.runs = RunsModel(env, self.tasks, parent=self) if runs is None else runs
+        self.flows = (
+            FlowsModel(env, self.tasks, parent=self) if flows is None else flows
+        )
         self.runs.turn_failed.connect(self._turn_failed)
         self._settings: dict[str, Any] | None = None
         self._engines: dict[str, status.EngineStatus] | None = None

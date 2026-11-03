@@ -1362,3 +1362,132 @@ def test_explicit_review_still_refuses_an_unchanged_failed_turn(h: Harness) -> N
     item = h.run()["tasks"][0]
     assert item["reason"] == "the writer made no change"
     assert item["reviews"] == []
+
+
+@pytest.mark.parametrize("already_saved", [False, True])
+def test_pending_cancel_prevents_startup_wave(h: Harness, already_saved: bool) -> None:
+    h.create()
+    request = {"at": time.time(), "reason": "cancel before startup"}
+    runs.write_private(
+        record.folder(h.id, h.env) / record.CANCEL_NAME, json.dumps(request)
+    )
+    if already_saved:
+        record.finish_cancel(h.flow(), request, h.env)
+    flow = h.run()
+    assert flow["status"] == "cancelled" and flow["reason"] == request["reason"]
+    assert flow["wave"] == 0 and flow["tasks"][0]["writer_run"] is None
+    assert not lock.live(h.id, h.env)
+    events = record.read_events(h.id, h.env)
+    assert len([event for event in events if event["kind"] == "end"]) == 1
+    assert events[-1]["exit"] == 82
+
+
+def test_cancel_finish_wins_over_queued_answers(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h.create()
+
+    def drive(instance: runner._Runner) -> tuple[str, None]:
+        h.answer("drop")
+        runs.write_private(
+            instance.folder / record.CANCEL_NAME,
+            json.dumps({"at": time.time(), "reason": "stop now"}),
+        )
+        instance.shutdown.set()
+        return "failed", None
+
+    monkeypatch.setattr(runner._Runner, "drive", drive)
+    flow = h.run()
+    assert flow["status"] == "cancelled" and flow["reason"] == "stop now"
+    assert flow["answers_seen"] == 0
+    assert flow["tasks"][0]["status"] == "pending"
+
+
+@pytest.mark.parametrize("phase", ["writer", "reviewer", "checking"])
+def test_cancel_live_runner_keeps_turns_and_stops_check(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    from ember.flows import command
+
+    check = [sys.executable, "-c", "import time; time.sleep(60)"]
+    h.create(
+        [task("a", text="@hang\n@write a value" if phase == "writer" else None)],
+        **({"check": check} if phase == "checking" else {}),
+    )
+    if phase == "reviewer":
+        h.scripts_update(**{"a read-only review;": "@hang\n@reply " + PASS})
+    shutdown = threading.Event()
+    monkeypatch.setattr(command, "POLL_SECONDS", 0.01)
+    signalled: list[bool] = []
+    pipeline_finished = threading.Event()
+    pipeline = runner._Runner.pipeline
+
+    def tracked_pipeline(instance: runner._Runner, item: dict[str, Any]) -> None:
+        try:
+            pipeline(instance, item)
+        finally:
+            pipeline_finished.set()
+
+    monkeypatch.setattr(runner._Runner, "pipeline", tracked_pipeline)
+
+    def signal_runner(fd: int, sig: int) -> None:
+        assert sig == signal.SIGTERM
+        request = record.cancel_request(h.id, h.env)
+        assert request is not None and request["reason"] == "scope changed"
+        assert command._startup(h.flow(), h.env)["at"] == 0
+        signalled.append(True)
+        shutdown.set()
+
+    monkeypatch.setattr(command.signal, "pidfd_send_signal", signal_runner)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(runner._run, h.id, h.env, h.factory, 0.01, shutdown)
+        deadline = time.monotonic() + 15
+        try:
+            while True:
+                flow = h.flow()
+                item = flow["tasks"][0]
+                ready = (
+                    flow.get("active_check")
+                    if phase == "checking"
+                    else item[f"{phase}_run"]
+                    and runs.load(item[f"{phase}_run"], h.env).status == runs.RUNNING
+                )
+                if ready:
+                    break
+                assert time.monotonic() < deadline, flow
+                time.sleep(0.01)
+            check_pid = (flow.get("active_check") or {}).get("pid")
+            out = io.StringIO()
+            command._cancel(h.id, "scope changed", True, h.env, out, io.StringIO())
+            assert future.result(timeout=10) == 0
+        finally:
+            shutdown.set()
+    assert signalled == [True]
+    flow = h.flow()
+    assert flow["status"] == "cancelled" and flow["reason"] == "scope changed"
+    assert not lock.live(h.id, h.env)
+    report = json.loads(out.getvalue())
+    if phase == "checking":
+        assert check_pid is not None and runner._process_start(check_pid) is None
+        assert flow["check_pending"] and flow["checks"][-1]["exit"] == 124
+        assert report["open_runs"] == []
+        flow["check"] = [sys.executable, "-c", "pass"]
+        record.save(flow, h.env)
+    else:
+        run_id = flow["tasks"][0][f"{phase}_run"]
+        assert {"task": "a", "role": phase, "run": run_id} in report["open_runs"]
+        opened = runs.load(run_id, h.env)
+        assert opened.status == runs.RUNNING
+        assert Path(opened.worktree).is_dir()
+        # Release the stub turn and collect it when the flow resumes.
+        (opened.folder / "stub" / "release").touch()
+        assert pipeline_finished.wait(10)
+    (record.folder(h.id, h.env) / record.CANCEL_NAME).unlink()
+    resumed = h.instance()
+    resumed.begin()
+    assert h.flow()["ended_at"] is None and h.flow()["reason"] is None
+    assert h.flow()["tasks"] == flow["tasks"]
+    h.scripts_update(**{"a read-only review;": "@reply " + PASS})
+    final = h.run()
+    assert final["status"] == "done", final["tasks"]
+    assert final["tasks"][0]["status"] == "merged"

@@ -6,11 +6,13 @@ component's status, its installed and newest versions, and the update or
 install command when there is one, which runs only after the Run this
 command? dialog. Opening the screen shows the last report; Check now reads
 installed versions, and newest versions when due.
+A newer Ember release appears above the groups with a download link.
 """
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from ember import deps
@@ -86,6 +88,10 @@ def subtitle(report: deps.DepsReport, now: float | None = None) -> str:
         summary = f"{parts[0]}."
     else:
         summary = f"{', '.join(parts[:-1])} and {parts[-1]}."
+    if report.components and all(
+        item.newest_kind == "none" for item in report.components
+    ):
+        return summary
     oldest = report.oldest_newest_read()
     if oldest is None:
         read = "Newest versions not read yet."
@@ -136,8 +142,10 @@ def versions_line(item: deps.Component) -> str:
     Returns:
         "Installed <v> · Newest <v>", with "Not read" for a version that was
         not read; a missing component shows only its newest version, when
-        one was read.
+        one was read. A skill shows its link state.
     """
+    if item.installed_kind == "skill":
+        return item.link_state or NOT_READ
     newest = item.newest or NOT_READ
     if item.status == deps.MISSING:
         return "" if item.newest is None else f"Newest {newest}"
@@ -176,14 +184,24 @@ class DependencyTile(widgets.Card):
         self.error = label(item.error or "", "muted")
         self.error.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.error)
-        self.error.setVisible(bool(item.error))
+        self.error.setVisible(bool(item.error) and item.error != item.link_state)
+        self.resolved_path = label(item.resolved_path or "", "muted")
+        self.resolved_path.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        layout.addWidget(self.resolved_path)
+        self.resolved_path.setVisible(
+            item.resolved_path is not None
+            and item.command is not None
+            and item.command_kind == "update"
+        )
         self.command: widgets.CommandLine | None = None
         self.note: QLabel | None = None
         if item.command is not None:
             self.command = widgets.CommandLine(item.command)
             self.command.run_requested.connect(self._run)
             layout.addWidget(self.command)
-        elif item.note:
+        if item.note:
             self.note = label(item.note, "secondary")
             layout.addWidget(self.note)
         layout.addStretch(1)
@@ -231,6 +249,7 @@ class DependenciesScreen(QWidget):
         self.alert_area = QVBoxLayout()
         self.alert_area.setContentsMargins(0, 0, 0, 0)
         self.alert: widgets.Alert | None = None
+        self.release_alert: widgets.Alert | None = None
         layout.addLayout(self.alert_area)
 
         self.state_view = widgets.StateView()
@@ -337,6 +356,29 @@ class DependenciesScreen(QWidget):
         """
         self._dirty = False
         self.subtitle.setText(subtitle(report))
+        discard(self.release_alert, self.alert_area)
+        self.release_alert = None
+        if report.ember_release is not None:
+            release = report.ember_release
+
+            def open_release() -> None:
+                QDesktopServices.openUrl(QUrl(release.url))
+
+            self.release_alert = widgets.Alert(
+                "info",
+                f"Ember {release.version} is available",
+                actions=(
+                    [("Download", open_release)]
+                    if release.url.startswith(
+                        "https://github.com/rearwindowvertigo/ember/"
+                    )
+                    else []
+                ),
+            )
+            self.alert_area.addWidget(self.release_alert)
+            self.release_alert.show()
+            if self.release_alert.buttons:
+                QWidget.setTabOrder(self.check_button, self.release_alert.buttons[0])
         self.tiles = {}
         self.groups = []
         groups = ordered(report)

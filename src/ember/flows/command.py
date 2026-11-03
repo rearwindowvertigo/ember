@@ -12,6 +12,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import sys
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -29,6 +30,7 @@ NOT_MERGED = 82
 POLL_SECONDS = 1.0
 START_SECONDS = 30.0
 SESSION_EXIT_SECONDS = 10.0
+CANCEL_SECONDS = 60.0
 GIT_LOCATION = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -55,7 +57,7 @@ def _usage(args: argparse.Namespace) -> str:
     """Check every mode and dependent option before reading files."""
     modes = [
         name
-        for name in ("dry_run", "start", "watch", "status", "lead", "resume")
+        for name in ("dry_run", "start", "watch", "status", "lead", "resume", "cancel")
         if (
             getattr(args, name)
             if name in ("dry_run", "start")
@@ -66,7 +68,7 @@ def _usage(args: argparse.Namespace) -> str:
     if len(modes) != 1:
         problem = (
             "give exactly one of --dry-run, --start, --watch, "
-            "--status, --lead or --resume"
+            "--status, --lead, --resume or --cancel"
         )
     else:
         mode = modes[0]
@@ -89,8 +91,10 @@ def _usage(args: argparse.Namespace) -> str:
             problem = "--writer and --claim need --dry-run or --start"
         elif args.stall is not None and mode != "start":
             problem = "--stall needs --start"
-        elif args.json and mode not in ("dry_run", "watch", "status"):
-            problem = "--json needs --dry-run, --watch or --status"
+        elif args.reason is not None and mode != "cancel":
+            problem = "--reason needs --cancel"
+        elif args.json and mode not in ("dry_run", "watch", "status", "cancel"):
+            problem = "--json needs --dry-run, --watch, --status or --cancel"
     if problem:
         raise CommandError(exits.USAGE, problem, "next: emb flow --help")
     return modes[0]
@@ -164,22 +168,27 @@ def runner_command(flow_id: str) -> list[str]:
 
 
 @contextlib.contextmanager
-def lifecycle(flow_id: str, env: Mapping[str, str]) -> Iterator[None]:
-    """Serialize startup and answer enqueueing with runner shutdown.
+def lifecycle(
+    flow_id: str, env: Mapping[str, str], *, blocking: bool = True
+) -> Iterator[None]:
+    """Serialize startup, answers and cancellation with runner shutdown.
 
     The runner must hold this same lifecycle.lock for its final answer read
     through releasing its lifetime lock. It must not hold it for a wave.
     """
-    with _file_lock(record.folder(flow_id, env) / "lifecycle.lock"):
+    with _file_lock(record.folder(flow_id, env) / "lifecycle.lock", blocking=blocking):
         yield
 
 
 @contextlib.contextmanager
-def _file_lock(path: Path) -> Iterator[None]:
+def _file_lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
     """Hold an exclusive lock on a private file until the operation ends."""
     fd = paths.open_private_file(path)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError as error:
+            raise lock.Busy(f"another command holds {path.name}") from error
         yield
     finally:
         os.close(fd)
@@ -247,6 +256,7 @@ def _session(
     _require_tool("tmux", env)
     try:
         _wait_session_exit(flow_id, env, follow)
+        (record.folder(flow_id, env) / record.CANCEL_NAME).unlink(missing_ok=True)
         events = record.read_events(flow_id, env)
         reservation = {"at": time.time(), "after": events[-1]["seq"] if events else 0}
         run_record.write_private(
@@ -395,6 +405,19 @@ def _start(
         tmux.socket_path(env)
     except OSError as error:
         raise CommandError(69, str(error), exits.line(69, "runtime") or "") from error
+    base_ref = branches.open_repository(top, env, "flow").git(
+        "rev-parse",
+        "--symbolic-full-name",
+        "--verify",
+        "--end-of-options",
+        document.base,
+    )
+    base_name = base_ref.stdout.strip() if base_ref.returncode == 0 else ""
+    base_branch = (
+        base_name.removeprefix("refs/heads/")
+        if base_name.startswith("refs/heads/")
+        else None
+    )
     flow_id = record.new_id()
     flow = record.new_flow(
         flow_id,
@@ -402,6 +425,7 @@ def _start(
         top=str(top),
         main=str(main),
         base=base,
+        base_branch=base_branch,
         writer=writer,
         reviewer=reviewer,
         stall_minutes=args.stall if args.stall is not None else STALL_MINUTES,
@@ -427,14 +451,18 @@ def _start(
     return 0
 
 
-def _load(flow_id: str, env: Mapping[str, str]) -> dict[str, Any]:
-    """Read a flow, reporting an invalid or missing id as usage."""
+def _load(
+    flow_id: str, env: Mapping[str, str], *, missing_code: int = 64
+) -> dict[str, Any]:
+    """Read a flow with the mode's missing-record exit code."""
     if not record.is_flow_id(flow_id):
         raise CommandError(64, f"invalid flow id: {flow_id}", "next: emb flow --status")
     try:
         return record.load(flow_id, env)
     except record.FlowMissingError as error:
-        raise CommandError(64, str(error), "next: emb flow --status") from error
+        raise CommandError(
+            missing_code, str(error), "next: emb flow --status"
+        ) from error
 
 
 def _not_done(flow: Mapping[str, Any]) -> None:
@@ -455,8 +483,178 @@ def _resume(
     with lifecycle(flow_id, env):
         flow = _load(flow_id, env)
         _not_done(flow)
+        if flow["status"] != "cancelled" and record.cancel_request(flow_id, env):
+            raise CommandError(
+                75,
+                f"cancellation of {flow_id} is pending",
+                f"next: emb flow --status {flow_id}",
+            )
         _session(flow, env, argv)
     print(f"flow {flow_id}", file=out)
+
+
+def _cancel_report(
+    flow: Mapping[str, Any], env: Mapping[str, str], err: TextIO
+) -> dict[str, Any]:
+    """List recorded task branches and runs whose stored status is open.
+
+    A run record that does not load is left out with a warning on `err`.
+    """
+    task_branches: list[dict[str, Any]] = []
+    open_runs: list[dict[str, str]] = []
+    seen_runs: set[str] = set()
+    seen_branches: set[str] = set()
+    for task in flow["tasks"]:
+        branch = task["branch"]
+        removed = any(
+            item.get("action") == "removed" and item.get("branch") == branch
+            for item in task["cleanup"]
+        )
+        if branch and not removed:
+            task_branches.append({"task": task["id"], "branch": branch})
+            seen_branches.add(branch)
+        for item in task["cleanup"]:
+            branch = item.get("branch")
+            if (
+                branch
+                and item.get("action") != "removed"
+                and branch not in seen_branches
+            ):
+                task_branches.append({"task": task["id"], "branch": branch})
+                seen_branches.add(branch)
+        references = [
+            ("writer", task["writer_run"]),
+            ("reviewer", task["reviewer_run"]),
+            *[("reviewer", item.get("run")) for item in task["reviews"]],
+            *[("writer", item.get("run")) for item in task["cleanup"]],
+            ("writer", (task.get("answer_effect") or {}).get("run")),
+        ]
+        for role, run_id in references:
+            if not run_id or run_id in seen_runs:
+                continue
+            seen_runs.add(run_id)
+            try:
+                run = run_record.load(run_id, env)
+            except run_record.RecordError as error:
+                print(
+                    f"WARNING: task {task['id']} {role} run {run_id} "
+                    f"is not listed: {error}",
+                    file=err,
+                )
+                continue
+            if run.status in (
+                run_record.STARTING,
+                run_record.RUNNING,
+                run_record.WAITING,
+            ):
+                open_runs.append({"task": task["id"], "role": role, "run": run_id})
+            if (
+                run.branch is not None
+                and run.branch in flow["abandoned"]
+                and run.branch not in seen_branches
+            ):
+                task_branches.append({"task": task["id"], "branch": run.branch})
+                seen_branches.add(run.branch)
+    for branch in flow["abandoned"]:
+        if branch not in seen_branches:
+            task_branches.append({"task": None, "branch": branch})
+            seen_branches.add(branch)
+    return {
+        "flow": flow["id"],
+        "status": flow["status"],
+        "reason": flow["reason"],
+        "branch": flow["branch"],
+        "task_branches": task_branches,
+        "open_runs": open_runs,
+    }
+
+
+def _signal_cancel(flow: Mapping[str, Any], env: Mapping[str, str]) -> None:
+    """Signal the recorded runner while its process identity still matches."""
+    from ember.flows.runner import _process_start
+
+    identity = flow["runner"]
+    if not identity or identity.get("exiting") or not lock.live(flow["id"], env):
+        return
+    pid = identity["pid"]
+    with contextlib.suppress(ProcessLookupError):
+        fd = os.pidfd_open(pid)
+        try:
+            matches = (
+                _process_start(pid) == identity["start"]
+                if identity.get("start") is not None
+                else tmux.pane_pid(flow["id"], env=env) == pid
+            )
+            if matches:
+                signal.pidfd_send_signal(fd, signal.SIGTERM)
+        finally:
+            os.close(fd)
+
+
+def _cancel(
+    flow_id: str,
+    reason: str | None,
+    as_json: bool,
+    env: Mapping[str, str],
+    out: TextIO,
+    err: TextIO,
+) -> None:
+    """Request cancellation, stop the runner and report the retained work."""
+    _load(flow_id, env, missing_code=65)
+    with lifecycle(flow_id, env):
+        flow = _load(flow_id, env, missing_code=65)
+        if flow["status"] in record.ENDED:
+            raise CommandError(
+                75,
+                f"the flow {flow_id} is {flow['status']}",
+                f"next: emb flow --status {flow_id}",
+            )
+        directory = record.folder(flow_id, env)
+        request = record.cancel_request(flow_id, env) or {
+            "at": time.time(),
+            "reason": reason,
+        }
+        run_record.write_private(directory / "startup.json", '{"at": 0}\n')
+        run_record.write_private(directory / record.CANCEL_NAME, json.dumps(request))
+        deadline = time.monotonic() + CANCEL_SECONDS
+        _signal_cancel(flow, env)
+    while True:
+        try:
+            with lifecycle(flow_id, env, blocking=False):
+                if not lock.live(flow_id, env):
+                    flow = _load(flow_id, env, missing_code=65)
+                    if flow["status"] not in record.ENDED:
+                        record.finish_cancel(flow, request, env)
+                    elif flow["status"] != "cancelled":
+                        raise CommandError(
+                            75,
+                            f"the flow {flow_id} is {flow['status']}",
+                            f"next: emb flow --status {flow_id}",
+                        )
+                    result = _cancel_report(flow, env, err)
+                    break
+        except lock.Busy:
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CommandError(
+                75,
+                f"the runner for {flow_id} is still running after {CANCEL_SECONDS:g} "
+                "seconds",
+                f"next: emb flow --status {flow_id}",
+            )
+        time.sleep(min(POLL_SECONDS, remaining))
+    if as_json:
+        print(json.dumps(result, indent=2), file=out)
+    else:
+        print(f"flow {flow_id} cancelled", file=out)
+        if result["reason"] is not None:
+            print(f"reason {result['reason']}", file=out)
+        print(f"branch {result['branch']}", file=out)
+        for item in result["task_branches"]:
+            print(f"task {item['task']} branch {item['branch']}", file=out)
+        for item in result["open_runs"]:
+            print(f"task {item['task']} {item['role']} run {item['run']}", file=out)
 
 
 def _lead(
@@ -472,6 +670,12 @@ def _lead(
     with lifecycle(flow_id, env):
         flow = _load(flow_id, env)
         _not_done(flow)
+        if flow["status"] == "cancelled" or record.cancel_request(flow_id, env):
+            raise CommandError(
+                75,
+                f"the flow {flow_id} is cancelled or cancelling",
+                f"next: emb flow --resume {flow_id}",
+            )
         try:
             task = record.task_entry(flow, task_id)
         except KeyError as error:
@@ -570,6 +774,8 @@ def _task_report(flow_id: str, task: Mapping[str, Any]) -> dict[str, Any]:
 def _next(flow: Mapping[str, Any], event: str, code: int | None, live: bool) -> str:
     """Describe the next action for a stop, loss or terminal outcome."""
     flow_id, branch = flow["id"], flow["branch"]
+    if flow["status"] == "cancelled":
+        return f"next: emb flow --resume {flow_id}"
     if event == "runner_lost":
         return f"next: emb flow --resume {flow_id}"
     if event == "lead_stop":
@@ -583,14 +789,15 @@ def _next(flow: Mapping[str, Any], event: str, code: int | None, live: bool) -> 
             return (
                 "next: fix the flow branch "
                 f"(an emb run on {shlex.quote(flow['worktree'])}, "
-                f"then emb merge <its branch> --into {branch} --verdict keep), "
+                f"then emb merge <its branch> --into {branch} --verdict keep "
+                "--note '<verdict line>'), "
                 f"then emb flow --resume {flow_id}"
             )
         return f"next: emb flow --status {flow_id}"
     prefix = "report the unmerged tasks to the owner; " if code else ""
     return (
         f"next: {prefix}review {branch}, then emb merge {branch} --into <your branch> "
-        f"--verdict keep --dir {shlex.quote(flow['dir'])}"
+        f"--verdict keep --note '<verdict line>' --dir {shlex.quote(flow['dir'])}"
     )
 
 
@@ -763,8 +970,11 @@ def _status(
         print(json.dumps(items, indent=2), file=out)
     else:
         for item in items:
+            status = item["status"]
+            if status == "cancelled" and item["reason"]:
+                status += f": {item['reason']}"
             print(
-                f"{item['id']}  {item['status']}  "
+                f"{item['id']}  {status}  "
                 f"{item['merged']}/{item['tasks']} merged  {item['dir']}",
                 file=out,
             )
@@ -803,6 +1013,10 @@ def main(
             _resume(flow_id, environment, argv, out)
         elif mode == "watch":
             return _watch(args.watch, args.json, environment, out, err)
+        elif mode == "cancel":
+            _cancel(args.cancel, args.reason, args.json, environment, out, err)
+            print(f"next: emb flow --resume {args.cancel}", file=err)
+            return 0
         else:
             _status(args.status, args.json, environment, out, err)
             return 0
