@@ -3199,7 +3199,7 @@ matched; dpkg is skipped and its method remains null.
 
 Every command runs with `LC_ALL=C`, standard input from `/dev/null` and a
 10-second deadline, in its own process group; at the deadline the whole group
-is killed. Every network read has a 10-second timeout. Every HTTP request Ember makes, here and for the OpenCode model list, sends `User-Agent: ember/<version>`.
+is killed. Every network read has a 10-second timeout. Requests to outside websites, here and for the models.dev catalogue, send `User-Agent: ember/<version>`.
 
 Versions read with apt are compared with `dpkg --compare-versions`, with the
 epoch and revision. Every other version is compared as dotted numbers: a

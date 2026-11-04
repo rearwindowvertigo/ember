@@ -1,4 +1,4 @@
-"""What Ember sends with every HTTP request."""
+"""What Ember sends with requests to outside websites."""
 
 from importlib.metadata import PackageNotFoundError, version
 
@@ -11,4 +11,4 @@ def _user_agent() -> str:
 
 
 USER_AGENT = _user_agent()
-"""The `User-Agent` of every HTTP request Ember makes: `ember/<version>`."""
+"""The `User-Agent` of requests to outside websites: `ember/<version>`."""
