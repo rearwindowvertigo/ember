@@ -619,8 +619,8 @@ Each turn's `denied_paths` is a list of objects:
 
 | Field | Value |
 |---|---|
-| `path` | The deepest matching hidden path in the launch inventory, or the hidden file itself |
-| `reason` | `hidden`, `secret location` or `protected` |
+| `path` | The deepest matching hidden path in the launch inventory, or the hidden file itself; a startup file inside a hidden folder is reported under its resolved file path |
+| `reason` | `hidden`, `startup file`, `secret location` or `protected` |
 | `allow_path` | The folder Overview may offer for reading, or null |
 
 `allow_path` is the deepest folder holding the denied path that contains
@@ -629,22 +629,44 @@ No folder inside `$XDG_CONFIG_HOME` is offered. A hidden file can have
 `allow_path: null`. Reports are deduplicated by resolved hidden path
 across every attempt of the turn, including capacity retries. A restricted
 report keeps `allow_path: null`; reasons rank `protected`, `secret location`,
-then `hidden`. No denial gives `[]` and no denial warning. Detection leaves
-the turn's exit code unchanged.
+`startup file`, then `hidden`. No denial gives `[]` and no denial warning.
+Detection leaves the turn's exit code unchanged.
 
-For each path, standard error prints once per turn:
+Shell and line-editor startup files in the home folder are classified as
+`startup file`: `.profile`, `.bashrc`, `.bash_profile`, `.bash_login`,
+`.bash_logout`, `.zshrc`, `.zprofile`, `.zshenv`, `.zlogin`, `.zlogout`,
+`.shrc`, `.kshrc`, `.mkshrc`, `.cshrc`, `.tcshrc`, `.login`, `.logout`,
+`.yashrc`, `.yash_profile`, `.inputrc` and `.editrc`. Ember matches their
+given and resolved names, including symlink aliases. Startup-file denials
+have `allow_path: null`, no Overview notice, no Allow reading button and
+no `sandbox.read` suggestion. They remain in `denied_paths` and
+`emb run --status`, including when they are a turn's only denials. A tool
+that needs a startup file's settings still reports the denial; the owner
+can add the file by hand. Other startup files outside the home folder are
+not classified by this list.
+
+Stored reasons are retained. An older run, flow or panel record with a
+`hidden` denial of a startup file still reports `hidden`; Overview shows
+its notice with the current hidden-path wording.
+
+For each path, standard error prints a warning once per turn. When reading
+is offered, it also prints an owner command:
 
 ```text
 WARNING: <run> was denied <path>
 owner: Settings, Sandbox read paths; emb choices --set 'sandbox.read=["<folder>"]'
 ```
 
-The command preserves the current read list and adds `allow_path`, or the
-matched path when no folder can be offered. A secret or protected warning
-appends `(secret location)` or `(protected)`. Protected runtime and other
-worker worktree paths receive no `sandbox.read` suggestion. A matched path
-inside Ember's own configuration or state folder instead receives an owner
-line saying it cannot be added.
+The command preserves the current read list and adds `allow_path`, or an
+addable secret location's matched path. A startup, secret or protected
+warning appends `(startup file)`, `(secret location)` or `(protected)`.
+Startup-file denials receive no `owner:` line. A `hidden` denial with
+`allow_path: null` receives `owner: <path> is hidden; no folder can be
+offered without exposing the home folder`, with no `sandbox.read`
+suggestion. Protected runtime and other worker worktree paths also receive
+no `sandbox.read` suggestion. A matched path inside Ember's own
+configuration or state folder instead receives an owner line saying it
+cannot be added.
 
 Secret locations include `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`,
 `~/.config/gcloud`, `~/.config/gh`, `~/.docker/config.json`, `~/.netrc`,
@@ -3747,8 +3769,9 @@ engine whose sandbox setting gives it no sandbox, with Open Engines.
 
 A notice says `A worker could not read <path>` for each reported hidden
 path whose offered folder (or matched path when none is offered) is not
-already covered by `sandbox.read`. It names the run and its flow or panel
-when present. Allow reading appears only for a non-null `allow_path`.
+already covered by `sandbox.read`, except entries with reason `startup file`.
+It names the run and its flow or panel when present. Allow reading appears
+only for a non-null `allow_path`.
 Its confirmation says `Every future worker can read <folder>. No worker
 can change it.` Confirming adds that folder to `sandbox.read`; newly
 started runs use it. The app checks the folder's eligibility again on
@@ -3756,7 +3779,10 @@ confirmation.
 
 A secret location's notice says the folder holds credentials; a protected
 location's says it is protected from workers. Both have Dismiss only.
-Other notices without an offered folder name Settings, Sandbox read paths.
+A `hidden` notice without an offered folder says `No folder can be offered
+without exposing the home folder.` It has Dismiss only and gives no
+`sandbox.read` suggestion. Older records that classify a startup file as
+`hidden` still show this notice.
 Dismiss hides the path until a later run or turn reports it again.
 Dismissals persist in the app's state file.
 

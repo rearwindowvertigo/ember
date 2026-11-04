@@ -326,7 +326,8 @@ def load_outcome(run: Run, turn: int) -> dict[str, Any]:
         isinstance(item, dict)
         and isinstance(item.get("path"), str)
         and Path(item["path"]).is_absolute()
-        and item.get("reason") in ("hidden", "secret location", "protected")
+        and item.get("reason")
+        in ("hidden", "startup file", "secret location", "protected")
         and (
             item.get("allow_path") is None
             or (

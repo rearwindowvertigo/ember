@@ -2089,3 +2089,51 @@ def test_orphaned_badge(env: dict[str, str], context: AppContext, qtbot: QtBot) 
     screen = screen_for(context, qtbot)
     row = screen.live_rows[LIVE_A]
     assert (row.badge.text(), row.badge.tone()) == ("Orphaned", "warning")
+
+
+@pytest.mark.parametrize("parent", ["run", "flow", "panel"])
+@pytest.mark.parametrize(
+    "name, reason",
+    [
+        (".profile", "startup file"),
+        (".profile", "hidden"),
+        (".toolrc", "hidden"),
+    ],
+)
+def test_home_file_denial_notice_uses_recorded_reason(
+    context: AppContext,
+    qtbot: QtBot,
+    env: dict[str, str],
+    parent: str,
+    name: str,
+    reason: str,
+) -> None:
+    file = Path(env["HOME"]) / name
+    run = write_run(make_run(env, LIVE_A))
+    _write_denial(run, file, reason=reason)
+    if name == ".profile" and reason == "hidden":
+        later = write_run(replace(run, turn=2, updated_at=run.updated_at + 1))
+        _write_denial(later, file, reason="startup file")
+    if parent == "flow":
+        flow = make_flow(env)
+        flow["tasks"][0]["writer_run"] = run.id
+        flow_record.save(flow, env)
+    elif parent == "panel":
+        make_panel(env, members=[make_member(run=run.id)])
+    with qtbot.waitSignal(context.settings_changed):
+        context.reload_settings()
+    with qtbot.waitSignal(context.runs.reloaded):
+        context.runs.reload()
+    screen = screen_for(context, qtbot)
+    if reason == "startup file":
+        assert screen.denied_notices == {}
+    else:
+        assert len(screen.denied_notices) == 1
+        notice = next(iter(screen.denied_notices.values()))
+        assert notice.title_label.text() == f"A worker could not read {file}"
+        assert (
+            "No folder can be offered without exposing the home folder."
+            in notice.text_label.text()
+        )
+        assert "Add a folder by hand" not in notice.text_label.text()
+        assert [button.text() for button in notice.buttons] == ["Dismiss"]
