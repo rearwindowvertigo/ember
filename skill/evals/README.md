@@ -241,7 +241,9 @@ and `sent: false`. No owner reply is supplied in these cases.
 `panel-named-members-compared` has text and JSON completion replies built
 with the panel result formatter and member-line formatter. Member lines
 are on standard error; standard output holds the panel id and summary in
-text mode, or one JSON object. `panel-progress-reported` has three status
+text mode, or one JSON object. Its OpenCode member uses the full id
+`openrouter/deepseek/deepseek-v4.1-flash-1017` in completion replies and
+grader expectations. `panel-progress-reported` has three status
 snapshots built with the panel status command: a list followed by two
 one-panel records. A mock supplies the lifetime lock and clock; isolated
 run records supply screen activity, including an older record without
