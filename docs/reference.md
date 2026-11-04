@@ -647,6 +647,27 @@ prints one `<field>: <value>` line per field, and `--status` one line per run:
 | `--interrupt` | Presses Escape in the session | Aborts the turn through the session API | Sends `SIGINT` to the process group of the turn's CLI, as Ctrl+C in the pane does; the program takes the next turn |
 | Messages Ember did not send | Each `user_message` in the rollout that does not match, in order, a message Ember pasted | Each user message whose id Ember did not send | None; the pane takes no typed messages |
 
+The OpenCode column describes OpenCode 1. When `opencode --version` reports
+version 2 or later (`opencode v2.2.5`), Ember uses its OpenCode 2 driver. The
+pane runs, inside the same sandbox, a shell script that starts a private
+`opencode serve --hostname 127.0.0.1 --port <free port>` protected by
+`OPENCODE_SERVER_PASSWORD`, waits with `python3` until Ember's session
+answers, then runs `opencode --server <url> --session <id>`. Ember chooses
+the session id (`ses_` and 26 hex characters) and, once the server answers,
+creates the session through `/api/session` with the agent `ember-worker`
+and the model as `{id, providerID: openrouter, variant: <effort>}`. Messages
+go to `/api/session/<id>/prompt`; a turn has ended when the session is not in
+`/api/session/active` and an `idle` message follows Ember's message, with
+outcome `succeeded` (the reply is the newest assistant text) or `failed`
+(the reason is its error message). `--interrupt` posts
+`/api/session/<id>/interrupt`. The agent's permissions deny `question` and
+Ember's denied git commands for `shell`; a read-only run denies `edit` and
+allows `external_directory` only for the folders of its read paths. The
+sandbox keeps the folder of the `opencode` executable, which the script
+starts. OpenCode 2 keeps its credentials in its own store; the sign-in check
+runs `opencode auth list --standalone`, so it never starts OpenCode 2's
+shared background service.
+
 Claude's turns use `--restricted`, `--safe-mode` and `--strict-mcp-config`;
 the run's read paths are added with `--add-dir` and edits to them are
 refused. While a tool call or a model message runs, Claude's pane prints a
@@ -2373,7 +2394,7 @@ The list is `ember/data/components.toml` in the package:
 | id | Label | Group | Installed version | Newest version | Update | Install |
 |---|---|---|---|---|---|---|
 | `codex` | Codex | `apps` | `codex --version`, `codex-cli (\S+)` | `version` of `https://registry.npmjs.org/@openai/codex/latest` | Detected install method | `npm install -g @openai/codex` |
-| `opencode` | OpenCode | `apps` | `opencode --version`, `^(\S+)$` | `version` of `https://registry.npmjs.org/opencode-ai/latest` | Detected install method | `curl -fsSL https://opencode.ai/install \| bash` |
+| `opencode` | OpenCode | `apps` | `opencode --version`, `1.19.5` or `opencode v2.2.5` | the highest non-draft, non-prerelease tag of `https://api.github.com/repos/anomalyco/opencode/releases?per_page=100` | `opencode upgrade --major` with OpenCode 1 installed; with OpenCode 2, the detected install method, else `opencode upgrade` | `curl -fsSL https://opencode.ai/v2/install \| bash` |
 | `claude` | Claude Code | `apps` | `claude --version`, `^(\S+) \(Claude Code\)$` | the text of `https://downloads.claude.ai/claude-code-releases/<channel>`, where `<channel>` is `autoUpdatesChannel` from Claude Code's `settings.json` (in `CLAUDE_CONFIG_DIR`, else `~/.claude`): `stable`, or `latest` when it is unset or anything else; a version cached from another channel is read again | Detected install method | `curl -fsSL https://claude.ai/install.sh \| bash` |
 | `claude-desktop` | Claude Desktop | `apps` | apt `claude-desktop` | apt | `sudo apt install --only-upgrade claude-desktop` | none; note "Not installed." |
 | `ember-skill` | ember skill | `apps` | `emb skill status` link state | none | none | By link state, below |
@@ -2829,8 +2850,9 @@ Finished appears and counts as a top-level run in the tray.
 Clicking the icon also shows the window. Closing the window hides it to the
 tray. When the desktop has no tray, the window shows at start and closing it
 quits. A menu click gives Ember an activation token; Quit Ember uses it on
-the window before quitting when the window is shown. With the window hidden
-the token is not used, and the desktop's busy cursor runs until its timeout.
+the window before quitting when the window is shown. With the window hidden,
+a separate invisible helper window is shown, activated and hidden to use the
+token before quitting; the main window stays hidden.
 
 A run, flow or panel change updates the icon and tooltip at once. The menu
 keeps its lines until it next opens, when it rebuilds them. A click from a

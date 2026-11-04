@@ -61,6 +61,11 @@ class LaunchSpec:
     """The text the core pastes once `Driver.ready` is true; `None` pastes
     nothing, because the brief went in on the command line."""
 
+    binary: str | None = None
+    """The engine's executable when `argv[0]` is not it, such as a shell
+    script that starts it; the sandbox keeps this executable's folder.
+    `None` means `argv[0]`."""
+
 
 @dataclass(frozen=True)
 class TurnOutcome:

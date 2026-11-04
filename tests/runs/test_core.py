@@ -1233,6 +1233,34 @@ def test_opencode_command_runs_inside_bwrap(
     )
 
 
+def test_a_launch_names_the_engine_binary_the_sandbox_keeps(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    home = Path(env["HOME"])
+    folder = home / ".opencode" / "bin"
+    folder.mkdir(parents=True)
+    binary = folder / "opencode"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    (tmp_path / "wt").mkdir()
+    run = _bare_run(env, tmp_path, "opencode", "bubblewrap")
+    spec = LaunchSpec(
+        argv=("sh", "-c", "script", "ember", str(binary)),
+        cwd=tmp_path / "wt",
+        binary=str(binary),
+    )
+    wrapped = _core(env)._sandboxed(spec, run, tmp_path / ".git")
+    assert ("--ro-bind", str(folder), str(folder)) in zip(
+        wrapped.argv, wrapped.argv[1:], wrapped.argv[2:], strict=False
+    )
+    without = _core(env)._sandboxed(
+        LaunchSpec(argv=spec.argv, cwd=spec.cwd), run, tmp_path / ".git"
+    )
+    assert ("--ro-bind", str(folder), str(folder)) not in zip(
+        without.argv, without.argv[1:], without.argv[2:], strict=False
+    )
+
+
 @pytest.mark.parametrize(
     ("engine", "provider"), [("claude", "none"), ("claude", "bubblewrap")]
 )

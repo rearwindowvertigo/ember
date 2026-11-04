@@ -258,6 +258,27 @@ def test_invalid_cache_is_absent(env: dict[str, str], content: str) -> None:
 # opencode
 
 
+@pytest.mark.parametrize("version", ["1.19.5", "opencode v2.2.5"])
+def test_openrouter_list_does_not_run_opencode(
+    env: dict[str, str], tmp_path: Path, version: str
+) -> None:
+    """Read models from OpenRouter without invoking either OpenCode version."""
+    calls = tmp_path / "opencode-calls"
+    stub = Path(env["PATH"]) / "opencode"
+    stub.write_text(
+        f'#!/bin/sh\necho "$*" >> "{calls}"\n'
+        f'if [ "$*" = "--version" ]; then echo "{version}"; else exit 9; fi\n'
+    )
+    stub.chmod(0o755)
+    fetch = Fetcher()
+    result = models.list_models("opencode", env, fetch=fetch, now=T0)
+    assert result.source == "openrouter"
+    assert result.reason is None
+    assert result.models
+    assert fetch.calls == [(models.OPENROUTER_URL, models.TIMEOUT)]
+    assert not calls.exists()
+
+
 def test_openrouter_list(env: dict[str, str]) -> None:
     fetch = Fetcher()
     result = models.list_models("opencode", env, fetch=fetch, now=T0)

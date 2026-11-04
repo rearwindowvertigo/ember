@@ -593,7 +593,8 @@ class Core:
         if run.sandbox == sandbox.NONE or run.engine == "claude":
             return spec
         worktree = Path(run.worktree)
-        binary = self._which(spec.argv[0]) if spec.argv else None
+        program = spec.binary or (spec.argv[0] if spec.argv else None)
+        binary = self._which(program) if program else None
         if run.engine == "codex":
             options = sandbox.codex_args(
                 worktree,

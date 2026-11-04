@@ -4,6 +4,7 @@
 # while it is missing (`install`). Ember shows these commands; it runs one only
 # after the owner confirms it. `update_note` and `install_note` are shown in
 # place of a command that is absent.
+# `updater_by_major` overrides install-method commands by installed major version.
 
 [[components]]
 id = "codex"
@@ -38,10 +39,11 @@ update = "sudo apt install --only-upgrade {package}"
 id = "opencode"
 label = "OpenCode"
 group = "apps"
-installed = { kind = "command", engine = "opencode", pattern = '^(\S+)$' }
-newest = { kind = "json", url = "https://registry.npmjs.org/opencode-ai/latest", field = "version" }
+installed = { kind = "command", engine = "opencode", pattern = '^(?:opencode v)?([0-9]+(?:\.[0-9]+)*)$' }
+newest = { kind = "github", repo = "anomalyco/opencode" }
 updater = "opencode upgrade"
-install = "curl -fsSL https://opencode.ai/install | bash"
+updater_by_major = { "1" = "opencode upgrade --major" }
+install = "curl -fsSL https://opencode.ai/v2/install | bash"
 
 [[components.methods]]
 path = "{prefix}/lib/node_modules/{package}"

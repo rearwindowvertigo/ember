@@ -449,13 +449,26 @@ class MainWindow(QMainWindow):
 
         A tray menu click leaves an activation token in the environment, and
         the desktop shows a busy cursor until a window uses it. A shown
-        window uses it before Ember quits.
+        window uses it before Ember quits; when hidden, a separate invisible
+        window uses it instead.
         """
         self._save_state()
         token = QProcessEnvironment.systemEnvironment().value("XDG_ACTIVATION_TOKEN")
-        if token and self.isVisible():
-            self.activateWindow()
-            QCoreApplication.processEvents()
+        if token:
+            if self.isVisible():
+                self.activateWindow()
+                QCoreApplication.processEvents()
+            else:
+                helper = QWidget(
+                    None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
+                )
+                helper.setFixedSize(1, 1)
+                helper.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+                helper.setWindowOpacity(0)
+                helper.show()
+                helper.activateWindow()
+                QCoreApplication.processEvents()
+                helper.hide()
         self._quit()
 
     def _save_state(self) -> None:
