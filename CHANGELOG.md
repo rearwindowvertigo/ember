@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.12.0](https://github.com/rearwindowvertigo/ember/compare/v0.11.0...v0.12.0) (2026-11-04)
+
+
+### Added
+
+* **deps:** read OpenCode's newest release from GitHub and offer the major upgrade ([2de4abc](https://github.com/rearwindowvertigo/ember/commit/2de4abc86c066cfcefe17ed9fe8cf65abc256b0b))
+* **engines:** run OpenCode 2 workers through a private server, chosen by the installed version ([2de4abc](https://github.com/rearwindowvertigo/ember/commit/2de4abc86c066cfcefe17ed9fe8cf65abc256b0b))
+
+
+### Fixed
+
+* **app:** use the tray's activation token on Quit with the window hidden ([2de4abc](https://github.com/rearwindowvertigo/ember/commit/2de4abc86c066cfcefe17ed9fe8cf65abc256b0b))
+* **engines:** check OpenCode 2 sign-in without starting its background service ([2de4abc](https://github.com/rearwindowvertigo/ember/commit/2de4abc86c066cfcefe17ed9fe8cf65abc256b0b))
+* **runs:** keep the engine's own folder in the sandbox when a script starts it ([2de4abc](https://github.com/rearwindowvertigo/ember/commit/2de4abc86c066cfcefe17ed9fe8cf65abc256b0b))
+
 ## [0.11.0](https://github.com/rearwindowvertigo/ember/compare/v0.10.0...v0.11.0) (2026-11-04)
 
 
