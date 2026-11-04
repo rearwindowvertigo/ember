@@ -69,7 +69,7 @@ GROUPS = ("apps", "system", "libraries")
 INSTALLED_KINDS = ("apt", "command", "python", "skill")
 """How an installed version can be read."""
 
-NEWEST_KINDS = ("apt", "json", "text", "pypi", "none")
+NEWEST_KINDS = ("apt", "json", "text", "pypi", "github", "none")
 """How a newest version can be read."""
 
 NEWEST_MODES = ("due", "always", "never")
@@ -124,6 +124,9 @@ class Source:
     """Whose release channel fills `{channel}` in `url`, for `text`:
     `claude-code` reads Claude Code's `autoUpdatesChannel`."""
 
+    repo: str | None = None
+    """The owner/repository whose releases are read, for `github`."""
+
 
 @dataclass(frozen=True)
 class Method:
@@ -159,6 +162,8 @@ class Spec:
     install_note: str | None
     methods: tuple[Method, ...] = ()
     updater: str | None = None
+    updater_by_major: Mapping[str, str] = dataclasses.field(default_factory=dict)
+    """Updater overrides by installed major version, before install methods."""
 
 
 @dataclass(frozen=True)
@@ -329,6 +334,7 @@ _SOURCE_FIELDS: dict[tuple[str, str], tuple[tuple[str, ...], tuple[str, ...]]] =
     ("newest", "json"): (("url", "field"), ()),
     ("newest", "text"): (("url",), ("channel",)),
     ("newest", "pypi"): (("package",), ()),
+    ("newest", "github"): (("repo",), ()),
 }
 """For each (role, kind): the required fields and the optional ones."""
 
@@ -366,6 +372,11 @@ def _source(where: str, role: str, value: object) -> Source:
             _text(where, state, command)
         return Source(kind=kind, commands=commands)
     if kind != "command":
+        repo = value.get("repo")
+        if repo is not None and not re.fullmatch(
+            r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", repo
+        ):
+            raise ComponentsError(f"{where}: repo must be owner/repository")
         url = value.get("url")
         if url is not None and not url.startswith("https://"):
             raise ComponentsError(f"{where}: url must start with https://")
@@ -383,6 +394,7 @@ def _source(where: str, role: str, value: object) -> Source:
             url=url,
             field=value.get("field"),
             channel=channel,
+            repo=repo,
         )
     if ("engine" in value) == ("argv" in value):
         raise ComponentsError(f"{where}: give exactly one of engine and argv")
@@ -465,7 +477,9 @@ def _spec(index: int, value: object) -> Spec:
     where = f"components[{index}]"
     if not isinstance(value, dict):
         raise ComponentsError(f"{where} must be a table")
-    unknown = sorted(set(value) - {*_REQUIRED, *_OPTIONAL, "methods"})
+    unknown = sorted(
+        set(value) - {*_REQUIRED, *_OPTIONAL, "methods", "updater_by_major"}
+    )
     if unknown:
         raise ComponentsError(f"{where}: unknown field {', '.join(unknown)}")
     for name in _REQUIRED:
@@ -494,19 +508,28 @@ def _spec(index: int, value: object) -> Spec:
         for name in _OPTIONAL
     }
     methods = _methods(where, value.get("methods", []))
-    if methods or optional["updater"] is not None:
+    updater_by_major = value.get("updater_by_major", {})
+    if not isinstance(updater_by_major, dict) or any(
+        not isinstance(major, str) or not re.fullmatch(r"0|[1-9][0-9]*", major)
+        for major in updater_by_major
+    ):
+        raise ComponentsError(f"{where}: updater_by_major must map major versions")
+    for major, command in updater_by_major.items():
+        _text(where, f"updater_by_major.{major}", command)
+    if methods or optional["updater"] is not None or updater_by_major:
         if installed.engine is None or optional["updater"] is None:
             raise ComponentsError(f"{where}: methods need an engine and updater")
         if optional["update"] is not None:
             raise ComponentsError(f"{where}: give methods instead of update")
-        try:
-            updater = shlex.split(optional["updater"] or "")
-        except ValueError as error:
-            raise ComponentsError(f"{where}: invalid updater: {error}") from None
-        if len(updater) < 2 or updater[0] != installed.engine:
-            raise ComponentsError(
-                f"{where}: updater must name the engine and arguments"
-            )
+        for command in (optional["updater"], *updater_by_major.values()):
+            try:
+                updater = shlex.split(command or "")
+            except ValueError as error:
+                raise ComponentsError(f"{where}: invalid updater: {error}") from None
+            if len(updater) < 2 or updater[0] != installed.engine:
+                raise ComponentsError(
+                    f"{where}: updater must name the engine and arguments"
+                )
     return Spec(
         id=ident,
         label=label,
@@ -519,6 +542,7 @@ def _spec(index: int, value: object) -> Spec:
         install_note=optional["install_note"],
         methods=methods,
         updater=optional["updater"],
+        updater_by_major=updater_by_major,
     )
 
 
@@ -825,6 +849,8 @@ def _read_newest(
     if source.kind == "pypi":
         url = PYPI_URL.format(package=source.package)
         return _json_field(url, _fetch(url, fetch), ("info", "version"))
+    if source.kind == "github":
+        return _newest_github(source.repo or "", fetch)
     url = source.url or ""
     if source.channel == "claude-code":
         url = url.replace("{channel}", claude_channel(env))
@@ -835,6 +861,42 @@ def _read_newest(
     if not version or len(version.split()) != 1:
         raise ReadError(f"{url} did not return a single version")
     return version
+
+
+def _newest_github(repo: str, fetch: Fetch) -> str:
+    """Return the highest dotted release version, excluding drafts and prereleases.
+
+    Args:
+        repo: The GitHub owner/repository.
+        fetch: Reads a URL as text.
+
+    Returns:
+        The highest version without its optional leading `v`.
+
+    Raises:
+        ReadError: The releases cannot be read or contain no stable versions.
+    """
+    url = f"https://api.github.com/repos/{repo}/releases"
+    try:
+        releases = json.loads(_fetch(url, fetch))
+    except ValueError:
+        raise ReadError(f"{url} did not return JSON") from None
+    if not isinstance(releases, list):
+        raise ReadError(f"{url} did not return a release list")
+    versions: list[str] = []
+    for release in releases:
+        if not isinstance(release, dict):
+            raise ReadError(f"{url} contains an invalid release")
+        if release.get("draft") or release.get("prerelease"):
+            continue
+        tag = release.get("tag_name")
+        if isinstance(tag, str):
+            version = tag.removeprefix("v")
+            if _DOTTED.fullmatch(version):
+                versions.append(version)
+    if not versions:
+        raise ReadError(f"{url} has no stable versioned releases")
+    return max(versions, key=dotted)
 
 
 CHANNELS = ("claude-code",)
@@ -1173,6 +1235,7 @@ def _update_command(
     resolved: Path | None,
     method_path: Path | None,
     options: _Options,
+    installed: str | None,
 ) -> tuple[str, Method | None]:
     command = shlex.join([launcher, *shlex.split(spec.updater or "")[1:]])
     matched = None
@@ -1211,6 +1274,12 @@ def _update_command(
         )
         matched = method
         break
+    if installed is not None and spec.updater_by_major:
+        with contextlib.suppress(ReadError):
+            updater = spec.updater_by_major.get(str(dotted(installed)[0]))
+            if updater is not None:
+                command = shlex.join([launcher, *shlex.split(updater)[1:]])
+                folder = Path(launcher).parent if resolved is None else resolved.parent
     if not os.access(folder, os.W_OK) and shlex.split(command)[0] != "sudo":
         command = "sudo " + command
     return command, matched
@@ -1264,7 +1333,7 @@ def _evaluate(
     )
     if spec.updater is not None:
         command, method = _update_command(
-            spec, launcher, resolved, method_path, options
+            spec, launcher, resolved, method_path, options, row.installed
         )
         row = replace(row, method=method)
         if row.status == UPDATE_AVAILABLE:
