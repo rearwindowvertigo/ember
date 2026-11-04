@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.14.0](https://github.com/rearwindowvertigo/ember/compare/v0.13.0...v0.14.0) (2026-11-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* **opencode:** OpenCode model ids are full OpenCode ids (`<integration>/<model>`, such as `openrouter/deepseek/deepseek-v4.1-flash-1017` or `anthropic/claude-haiku-4-5`) in `emb engines --models opencode`, `emb run --model` and saved settings. Settings, run, flow and panel records written by 0.13.0 are read with their OpenCode models as `openrouter/<model>`.
+
+### Added
+
+* **app:** show and filter OpenCode models by provider ([b4f081d](https://github.com/rearwindowvertigo/ember/commit/b4f081d092a21a86a2f8f8cd0851c9af19eb8a73))
+* **opencode:** list and run every connected integration's models ([b4f081d](https://github.com/rearwindowvertigo/ember/commit/b4f081d092a21a86a2f8f8cd0851c9af19eb8a73)), closes [#112](https://github.com/rearwindowvertigo/ember/issues/112)
+* warn about cited sources a worker cannot read ([641ddcf](https://github.com/rearwindowvertigo/ember/commit/641ddcf84d17384b486befa1f1c61a840697aa06)), closes [#110](https://github.com/rearwindowvertigo/ember/issues/110)
+
+
+### Fixed
+
+* match whole cited references and use every read path ([9cb3cec](https://github.com/rearwindowvertigo/ember/commit/9cb3cecc0cbf345b6c1938274d5ccf4ad3533a00)), closes [#110](https://github.com/rearwindowvertigo/ember/issues/110)
+* **sandbox:** stop offering read access for shell startup files ([b4f081d](https://github.com/rearwindowvertigo/ember/commit/b4f081d092a21a86a2f8f8cd0851c9af19eb8a73)), closes [#114](https://github.com/rearwindowvertigo/ember/issues/114)
+* **skill:** stop telling the lead how a worker is billed ([b4f081d](https://github.com/rearwindowvertigo/ember/commit/b4f081d092a21a86a2f8f8cd0851c9af19eb8a73))
+
 ## [0.13.0](https://github.com/rearwindowvertigo/ember/compare/v0.12.0...v0.13.0) (2026-11-04)
 
 
