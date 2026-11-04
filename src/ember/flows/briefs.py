@@ -71,11 +71,19 @@ def _files(files: Sequence[str], wave_files: Sequence[str]) -> str:
 
 
 def writer_brief(
-    flow_id: str, plan: Plan, task: Task, wave_files: Sequence[str]
+    flow_id: str,
+    plan: Plan,
+    task: Task,
+    wave_files: Sequence[str],
+    standing: Sequence[str] = (),
 ) -> str:
-    """Build an editing brief, keeping the task text and commit subject intact."""
+    """Build an editing brief, keeping the task text and commit subject intact.
+
+    `standing` holds the `sandbox.read` paths, listed as sources before the
+    plan's `read`.
+    """
     parts = [task.subject, task.task, "## Files\n\n" + _files(task.files, wave_files)]
-    sources = citations.sources_section(citations.source_files(plan.read))
+    sources = citations.sources_section(citations.source_files([*standing, *plan.read]))
     if sources:
         parts.append(sources)
     if plan.context.strip():
@@ -124,8 +132,13 @@ def review_brief(
     writer_report: str | None,
     earlier: Sequence[Finding] = (),
     fix_base: str | None = None,
+    standing: Sequence[str] = (),
 ) -> str:
-    """Build a review brief with indented evidence and the packaged reply schema."""
+    """Build a review brief with indented evidence and the packaged reply schema.
+
+    `standing` holds the `sandbox.read` paths, listed as sources before the
+    plan's `read`.
+    """
     parts = [
         REVIEW_FIRST.format(task=task.id, round=round, flow=flow_id),
         f"You review task {task.id} of a flow. The writer's work is in your "
@@ -133,7 +146,7 @@ def review_brief(
         "## Task\n\n" + indent(task.subject + "\n\n" + task.task, "    "),
         "## Files\n\n" + indent(_files(task.files, wave_files), "    "),
     ]
-    sources = citations.sources_section(citations.source_files(plan.read))
+    sources = citations.sources_section(citations.source_files([*standing, *plan.read]))
     if sources:
         parts.append(sources)
     for heading, text in (

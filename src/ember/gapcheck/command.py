@@ -22,7 +22,7 @@ import signal
 import subprocess
 import sys
 import threading
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from types import FrameType
 from typing import Any, TextIO
@@ -468,8 +468,12 @@ def _run(
     env: Mapping[str, str],
     core_factory: Callable[..., Core],
     err: TextIO,
+    sources: Sequence[Path] = (),
 ) -> tuple[dict[str, Any] | None, int, CommandError | None]:
-    """Start, collect and close one run, forwarding every run diagnostic."""
+    """Start, collect and close one run, forwarding every run diagnostic.
+
+    `sources` are the read files listed in the brief.
+    """
     output, errors = io.StringIO(), io.StringIO()
     temporary: Path | None = None
     created = False
@@ -481,17 +485,7 @@ def _run(
             fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             created = True
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                stream.write(
-                    brief.text(
-                        document,
-                        top,
-                        earlier,
-                        citations.source_files(
-                            str(Path(item).expanduser().absolute())
-                            for item in args.read
-                        ),
-                    )
-                )
+                stream.write(brief.text(document, top, earlier, sources))
         except (OSError, paths.RuntimeDirError) as error:
             raise CommandError(
                 69, str(error), exits.line(69, "runtime") or ""
@@ -642,16 +636,19 @@ def main(
                     f"from --plan {document.path}",
                     file=err,
                 )
+        problem = None
+        reply_path = None
+        settings = _settings(args, environment) if args.reply is None else None
         sources = citations.source_files(
-            str(Path(item).expanduser().absolute()) for item in args.read
+            [
+                *citations.standing(settings),
+                *(str(Path(item).expanduser().absolute()) for item in args.read),
+            ]
         )
         for item in citations.uncovered(
             citations.find("the plan", document.text), sources
         ):
             print(f"WARNING: {citations.warning(item)}", file=err)
-        problem = None
-        reply_path = None
-        settings = _settings(args, environment) if args.reply is None else None
         if settings is not None and not args.confirmed:
             if settings.get("source_error"):
                 reason = "; ".join(settings.get("errors") or []) or "not valid"
@@ -689,6 +686,7 @@ def main(
                 environment,
                 core_factory,
                 err,
+                sources,
             )
             if result is None:
                 if code:

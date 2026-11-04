@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, TextIO
 
-from ember import branches, paths, tmux
+from ember import branches, choices, citations, paths, tmux
 from ember.engines import Driver
 from ember.flows import briefs, lock, plan, record, verdict
 from ember.runs import record as runs
@@ -219,6 +219,13 @@ class _Runner:
                 f"git {args[0]}: {result.stderr.strip() or result.stdout.strip()}"
             )
         return result
+
+    def standing_read(self) -> tuple[str, ...]:
+        """Return the `sandbox.read` paths every worker of this flow also reads."""
+        try:
+            return citations.standing(choices.read(None, env=self.env))
+        except Exception:  # noqa: BLE001 - a brief is written without the listing
+            return ()
 
     def tip(self, branch: str) -> str:
         """Resolve a commit without allowing a ref to become an option."""
@@ -504,6 +511,7 @@ class _Runner:
                 writer_report=report,
                 earlier=earlier,
                 fix_base=task.get("fix_base"),
+                standing=self.standing_read(),
             )
             path = self.artifact(task, "review", text)
             self.change(
@@ -607,7 +615,11 @@ class _Runner:
             if not self.allowed(task, write=True):
                 return
             text = briefs.writer_brief(
-                self.id, self.plan, self.plan.task(task["id"]), self.other_files(task)
+                self.id,
+                self.plan,
+                self.plan.task(task["id"]),
+                self.other_files(task),
+                standing=self.standing_read(),
             )
             path = self.artifact(task, "write", text)
             self.change(

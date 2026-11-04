@@ -78,3 +78,28 @@ def test_sources_section(tmp_path: Path) -> None:
     section = citations.sources_section([tmp_path / "a.md"])
     assert section is not None and section.startswith("## Sources to read")
     assert f"- {tmp_path / 'a.md'}" in section
+
+
+@pytest.mark.parametrize(
+    ("text", "reference"),
+    [
+        ("Source: #930\n", "#93"),
+        ("Source: owner/repo#93\n", "#93"),
+        ("https://example.com/x/y\n", "https://example.com/x"),
+        ("https://example.com/xy\n", "https://example.com/x"),
+    ],
+)
+def test_a_longer_reference_does_not_supply_a_shorter_one(
+    tmp_path: Path, text: str, reference: str
+) -> None:
+    path = tmp_path / "unrelated.md"
+    path.write_text(text)
+    assert not citations.supplies(path, reference)
+
+
+def test_standing_reads_the_sandbox_read_setting() -> None:
+    reply = {"answers": {"sandbox.read": {"value": ["/a", "/b"]}}}
+    assert citations.standing(reply) == ("/a", "/b")
+    assert citations.standing(None) == ()
+    assert citations.standing({"answers": {}}) == ()
+    assert citations.standing({"answers": {"sandbox.read": {"value": "x"}}}) == ()

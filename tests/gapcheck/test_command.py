@@ -1342,3 +1342,16 @@ def test_cited_source_warns_and_read_file_is_listed_in_the_brief(
         "WARNING: the plan cites https://example.com/spec, which no read path supplies"
     ]
     assert "## Sources to read" in out and f"- {issue}" in out
+
+
+def test_sandbox_read_files_supply_citations_and_are_listed(
+    env: dict[str, str], repo: Path, tmp_path: Path
+) -> None:
+    cited = tmp_path / "cited.md"
+    cited.write_text("## Failure model\nNone.\n1. Test #7\n")
+    issue = tmp_path / "issue-7.md"
+    issue.write_text("title: x\n")
+    choices.set_settings({"sandbox.read": [str(issue)]}, env=env)
+    code, out, err = invoke(env, cited, "--brief", "--dir", str(repo))
+    assert code == 0 and not err
+    assert "## Sources to read" in out and f"- {issue}" in out

@@ -12,9 +12,10 @@ ordinary words such as `UTF-8`, `SHA-256` and `ISO-8601`.
 """
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 PATTERN = re.compile(
     r"https?://[^\s<>()\[\]{}`'\"]*[^\s<>()\[\]{}`'\".,;:!?]"
@@ -51,6 +52,25 @@ def find(where: str, text: str) -> list[Citation]:
     for match in PATTERN.finditer(text):
         seen.setdefault(match.group(0))
     return [Citation(where, reference) for reference in seen]
+
+
+def standing(settings: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Return the `sandbox.read` setting from a choices reply, or nothing.
+
+    Every run reads these paths besides its own, so they supply citations
+    and are listed as sources too.
+
+    Args:
+        settings: A reply of `choices.read`; `None` when it could not be read.
+
+    Returns:
+        The standing read paths, empty when the reply holds none.
+    """
+    try:
+        value = (settings or {})["answers"]["sandbox.read"]["value"]
+    except KeyError, TypeError:
+        return ()
+    return tuple(str(item) for item in value) if isinstance(value, list) else ()
 
 
 def source_files(read: Iterable[str]) -> list[Path]:
@@ -101,9 +121,10 @@ def _number(reference: str) -> str | None:
 def supplies(path: Path, reference: str) -> bool:
     """Return whether a read file supplies a reference.
 
-    It does when the reference appears in its first lines, or, for an issue
-    reference, when the file name holds the issue number as its own token,
-    such as `issue-93.md` for `#93`.
+    It does when its first lines hold the same whole reference, so `#930`
+    does not supply `#93` and a longer URL does not supply its prefix, or,
+    for an issue reference, when the file name holds the issue number as its
+    own token, such as `issue-93.md` for `#93`.
 
     Args:
         path: A read file.
@@ -112,7 +133,7 @@ def supplies(path: Path, reference: str) -> bool:
     Returns:
         Whether the file names the reference.
     """
-    if reference in _head(path):
+    if reference in {match.group(0) for match in PATTERN.finditer(_head(path))}:
         return True
     number = _number(reference)
     if number is None:

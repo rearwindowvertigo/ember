@@ -20,7 +20,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, TextIO
 
-from ember import branches, choices, db, paths, tmux
+from ember import branches, choices, citations, db, paths, tmux
 from ember.flows import lock, plan, record
 from ember.gapcheck import policy
 from ember.runs import exits
@@ -407,6 +407,8 @@ def _dry_run(
     ]
     if args.previous is not None:
         gapcheck += ["--previous", args.previous]
+    for path in document.read:
+        gapcheck += ["--read", path]
     if reviewer.source != "menu":
         # A reviewer named for this flow, by option or in the plan, also
         # checks its plan; the Gap check reviewer row covers the rest.
@@ -421,7 +423,7 @@ def _dry_run(
     whole = _whole_review(settings)
     stall = _stall_minutes(args, settings)
     waves = plan.waves(document)
-    warnings = plan.warnings(document, str(top), env)
+    warnings = plan.warnings(document, str(top), env, citations.standing(settings))
     if args.json:
         print(
             json.dumps(

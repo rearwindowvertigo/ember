@@ -13,6 +13,9 @@ Open at most <number> files. <Name priority inputs and where to stop if
 the budget runs out.>
 <Restate the repository rules this task needs. Assume no conversation
 context reaches the worker.>
+<The worker cannot open an issue tracker. Put each source this brief cites
+here, or export it to a file in the scratchpad, pass it with `--read`, and
+name that file here.>
 
 ## Outputs
 
@@ -42,9 +45,10 @@ by this task's own checks in this task's files.>
 <Keep the line that applies; remove the others.>
 
 `emb run` worker:
-You may run git commands that only read, such as `git log`, `git show` and
-`git diff`. Run no git command that changes the index, a branch or a ref:
-Ember commits your edits on its run branch at the end of each turn.
+You may run git commands that only read, such as `git log`, `git show`,
+`git diff`, `git status` and `git blame`. Run no git command that changes
+the index, a tracked file's state, a branch or a ref: Ember commits your
+edits on its run branch at the end of each turn.
 
 Editing Claude subagent or Workflow agent:
 Commit on your own branch in this worktree, with this exact trailer:

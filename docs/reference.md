@@ -1007,7 +1007,7 @@ claim to the run.
 | `--model MODEL` | Use this model, whether or not shortlisted; requires `--engine` |
 | `--effort EFFORT` | Use this effort; requires `--engine` |
 | `--claim ID` | Read choices with this claim and pass it to the run |
-| `--read PATH` | Add a readable path to the run; repeatable; also accepted with `--brief`, where it only covers citations and lists sources |
+| `--read PATH` | Add a readable path to the run; repeatable; also accepted with `--brief`, where it only covers citations and lists sources. Citations in the plan that neither these paths nor the `sandbox.read` setting supply are warned about on standard error |
 | `--window` | Open a terminal window on the run's session |
 | `--stall MINUTES` | Stop waiting after this many minutes without a screen change; default 10 |
 | `--json` | Print the result as JSON |
@@ -1475,12 +1475,15 @@ Warnings do not refuse a plan:
 - `<where> cites <reference>, which no read path supplies`, once per
   reference at its first citation, where `<where>` is `the context`, `the
   failure model` or `task <id>` (its subject, task text and review focus).
-  A reference is a URL, `#<n>` or `<owner>/<repo>#<n>`. A read path that is
-  a file, or a file directly inside a read folder, supplies a reference when
-  the reference appears in its first 20 lines, or, for `#<n>` and
+  A reference is a URL, `#<n>` or `<owner>/<repo>#<n>`. The read paths are
+  the `sandbox.read` setting and the plan's `read`. A read path that is a
+  file, or a file directly inside a read folder, supplies a reference when
+  its first 20 lines hold the same whole reference (`#930` does not supply
+  `#93`, and a longer URL does not supply its prefix), or, for `#<n>` and
   `<owner>/<repo>#<n>`, when its file name holds the number as its own
   token, such as `issue-93.md`. The warning applies whatever the engines'
-  sandbox switches say.
+  sandbox switches say. The printed gap check command passes each of the
+  plan's `read` paths as `--read`.
 
 A failed or timed-out folder probe emits no folder warning. It does not
 change plan validation. Git probes omit checkout override variables and
@@ -1649,8 +1652,8 @@ the run open and is reported by the runner.
 
 The writer brief starts with the task's commit subject and preserves the
 task text as written. It lists the task's files, the other tasks' files in
-the wave, a `## Sources to read` section listing the plan's read files when
-there are any, context and failure model when present, limits, the git rule
+the wave, a `## Sources to read` section listing the read files of the
+`sandbox.read` setting and the plan's `read` when there are any, context and failure model when present, limits, the git rule
 (git commands that only read are allowed; Ember makes the commit), checks
 and closing report headings. Lead corrections also
 preserve their text as written.
