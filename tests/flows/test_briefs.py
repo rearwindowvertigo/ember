@@ -40,7 +40,9 @@ def plan() -> Plan:
     return cast(
         "Plan",
         SimpleNamespace(
-            context="Decided here\n@context", failure_model="Handle empty\n@failure"
+            context="Decided here\n@context",
+            failure_model="Handle empty\n@failure",
+            read=(),
         ),
     )
 
@@ -71,7 +73,8 @@ def test_writer(plan: Plan, task: Task) -> None:
     for value in (*task.files, "src/b.py", plan.context, plan.failure_model):
         assert value in text
     assert "Other tasks in this wave change these files; do not change them:" in text
-    assert "Do not run git. Ember commits your edits on its run branch" in text
+    assert "You may run git commands that only read" in text
+    assert "Ember commits your edits on its run branch" in text
     headings = re.findall(r"^## (.*)$", text, re.M)
     assert headings == [
         "Files",
@@ -87,7 +90,10 @@ def test_writer(plan: Plan, task: Task) -> None:
 
 def test_writer_omits_blank_optional_sections(task: Task) -> None:
     text = briefs.writer_brief(
-        FLOW, cast("Plan", SimpleNamespace(context=" \n", failure_model="")), task, []
+        FLOW,
+        cast("Plan", SimpleNamespace(context=" \n", failure_model="", read=())),
+        task,
+        [],
     )
     assert "## Context" not in text and "## Failure model" not in text
     assert "No other task runs in this wave." in text
@@ -129,7 +135,7 @@ def test_review(plan: Plan, task: Task, round: int) -> None:
 def test_review_without_report_or_outside_files(task: Task) -> None:
     text = briefs.review_brief(
         FLOW,
-        cast("Plan", SimpleNamespace(context="", failure_model="")),
+        cast("Plan", SimpleNamespace(context="", failure_model="", read=())),
         task,
         round=1,
         base="base",
@@ -226,3 +232,43 @@ def test_briefs_with_parsed_plan(tmp_path: Path) -> None:
     assert "    Read input" in review and "    Check empty input" in review
     assert briefs.fix_message(FLOW, task, 1, [_finding()]).startswith("Fix round 1")
     assert briefs.send_message(FLOW, task, "Correction").endswith("\n\nCorrection")
+
+
+def test_writer_and_reviewer_list_the_read_files(tmp_path: Path, task: Task) -> None:
+    issue = tmp_path / "issue-93.md"
+    issue.write_text("title: x\n")
+    folder = tmp_path / "sources"
+    folder.mkdir()
+    (folder / "spec.md").write_text("spec\n")
+    with_sources = cast(
+        "Plan",
+        SimpleNamespace(
+            context="",
+            failure_model="",
+            read=(str(issue), str(folder), str(tmp_path / "missing")),
+        ),
+    )
+    writer = briefs.writer_brief(FLOW, with_sources, task, [])
+    review = briefs.review_brief(
+        FLOW,
+        with_sources,
+        task,
+        round=1,
+        base="a" * 40,
+        head="b" * 40,
+        changed=["src/a.py"],
+        outside=[],
+        wave_files=[],
+        writer_report=None,
+    )
+    for text in (writer, review):
+        assert "## Sources to read" in text
+        assert f"- {issue}" in text and f"- {folder / 'spec.md'}" in text
+        assert str(tmp_path / "missing") not in text
+    plain = briefs.writer_brief(
+        FLOW,
+        cast("Plan", SimpleNamespace(context="", failure_model="", read=())),
+        task,
+        [],
+    )
+    assert "## Sources to read" not in plain

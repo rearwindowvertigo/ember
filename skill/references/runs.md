@@ -16,6 +16,10 @@ Start options: `--model`, `--effort`, `--read-only`, `--read <path>`
 `opencode` or `claude` directly: Ember owns the worktree, the sandbox, the
 commits and the run record.
 
+A worker cannot open an issue tracker. Put each source the brief cites in
+the brief, or export it to a file in the scratchpad and pass it with
+`--read`, naming that file in the brief.
+
 Write every brief and correction to a file in the session's scratchpad
 and pass it with `--task-file` or `--message-file`; there is no inline
 option. Single-quote trailers so the shell cannot change them; for a

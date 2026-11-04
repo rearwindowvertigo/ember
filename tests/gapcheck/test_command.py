@@ -198,7 +198,7 @@ def test_subagent_route(
         ["--brief", "--json"],
         ["--brief", "--stall", "10"],
         ["--reply", "answer", "--window"],
-        ["--brief", "--read", "."],
+        ["--reply", "answer", "--read", "."],
         ["--reply", "answer", "--claim", "claim-123"],
     ],
 )
@@ -1316,3 +1316,42 @@ def test_stop_signal_while_waiting_keeps_the_run_with_its_parent(
     assert run.status != record.CLOSED
     assert run.parent is not None and run.parent["command"] == "gapcheck"
     assert run.parent["pid"] == os.getpid() and not record.orphaned(run)
+
+
+def test_cited_source_warns_and_read_file_is_listed_in_the_brief(
+    env: dict[str, str], repo: Path, tmp_path: Path
+) -> None:
+    cited = tmp_path / "cited plan.md"
+    cited.write_text(
+        "## Failure model\nNone.\n1. Build https://example.com/spec\n2. Test #7\n"
+    )
+    code, out, err = invoke(env, cited, "--brief", "--dir", str(repo))
+    assert code == 0 and out.startswith("Gap check of the plan")
+    assert err.splitlines() == [
+        "WARNING: the plan cites https://example.com/spec, which no read path supplies",
+        "WARNING: the plan cites #7, which no read path supplies",
+    ]
+    assert "## Sources to read" not in out
+    issue = tmp_path / "issue-7.md"
+    issue.write_text("title: x\n")
+    code, out, err = invoke(
+        env, cited, "--brief", "--dir", str(repo), "--read", str(issue)
+    )
+    assert code == 0
+    assert err.splitlines() == [
+        "WARNING: the plan cites https://example.com/spec, which no read path supplies"
+    ]
+    assert "## Sources to read" in out and f"- {issue}" in out
+
+
+def test_sandbox_read_files_supply_citations_and_are_listed(
+    env: dict[str, str], repo: Path, tmp_path: Path
+) -> None:
+    cited = tmp_path / "cited.md"
+    cited.write_text("## Failure model\nNone.\n1. Test #7\n")
+    issue = tmp_path / "issue-7.md"
+    issue.write_text("title: x\n")
+    choices.set_settings({"sandbox.read": [str(issue)]}, env=env)
+    code, out, err = invoke(env, cited, "--brief", "--dir", str(repo))
+    assert code == 0 and not err
+    assert "## Sources to read" in out and f"- {issue}" in out

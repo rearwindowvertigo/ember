@@ -9,6 +9,7 @@ from importlib import resources
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from ember import citations
 from ember.engines import Driver, DriverMissingError, status
 from ember.runs import exits
 
@@ -362,8 +363,27 @@ def waves(plan: Plan) -> list[list[Task]]:
     return result
 
 
-def warnings(plan: Plan, top: str, env: Mapping[str, str]) -> list[str]:
-    """Describe missing checks, missing tests and folders declared as files."""
+def cited(plan: Plan) -> list[citations.Citation]:
+    """Return the sources the plan's context, failure model and tasks cite."""
+    found = citations.find("the context", plan.context) + citations.find(
+        "the failure model", plan.failure_model
+    )
+    for task in plan.tasks:
+        found += citations.find(
+            f"task {task.id}", "\n".join((task.subject, task.task, task.review))
+        )
+    return found
+
+
+def warnings(
+    plan: Plan, top: str, env: Mapping[str, str], standing: Sequence[str] = ()
+) -> list[str]:
+    """Describe missing checks and tests, folders declared as files, and sources.
+
+    A source the plan cites by reference that no read file supplies is named
+    once, at its first citation. Read files are the standing `sandbox.read`
+    paths and the plan's `read`, as every worker of the flow gets both.
+    """
     result: list[str] = []
     if not plan.failure_model.strip():
         result.append("no failure_model; every unsettled case is a gap")
@@ -389,6 +409,10 @@ def warnings(plan: Plan, top: str, env: Mapping[str, str]) -> list[str]:
                 )
         if not any(_test_file(file) for file in task.files):
             result.append(f"{task.id}: no test file in its files")
+    files = citations.source_files([*standing, *plan.read])
+    result += [
+        citations.warning(item) for item in citations.uncovered(cited(plan), files)
+    ]
     return result
 
 

@@ -1475,3 +1475,29 @@ def test_accept_on_a_conflict_refuses_another_commit(
         )
     assert code == 64 and not out and "approved tip" in err
     assert not record.read_answers(flow["id"], env)
+
+
+def test_dry_run_passes_read_files_to_the_gap_check_and_counts_sandbox_read(
+    env: dict[str, str], plan_file: Path, tmp_path: Path
+) -> None:
+    issue = tmp_path / "issue 93.md"
+    issue.write_text("#93\n")
+    spec = tmp_path / "spec.md"
+    spec.write_text("https://example.com/spec\n")
+    raw = json.loads(plan_file.read_text())
+    raw["tasks"][0]["task"] = "Build #93 from https://example.com/spec"
+    raw["read"] = [str(issue)]
+    plan_file.write_text(json.dumps(raw))
+    code, out, err = invoke(env, "--plan", str(plan_file), "--dry-run", "--json")
+    assert code == 0, err
+    result = json.loads(out)
+    words = shlex.split(result["gapcheck"])
+    assert words[words.index("--read") + 1] == str(issue)
+    cites = [w for w in result["warnings"] if " cites " in w]
+    assert cites == [
+        "task a cites https://example.com/spec, which no read path supplies"
+    ]
+    choices.set_settings({"sandbox.read": [str(spec)]}, env=env)
+    code, out, err = invoke(env, "--plan", str(plan_file), "--dry-run", "--json")
+    assert code == 0, err
+    assert not [w for w in json.loads(out)["warnings"] if " cites " in w]

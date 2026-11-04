@@ -16,6 +16,14 @@ those it accepts: a nonblank `failure_model` string in a flow plan, or a
 wording, docstrings or tests the owner did not ask for. A blank plan is
 refused; a one-step plan is checked as one step.
 
+A reviewer reads only the plan, its worktree and its read paths; it cannot
+open an issue tracker. Put the text of each source the plan cites in the
+plan, or export it to a file in the session scratchpad and pass the file
+with `--read` (for a GitHub issue,
+`gh issue view <n> --comments > <scratch>/issue-<n>.md`). `emb gapcheck`
+and `emb flow --dry-run` warn about each citation no read file supplies;
+treat that warning as a missing source.
+
 ## Decide first
 
 Settle whether the plan gets a check before choosing a reviewer or asking
