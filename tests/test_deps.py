@@ -138,7 +138,12 @@ def test_packaged_engine_install_matches_status() -> None:
     specs = {spec.id: spec for spec in deps.load_components()}
     for engine in status.ENGINES:
         assert specs[engine].installed.engine == engine
-        assert specs[engine].install == status.INSTALL[engine]
+        expected = (
+            "curl -fsSL https://opencode.ai/v2/install | bash"
+            if engine == "opencode"
+            else status.INSTALL[engine]
+        )
+        assert specs[engine].install == expected
 
 
 def _normalise(name: str) -> str:
@@ -799,17 +804,24 @@ def _engine_read(
     *,
     installed: bool = True,
     newest: str = "due",
-    version: str = "2.0.0",
+    version: str = "2.1.0",
     deadline: float = deps.TIMEOUT,
 ) -> deps.Component:
-    body = version if spec.newest.kind == "text" else json.dumps({"version": version})
+    url = (spec.newest.url or "").replace("{channel}", "latest")
+    if spec.newest.kind == "github":
+        url = f"https://api.github.com/repos/{spec.newest.repo}/releases?per_page=100"
+        body = json.dumps(
+            [{"tag_name": f"v{version}", "draft": False, "prerelease": False}]
+        )
+    else:
+        body = (
+            version if spec.newest.kind == "text" else json.dumps({"version": version})
+        )
     return _one(
         deps.read(
             env,
             components=(spec,),
-            fetch=Fetcher(
-                {(spec.newest.url or "").replace("{channel}", "latest"): body}
-            ),
+            fetch=Fetcher({url: body}),
             installed=installed,
             newest=newest,
             deadline=deadline,
@@ -821,7 +833,7 @@ def _launcher(env: dict[str, str], engine: str, target: Path) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     versions = {
         "codex": "codex-cli 1.0.0",
-        "opencode": "1.0.0",
+        "opencode": "opencode v2.0.0",
         "claude": "1.0.0 (Claude Code)",
     }
     target.write_text(
@@ -1611,3 +1623,214 @@ def test_a_channel_change_reads_the_newest_version_again(env: dict[str, str]) ->
     item = _one(_read(env, CHANNELLED, fetch, now=NOW + 120))
     assert item.newest == "2.1.311"
     assert len(fetch.calls) == 2
+
+
+# GitHub releases and OpenCode major upgrades
+
+
+OPENCODE_RELEASES_URL = (
+    "https://api.github.com/repos/anomalyco/opencode/releases?per_page=100"
+)
+
+
+def test_github_selects_highest_stable_version(env: dict[str, str]) -> None:
+    """Read release versions numerically, independently of release order."""
+    _stub(env, "opencode", "echo 1.19.5\n")
+    releases = [
+        {"tag_name": "v1.19.5", "draft": False, "prerelease": False},
+        {"tag_name": "v2.2.5", "draft": False, "prerelease": False},
+        {"tag_name": "v99.0.0", "draft": True, "prerelease": False},
+        {"tag_name": "v100.0.0", "draft": False, "prerelease": True},
+        {"tag_name": "2.10.0", "draft": False, "prerelease": False},
+        {"tag_name": "process-daemon-v200.0.0"},
+        {"tag_name": "v300.0.0-beta.1"},
+        {"tag_name": 400},
+        {"tag_name": "v2.9.0", "draft": False, "prerelease": False},
+    ]
+    fetch = Fetcher({OPENCODE_RELEASES_URL: json.dumps(releases)})
+    report = deps.read(
+        env, components=(_engine_spec("opencode"),), fetch=fetch, now=NOW
+    )
+    item = _one(report)
+    assert item.status == deps.UPDATE_AVAILABLE
+    assert (item.installed, item.newest, item.error) == ("1.19.5", "2.10.0", None)
+    assert shlex.split(item.command or "")[-2:] == ["upgrade", "--major"]
+    assert fetch.calls == [OPENCODE_RELEASES_URL]
+    assert report.newest_read_at == {"opencode": NOW}
+    cached = deps.read(
+        env,
+        components=(_engine_spec("opencode"),),
+        fetch=fetch,
+        installed=False,
+        now=NOW + 1,
+    )
+    assert cached == report
+    assert fetch.calls == [OPENCODE_RELEASES_URL]
+
+
+@pytest.mark.parametrize(
+    ("reply", "message"),
+    [
+        ("[]", "no stable versioned releases"),
+        ('[{"tag_name": "v3.0.0", "prerelease": true}]', "no stable"),
+        ('[{"tag_name": "v3.0.0", "draft": true}]', "no stable"),
+        ('[{"tag_name": "process-daemon-v1.0.0"}]', "no stable"),
+        ('{"message": "API rate limit exceeded"}', "not return a release list"),
+        ("null", "not return a release list"),
+        ("[null]", "invalid release"),
+        ("<html>", "not return JSON"),
+        (OSError("no network"), "no network"),
+    ],
+)
+def test_github_release_failures(
+    env: dict[str, str], reply: str | Exception, message: str
+) -> None:
+    """Report unavailable release versions as failed checks."""
+    _stub(env, "opencode", "echo 1.19.5\n")
+    report = deps.read(
+        env,
+        components=(_engine_spec("opencode"),),
+        fetch=Fetcher({OPENCODE_RELEASES_URL: reply}),
+        now=NOW,
+    )
+    item = _one(report)
+    assert item.status == deps.CHECK_FAILED
+    assert item.installed == "1.19.5"
+    assert item.newest is None and item.command is None
+    assert item.error is not None and message in item.error
+    assert report.newest_read_at == {"opencode": None}
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        {"kind": "github"},
+        {"kind": "github", "repo": ""},
+        {"kind": "github", "repo": 1},
+        {"kind": "github", "repo": "anomalyco"},
+        {"kind": "github", "repo": "https://github.com/anomalyco/opencode"},
+        {"kind": "github", "repo": "anomalyco/opencode?x=1"},
+        {"kind": "github", "repo": "anomalyco/opencode", "field": "tag_name"},
+    ],
+)
+def test_github_source_schema(source: dict[str, object]) -> None:
+    """Validate repository sources using the component source schema."""
+    with pytest.raises(deps.ComponentsError):
+        deps._source("component opencode", "newest", source)
+
+
+@pytest.mark.parametrize(
+    ("output", "version", "state", "arguments"),
+    [
+        ("1.19.5", "1.19.5", deps.UPDATE_AVAILABLE, ["upgrade", "--major"]),
+        ("opencode v2.2.4", "2.2.4", deps.UPDATE_AVAILABLE, ["upgrade"]),
+        ("opencode v2.2.5", "2.2.5", deps.CURRENT, []),
+        ("2.2.4", "2.2.4", deps.UPDATE_AVAILABLE, ["upgrade"]),
+    ],
+)
+def test_opencode_installed_versions_and_update_commands(
+    env: dict[str, str],
+    output: str,
+    version: str,
+    state: str,
+    arguments: list[str],
+) -> None:
+    """Read both CLI formats and choose the installed major's updater."""
+    target = Path(env["HOME"]) / ".opencode/bin/opencode"
+    launcher = _launcher(env, "opencode", target)
+    target.write_text(f"#!/bin/sh\necho '{output}'\n")
+    item = _engine_read(env, _engine_spec("opencode"), version="2.2.5")
+    assert (item.installed, item.newest, item.status) == (version, "2.2.5", state)
+    assert item.error is None
+    if arguments:
+        assert shlex.split(item.command or "") == [str(launcher), *arguments]
+        assert item.command_kind == "update"
+    else:
+        assert item.command is None and item.command_kind is None
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        "lib/node_modules/opencode-ai/bin/opencode",
+        "global/5/node_modules/opencode-ai/bin/opencode",
+        "install/global/node_modules/opencode-ai/bin/opencode",
+        "Cellar/opencode/1.19.5/bin/opencode",
+        "usr/bin/opencode",
+        "unknown/opencode",
+    ],
+)
+@pytest.mark.parametrize("writable", [True, False])
+def test_opencode_major_upgrade_overrides_install_method(
+    env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    layout: str,
+    writable: bool,
+) -> None:
+    """Offer the major upgrade through the located launcher for every layout."""
+    target = tmp_path / "prefix with ' spaces" / layout
+    launcher = _launcher(env, "opencode", target)
+    target.write_text("#!/bin/sh\necho 1.19.5\n")
+    if layout == "usr/bin/opencode":
+        _stub(env, "dpkg-query", 'printf "%s\\n" "opencode: $2"\n')
+    access = os.access
+    monkeypatch.setattr(
+        deps.os,
+        "access",
+        lambda path, mode: writable if mode == os.W_OK else access(path, mode),
+    )
+    item = _engine_read(env, _engine_spec("opencode"), version="2.2.5")
+    expected = ([] if writable else ["sudo"]) + [
+        str(launcher),
+        "upgrade",
+        "--major",
+    ]
+    assert item.status == deps.UPDATE_AVAILABLE
+    assert shlex.split(item.command or "") == expected
+    assert (item.method is None) == (layout == "unknown/opencode")
+
+
+def test_missing_opencode_uses_v2_installer(env: dict[str, str]) -> None:
+    """Offer the v2 installer without fetching releases for a missing CLI."""
+    fetch = Fetcher({})
+    item = _one(
+        deps.read(env, components=(_engine_spec("opencode"),), fetch=fetch, now=NOW)
+    )
+    assert item.status == deps.MISSING
+    assert item.command == "curl -fsSL https://opencode.ai/v2/install | bash"
+    assert item.command_kind == "install"
+    assert fetch.calls == []
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        '"bad"',
+        '{ "v1" = "codex update" }',
+        '{ "01" = "codex update" }',
+        '{ "-1" = "codex update" }',
+        '{ "1" = 3 }',
+        '{ "1" = "" }',
+        '{ "1" = "opencode upgrade --major" }',
+        '{ "1" = "codex" }',
+        """{ "1" = "codex '" }""",
+    ],
+)
+def test_invalid_major_updater_schema(override: str) -> None:
+    """Reject malformed major-version selectors and updater commands."""
+    text = CODEX.replace(
+        'update = "codex update"',
+        'updater = "codex update"\n' + f"updater_by_major = {override}",
+    )
+    with pytest.raises(deps.ComponentsError):
+        _specs(text)
+
+
+def test_major_updater_requires_default_updater() -> None:
+    """Require an engine updater when major-version overrides are present."""
+    text = CODEX.replace(
+        'update = "codex update"', 'updater_by_major = { "1" = "codex update" }'
+    )
+    with pytest.raises(deps.ComponentsError, match="need an engine and updater"):
+        _specs(text)
