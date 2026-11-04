@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/rearwindowvertigo/ember/compare/v0.14.0...v0.14.1) (2026-11-04)
+
+
+### Fixed
+
+* **app:** keep the OpenCode model table inside the Engines screen ([f536c2c](https://github.com/rearwindowvertigo/ember/commit/f536c2c7c730054d6ee2989ce64deb3ff22697cc)), closes [#120](https://github.com/rearwindowvertigo/ember/issues/120)
+
 ## [0.14.0](https://github.com/rearwindowvertigo/ember/compare/v0.13.0...v0.14.0) (2026-11-04)
 
 
