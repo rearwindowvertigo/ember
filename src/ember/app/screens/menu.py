@@ -619,12 +619,12 @@ class MenuScreen(QWidget):
                     )
         finally:
             self.add_member.blockSignals(False)
-        self.add_member.setEnabled(
-            not self._panel_pending
-            and not blocked
-            and len(members) < PANEL_LIMIT
-            and bool(groups)
+        # A line on the card or the screen says why a member cannot be added:
+        # the eight-member limit, a member to fix first, or no shortlist.
+        self.add_member.setVisible(
+            not blocked and len(members) < PANEL_LIMIT and bool(groups)
         )
+        self.add_member.setEnabled(not self._panel_pending)
 
     def _draw_icons(self) -> None:
         """Keep the member removal icons in the current theme's text colour."""

@@ -382,7 +382,7 @@ def test_multi_shows_saved_value_and_saves_only_changes(
     assert screen.multi.value() == target
     # Multi-task work remains usable without any shortlisted model.
     assert screen.empty.isVisibleTo(screen)
-    assert not screen.add_member.isEnabled()
+    assert not screen.add_member.isVisibleTo(screen)
 
 
 def test_panel_empty_add_choices_and_save(env: dict[str, str], qtbot: QtBot) -> None:
@@ -430,7 +430,7 @@ def test_panel_at_limit(env: dict[str, str], qtbot: QtBot) -> None:
     choices.set_settings({"shortlist.codex": models}, env=env)
     choices.set_settings({"panel.members": members}, env=env)
     context, screen = _screen(env, qtbot)
-    assert not screen.add_member.isEnabled()
+    assert not screen.add_member.isVisibleTo(screen)
     assert screen.full.isVisibleTo(screen)
     assert screen.full.text() == menu.FULL
     with qtbot.waitSignal(context.settings_changed, timeout=5000):
@@ -464,7 +464,7 @@ def test_panel_off_shortlist_blocks_add_but_can_be_removed(
         env=env,
     )
     context, screen = _screen(env, qtbot)
-    assert not screen.add_member.isEnabled()
+    assert not screen.add_member.isVisibleTo(screen)
     assert screen.add_warning.text() == menu.ADD_BLOCKED
     if not engine_off:
         assert (

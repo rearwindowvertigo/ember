@@ -736,7 +736,8 @@ class _PickerDelegate(QStyledItemDelegate):
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(theme.color("bg-selected"))
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-                painter.drawRoundedRect(QRectF(rect), 6, 6)
+                radius = theme.RADIUS["sm"]
+                painter.drawRoundedRect(QRectF(rect), radius, radius)
             text_rect = rect.adjusted(12, self.PAD, -12, -self.PAD)
             text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
             if header:

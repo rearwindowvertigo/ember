@@ -16,13 +16,11 @@ from typing import TYPE_CHECKING, Any
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QHideEvent
 from PySide6.QtWidgets import (
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -35,6 +33,7 @@ from ember.app import icons, state, theme, tray
 from ember.app.flows import FlowItem, PanelItem, plan_wave
 from ember.app.runs import DONE, FINISHED_LIMIT, LIVE
 from ember.app.screens.common import (
+    ToneLine,
     chain_tab_order,
     discard,
     engine_name,
@@ -50,6 +49,7 @@ from ember.app.widgets import (
     Badge,
     Card,
     ElidedLabel,
+    Picker,
     StateView,
     button,
     set_icon,
@@ -315,6 +315,17 @@ def run_parents(parents: list[FlowItem | PanelItem]) -> dict[str, FlowItem | Pan
         for run_id in parent.run_ids:
             result.setdefault(run_id, parent)
     return result
+
+
+MISSING_FILES = {
+    "Summary": "the panel writes summary.md when it ends.",
+    "Briefs": "the flow has written no task briefs yet.",
+    "Check logs": "the flow has run no repository check yet.",
+}
+"""Why each flow or panel file button has nothing to open yet."""
+
+CODE_ROWS = ("Run", "Repository", "Branch")
+"""Run record rows whose values are a run id, a path or a branch, in `type-code`."""
 
 
 def record_rows(run: Run, now: float | None = None) -> list[tuple[str, str]]:
@@ -645,7 +656,7 @@ class _Row(_ExpandableRow):
         self.nested = nested
 
     def draw_time(self, now: float | None = None) -> None:
-        """Draw the detail line and the right column's end time or "Live"."""
+        """Draw the detail line and the right column's Elapsed time."""
         ended = run_ended(self.run)
         detail = run_detail(self.run, now)
         if self.parent_label:
@@ -681,8 +692,11 @@ class _Row(_ExpandableRow):
             name = QLabel(label)
             name.setProperty("role", "secondary")
             text = QLabel(value)
+            text.setTextFormat(Qt.TextFormat.PlainText)
             text.setWordWrap(True)
             text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            if label in CODE_ROWS and value not in ("read-only", "None"):
+                text.setFont(theme.font("code"))
             grid.addWidget(name, row, 0, Qt.AlignmentFlag.AlignTop)
             grid.addWidget(text, row, 1)
         grid.setColumnStretch(1, 1)
@@ -764,6 +778,7 @@ class _RecordRow(_ExpandableRow):
         super().__init__(item.record["id"], kind, "details")
         self.details: QWidget | None = None
         self.file_buttons: dict[str, QPushButton] = {}
+        self.file_note = ToneLine("warning")
         self.file_paths: dict[str, Path | None] = {}
         self.shown_values: tuple[object, ...] = ()
         self.base_detail = ""
@@ -880,6 +895,12 @@ class _RecordRow(_ExpandableRow):
                 self.file_buttons[name] = link
             actions.addStretch()
             layout.addLayout(actions)
+            self.file_note = ToneLine("warning")
+            policy = self.file_note.sizePolicy()
+            policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+            policy.setHeightForWidth(True)
+            self.file_note.setSizePolicy(policy)
+            layout.addWidget(self.file_note)
             self._refresh_files()
             self.body.addWidget(details)
             self.details = details
@@ -906,22 +927,21 @@ class _RecordRow(_ExpandableRow):
         else:
             summary = panel_record.folder(self.item.record["id"], env) / "summary.md"
             self.file_paths = {"Summary": summary if summary.is_file() else None}
-        for name, link in self.file_buttons.items():
-            path = self.file_paths[name]
-            link.setEnabled(path is not None)
 
     def _open_file(self, name: str) -> None:
-        """Open the selected file URL and report a refused viewer launch."""
+        """Open the selected file URL, or say under the buttons why it did not open.
+
+        The buttons stay enabled; a file or folder that is not there yet, or a
+        viewer that refused the file, is named in the line under them.
+        """
+        self._refresh_files()
         path = self.file_paths[name]
-        if path is None or QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
-            return
-        message = QMessageBox(self)
-        message.setIcon(QMessageBox.Icon.Warning)
-        message.setWindowTitle("Could not open viewer")
-        message.setTextFormat(Qt.TextFormat.PlainText)
-        message.setText(f"No viewer opened {path}.")
-        message.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        message.open()
+        if path is None:
+            self.file_note.show_text(f"{name}: {MISSING_FILES[name]}")
+        elif QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            self.file_note.show_text(None)
+        else:
+            self.file_note.show_text(f"No viewer opened {path}.")
 
 
 class _FlowRow(_RecordRow):
@@ -1046,19 +1066,29 @@ class OverviewScreen(QWidget):
         self.filter_bar = QWidget()
         filters = QHBoxLayout(self.filter_bar)
         filters.setContentsMargins(0, 0, 0, 0)
-        self.type_filter = QComboBox()
-        self.status_filter = QComboBox()
-        self.engine_filter = QComboBox()
-        for label, combo, values in (
-            ("Type", self.type_filter, ("all", "Run", "Flow", "Panel")),
-            ("Status", self.status_filter, ("all", "Done", "Incomplete", "Failed")),
-            ("Engine", self.engine_filter, ("all", "Codex", "OpenCode", "Claude")),
+        self.type_filter = Picker()
+        self.status_filter = Picker()
+        self.engine_filter = Picker()
+        for label, combo, every, values in (
+            ("Type", self.type_filter, "All types", ("Run", "Flow", "Panel")),
+            (
+                "Status",
+                self.status_filter,
+                "All statuses",
+                ("Done", "Incomplete", "Failed"),
+            ),
+            (
+                "Engine",
+                self.engine_filter,
+                "All engines",
+                ("Codex", "OpenCode", "Claude"),
+            ),
         ):
-            name = QLabel(label)
-            name.setBuddy(combo)
             combo.setAccessibleName(label)
-            combo.addItems(values)
-            filters.addWidget(name)
+            combo.setProperty("scale", "sm")
+            combo.add_option(every, "all")
+            for value in values:
+                combo.add_option(value, value)
             filters.addWidget(combo)
             combo.currentTextChanged.connect(self.refresh)
         self.finished_cap = QLabel(
@@ -1155,9 +1185,9 @@ class OverviewScreen(QWidget):
                 if matches_filters(
                     item,
                     workers.get(item_id(item), []),
-                    self.type_filter.currentText(),
-                    self.status_filter.currentText(),
-                    self.engine_filter.currentText().lower(),
+                    str(self.type_filter.value()),
+                    str(self.status_filter.value()),
+                    str(self.engine_filter.value()).lower(),
                 )
             ]
         else:
@@ -1169,7 +1199,7 @@ class OverviewScreen(QWidget):
             "No finished records match the filters."
             if self.finished_open
             and any(
-                combo.currentText() != "all"
+                combo.value() != "all"
                 for combo in (self.type_filter, self.status_filter, self.engine_filter)
             )
             else "No finished runs, flows or panels yet."
@@ -1256,8 +1286,13 @@ class OverviewScreen(QWidget):
         self.records.reload()
 
     def _update_clear(self) -> None:
-        """Enable Clear only when shown records exist and no clear is pending."""
-        self.clear_button.setEnabled(bool(self._shown_finished) and not self._clearing)
+        """Show Clear only while records are shown; it waits out a pending clear.
+
+        With nothing shown, the Finished list's empty line says why there is
+        nothing to clear.
+        """
+        self.clear_button.setVisible(bool(self._shown_finished))
+        self.clear_button.setEnabled(not self._clearing)
 
     def clear_finished(self) -> None:
         """Preview removal of the ids shown at the time Clear is clicked."""

@@ -2911,8 +2911,9 @@ full list is open; with twenty rows, `Filters cover the newest 20 records.`
 shows beside the pickers. Whether it is open is kept in `app.json` as
 `finished_open` and restored when the app starts.
 
-Finished filters this capped list by Type (all, Run, Flow, Panel), Status
-(all, Done, Incomplete, Failed) and Engine (all, Codex, OpenCode, Claude).
+Finished filters this capped list with three pickers: Type (All types, Run,
+Flow, Panel), Status (All statuses, Done, Incomplete, Failed) and Engine (All
+engines, Codex, OpenCode, Claude).
 The filters combine and test top-level rows: Run selects standalone runs,
 Status matches the parent's own chip, and a flow or panel matches Engine
 when any of its readable runs, nested or shown in Live, used that engine. A parent without
@@ -2920,8 +2921,9 @@ readable nested runs matches only Engine=all. Filters start at all when
 the app starts and keep their values across reloads for the app session.
 
 Clear is a red outline button with a trash icon. Its accessible
-description is `Remove shown records`. Clear is disabled when no records are shown or a
-clear is pending. It
+description is `Remove shown records`. Clear is hidden when no records are
+shown, where the list's empty line says so, and disabled while a clear is
+pending. It
 captures the shown top-level ids and calls `prune.remove` with
 `older_than=0` and those ids, first as a dry run and then, after confirmation,
 for removal. Both calls run off the GUI thread. The confirmation lists the
@@ -2994,12 +2996,14 @@ flow details have Briefs for the `briefs/` folder and one Check logs button.
 Check logs considers only files matching `check-*.log` directly in the flow
 folder. It selects the highest integer `(wave, attempt)` from
 `check-<wave>-<attempt>.log`; if no name parses, it selects the newest file
-by modification time. Buttons are disabled when their file or folder is
-absent. Targets are checked when details expand and on every model reload
+by modification time. The buttons stay enabled; one whose file or folder is
+absent says why on a line under the buttons, such as `Summary: the panel
+writes summary.md when it ends.` Targets are checked when details expand,
+on every click and on every model reload
 while those details are drawn. Collapsed rows do not check targets.
 Buttons pass a file URL to `QDesktopServices.openUrl` for the desktop's
-default viewer. If it returns false, a warning names the path and says no
-viewer opened it.
+default viewer. If it returns false, the line under the buttons reads
+`No viewer opened <path>.`
 
 A run's title, after `Run`, shows its subject on one line, or engine, model
 and effort for a run without one. Its second line shows engine, model and
@@ -3020,7 +3024,8 @@ shows `Elapsed` and its duration: `Elapsed 2 min 5 s` under an hour,
 and has no tooltip. The branch is in the expanded record. Live runs have Open terminal, which
 opens a terminal window on the run as `emb run --attach` does. Expanding a
 run shows its record, including last exit and reason; a live run's Ended is
-`Not yet`. Rows and expanded
+`Not yet`. The record's run id, repository and branch are set in the code
+font. Rows and expanded
 details survive unrelated record changes. Elapsed times update every second
 while shown.
 
@@ -3100,16 +3105,17 @@ Each member has a Remove button. Add member lists shortlisted models of
 engines that are on, grouped by engine, excluding saved members. Choosing
 one appends it and returns the picker to Add member. With no members the
 card says "No members. Claude asks for members, or uses the ones it is given,
-each time." At eight members Add member is disabled and the card says
+each time." At eight members Add member is hidden and the card says
 "A panel has at most eight members."
 
-A member missing from its shortlist disables Add member, even when its
+A member missing from its shortlist hides Add member, even when its
 engine is off or not connected. The warning asks the owner to remove those
 members or shortlist them in Engines. Remove saves only when every remaining
 member is shortlisted. Otherwise it sends no save, names the first remaining
 member to shortlist, and shows Remove all, which saves an empty list. An
 engine being off or not connected alone does not block saving. Add member
-is also disabled when no unused shortlisted model is offered.
+is also hidden when no unused shortlisted model is offered, where the
+screen says to shortlist models in Engines.
 
 One-time choices are not shown. Each change saves at once with the settings
 generation check; choosing an already saved multi-task value saves nothing.

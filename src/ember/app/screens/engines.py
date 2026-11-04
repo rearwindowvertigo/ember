@@ -13,6 +13,7 @@ on. A card whose sandbox is off shows its sandbox check as not run.
 Every read, check and save runs in a task.
 """
 
+import html
 from collections.abc import Sequence
 from decimal import Decimal
 from math import ceil
@@ -303,6 +304,7 @@ class _EngineCard(Card):
         )
         layout.addWidget(self.none_label)
         self.bwrap_label = label(role="secondary")
+        self.bwrap_label.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(self.bwrap_label)
         self.check_label = label(role="secondary")
         self.check_label.setTextInteractionFlags(
@@ -417,7 +419,12 @@ class _EngineCard(Card):
             self.bwrap_label.setText("bwrap: not found")
         else:
             version = check.bwrap_version or "version unknown"
-            self.bwrap_label.setText(f"bwrap: {check.bwrap_path}, {version}")
+            family = html.escape(theme.font("code").family())
+            path = html.escape(check.bwrap_path)
+            self.bwrap_label.setText(
+                f"bwrap: <span style=\"font-family: '{family}'\">{path}</span>, "
+                f"{html.escape(version)}"
+            )
         if not switched_on:
             self.check_label.setText("Sandbox check: not run")
             check = None

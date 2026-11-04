@@ -188,6 +188,7 @@ class DependencyTile(widgets.Card):
         layout.addWidget(self.error)
         self.error.setVisible(bool(item.error) and item.error != item.link_state)
         self.resolved_path = label(item.resolved_path or "", "muted")
+        self.resolved_path.setFont(theme.font("code"))
         self.resolved_path.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )

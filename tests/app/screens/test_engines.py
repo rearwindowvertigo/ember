@@ -797,7 +797,8 @@ def test_sandbox_switch_on_saves_then_runs_the_check(
     qtbot.waitUntil(lambda: not screen.checking, timeout=5000)
     assert "Sandbox check: failed, today" in card.check_label.text()
     assert card.check_label.text().endswith(": the sandbox test failed")
-    assert card.bwrap_label.text() == "bwrap: /usr/bin/bwrap, 0.11.1"
+    assert card.bwrap_label.text().startswith("bwrap: <span style=")
+    assert ">/usr/bin/bwrap</span>, 0.11.1" in card.bwrap_label.text()
     assert sandbox.last_checks(env)["opencode"].ok is False
 
 

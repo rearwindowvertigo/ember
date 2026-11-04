@@ -430,7 +430,7 @@ QLineEdit, QComboBox {
     padding: 0 14px;
     border-radius: 18px;
     border: 1px solid @border-strong;
-    background: @bg-card;
+    background: @bg-raised;
     color: @text-primary;
     font-size: 14px;
     selection-background-color: @accent;
@@ -468,7 +468,7 @@ QComboBox QAbstractItemView {
     background: @bg-raised;
     color: @text-primary;
     border: 1px solid @border-strong;
-    border-radius: 10px;
+    border-radius: 16px;
     padding: 8px;
     outline: none;
     selection-background-color: @bg-selected;
@@ -478,12 +478,12 @@ QMenu {
     background: @bg-raised;
     color: @text-primary;
     border: 1px solid @border-strong;
-    border-radius: 10px;
+    border-radius: 16px;
     padding: 8px;
 }
 QMenu::item {
     padding: 6px 12px;
-    border-radius: 6px;
+    border-radius: 10px;
 }
 QMenu::item:selected {
     background: @bg-hover;

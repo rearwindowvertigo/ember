@@ -727,12 +727,9 @@ def test_record_file_buttons(
         assert all(url.isLocalFile() for url in opened)
         monkeypatch.setattr(overview.QDesktopServices, "openUrl", lambda _url: False)
         panel.file_buttons["Summary"].click()
-        message = panel.findChild(QMessageBox)
-        assert message is not None
-        assert message.icon() == QMessageBox.Icon.Warning
-        assert message.textFormat() == Qt.TextFormat.PlainText
-        assert message.text() == f"No viewer opened {summary}."
-        message.accept()
+        assert panel.findChild(QMessageBox) is None
+        assert panel.file_note.isVisible()
+        assert panel.file_note.text() == f"No viewer opened {summary}."
     finally:
         theme.apply(qapp, previous)
 
@@ -769,9 +766,16 @@ def test_record_file_buttons_refresh_only_when_expanded(
     panel.expand_button.click()
     assert calls == [FLOW, PANEL]
     assert all(
-        not button.isEnabled()
+        path is None for row in (flow, panel) for path in row.file_paths.values()
+    )
+    assert all(
+        button.isEnabled()
         for row in (flow, panel)
         for button in row.file_buttons.values()
+    )
+    panel.file_buttons["Summary"].click()
+    assert panel.file_note.text() == (
+        "Summary: the panel writes summary.md when it ends."
     )
     details = flow.details, panel.details
     briefs.mkdir()
@@ -782,9 +786,7 @@ def test_record_file_buttons_refresh_only_when_expanded(
         context.flows.reload()
     assert (flow.details, panel.details) == details
     assert all(
-        button.isEnabled()
-        for row in (flow, panel)
-        for button in row.file_buttons.values()
+        path is not None for row in (flow, panel) for path in row.file_paths.values()
     )
     newest = folder / "check-2-1.log"
     newest.touch()
@@ -798,9 +800,7 @@ def test_record_file_buttons_refresh_only_when_expanded(
     with qtbot.waitSignal(context.flows.reloaded):
         context.flows.reload()
     assert all(
-        not button.isEnabled()
-        for row in (flow, panel)
-        for button in row.file_buttons.values()
+        path is None for row in (flow, panel) for path in row.file_paths.values()
     )
     flow.expand_button.click()
     panel.expand_button.click()
@@ -1277,7 +1277,8 @@ def test_finished_filters_combine_and_persist(
     assert DONE_A in screen.finished_rows
     screen.status_filter.setCurrentText("Done")
     assert not screen._shown_finished
-    assert screen.finished_empty.isVisible() and not screen.clear_button.isEnabled()
+    assert screen.finished_empty.isVisible()
+    assert not screen.clear_button.isVisibleTo(screen)
     screen.status_filter.setCurrentText("Incomplete")
     assert screen._shown_finished == (FLOW,)
     screen.type_filter.setCurrentText("Run")
@@ -1305,9 +1306,10 @@ def test_finished_filters_combine_and_persist(
     fresh = OverviewScreen(context)
     qtbot.addWidget(fresh)
     assert all(
-        combo.currentText() == "all"
+        combo.value() == "all"
         for combo in (fresh.type_filter, fresh.status_filter, fresh.engine_filter)
     )
+    assert fresh.type_filter.currentText() == "All types"
 
 
 def test_filters_apply_after_cap_and_ignore_unreadable_workers(
@@ -1337,7 +1339,7 @@ def test_filters_apply_after_cap_and_ignore_unreadable_workers(
     assert not screen._shown_finished
     screen.engine_filter.setCurrentText("OpenCode")
     assert not screen._shown_finished
-    screen.engine_filter.setCurrentText("all")
+    screen.engine_filter.setCurrentText("All engines")
     assert screen._shown_finished == (FLOW,)
 
 
@@ -1481,7 +1483,7 @@ def test_clear_prunes_nested_records_and_rechecks_state(
     assert (paths.runs_dir(env) / DONE_B / "worker.log").exists()
     result.accept()
     qtbot.waitUntil(lambda: not screen._shown_finished)
-    assert not screen.clear_button.isEnabled()
+    assert not screen.clear_button.isVisibleTo(screen)
 
 
 @pytest.mark.parametrize("mode", ["light", "dark"])
