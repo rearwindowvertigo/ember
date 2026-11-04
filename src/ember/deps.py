@@ -876,7 +876,7 @@ def _newest_github(repo: str, fetch: Fetch) -> str:
     Raises:
         ReadError: The releases cannot be read or contain no stable versions.
     """
-    url = f"https://api.github.com/repos/{repo}/releases"
+    url = f"https://api.github.com/repos/{repo}/releases?per_page=100"
     try:
         releases = json.loads(_fetch(url, fetch))
     except ValueError:

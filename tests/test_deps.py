@@ -809,7 +809,7 @@ def _engine_read(
 ) -> deps.Component:
     url = (spec.newest.url or "").replace("{channel}", "latest")
     if spec.newest.kind == "github":
-        url = f"https://api.github.com/repos/{spec.newest.repo}/releases"
+        url = f"https://api.github.com/repos/{spec.newest.repo}/releases?per_page=100"
         body = json.dumps(
             [{"tag_name": f"v{version}", "draft": False, "prerelease": False}]
         )
@@ -1628,7 +1628,9 @@ def test_a_channel_change_reads_the_newest_version_again(env: dict[str, str]) ->
 # GitHub releases and OpenCode major upgrades
 
 
-OPENCODE_RELEASES_URL = "https://api.github.com/repos/anomalyco/opencode/releases"
+OPENCODE_RELEASES_URL = (
+    "https://api.github.com/repos/anomalyco/opencode/releases?per_page=100"
+)
 
 
 def test_github_selects_highest_stable_version(env: dict[str, str]) -> None:
