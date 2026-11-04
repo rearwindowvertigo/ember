@@ -518,7 +518,7 @@ def test_deps_text(
     assert lines[:10] == [
         "Codex: current, installed 1.0.0, newest 1.0.0",
         "OpenCode: missing",
-        "  install: curl -fsSL https://opencode.ai/install | bash",
+        "  install: curl -fsSL https://opencode.ai/v2/install | bash",
         "Claude Code: missing",
         "  install: curl -fsSL https://claude.ai/install.sh | bash",
         "Claude Desktop: update available, installed 1.0, newest 1.1",
