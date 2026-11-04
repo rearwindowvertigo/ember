@@ -308,8 +308,8 @@ def test_read_only_agent_may_read_its_read_paths(
 ) -> None:
     folder = tmp_path / "shared"
     folder.mkdir()
-    note = tmp_path / "notes" / "brief.md"
-    note.parent.mkdir()
+    note = Path(env["HOME"]) / "notes" / "brief.md"
+    note.parent.mkdir(parents=True)
     note.write_text("x")
     run = dataclasses.replace(
         make_run(env, tmp_path, read_only=True),
@@ -945,16 +945,37 @@ def test_load_driver(env: dict[str, str]) -> None:
 )
 def test_wait_shows_the_session_while_the_start_screen_returns(
     driver: OpenCodeDriver,
-    env: dict[str, str],
-    tmp_path: Path,
+    run: Run,
+    server: Server,
     monkeypatch: pytest.MonkeyPatch,
     screen: str,
     age: float,
     selects: int,
 ) -> None:
-    run = dataclasses.replace(make_run(env, tmp_path), started_at=time.time() - age)
+    run = dataclasses.replace(
+        started(driver, run, server), started_at=time.time() - age
+    )
+    server.write("status.json", {"ses_test": {"type": "busy"}})
+    server.write("messages.json", [])
     calls: list[str] = []
     monkeypatch.setattr(tmux, "capture", lambda *_args, **_kwargs: screen)
     monkeypatch.setattr(driver, "_select", lambda _run, session: calls.append(session))
-    driver._show_session(run, "ses_1")
-    assert calls == ["ses_1"] * selects
+    assert driver.wait(run).state == engines.RUNNING
+    assert calls == ["ses_test"] * selects
+
+
+def test_file_read_paths_open_their_folder_only_where_the_sandbox_hides_it(
+    tmp_path: Path,
+) -> None:
+    hidden = tmp_path / "home"
+    inside = hidden / "notes" / "brief.md"
+    outside = tmp_path / "srv" / "specs" / "brief.md"
+    for path in (inside, outside):
+        path.parent.mkdir(parents=True)
+        path.write_text("x")
+    rules = opencode.external_directory(True, (str(inside), str(outside)), (hidden,))
+    assert rules == {"*": "deny", f"{inside.parent}/*": "allow"}
+    assert opencode.external_directory(True, (str(outside),), (hidden,)) == "deny"
+    assert opencode.external_directory(True, (str(hidden / "x.md"),), (hidden,)) == (
+        "deny"
+    )
