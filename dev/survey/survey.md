@@ -39,8 +39,10 @@ Every area asks the same five questions:
 
 ## 1. Setup and choosing workers
 
-`emb ground`, `emb choices` claims and reads, `emb engines`, Menu rows and
-the worker question.
+`emb ground`, `emb choices` claims and reads and the claim's `skill`
+status, `emb engines` and `emb engines --models` (OpenCode models by
+integration), Team rows, the worker question and the `emb run --dry-run`
+announce line.
 
 Score:
 
@@ -52,8 +54,11 @@ Score:
 
 ## 2. Planning and gap checks
 
-Briefs, flow plans, `emb flow --dry-run`, the gap check before a flow and
-the owner's answers to its gaps.
+Briefs, flow plans, `emb flow --dry-run` and its warnings (including
+cited sources a worker cannot read), the gap check before a flow or its
+skip under the Team gap check settings, gaps the lead settled with
+`emb gapcheck --answer`, gaps put to the owner, and repeat checks with
+`--previous`.
 
 Score:
 
@@ -66,7 +71,10 @@ Score:
 ## 3. Running and following work
 
 `emb run` and `emb flow`, `--watch`, `--send`, `--recover`, lead stops,
-`next:` and `owner:` lines, `WARNING:` lines, non-zero exits and recovery.
+`next:` and `owner:` lines, `WARNING:` lines, each turn's result in
+`emb run --status`, denied paths and their reasons (`hidden`,
+`startup file`, `secret location`, `protected`), provider errors (exit 73
+and `provider_kind`) and capacity retries, non-zero exits and recovery.
 
 Score:
 
@@ -79,7 +87,8 @@ Score:
 ## 4. Review, merge and cleanup
 
 `verify_branch.py`, reviewer findings and the review bar, verdicts,
-`emb merge`, `emb cleanup`, `emb run --close` and `emb choices --finish`.
+`emb merge --subject` and its squash commit, `emb cleanup`,
+`emb run --close` and `emb choices --finish`.
 
 Score:
 
