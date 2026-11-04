@@ -1007,7 +1007,7 @@ def test_record_keyboard_order_and_long_text(
     assert area.horizontalScrollBar().maximum() == 0
     assert screen.width() == 900
     assert not flow_row.detail_label.wordWrap()
-    assert flow_row.detail_label.toolTip() == flow_row.detail_label.text()
+    assert flow_row.detail_label.toolTip() == ""
     assert flow_row.details is not None
     assert all(
         label.sizePolicy().hasHeightForWidth()
@@ -1760,7 +1760,7 @@ def test_nested_runs_are_oldest_first(
     assert screen.finished_rows[early].time_label.text() == "Elapsed 1 h 6 min"
 
 
-def test_clear_is_a_red_outline_with_its_tooltip(
+def test_clear_is_a_red_outline_without_a_tooltip(
     env: dict[str, str], context: AppContext, qtbot: QtBot
 ) -> None:
     screen = loaded(env, context, qtbot)
@@ -1769,7 +1769,7 @@ def test_clear_is_a_red_outline_with_its_tooltip(
     assert screen.clear_button.accessibleName() == "Clear"
     assert screen.clear_button.accessibleDescription() == "Remove shown records"
     assert not screen.clear_button.icon().isNull()
-    assert screen.clear_button.toolTip() == "Remove shown records"
+    assert screen.clear_button.toolTip() == ""
     assert not hasattr(screen, "clear_caption")
 
 

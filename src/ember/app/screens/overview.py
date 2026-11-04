@@ -626,7 +626,6 @@ class _ExpandableRow(QWidget):
         self.expand_button.setAccessibleName(
             f"{verb} {self._what} of {self._kind} {self._item_id}"
         )
-        self.expand_button.setToolTip(f"{verb} {self._what}")
 
 
 class _Row(_ExpandableRow):
@@ -910,7 +909,6 @@ class _RecordRow(_ExpandableRow):
         for name, link in self.file_buttons.items():
             path = self.file_paths[name]
             link.setEnabled(path is not None)
-            link.setToolTip(str(path) if path is not None else "")
 
     def _open_file(self, name: str) -> None:
         """Open the selected file URL and report a refused viewer launch."""
@@ -1072,7 +1070,6 @@ class OverviewScreen(QWidget):
         filters.addStretch(1)
         self.clear_button = button("Clear", "danger-outline", size="sm")
         self.clear_button.clicked.connect(self.clear_finished)
-        self.clear_button.setToolTip(CLEAR_TIP)
         self.clear_button.setAccessibleDescription(CLEAR_TIP)
         filters.addWidget(self.clear_button)
         finished_layout.insertWidget(1, self.filter_bar)

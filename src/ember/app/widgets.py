@@ -10,7 +10,6 @@ import math
 from collections.abc import Callable, Sequence
 from typing import cast
 
-from PySide6 import QtGui
 from PySide6.QtCore import (
     QEvent,
     QModelIndex,
@@ -225,21 +224,22 @@ def _breakable(word: str, metrics: QFontMetrics) -> str:
 
 
 class TipWrapper(QObject):
-    """Shows each widget's plain-text tooltip through `tip_text`.
+    """Lets only an info icon show a tooltip, wrapped by `tip_text`.
 
-    The widget keeps its plain text in `toolTip()`; only what is shown wraps.
+    Every other widget's tooltip event is dropped, so nothing without an
+    info icon opens a tooltip. The icon keeps its plain text in `toolTip()`;
+    only what is shown wraps.
     """
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: D102
         if event.type() != QEvent.Type.ToolTip or not isinstance(watched, QWidget):
             return False
+        if not isinstance(watched, InfoTip):
+            return True
         text = watched.toolTip()
-        if not text or QtGui.Qt.mightBeRichText(text):
-            return False
-        shown = tip_text(text)
-        if shown == text:
-            return False
-        QToolTip.showText(cast(QHelpEvent, event).globalPos(), shown, watched)
+        if not text:
+            return True
+        QToolTip.showText(cast(QHelpEvent, event).globalPos(), tip_text(text), watched)
         return True
 
 
@@ -357,16 +357,10 @@ class ElidedLabel(QLabel):
     """A plain-text label that paints one elided line and retains its full text."""
 
     def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
-        """Create a label whose tooltip holds its full text."""
+        """Create a label that keeps its full text for selection and copy."""
         super().__init__(text, parent)
         self.setTextFormat(Qt.TextFormat.PlainText)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        self.setToolTip(text)
-
-    def setText(self, text: str) -> None:  # noqa: N802
-        """Set the full text and its tooltip."""
-        super().setText(text)
-        self.setToolTip(text)
 
     def display_text(self) -> str:
         """Return the text that fits the label's contents rectangle."""
@@ -695,7 +689,6 @@ class Picker(QComboBox):
         item.setData(value, Qt.ItemDataRole.UserRole)
         if hint:
             item.setData(hint, HINT_ROLE)
-            item.setToolTip(tip_text(hint))
         item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
         self._model.appendRow(item)
         if self.currentIndex() < 0 or self.is_header(self.currentIndex()):

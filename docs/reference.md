@@ -2788,8 +2788,9 @@ its line breaks and may break a path after each `/`; a shorter one shows on
 one line. A setting row with more to say than its help line has an info
 icon after its name; hovering the icon, focusing it from the keyboard or
 clicking it shows the tooltip under it, and the name, help line and control
-have no tooltip. A button that shows only an icon keeps its tooltip on the
-button. The tray icon's tooltip is drawn by the desktop.
+have no tooltip. Nothing else in the window opens a tooltip: not cut-off
+text, icon-only buttons (their accessible names stay), model names, file
+buttons or picker items. The tray icon's tooltip is drawn by the desktop.
 
 ### Tray
 
@@ -2914,8 +2915,8 @@ when any of its readable runs, nested or shown in Live, used that engine. A pare
 readable nested runs matches only Engine=all. Filters start at all when
 the app starts and keep their values across reloads for the app session.
 
-Clear is a red outline button with a trash icon. Its tooltip and accessible
-description are `Remove shown records`. Clear is disabled when no records are shown or a
+Clear is a red outline button with a trash icon. Its accessible
+description is `Remove shown records`. Clear is disabled when no records are shown or a
 clear is pending. It
 captures the shown top-level ids and calls `prune.remove` with
 `older_than=0` and those ids, first as a dry run and then, after confirmation,
@@ -2939,7 +2940,7 @@ the text, and the time and actions on the right. The chip column is as wide
 as the widest chip. The expand button and the chip are centred vertically
 on the text lines. The title starts with the row's type: `Run`, `Flow` or
 `Panel`. The title and second line each show one line, cut with an
-ellipsis, with the whole text in a tooltip. Chips are 22 pixels tall with
+ellipsis; the whole text is in the expanded details. Chips are 22 pixels tall with
 6-pixel corners. The status chips:
 
 | Chip | States | Colour |

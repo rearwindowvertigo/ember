@@ -418,10 +418,9 @@ def test_model_rows_share_columns_and_centres(
     assert panel.name_header.width() == first.name.width() == missing.name.width()
     assert first.name.display_text().endswith("…")
     assert first.name.text() == long_id
-    assert first.name.toolTip() == f"{long_id}\nLong model"
-    assert second.name.toolTip() == short_id
+    assert first.name.toolTip() == second.name.toolTip() == ""
     assert missing.name.display_text().endswith("…")
-    assert missing.name.toolTip() == missing_id
+    assert missing.name.toolTip() == ""
     assert isinstance(second.effort_cell, QLabel)
     assert second.effort_cell.text() == ""
     for row in panel.rows:
@@ -597,7 +596,8 @@ def test_card_rows_stay_level_with_long_version(
     screen.show()
     QApplication.processEvents()
     version = screen.cards["claude"].version_label
-    assert version.text() == version.toolTip() == long_version
+    assert version.text() == long_version
+    assert version.toolTip() == ""
     assert version.display_text().endswith("…")
     assert not version.wordWrap()
     for attribute in (

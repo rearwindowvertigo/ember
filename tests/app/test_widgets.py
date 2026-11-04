@@ -121,7 +121,8 @@ def test_elided_label_keeps_full_text_for_copy(
         name.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         name.resize(220, 36)
         name.show()
-        assert name.text() == name.toolTip() == text
+        assert name.text() == text
+        assert name.toolTip() == ""
         assert name.display_text().endswith("…")
         name.setFocus()
         qtbot.keyClick(name, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
@@ -132,7 +133,8 @@ def test_elided_label_keeps_full_text_for_copy(
         name.resize(name.fontMetrics().horizontalAdvance(text) + 20, 36)
         assert name.display_text() == text
         name.setText("short")
-        assert name.display_text() == name.text() == name.toolTip() == "short"
+        assert name.display_text() == name.text() == "short"
+        assert name.toolTip() == ""
         name.setText("")
         assert not name.grab().isNull()
     finally:
@@ -765,21 +767,29 @@ def test_tip_text_breaks_long_paths_after_slashes() -> None:
     assert "<br>" in shown
 
 
-def test_tip_wrapper_shows_long_tooltips_wrapped(
+def test_tip_wrapper_lets_only_an_info_icon_show_a_tooltip(
     qapp: QApplication, qtbot: QtBot
 ) -> None:
     widgets.install_tooltips(qapp)
     assert widgets.install_tooltips(qapp) is qapp.findChild(widgets.TipWrapper)
     label = QLabel("x")
-    qtbot.addWidget(label)
-    label.setToolTip(LONG_TIP)
-    label.show()
+    info = widgets.InfoTip("Run the gap check", LONG_TIP)
+    for widget in (label, info):
+        qtbot.addWidget(widget)
+        widget.show()
+    label.setToolTip("Not shown")
     point = QPoint(2, 2)
-    event = QHelpEvent(QEvent.Type.ToolTip, point, label.mapToGlobal(point))
     try:
+        QToolTip.hideText()
+        qtbot.waitUntil(lambda: not QToolTip.isVisible(), timeout=2000)
+        event = QHelpEvent(QEvent.Type.ToolTip, point, label.mapToGlobal(point))
         QApplication.sendEvent(label, event)
+        assert not QToolTip.isVisible()
+        event = QHelpEvent(QEvent.Type.ToolTip, point, info.mapToGlobal(point))
+        QApplication.sendEvent(info, event)
+        assert QToolTip.isVisible()
         assert QToolTip.text() == widgets.tip_text(LONG_TIP)
-        assert label.toolTip() == LONG_TIP
+        assert info.toolTip() == LONG_TIP
     finally:
         QToolTip.hideText()
 

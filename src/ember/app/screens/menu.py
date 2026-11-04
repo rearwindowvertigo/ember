@@ -617,7 +617,6 @@ class MenuScreen(QWidget):
             line.addWidget(title, 1)
             remove = widgets.button("", "ghost", size="sm")
             remove.setAccessibleName(f"Remove {text}")
-            remove.setToolTip(f"Remove {text}")
             value = member["value"]
             remove.clicked.connect(
                 lambda _checked=False, value=value: self._remove_member(value)

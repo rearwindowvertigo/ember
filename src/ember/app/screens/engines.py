@@ -522,8 +522,6 @@ class _ModelRow(QWidget):
         self.name = ElidedLabel(model.id)
         self.name.setFixedWidth(panel.name_width)
         self.name.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        if model.label != model.id:
-            self.name.setToolTip(f"{model.id}\n{model.label}")
         layout.addWidget(self.name, 0, Qt.AlignmentFlag.AlignVCenter)
         self.figures: list[QLabel] = []
         if columns:

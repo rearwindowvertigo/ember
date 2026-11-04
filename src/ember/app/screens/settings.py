@@ -281,7 +281,6 @@ class SettingsScreen(QWidget):
             remove = widgets.button("", "ghost", size="sm")
             remove.setIcon(icons.icon("x", color, 16))
             remove.setAccessibleName(f"Remove {path}")
-            remove.setToolTip(f"Remove {path}")
             remove.clicked.connect(lambda _checked=False, path=path: self._remove(path))
             line.addWidget(remove)
             self.paths_layout.addWidget(row)
