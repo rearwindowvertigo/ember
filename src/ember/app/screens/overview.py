@@ -16,13 +16,11 @@ from typing import TYPE_CHECKING, Any
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QHideEvent
 from PySide6.QtWidgets import (
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -35,10 +33,9 @@ from ember.app import icons, state, theme, tray
 from ember.app.flows import FlowItem, PanelItem, plan_wave
 from ember.app.runs import DONE, FINISHED_LIMIT, LIVE
 from ember.app.screens.common import (
-    MONTHS,
+    ToneLine,
     chain_tab_order,
     discard,
-    duration,
     engine_name,
     inline,
     plural,
@@ -52,6 +49,7 @@ from ember.app.widgets import (
     Badge,
     Card,
     ElidedLabel,
+    Picker,
     StateView,
     button,
     set_icon,
@@ -219,10 +217,10 @@ def _clock(stamp: float) -> str:
 def span_text(started: float, ended: float | None, now: float | None = None) -> str:
     """Return a record's times for its detail line.
 
-    An ended record reads "08:17 to 08:33 · 16 min"; a live one reads
-    "started 08:01 · 4 min 12 s". The start names its day only when it falls
-    on an earlier day than the end, or than now while live: "yesterday 23:50
-    to 00:10 · 20 min".
+    An ended record reads "08:17 to 08:33"; its duration shows in the time
+    column. A live one reads "started 08:01 · 4 min 12 s". The start names
+    its day only when it falls on an earlier day than the end, or than now
+    while live: "yesterday 23:50 to 00:10".
     """
     now = time.time() if now is None else now
     last = now if ended is None else ended
@@ -233,19 +231,22 @@ def span_text(started: float, ended: float | None, now: float | None = None) -> 
         start = _clock(started)
     if ended is None:
         return f"started {start} · {elapsed(now - started)}"
-    return f"{start} to {_clock(ended)} · {duration(ended - started)}"
+    return f"{start} to {_clock(ended)}"
 
 
-def end_text(ended: float | None, now: float | None = None) -> str:
-    """Return the right column's time: the end time, or "Live"."""
-    return "Live" if ended is None else when(ended, now)
+def took(seconds: float) -> str:
+    """Return a finished duration: "45 s", "2 min 5 s", or "1 h 12 min" from an hour."""
+    total = max(0, int(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours} h {minutes} min"
+    return f"{minutes} min {secs} s" if minutes else f"{secs} s"
 
 
-def end_tooltip(started: float, ended: float | None) -> str:
-    """Return the right column's tooltip: "Ended at 08:33 on 3 Nov"."""
-    stamp, word = (started, "Started") if ended is None else (ended, "Ended")
-    moment = datetime.datetime.fromtimestamp(stamp)
-    return f"{word} at {_clock(stamp)} on {moment.day} {MONTHS[moment.month - 1]}"
+def end_text(started: float, ended: float | None) -> str:
+    """Return the right column's text: "Elapsed 2 min 5 s", or "" while live."""
+    return "" if ended is None else f"Elapsed {took(ended - started)}"
 
 
 def worker_line(run: Run) -> str:
@@ -262,8 +263,9 @@ def branch_text(run: Run) -> str:
 
 
 def run_title(run: Run) -> str:
-    """Return "Run · <Engine> · <model> · <effort>"."""
-    return f"Run · {worker_line(run)}"
+    """Return "Run · <subject>", or "Run · <worker>" for a run without one."""
+    subject = " ".join(run.subject.split())
+    return f"Run · {subject}" if subject else f"Run · {worker_line(run)}"
 
 
 def run_ended(run: Run) -> float | None:
@@ -286,10 +288,44 @@ def run_result(run: Run) -> str:
 
 
 def run_detail(run: Run, now: float | None = None) -> str:
-    """Return "<repository folder> · <result> · <times>"."""
+    """Return "<worker> · <repository folder> · <result> · <times>".
+
+    The worker leads the line when the title holds the run's subject.
+    """
     folder = PurePosixPath(run.repo).name or run.repo
     times = span_text(run.started_at, run_ended(run), now)
-    return f"{folder} · {run_result(run)} · {times}"
+    worker = f"{worker_line(run)} · " if run.subject.strip() else ""
+    return f"{worker}{folder} · {run_result(run)} · {times}"
+
+
+def parent_label(parent: FlowItem | PanelItem) -> str:
+    """Return a parent's type and first fact: "Panel · 7 members", "Flow · ember"."""
+    title = (
+        flow_title(parent.record)
+        if isinstance(parent, FlowItem)
+        else panel_title(parent.record)
+    )
+    return " · ".join(title.split(" · ")[:2])
+
+
+def run_parents(parents: list[FlowItem | PanelItem]) -> dict[str, FlowItem | PanelItem]:
+    """Return each worker's oldest parent by run id."""
+    result: dict[str, FlowItem | PanelItem] = {}
+    for parent in sorted(parents, key=item_started):
+        for run_id in parent.run_ids:
+            result.setdefault(run_id, parent)
+    return result
+
+
+MISSING_FILES = {
+    "Summary": "the panel writes summary.md when it ends.",
+    "Briefs": "the flow has written no task briefs yet.",
+    "Check logs": "the flow has run no repository check yet.",
+}
+"""Why each flow or panel file button has nothing to open yet."""
+
+CODE_ROWS = ("Run", "Repository", "Branch")
+"""Run record rows whose values are a run id, a path or a branch, in `type-code`."""
 
 
 def record_rows(run: Run, now: float | None = None) -> list[tuple[str, str]]:
@@ -363,16 +399,21 @@ def item_end_key(item: Item) -> tuple[float, float, str]:
 def sections(
     runs: list[Run], parents: list[FlowItem | PanelItem]
 ) -> tuple[list[Item], list[Item], dict[str, list[Run]]]:
-    """Select top-level rows and assign workers to their oldest parent."""
+    """Select top-level rows and assign workers to their oldest parent.
+
+    A live worker whose parent has ended is a top-level row, so it shows in
+    Live even when its parent is not among the shown Finished items.
+    """
     owners: dict[str, str] = {}
     children: dict[str, list[Run]] = {item_id(parent): [] for parent in parents}
+    ended = {item_id(parent) for parent in parents if item_ended(parent)}
     for parent in sorted(parents, key=item_started):
         for run_id in parent.run_ids:
             owners.setdefault(run_id, item_id(parent))
     top: list[Item] = list(parents)
     for run in sorted(runs, key=item_started):
         owner = owners.get(run.id)
-        if owner is None:
+        if owner is None or (owner in ended and not item_ended(run)):
             top.append(run)
         else:
             children[owner].append(run)
@@ -570,10 +611,6 @@ class _ExpandableRow(QWidget):
         self.detail_label.setProperty("role", "secondary")
         lines.addWidget(self.title_label)
         lines.addWidget(self.detail_label)
-        self.question_label = ElidedLabel()
-        self.question_label.setProperty("role", "secondary")
-        self.question_label.hide()
-        lines.addWidget(self.question_label)
         header.addLayout(lines, 1)
         self.time_label = QLabel()
         self.time_label.setProperty("role", "secondary")
@@ -600,7 +637,6 @@ class _ExpandableRow(QWidget):
         self.expand_button.setAccessibleName(
             f"{verb} {self._what} of {self._kind} {self._item_id}"
         )
-        self.expand_button.setToolTip(f"{verb} {self._what}")
 
 
 class _Row(_ExpandableRow):
@@ -610,6 +646,7 @@ class _Row(_ExpandableRow):
         """Build a run row without drawing its values."""
         self.run = run
         self.nested = False
+        self.parent_label = ""
         self.details: QWidget | None = None
         self.detail_values: tuple[tuple[str, str], ...] = ()
         super().__init__(run.id, "run", "details")
@@ -619,11 +656,13 @@ class _Row(_ExpandableRow):
         self.nested = nested
 
     def draw_time(self, now: float | None = None) -> None:
-        """Draw the detail line and the right column's end time or "Live"."""
+        """Draw the detail line and the right column's Elapsed time."""
         ended = run_ended(self.run)
-        self.detail_label.setText(run_detail(self.run, now))
-        self.time_label.setText(end_text(ended, now))
-        self.time_label.setToolTip(end_tooltip(self.run.started_at, ended))
+        detail = run_detail(self.run, now)
+        if self.parent_label:
+            detail = f"{self.parent_label} · {detail}"
+        self.detail_label.setText(detail)
+        self.time_label.setText(end_text(self.run.started_at, ended))
 
     def set_run(self, run: Run) -> None:
         """Store the run and draw its badge."""
@@ -653,8 +692,11 @@ class _Row(_ExpandableRow):
             name = QLabel(label)
             name.setProperty("role", "secondary")
             text = QLabel(value)
+            text.setTextFormat(Qt.TextFormat.PlainText)
             text.setWordWrap(True)
             text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            if label in CODE_ROWS and value not in ("read-only", "None"):
+                text.setFont(theme.font("code"))
             grid.addWidget(name, row, 0, Qt.AlignmentFlag.AlignTop)
             grid.addWidget(text, row, 1)
         grid.setColumnStretch(1, 1)
@@ -706,7 +748,7 @@ class _FinishedRow(_Row):
             run.status,
             run_title(run),
             run_detail(run),
-            end_text(run_ended(run)),
+            end_text(run.started_at, run_ended(run)),
             tuple(record_rows(run)),
         )
 
@@ -736,6 +778,7 @@ class _RecordRow(_ExpandableRow):
         super().__init__(item.record["id"], kind, "details")
         self.details: QWidget | None = None
         self.file_buttons: dict[str, QPushButton] = {}
+        self.file_note = ToneLine("warning")
         self.file_paths: dict[str, Path | None] = {}
         self.shown_values: tuple[object, ...] = ()
         self.base_detail = ""
@@ -775,10 +818,6 @@ class _RecordRow(_ExpandableRow):
             parts.append(plural(self.run_count, "run"))
         detail = " · ".join([*parts, detail])
         self.base_detail = detail
-        self.question_label.setText(
-            item.question if isinstance(item, PanelItem) else ""
-        )
-        self.question_label.setVisible(bool(self.question_label.text()))
         entries = self.entries()
         values = (
             badge,
@@ -813,8 +852,7 @@ class _RecordRow(_ExpandableRow):
             ended = data["updated_at"]
         times = span_text(data["started_at"], ended, now)
         self.detail_label.setText(f"{self.base_detail} · {times}")
-        self.time_label.setText(end_text(ended, now))
-        self.time_label.setToolTip(end_tooltip(data["started_at"], ended))
+        self.time_label.setText(end_text(data["started_at"], ended))
 
     def show_details(self, shown: bool) -> None:
         """Expand or collapse the selectable body and its file buttons."""
@@ -857,6 +895,12 @@ class _RecordRow(_ExpandableRow):
                 self.file_buttons[name] = link
             actions.addStretch()
             layout.addLayout(actions)
+            self.file_note = ToneLine("warning")
+            policy = self.file_note.sizePolicy()
+            policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+            policy.setHeightForWidth(True)
+            self.file_note.setSizePolicy(policy)
+            layout.addWidget(self.file_note)
             self._refresh_files()
             self.body.addWidget(details)
             self.details = details
@@ -883,23 +927,21 @@ class _RecordRow(_ExpandableRow):
         else:
             summary = panel_record.folder(self.item.record["id"], env) / "summary.md"
             self.file_paths = {"Summary": summary if summary.is_file() else None}
-        for name, link in self.file_buttons.items():
-            path = self.file_paths[name]
-            link.setEnabled(path is not None)
-            link.setToolTip(str(path) if path is not None else "")
 
     def _open_file(self, name: str) -> None:
-        """Open the selected file URL and report a refused viewer launch."""
+        """Open the selected file URL, or say under the buttons why it did not open.
+
+        The buttons stay enabled; a file or folder that is not there yet, or a
+        viewer that refused the file, is named in the line under them.
+        """
+        self._refresh_files()
         path = self.file_paths[name]
-        if path is None or QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
-            return
-        message = QMessageBox(self)
-        message.setIcon(QMessageBox.Icon.Warning)
-        message.setWindowTitle("Could not open viewer")
-        message.setTextFormat(Qt.TextFormat.PlainText)
-        message.setText(f"No viewer opened {path}.")
-        message.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        message.open()
+        if path is None:
+            self.file_note.show_text(f"{name}: {MISSING_FILES[name]}")
+        elif QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            self.file_note.show_text(None)
+        else:
+            self.file_note.show_text(f"No viewer opened {path}.")
 
 
 class _FlowRow(_RecordRow):
@@ -922,9 +964,13 @@ class _PanelRow(_RecordRow):
     """A panel with member answers, omissions and a Summary button."""
 
     def entries(self) -> list[tuple[str, bool]]:
-        """Return member details followed by omissions."""
+        """Return the question, then member details, then omissions."""
         result: list[tuple[str, bool]] = []
         data = self.item.record
+        question = self.item.question if isinstance(self.item, PanelItem) else ""
+        if question:
+            result.append(("Question", False))
+            result.append((question, True))
         for member in data["members"]:
             result.append((member_line(member), False))
             if member["reason"]:
@@ -1020,25 +1066,40 @@ class OverviewScreen(QWidget):
         self.filter_bar = QWidget()
         filters = QHBoxLayout(self.filter_bar)
         filters.setContentsMargins(0, 0, 0, 0)
-        self.type_filter = QComboBox()
-        self.status_filter = QComboBox()
-        self.engine_filter = QComboBox()
-        for label, combo, values in (
-            ("Type", self.type_filter, ("all", "Run", "Flow", "Panel")),
-            ("Status", self.status_filter, ("all", "Done", "Incomplete", "Failed")),
-            ("Engine", self.engine_filter, ("all", "Codex", "OpenCode", "Claude")),
+        self.type_filter = Picker()
+        self.status_filter = Picker()
+        self.engine_filter = Picker()
+        for label, combo, every, values in (
+            ("Type", self.type_filter, "All types", ("Run", "Flow", "Panel")),
+            (
+                "Status",
+                self.status_filter,
+                "All statuses",
+                ("Done", "Incomplete", "Failed"),
+            ),
+            (
+                "Engine",
+                self.engine_filter,
+                "All engines",
+                ("Codex", "OpenCode", "Claude"),
+            ),
         ):
-            name = QLabel(label)
-            name.setBuddy(combo)
             combo.setAccessibleName(label)
-            combo.addItems(values)
-            filters.addWidget(name)
+            combo.setProperty("scale", "sm")
+            combo.add_option(every, "all")
+            for value in values:
+                combo.add_option(value, value)
             filters.addWidget(combo)
             combo.currentTextChanged.connect(self.refresh)
+        self.finished_cap = QLabel(
+            f"Filters cover the newest {FINISHED_LIMIT} records."
+        )
+        self.finished_cap.setProperty("role", "secondary")
+        self.finished_cap.hide()
+        filters.addWidget(self.finished_cap)
         filters.addStretch(1)
         self.clear_button = button("Clear", "danger-outline", size="sm")
         self.clear_button.clicked.connect(self.clear_finished)
-        self.clear_button.setToolTip(CLEAR_TIP)
         self.clear_button.setAccessibleDescription(CLEAR_TIP)
         filters.addWidget(self.clear_button)
         finished_layout.insertWidget(1, self.filter_bar)
@@ -1053,6 +1114,7 @@ class OverviewScreen(QWidget):
         self.live_rows: dict[str, _LiveRow] = {}
         self.finished_rows: dict[str, _FinishedRow] = {}
         self._reading_order: list[_ExpandableRow] = []
+        self._parents: dict[str, FlowItem | PanelItem] = {}
         self.expanded_live: str | None = None
         self.expanded_finished: str | None = None
         self._stale = True
@@ -1109,6 +1171,12 @@ class OverviewScreen(QWidget):
             *self.records.panels(),
         ]
         live, finished, children = sections(runs.runs(), parents)
+        self._parents = run_parents(parents)
+        workers: dict[str, list[Run]] = {item_id(parent): [] for parent in parents}
+        for run in runs.runs():
+            owner = self._parents.get(run.id)
+            if owner is not None:
+                workers[item_id(owner)].append(run)
         total = len(finished)
         if self.finished_open:
             finished = [
@@ -1116,10 +1184,10 @@ class OverviewScreen(QWidget):
                 for item in finished
                 if matches_filters(
                     item,
-                    children.get(item_id(item), []),
-                    self.type_filter.currentText(),
-                    self.status_filter.currentText(),
-                    self.engine_filter.currentText().lower(),
+                    workers.get(item_id(item), []),
+                    str(self.type_filter.value()),
+                    str(self.status_filter.value()),
+                    str(self.engine_filter.value()).lower(),
                 )
             ]
         else:
@@ -1131,7 +1199,7 @@ class OverviewScreen(QWidget):
             "No finished records match the filters."
             if self.finished_open
             and any(
-                combo.currentText() != "all"
+                combo.value() != "all"
                 for combo in (self.type_filter, self.status_filter, self.engine_filter)
             )
             else "No finished runs, flows or panels yet."
@@ -1184,9 +1252,14 @@ class OverviewScreen(QWidget):
     def _draw_finished_header(self, total: int) -> None:
         """Show the pickers and Clear only while the full list is open."""
         self.filter_bar.setVisible(self.finished_open)
-        self.finished_toggle.setText(
-            "Show fewer" if self.finished_open else f"Show all {total}"
-        )
+        if self.finished_open:
+            label = "Show fewer"
+        elif total >= FINISHED_LIMIT:
+            label = f"Newest {FINISHED_LIMIT}"
+        else:
+            label = f"Show all {total}"
+        self.finished_toggle.setText(label)
+        self.finished_cap.setVisible(self.finished_open and total >= FINISHED_LIMIT)
         self.finished_toggle.setVisible(self.finished_open or total > FINISHED_PREVIEW)
 
     def _draw_clear_icon(self, *_args: object) -> None:
@@ -1213,8 +1286,13 @@ class OverviewScreen(QWidget):
         self.records.reload()
 
     def _update_clear(self) -> None:
-        """Enable Clear only when shown records exist and no clear is pending."""
-        self.clear_button.setEnabled(bool(self._shown_finished) and not self._clearing)
+        """Show Clear only while records are shown; it waits out a pending clear.
+
+        With nothing shown, the Finished list's empty line says why there is
+        nothing to clear.
+        """
+        self.clear_button.setVisible(bool(self._shown_finished))
+        self.clear_button.setEnabled(not self._clearing)
 
     def clear_finished(self) -> None:
         """Preview removal of the ids shown at the time Clear is clicked."""
@@ -1292,13 +1370,25 @@ class OverviewScreen(QWidget):
     def _draw_sections(
         self, live: list[Item], finished: list[Item], children: dict[str, list[Run]]
     ) -> None:
-        """Reuse rows and place every worker in its parent's section."""
+        """Reuse rows and place every worker in its parent's section.
+
+        A top-level worker of an ended parent names that parent first on its
+        detail line.
+        """
         shown_runs = [item for item in [*live, *finished] if isinstance(item, Run)]
         parents = [item for item in [*live, *finished] if not isinstance(item, Run)]
         for parent in parents:
             shown_runs.extend(children[item_id(parent)])
         self._draw_live([run for run in shown_runs if run.status in LIVE])
         self._draw_finished([run for run in shown_runs if run.status in DONE])
+        top_ids = {item.id for item in [*live, *finished] if isinstance(item, Run)}
+        for run in shown_runs:
+            row = self._run_row(run)
+            owner = self._parents.get(run.id) if run.id in top_ids else None
+            label = parent_label(owner) if owner is not None else ""
+            if label != row.parent_label:
+                row.parent_label = label
+                row.draw_time()
         for item in parents:
             rows = self.flow_rows if isinstance(item, FlowItem) else self.panel_rows
             key = item_id(item)

@@ -642,7 +642,7 @@ prints one `<field>: <value>` line per field, and `--status` one line per run:
 | Brief | Pasted once Codex's composer shows `? for shortcuts` | Sent through the server's session API once the server answers and the view has drawn its screen | Written as turn 1's request before the pane starts; given to the CLI on standard input |
 | Turn end and reply | Read from Codex's rollout file: `task_complete` with its last message, or `turn_aborted`; an `error` event during the turn fails it | Read from the session status and messages: the turn's last assistant message, once the session is idle; its text parts are the reply | The CLI's exit; the reply is the assistant text after the turn's last tool result |
 | Later messages | Pasted | Sent through the session API | A new `claude -p` that resumes the previous turn's CLI session |
-| Read-only run | Ember's profile extends Codex's `:read-only` profile | The agent may not edit, write or patch files or reach folders outside the checkout, and the worktree is mounted read-only | The tools are `Read`, `Glob` and `Grep`, and the worktree is mounted read-only |
+| Read-only run | Ember's profile extends Codex's `:read-only` profile | The agent may not edit, write or patch files or reach folders outside the checkout other than the folders of its read paths, and the worktree is mounted read-only | The tools are `Read`, `Glob` and `Grep`, and the worktree is mounted read-only |
 | Sandbox provider | `codex` | `bubblewrap` | `bubblewrap` |
 | `--interrupt` | Presses Escape in the session | Aborts the turn through the session API | Sends `SIGINT` to the process group of the turn's CLI, as Ctrl+C in the pane does; the program takes the next turn |
 | Messages Ember did not send | Each `user_message` in the rollout that does not match, in order, a message Ember pasted | Each user message whose id Ember did not send | None; the pane takes no typed messages |
@@ -2374,7 +2374,7 @@ The list is `ember/data/components.toml` in the package:
 |---|---|---|---|---|---|---|
 | `codex` | Codex | `apps` | `codex --version`, `codex-cli (\S+)` | `version` of `https://registry.npmjs.org/@openai/codex/latest` | Detected install method | `npm install -g @openai/codex` |
 | `opencode` | OpenCode | `apps` | `opencode --version`, `^(\S+)$` | `version` of `https://registry.npmjs.org/opencode-ai/latest` | Detected install method | `curl -fsSL https://opencode.ai/install \| bash` |
-| `claude` | Claude Code | `apps` | `claude --version`, `^(\S+) \(Claude Code\)$` | the text of `https://downloads.claude.ai/claude-code-releases/latest` | Detected install method | `curl -fsSL https://claude.ai/install.sh \| bash` |
+| `claude` | Claude Code | `apps` | `claude --version`, `^(\S+) \(Claude Code\)$` | the text of `https://downloads.claude.ai/claude-code-releases/<channel>`, where `<channel>` is `autoUpdatesChannel` from Claude Code's `settings.json` (in `CLAUDE_CONFIG_DIR`, else `~/.claude`): `stable`, or `latest` when it is unset or anything else; a version cached from another channel is read again | Detected install method | `curl -fsSL https://claude.ai/install.sh \| bash` |
 | `claude-desktop` | Claude Desktop | `apps` | apt `claude-desktop` | apt | `sudo apt install --only-upgrade claude-desktop` | none; note "Not installed." |
 | `ember-skill` | ember skill | `apps` | `emb skill status` link state | none | none | By link state, below |
 | `tmux` | tmux | `system` | apt `tmux` | apt | `sudo apt install --only-upgrade tmux` | `sudo apt install tmux` |
@@ -2525,6 +2525,10 @@ compared as text.
 | `check failed` | A read failed, a needed version was neither read nor cached, or the versions cannot be compared; `error` names each read that failed (`installed version`, `newest version` or `comparison`) and why. The installed version is kept when it was read |
 | `update available` | The installed version is older than the newest |
 | `current` | Otherwise |
+
+When the source reports a version older than the installed one, such as apt
+lists read before a newer package was installed, `newest` is the installed
+version.
 
 `command` is the update command while an update is available and the install
 command while missing, with `command_kind` `update` or `install`; otherwise
@@ -2680,7 +2684,9 @@ emb app [--hidden]
 ```
 
 Starts the desktop app, or brings the running one forward. One instance runs
-at a time.
+at a time. A start that finds a running app passes its `XDG_ACTIVATION_TOKEN`
+on the single-instance socket (`show <token>`), and the running app uses it
+when it raises its window, so the desktop's busy cursor for the launch ends.
 
 | Option | Does |
 |---|---|
@@ -2783,11 +2789,16 @@ last input: a key press shows it, a mouse press does not.
 Tooltips draw in `fill-primary` with `on-primary`, 6-pixel corners and
 12-pixel text. A tooltip wider than 320 pixels wraps at 320 pixels, keeps
 its line breaks and may break a path after each `/`; a shorter one shows on
-one line. A setting row with more to say than its help line has an info
-icon after its name; hovering the icon, focusing it from the keyboard or
-clicking it shows the tooltip under it, and the name, help line and control
-have no tooltip. A button that shows only an icon keeps its tooltip on the
-button. The tray icon's tooltip is drawn by the desktop.
+one line. Every setting row on Team and Settings is its name with an info
+icon after it, and no line under the name; the icon's tooltip holds what
+the setting does. Hovering the icon, focusing it from the keyboard or
+clicking it shows the tooltip under it, in Ember's own window with 6-pixel
+rounded corners; it hides when the pointer leaves an unfocused icon, focus
+moves on, or Escape is pressed. A screen's setting controls share one
+column as wide as its widest control: pickers fill it, and segmented
+controls, switches and buttons sit at its right edge. Nothing else in the window opens a tooltip: not cut-off
+text, icon-only buttons (their accessible names stay), model names, file
+buttons or picker items. The tray icon's tooltip is drawn by the desktop.
 
 ### Tray
 
@@ -2817,7 +2828,9 @@ Finished appears and counts as a top-level run in the tray.
 
 Clicking the icon also shows the window. Closing the window hides it to the
 tray. When the desktop has no tray, the window shows at start and closing it
-quits.
+quits. A menu click gives Ember an activation token; Quit Ember uses it on
+the window before quitting when the window is shown. With the window hidden
+the token is not used, and the desktop's busy cursor runs until its timeout.
 
 A run, flow or panel change updates the icon and tooltip at once. The menu
 keeps its lines until it next opens, when it rebuilds them. A click from a
@@ -2883,7 +2896,10 @@ command line:
 ### Overview
 
 Overview shows Live and Finished. Live lists starting, running and waiting
-records, oldest first by start time and then id. Finished lists ended
+records, oldest first by start time and then id. A live run whose flow or
+panel has ended is a top-level Live row, not nested under that parent; its
+detail line starts with the parent's type and first fact, such as
+`Panel · 7 members`. Finished lists ended
 records, newest first by end time, update time and id, with update time used
 when end time is absent. Its cap of twenty applies to top-level rows across
 runs, flows and panels. Each empty section shows its empty state.
@@ -2891,23 +2907,27 @@ runs, flows and panels. Each empty section shows its empty state.
 Live comes first. Finished starts as a preview of its three newest
 top-level rows, each with its nested runs, and a `Show all <n>` button in
 its header, where `<n>` is the number of rows the full list shows. The
-button is hidden when the preview already holds every row. Show all opens
+button reads `Newest 20` once Finished holds twenty rows, the most it
+reads, and is hidden when the preview already holds every row. It opens
 the full list with the Type, Status and Engine pickers and Clear; `Show
 fewer` returns to the preview. The pickers and Clear show only while the
-full list is open. Whether it is open is kept in `app.json` as
+full list is open; with twenty rows, `Filters cover the newest 20 records.`
+shows beside the pickers. Whether it is open is kept in `app.json` as
 `finished_open` and restored when the app starts.
 
-Finished filters this capped list by Type (all, Run, Flow, Panel), Status
-(all, Done, Incomplete, Failed) and Engine (all, Codex, OpenCode, Claude).
+Finished filters this capped list with three pickers: Type (All types, Run,
+Flow, Panel), Status (All statuses, Done, Incomplete, Failed) and Engine (All
+engines, Codex, OpenCode, Claude).
 The filters combine and test top-level rows: Run selects standalone runs,
 Status matches the parent's own chip, and a flow or panel matches Engine
-when any readable run nested under it used that engine. A parent without
+when any of its readable runs, nested or shown in Live, used that engine. A parent without
 readable nested runs matches only Engine=all. Filters start at all when
 the app starts and keep their values across reloads for the app session.
 
-Clear is a red outline button with a trash icon. Its tooltip and accessible
-description are `Remove shown records`. Clear is disabled when no records are shown or a
-clear is pending. It
+Clear is a red outline button with a trash icon. Its accessible
+description is `Remove shown records`. Clear is hidden when no records are
+shown, where the list's empty line says so, and disabled while a clear is
+pending. It
 captures the shown top-level ids and calls `prune.remove` with
 `older_than=0` and those ids, first as a dry run and then, after confirmation,
 for removal. Both calls run off the GUI thread. The confirmation lists the
@@ -2930,7 +2950,7 @@ the text, and the time and actions on the right. The chip column is as wide
 as the widest chip. The expand button and the chip are centred vertically
 on the text lines. The title starts with the row's type: `Run`, `Flow` or
 `Panel`. The title and second line each show one line, cut with an
-ellipsis, with the whole text in a tooltip. Chips are 22 pixels tall with
+ellipsis; the whole text is in the expanded details. Chips are 22 pixels tall with
 6-pixel corners. The status chips:
 
 | Chip | States | Colour |
@@ -2971,41 +2991,45 @@ merged count.
 Its second line includes its branch, active plan wave and reason. Expanded,
 it shows the pass count and task, writer and review details. A panel's title,
 after `Panel`, shows its member and answer counts; its second line includes the repository
-folder. The first non-empty question line appears on a third line, elided
-to fit, with its full text in the tooltip. Expanded, a panel shows member
-status, worker, duration, reason and changed paths, and left-out members.
+folder. Expanded, a panel shows its whole question under `Question`, then
+member status, worker, duration, reason and changed paths, and left-out
+members.
 
 Expanded panel details have a Summary button for `summary.md`. Expanded
 flow details have Briefs for the `briefs/` folder and one Check logs button.
 Check logs considers only files matching `check-*.log` directly in the flow
 folder. It selects the highest integer `(wave, attempt)` from
 `check-<wave>-<attempt>.log`; if no name parses, it selects the newest file
-by modification time. Buttons are disabled when their file or folder is
-absent. Targets are checked when details expand and on every model reload
+by modification time. The buttons stay enabled; one whose file or folder is
+absent says why on a line under the buttons, such as `Summary: the panel
+writes summary.md when it ends.` Targets are checked when details expand,
+on every click and on every model reload
 while those details are drawn. Collapsed rows do not check targets.
 Buttons pass a file URL to `QDesktopServices.openUrl` for the desktop's
-default viewer. If it returns false, a warning names the path and says no
-viewer opened it.
+default viewer. If it returns false, the line under the buttons reads
+`No viewer opened <path>.`
 
-A run's title, after `Run`, shows engine, model and effort. Its second line
-shows the repository folder, the result and the times:
+A run's title, after `Run`, shows its subject on one line, or engine, model
+and effort for a run without one. Its second line shows engine, model and
+effort when the title holds the subject, then the repository folder, the
+result and the times:
 
 - live: `turn <n>` and the commits so far (`1 commit`, `<n> commits`), or
   `read-only`; then `started <start> · <elapsed>`, the elapsed time to the
   second, such as `4 min 12 s`;
 - done: the commit count or `read-only`; failed: the last reason, or
-  `No reason recorded`; then `<start> to <end> · <duration>`, such as
-  `08:17 to 08:33 · 16 min`.
+  `No reason recorded`; then `<start> to <end>`, such as `08:17 to 08:33`.
 
 The start names its day only when it falls on an earlier day than the end,
-or than now while live: `yesterday 23:50 to 00:10 · 20 min`. Flow and panel
-rows end their second line with the same times. The right column of every
-row shows the end time (`Today 08:33`), or `Live`; its tooltip names it:
-`Ended at 08:33 on 3 Nov`, or `Started at 08:01 on 3 Nov` while live. The
-subject and branch are in the expanded record. Live runs have Open terminal, which
+or than now while live: `yesterday 23:50 to 00:10`. Flow and panel rows end
+their second line with the same times. The right column of an ended row
+shows `Elapsed` and its duration: `Elapsed 2 min 5 s` under an hour,
+`Elapsed 1 h 12 min` from an hour on. It is empty while the row is live,
+and has no tooltip. The branch is in the expanded record. Live runs have Open terminal, which
 opens a terminal window on the run as `emb run --attach` does. Expanding a
 run shows its record, including last exit and reason; a live run's Ended is
-`Not yet`. Rows and expanded
+`Not yet`. The record's run id, repository and branch are set in the code
+font. Rows and expanded
 details survive unrelated record changes. Elapsed times update every second
 while shown.
 
@@ -3033,7 +3057,8 @@ Work of several tasks, Flows, Claude Workflows and Panel. Single tasks holds the
 for Codex, OpenCode and Claude in that order, each engine that is on and has
 shortlisted models, under the engine's name, with its models as
 `<model> · <effort>` (OpenCode entries without an effort show the model
-alone). The engine names are headers and cannot be chosen. While a picker
+alone). The engine names are headers and cannot be chosen. The closed
+picker names the engine: `Codex · gpt-6-astra · high`. While a picker
 holds a Claude model, a row under it picks how it runs, CLI or Subagent
 (`single.writer_as`, `single.reviewer_as`).
 
@@ -3047,10 +3072,12 @@ offers a model, the pickers hold Ask each time only and the screen shows
 "Shortlist models in Engines to offer them here." with Open Engines.
 
 Planning holds Gap check reviewer (`gapcheck.reviewer`), a picker of Same
-as Reviewer (`same`) and the same models as Reviewer; Run the gap check
-(`gapcheck.when`), a picker of Off, Always, 2+ tasks to 10+ tasks and Ask
-each time, whose help line states the effect of the chosen value, such as
-"Plans of 5 or more tasks. Plans of 1 to 4 tasks start without one."; and
+as Reviewer (`same`) and the same models as Reviewer; closed on Same as
+Reviewer it shows what that resolves to, such as `Same as Reviewer · Codex ·
+gpt-6-astra · high`, as Flow writer and Flow reviewer do. Run the gap check
+(`gapcheck.when`) is a picker of Off, Always, 2+ tasks to 10+ tasks and Ask
+each time; in its open list each option has a hint line with its effect,
+such as "Plans of 1 to 4 tasks start without one." under 5+ tasks; and
 Gaps Claude asks you about (`gapcheck.ask`): High only, High and medium,
 All.
 
@@ -3070,8 +3097,8 @@ same time; and When an agent runs late
 (`workflow.late`): Ask me, Wait once more, Stop. These are available even
 when no engine offers a model.
 
-Every setting in Planning, Flows and Claude Workflows has an info icon after
-its name whose tooltip explains it more fully.
+The Panel card's description is the tooltip of an info icon after its
+title.
 
 Panel lists `panel.members` in saved order. A member shows
 `<Engine> · <model> · <effort>`, omitting effort when none is set. A member
@@ -3082,16 +3109,19 @@ Each member has a Remove button. Add member lists shortlisted models of
 engines that are on, grouped by engine, excluding saved members. Choosing
 one appends it and returns the picker to Add member. With no members the
 card says "No members. Claude asks for members, or uses the ones it is given,
-each time." At eight members Add member is disabled and the card says
+each time." At eight members Add member is hidden and the card says
 "A panel has at most eight members."
 
-A member missing from its shortlist disables Add member, even when its
+A member missing from its shortlist hides Add member, even when its
 engine is off or not connected. The warning asks the owner to remove those
 members or shortlist them in Engines. Remove saves only when every remaining
 member is shortlisted. Otherwise it sends no save, names the first remaining
 member to shortlist, and shows Remove all, which saves an empty list. An
 engine being off or not connected alone does not block saving. Add member
-is also disabled when no unused shortlisted model is offered.
+is also hidden when no unused shortlisted model is offered: with no
+shortlist the screen says to shortlist models in Engines, and with every
+shortlisted model already a member the card says "Every shortlisted model is
+a member. Shortlist more in Engines to add one."
 
 One-time choices are not shown. Each change saves at once with the settings
 generation check; choosing an already saved multi-task value saves nothing.

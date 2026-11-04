@@ -13,17 +13,20 @@ on. A card whose sandbox is off shows its sandbox check as not run.
 Every read, check and save runs in a task.
 """
 
+import html
 from collections.abc import Sequence
 from decimal import Decimal
 from math import ceil
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QFontMetricsF
 from PySide6.QtWidgets import (
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -37,6 +40,7 @@ from ember.app.screens.common import (
     clear_layout,
     discard,
     engine_name,
+    fitting_columns,
     inline,
     label,
     screen_header,
@@ -95,6 +99,9 @@ NO_EFFORT_NOTE = "This model reports no effort, so it cannot be shortlisted."
 """Shown on a Codex or Claude model row that has no effort to save."""
 
 CHECK_AGAIN = "Check again after the command finishes."
+
+CARD_GAP = 16
+"""The space between engine cards."""
 """Shown on a card after the owner ran one of its setup commands."""
 
 
@@ -303,6 +310,7 @@ class _EngineCard(Card):
         )
         layout.addWidget(self.none_label)
         self.bwrap_label = label(role="secondary")
+        self.bwrap_label.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(self.bwrap_label)
         self.check_label = label(role="secondary")
         self.check_label.setTextInteractionFlags(
@@ -417,7 +425,12 @@ class _EngineCard(Card):
             self.bwrap_label.setText("bwrap: not found")
         else:
             version = check.bwrap_version or "version unknown"
-            self.bwrap_label.setText(f"bwrap: {check.bwrap_path}, {version}")
+            family = html.escape(theme.font("code").family())
+            path = html.escape(check.bwrap_path)
+            self.bwrap_label.setText(
+                f"bwrap: <span style=\"font-family: '{family}'\">{path}</span>, "
+                f"{html.escape(version)}"
+            )
         if not switched_on:
             self.check_label.setText("Sandbox check: not run")
             check = None
@@ -522,8 +535,6 @@ class _ModelRow(QWidget):
         self.name = ElidedLabel(model.id)
         self.name.setFixedWidth(panel.name_width)
         self.name.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        if model.label != model.id:
-            self.name.setToolTip(f"{model.id}\n{model.label}")
         layout.addWidget(self.name, 0, Qt.AlignmentFlag.AlignVCenter)
         self.figures: list[QLabel] = []
         if columns:
@@ -999,6 +1010,7 @@ class EnginesScreen(QWidget):
         self._reading_engines = False
 
         layout = scrolled(self)
+        self.content_layout = layout
         self.check_button = button("Check now", "secondary")
         self.check_button.setAccessibleName("Check now")
         self.check_button.clicked.connect(self.check_now)
@@ -1008,14 +1020,19 @@ class EnginesScreen(QWidget):
         layout.addLayout(self.failure_area)
         self.failure: Alert | None = None
 
-        cards = QHBoxLayout()
-        cards.setSpacing(16)
+        self.cards_grid = QGridLayout()
+        self.cards_grid.setHorizontalSpacing(CARD_GAP)
+        self.cards_grid.setVerticalSpacing(CARD_GAP)
         self.cards: dict[str, _EngineCard] = {}
         for engine in status.ENGINES:
-            card = _EngineCard(self, engine)
-            cards.addWidget(card, 1)
-            self.cards[engine] = card
-        layout.addLayout(cards)
+            self.cards[engine] = _EngineCard(self, engine)
+        layout.addLayout(self.cards_grid)
+        area = self.findChild(QScrollArea)
+        assert area is not None
+        self.scroll_area = area
+        self.columns = len(self.cards)
+        self._place_cards()
+        self.scroll_area.installEventFilter(self)
 
         self.panel_area = QVBoxLayout()
         layout.addLayout(self.panel_area)
@@ -1067,6 +1084,34 @@ class EnginesScreen(QWidget):
             self._redraw()
 
         self.context.tasks.run(read, loaded, lambda _error: None)
+
+    def fitting_columns(self) -> int:
+        """Return how many engine cards, up to three, fit side by side."""
+        tile = max(card.minimumSizeHint().width() for card in self.cards.values())
+        margins = self.content_layout.contentsMargins()
+        return fitting_columns(
+            tile,
+            self.scroll_area,
+            len(self.cards),
+            CARD_GAP,
+            margins.left() + margins.right(),
+        )
+
+    def _place_cards(self) -> None:
+        for card in self.cards.values():
+            self.cards_grid.removeWidget(card)
+        for index in range(len(self.cards)):
+            self.cards_grid.setColumnStretch(index, 1 if index < self.columns else 0)
+        for index, card in enumerate(self.cards.values()):
+            self.cards_grid.addWidget(card, index // self.columns, index % self.columns)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: D102, N802
+        if watched is self.scroll_area and event.type() == QEvent.Type.Resize:
+            columns = self.fitting_columns()
+            if columns != self.columns:
+                self.columns = columns
+                self._place_cards()
+        return super().eventFilter(watched, event)
 
     def _engines_read(self, _result: dict) -> None:
         self._reading_engines = False

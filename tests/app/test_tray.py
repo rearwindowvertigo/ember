@@ -364,9 +364,9 @@ def test_finished_parent_leaves_live_worker_at_tray_top_level(
         live, finished, children = sections(
             context.runs.runs(), [*context.flows.flows(), *context.flows.panels()]
         )
-        assert live == []
+        assert live == [worker]
         assert [item_id(item) for item in finished] == [data["id"]]
-        assert children[data["id"]] == [worker]
+        assert children[data["id"]] == []
         assert tray.lines() == [
             "1 run live",
             tray_module.run_line(worker),

@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from pytestqt.qtbot import QtBot
 
 from ember import choices
@@ -356,3 +356,22 @@ def test_every_control_is_reached_with_tab(
     ]
     # Tab reaches a segmented control's chosen option; arrows move within it.
     assert [w for w in chain if w in expected] == expected
+
+
+def test_settings_rows_are_names_with_info_icons(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    _context, screen = _screen(env, qtbot)
+    names = ["Start at login", "Theme", "Worker network", "Terminal"]
+    names.append("Sandbox read paths")
+    assert list(screen.tip_rows) == names
+    for row in screen.tip_rows.values():
+        assert [label.text() for label in row.findChildren(QLabel)] == [
+            row.heading.text()
+        ]
+        assert row.info.toolTip()
+    assert len({row.slot.width() for row in screen.tip_rows.values()}) == 1
+    widget = screen.tip_rows["Start at login"].info.nextInFocusChain()
+    while widget is not None and not widget.focusPolicy() & Qt.FocusPolicy.TabFocus:
+        widget = widget.nextInFocusChain()
+    assert widget is screen.autostart

@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QGridLayout,
     QHBoxLayout,
     QPushButton,
     QVBoxLayout,
@@ -35,11 +34,11 @@ from ember.app import icons, theme, widgets
 from ember.app.screens.common import (
     ToneLine,
     TooltipRow,
+    align_controls,
     chain_tab_order,
     clear_layout,
     engine_name,
     label,
-    name_and_help,
     screen_header,
     scrolled,
     titled_card,
@@ -58,10 +57,19 @@ SUBTITLE = "Which workers Claude uses. Ask each time means Claude asks you."
 
 MULTI = (("ask", "Ask each time"), ("flow", "Flow"), ("workflow", "Claude Workflow"))
 MULTI_HELP = "How Claude runs two or more tasks that each need a worker."
+RUN_AS_HELP = (
+    "How a Claude model runs. CLI is a Claude Code worker started with emb run. "
+    "Subagent is a subagent inside Claude's own session."
+)
 ROUNDS = tuple((value, value) for value in choices.REVIEW_ROUNDS)
 ROUNDS_HELP = (
     "The most times a reviewer can check one flow task. "
     "A flow plan that sets its own rounds wins."
+)
+WHOLE_HELP = (
+    "One review of all the flow's changes together. After every task of a "
+    "flow merges, the Flow reviewer reads the whole flow's changes once, with "
+    "the review bar, before Claude merges the flow."
 )
 PANEL_HELP = "The models a panel asks when Claude is given no members."
 PANEL_LIMIT = 8
@@ -70,6 +78,7 @@ NO_MEMBERS = (
     "No members. Claude asks for members, or uses the ones it is given, each time."
 )
 FULL = "A panel has at most eight members."
+ALL_ADDED = "Every shortlisted model is a member. Shortlist more in Engines to add one."
 ADD_BLOCKED = (
     "Remove the members not on their shortlist, or shortlist them "
     "in Engines, to add a member."
@@ -85,36 +94,34 @@ ROLES = (
         "Flow reviewer while they are Same as Reviewer.",
     ),
 )
-"""`(role, name, help)` for each row."""
+"""`(role, name, tooltip)` for each row."""
 
 DERIVED = (
     (
         "gapcheck.reviewer",
         "Gap check reviewer",
-        "Reads a plan before work starts and lists what it leaves open.",
-        "The model that checks a flow or Claude Workflow plan for gaps before "
-        "any worker starts. Same as Reviewer uses the single-task Reviewer.",
+        "Reads a flow or Claude Workflow plan before any worker starts and "
+        "lists what it leaves open. Same as Reviewer uses the single-task "
+        "Reviewer.",
         "Same as Reviewer",
     ),
     (
         "flow.writer",
         "Flow writer",
-        "Writes each flow task.",
-        "The model that writes every task of a flow. Same as Writer uses the "
-        "single-task Writer. A flow Claude starts with named workers uses those.",
+        "Writes every task of a flow. Same as Writer uses the single-task "
+        "Writer. A flow Claude starts with named workers uses those.",
         "Same as Writer",
     ),
     (
         "flow.reviewer",
         "Flow reviewer",
-        "Reviews each flow task, and the whole flow when that is on.",
-        "The model that reviews every flow task and, with Review the whole "
-        "flow on, the whole flow once before Claude merges it. Same as "
-        "Reviewer uses the single-task Reviewer.",
+        "Reviews every flow task and, with Review the whole flow on, the whole "
+        "flow once before Claude merges it. Same as Reviewer uses the "
+        "single-task Reviewer.",
         "Same as Reviewer",
     ),
 )
-"""`(key, name, help, tooltip, same text)` for each worker row with a Same choice."""
+"""`(key, name, tooltip, same text)` for each worker row with a Same choice."""
 
 WHEN = tuple(
     (
@@ -132,9 +139,11 @@ WHEN_TIP = (
 )
 ASKS = (("high", "High only"), ("medium", "High and medium"), ("all", "All"))
 ASKS_TIP = (
-    "Which gaps Claude brings to you. Gaps below the line take the default the "
-    "gap check proposes, written into the plan, and Claude lists them in its "
-    "report."
+    "Which gaps Claude brings to you. High only: medium and low gaps take "
+    "their default. High and medium: low gaps take their default. All: high "
+    "gaps one by one, medium and low together in one question. A gap that is "
+    "not asked takes the default the gap check proposes, written into the "
+    "plan, and Claude lists it in its report."
 )
 PARALLEL = tuple((value, value) for value in choices.FLOW_PARALLEL)
 STALL = tuple((value, f"{value} min") for value in choices.FLOW_STALL)
@@ -144,15 +153,13 @@ SEGMENTS = (
     (
         "flow.parallel",
         "Max tasks at once",
-        "No more than this many flow tasks run at the same time.",
-        "The most flow tasks that run at the same time. A plan that sets its "
-        "own parallel count wins.",
+        "No more than this many flow tasks run at the same time. A plan that "
+        "sets its own parallel count wins.",
         PARALLEL,
     ),
     (
         "flow.stall",
         "Stall after",
-        "Minutes without screen changes before a task stops waiting.",
         "How long a flow worker's screen may stay still before Ember stops "
         "waiting on it and asks Claude.",
         STALL,
@@ -160,48 +167,33 @@ SEGMENTS = (
     (
         "workflow.agents",
         "Max agents at once",
-        "No more than this many Claude Workflow agents run at the same time.",
-        "The most Claude Workflow agents that run at the same time. Agents use "
-        "this session's Claude model.",
+        "No more than this many Claude Workflow agents run at the same time. "
+        "Agents use this session's Claude model.",
         AGENTS,
     ),
     (
         "workflow.late",
         "When an agent runs late",
-        "After its expected time plus half again, or 10 minutes.",
-        "What Claude does when a Claude Workflow agent runs past its "
-        "deadline: ask you, wait one more deadline, or stop the agent.",
+        "What Claude does when a Claude Workflow agent runs past its deadline, "
+        "its expected time plus half again, or 10 minutes: ask you, wait one "
+        "more deadline, or stop the agent.",
         LATE,
     ),
 )
-"""`(key, name, help, tooltip, choices)` for each segmented setting."""
-
-WHOLE_TIP = (
-    "After every task of a flow merges, the Flow reviewer reads the whole "
-    "flow's changes once, with the review bar, before Claude merges the flow."
-)
+"""`(key, name, tooltip, choices)` for each segmented setting."""
 
 
-def when_help(value: str) -> str:
-    """Return the help line under Run the gap check for a value."""
+def when_hint(value: str) -> str:
+    """Return the hint line under a Run the gap check option."""
     if value == "off":
-        return "No gap check. Claude starts work straight from the plan."
+        return "Every flow and Claude Workflow starts without one."
     if value == "always":
         return "Before every flow and Claude Workflow."
     if value == "ask":
-        return "Claude asks you before each plan."
+        return "Claude asks you before each flow or Claude Workflow."
     least = int(value)
     rest = "1 task" if least == 2 else f"1 to {least - 1} tasks"
-    return f"Plans of {least} or more tasks. Plans of {rest} start without one."
-
-
-def asks_help(value: str) -> str:
-    """Return the help line under Gaps Claude asks you about for a value."""
-    return {
-        "high": "Medium and low gaps take their default; Claude lists them.",
-        "medium": "Low gaps take their default; Claude lists them.",
-        "all": "High gaps one by one; medium and low together in one question.",
-    }.get(value, "")
+    return f"Plans of {rest} start without one."
 
 
 RUN_AS = (("cli", "CLI"), ("subagent", "Subagent"))
@@ -355,7 +347,7 @@ class _Role:
         self.warning = ToneLine("warning")
         self.run_as = widgets.Segmented(RUN_AS)
         self.run_as.setAccessibleName(f"Claude {role} runs as")
-        self.run_as_row = QWidget()
+        self.run_as_row: QWidget = QWidget()
 
 
 class _Derived:
@@ -387,35 +379,21 @@ class MenuScreen(QWidget):
         screen_header(layout, self.TITLE, SUBTITLE)
 
         card, column = titled_card("Single tasks")
-        grid = QGridLayout()
-        column.addLayout(grid)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(24)
-        grid.setVerticalSpacing(16)
-        grid.setColumnStretch(0, 1)
         self.roles: dict[str, _Role] = {}
-        row = 0
-        for role, name, help_text in ROLES:
+        rows: dict[str, TooltipRow] = {}
+        self.tip_rows = rows
+        """Each setting's row with an info icon, by settings key."""
+        for role, name, tooltip in ROLES:
             controls = _Role(role, name)
             self.roles[role] = controls
-            grid.addWidget(name_and_help(name, help_text), row, 0)
-            grid.addWidget(controls.picker, row, 1, Qt.AlignmentFlag.AlignVCenter)
-            row += 1
-            grid.addWidget(controls.warning, row, 0, 1, 2)
-            row += 1
-            run_as_layout = QHBoxLayout(controls.run_as_row)
-            run_as_layout.setContentsMargins(0, 0, 0, 0)
-            run_as_layout.addWidget(
-                name_and_help(
-                    f"Claude {role} runs as",
-                    "CLI is a Claude Code worker started with emb run. "
-                    "Subagent is a subagent inside Claude's own session.",
-                ),
-                1,
+            rows[controls.key] = TooltipRow(name, tooltip, controls.picker)
+            column.addWidget(rows[controls.key])
+            column.addWidget(controls.warning)
+            controls.run_as_row = TooltipRow(
+                f"Claude {role} runs as", RUN_AS_HELP, controls.run_as
             )
-            run_as_layout.addWidget(controls.run_as, 0, Qt.AlignmentFlag.AlignVCenter)
-            grid.addWidget(controls.run_as_row, row, 0, 1, 2)
-            row += 1
+            rows[f"{controls.key}_as"] = controls.run_as_row
+            column.addWidget(controls.run_as_row)
             controls.picker.activated.connect(
                 lambda _index, controls=controls: self._picked(controls)
             )
@@ -437,24 +415,21 @@ class MenuScreen(QWidget):
 
         self.derived: dict[str, _Derived] = {}
         self.segments: dict[str, widgets.Segmented] = {}
-        rows: dict[str, TooltipRow] = {}
-        self.tip_rows = rows
-        """Each setting's row with an info icon, by settings key."""
-        for key, name, help_text, tip, same in DERIVED:
+        for key, name, tip, same in DERIVED:
             derived = _Derived(key, name, same)
             self.derived[key] = derived
-            rows[key] = TooltipRow(name, help_text, tip, derived.picker)
+            rows[key] = TooltipRow(name, tip, derived.picker)
             derived.picker.activated.connect(
                 lambda _index, derived=derived: self._derived_picked(derived)
             )
-        for key, name, help_text, tip, values in SEGMENTS:
+        for key, name, tip, values in SEGMENTS:
             control = widgets.Segmented(values)
             control.setAccessibleName(name)
             control.changed.connect(
                 lambda value, key=key: self._segment_picked(key, value)
             )
             self.segments[key] = control
-            rows[key] = TooltipRow(name, help_text, tip, control)
+            rows[key] = TooltipRow(name, tip, control)
 
         planning_card, planning = titled_card("Planning")
         planning.addWidget(rows["gapcheck.reviewer"])
@@ -463,9 +438,9 @@ class MenuScreen(QWidget):
         self.when.setAccessibleName("Run the gap check")
         self.when.setMinimumWidth(180)
         for value, text in WHEN:
-            self.when.add_option(text, value)
+            self.when.add_option(text, value, when_hint(value))
         self.when.activated.connect(self._when_picked)
-        self.when_row = TooltipRow("Run the gap check", "", WHEN_TIP, self.when)
+        self.when_row = TooltipRow("Run the gap check", WHEN_TIP, self.when)
         rows["gapcheck.when"] = self.when_row
         planning.addWidget(self.when_row)
         self.asks = widgets.Segmented(ASKS)
@@ -473,21 +448,17 @@ class MenuScreen(QWidget):
         self.asks.changed.connect(
             lambda value: self._segment_picked("gapcheck.ask", value)
         )
-        self.asks_row = TooltipRow(
-            "Gaps Claude asks you about", "", ASKS_TIP, self.asks
-        )
+        self.asks_row = TooltipRow("Gaps Claude asks you about", ASKS_TIP, self.asks)
         rows["gapcheck.ask"] = self.asks_row
         planning.addWidget(self.asks_row)
         layout.addWidget(planning_card)
 
         multi_card, multi_layout = titled_card("Work of several tasks")
-        multi_row = QHBoxLayout()
-        multi_row.addWidget(name_and_help("Multi-task work", MULTI_HELP), 1)
         self.multi = widgets.Segmented(MULTI)
         self.multi.setAccessibleName("Multi-task work")
         self.multi.changed.connect(self._multi_picked)
-        multi_row.addWidget(self.multi)
-        multi_layout.addLayout(multi_row)
+        rows["multi.runs_as"] = TooltipRow("Multi-task work", MULTI_HELP, self.multi)
+        multi_layout.addWidget(rows["multi.runs_as"])
         layout.addWidget(multi_card)
 
         self.flow_card, flows = titled_card("Flows")
@@ -498,10 +469,7 @@ class MenuScreen(QWidget):
         self.rounds.setAccessibleName("Max review rounds")
         self.rounds.changed.connect(self._rounds_picked)
         rows["flow.review_rounds"] = TooltipRow(
-            "Max review rounds",
-            "The most times a reviewer can check one flow task.",
-            ROUNDS_HELP,
-            self.rounds,
+            "Max review rounds", ROUNDS_HELP, self.rounds
         )
         flows.addWidget(rows["flow.review_rounds"])
         flows.addWidget(rows["flow.parallel"])
@@ -510,10 +478,7 @@ class MenuScreen(QWidget):
         self.whole.setAccessibleName("Review the whole flow")
         self.whole.clicked.connect(self._whole_picked)
         rows["flow.whole_review"] = TooltipRow(
-            "Review the whole flow",
-            "One review of all the flow's changes together, before Claude merges it.",
-            WHOLE_TIP,
-            self.whole,
+            "Review the whole flow", WHOLE_HELP, self.whole
         )
         flows.addWidget(rows["flow.whole_review"])
         layout.addWidget(self.flow_card)
@@ -523,8 +488,8 @@ class MenuScreen(QWidget):
         workflows.addWidget(rows["workflow.late"])
         layout.addWidget(self.workflow_card)
 
-        panel_card, panel_layout = titled_card("Panel")
-        panel_layout.addWidget(label(PANEL_HELP, "secondary"))
+        panel_card, panel_layout = titled_card("Panel", PANEL_HELP)
+        self.panel_info = panel_card.findChild(widgets.InfoTip)
         self.members_layout = QVBoxLayout()
         panel_layout.addLayout(self.members_layout)
         self.member_removes: dict[str, QPushButton] = {}
@@ -549,6 +514,7 @@ class MenuScreen(QWidget):
         panel_layout.addWidget(self.add_member, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(panel_card)
         layout.addStretch(1)
+        align_controls(rows.values())
 
         context.settings_changed.connect(self._settings_changed)
         context.engines_changed.connect(self._redraw)
@@ -590,14 +556,13 @@ class MenuScreen(QWidget):
             self.when.set_value(when)
         finally:
             self.when.blockSignals(False)
-        self.when_row.help.setText(when_help(when))
         asks = str(answers["gapcheck.ask"]["value"])
         self.asks.set_value(asks)
-        self.asks_row.help.setText(asks_help(asks))
         for key, control in self.segments.items():
             control.set_value(answers[key]["value"])
         self.whole.setChecked(answers["flow.whole_review"]["value"] == "on")
         self._fill_panel(answers, panel)
+        align_controls(self.tip_rows.values())
         self._chain_focus()
 
     def _fill_panel(self, answers: dict[str, Any], panel: dict[str, Any]) -> None:
@@ -617,7 +582,6 @@ class MenuScreen(QWidget):
             line.addWidget(title, 1)
             remove = widgets.button("", "ghost", size="sm")
             remove.setAccessibleName(f"Remove {text}")
-            remove.setToolTip(f"Remove {text}")
             value = member["value"]
             remove.clicked.connect(
                 lambda _checked=False, value=value: self._remove_member(value)
@@ -643,9 +607,16 @@ class MenuScreen(QWidget):
         self.remove_warning.show_text(warning_text)
         self.remove_all.setVisible(warning_text is not None)
         self.remove_all.setEnabled(not self._panel_pending)
-        self.add_warning.show_text(ADD_BLOCKED if blocked else None)
-        self.full.setVisible(len(members) >= PANEL_LIMIT)
         groups = addable(answers, members)
+        full = len(members) >= PANEL_LIMIT
+        if blocked:
+            add_text = ADD_BLOCKED
+        elif not full and not groups and offered(answers):
+            add_text = ALL_ADDED
+        else:
+            add_text = None
+        self.add_warning.show_text(add_text)
+        self.full.setVisible(full)
         self.add_member.blockSignals(True)
         try:
             self.add_member.clear()
@@ -658,12 +629,11 @@ class MenuScreen(QWidget):
                     )
         finally:
             self.add_member.blockSignals(False)
-        self.add_member.setEnabled(
-            not self._panel_pending
-            and not blocked
-            and len(members) < PANEL_LIMIT
-            and bool(groups)
-        )
+        # A line on the card or the screen says why a member cannot be added:
+        # the eight-member limit, a member to fix first, every shortlisted
+        # model added, or no shortlist.
+        self.add_member.setVisible(not blocked and not full and bool(groups))
+        self.add_member.setEnabled(not self._panel_pending)
 
     def _draw_icons(self) -> None:
         """Keep the member removal icons in the current theme's text colour."""
@@ -673,17 +643,19 @@ class MenuScreen(QWidget):
     def _chain_focus(self) -> None:
         """Put the controls in reading order, including rebuilt member rows."""
         order: list[QWidget] = []
+        tips = self.tip_rows
         for controls in self.roles.values():
-            order.append(controls.picker)
+            order.extend((tips[controls.key].info, controls.picker))
+            order.append(tips[f"{controls.key}_as"].info)
             order.extend(controls.run_as.buttons())
         order.append(self.open_engines)
-        tips = self.tip_rows
         order.extend(
             (tips["gapcheck.reviewer"].info, self.derived["gapcheck.reviewer"].picker)
         )
         order.extend((tips["gapcheck.when"].info, self.when))
         order.append(tips["gapcheck.ask"].info)
         order.extend(self.asks.buttons())
+        order.append(tips["multi.runs_as"].info)
         order.extend(self.multi.buttons())
         for key in ("flow.writer", "flow.reviewer"):
             order.extend((tips[key].info, self.derived[key].picker))
@@ -696,6 +668,8 @@ class MenuScreen(QWidget):
         for key in ("workflow.agents", "workflow.late"):
             order.append(tips[key].info)
             order.extend(self.segments[key].buttons())
+        if self.panel_info is not None:
+            order.append(self.panel_info)
         order.extend(self.member_removes.values())
         order.extend((self.remove_all, self.add_member))
         chain_tab_order(order)
@@ -759,7 +733,12 @@ class MenuScreen(QWidget):
             for engine, models in groups:
                 picker.add_header(ENGINE_LABELS[engine])
                 for model, effort in models:
-                    picker.add_option(option_text(model, effort), f"{engine}:{model}")
+                    text = option_text(model, effort)
+                    picker.add_option(
+                        text,
+                        f"{engine}:{model}",
+                        closed=f"{ENGINE_LABELS[engine]} · {text}",
+                    )
             picker.set_value(value)
         finally:
             picker.blockSignals(False)
@@ -794,14 +773,23 @@ class MenuScreen(QWidget):
         picker.blockSignals(True)
         try:
             picker.clear()
-            picker.add_option(derived.same, choices.SAME)
+            role = "writer" if derived.same == "Same as Writer" else "reviewer"
+            resolved = self.roles[role].picker.closed_text()
+            picker.add_option(
+                derived.same, choices.SAME, closed=f"{derived.same} · {resolved}"
+            )
             missing = None if value == choices.SAME else orphan(value, answers)
             if missing is not None:
                 picker.add_option(missing[0], value)
             for engine, models in groups:
                 picker.add_header(ENGINE_LABELS[engine])
                 for model, effort in models:
-                    picker.add_option(option_text(model, effort), f"{engine}:{model}")
+                    text = option_text(model, effort)
+                    picker.add_option(
+                        text,
+                        f"{engine}:{model}",
+                        closed=f"{ENGINE_LABELS[engine]} · {text}",
+                    )
             picker.set_value(value)
         finally:
             picker.blockSignals(False)
@@ -825,15 +813,11 @@ class MenuScreen(QWidget):
 
     def _when_picked(self, _index: int) -> None:
         value = self.when.value()
-        if value is not None:
-            self.when_row.help.setText(when_help(str(value)))
-            if value != self.context.setting("gapcheck.when"):
-                self._save({"gapcheck.when": value})
+        if value is not None and value != self.context.setting("gapcheck.when"):
+            self._save({"gapcheck.when": value})
 
     def _segment_picked(self, key: str, value: str) -> None:
         """Save a segmented setting only when it changed."""
-        if key == "gapcheck.ask":
-            self.asks_row.help.setText(asks_help(value))
         if value != self.context.setting(key):
             self._save({key: value})
 

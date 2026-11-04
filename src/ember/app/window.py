@@ -9,10 +9,11 @@ read in progress, or its error with Try again.
 
 import dataclasses
 import importlib.metadata
+import os
 from collections.abc import Callable
 from typing import cast
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QCoreApplication, QProcessEnvironment, QSize, Qt
 from PySide6.QtGui import QCloseEvent, QHideEvent, QKeySequence, QShortcut, QShowEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -418,8 +419,16 @@ class MainWindow(QMainWindow):
 
     # Showing, hiding and quitting
 
-    def bring_forward(self) -> None:
-        """Show the window, raise it and give it focus."""
+    def bring_forward(self, token: str = "") -> None:
+        """Show the window, raise it and give it focus.
+
+        Args:
+            token: An activation token from another launch of Ember, or "".
+                Qt's Wayland activation reads it from `XDG_ACTIVATION_TOKEN`
+                and unsets it once used, which ends the desktop's busy cursor.
+        """
+        if token:
+            os.environ["XDG_ACTIVATION_TOKEN"] = token
         if self.isMinimized():
             self.showNormal()
         else:
@@ -436,8 +445,17 @@ class MainWindow(QMainWindow):
             self.quit_app()
 
     def quit_app(self) -> None:
-        """Keep the window's state and quit Ember."""
+        """Keep the window's state and quit Ember.
+
+        A tray menu click leaves an activation token in the environment, and
+        the desktop shows a busy cursor until a window uses it. A shown
+        window uses it before Ember quits.
+        """
         self._save_state()
+        token = QProcessEnvironment.systemEnvironment().value("XDG_ACTIVATION_TOKEN")
+        if token and self.isVisible():
+            self.activateWindow()
+            QCoreApplication.processEvents()
         self._quit()
 
     def _save_state(self) -> None:

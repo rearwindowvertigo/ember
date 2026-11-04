@@ -418,10 +418,9 @@ def test_model_rows_share_columns_and_centres(
     assert panel.name_header.width() == first.name.width() == missing.name.width()
     assert first.name.display_text().endswith("…")
     assert first.name.text() == long_id
-    assert first.name.toolTip() == f"{long_id}\nLong model"
-    assert second.name.toolTip() == short_id
+    assert first.name.toolTip() == second.name.toolTip() == ""
     assert missing.name.display_text().endswith("…")
-    assert missing.name.toolTip() == missing_id
+    assert missing.name.toolTip() == ""
     assert isinstance(second.effort_cell, QLabel)
     assert second.effort_cell.text() == ""
     for row in panel.rows:
@@ -597,7 +596,8 @@ def test_card_rows_stay_level_with_long_version(
     screen.show()
     QApplication.processEvents()
     version = screen.cards["claude"].version_label
-    assert version.text() == version.toolTip() == long_version
+    assert version.text() == long_version
+    assert version.toolTip() == ""
     assert version.display_text().endswith("…")
     assert not version.wordWrap()
     for attribute in (
@@ -797,7 +797,8 @@ def test_sandbox_switch_on_saves_then_runs_the_check(
     qtbot.waitUntil(lambda: not screen.checking, timeout=5000)
     assert "Sandbox check: failed, today" in card.check_label.text()
     assert card.check_label.text().endswith(": the sandbox test failed")
-    assert card.bwrap_label.text() == "bwrap: /usr/bin/bwrap, 0.11.1"
+    assert card.bwrap_label.text().startswith("bwrap: <span style=")
+    assert ">/usr/bin/bwrap</span>, 0.11.1" in card.bwrap_label.text()
     assert sandbox.last_checks(env)["opencode"].ok is False
 
 
@@ -1339,3 +1340,33 @@ def test_check_now_has_the_refresh_icon(env: dict[str, str], qtbot: QtBot) -> No
     before = screen.check_button.icon().cacheKey()
     theme.signals.changed.emit(theme.current_mode())
     assert screen.check_button.icon().cacheKey() != before
+
+
+def test_engine_cards_fit_the_window_width(env: dict[str, str], qtbot: QtBot) -> None:
+    screen, _context = _screen(env, qtbot)
+    screen.resize(1400, 700)
+    screen.show()
+    qtbot.waitUntil(lambda: screen.columns == 3, timeout=2000)
+    screen.resize(500, 700)
+    qtbot.waitUntil(lambda: screen.columns < 3, timeout=2000)
+    assert screen.scroll_area.horizontalScrollBar().maximum() == 0
+    positions = [
+        (card.mapTo(screen, card.rect().topLeft()).y())
+        for card in screen.cards.values()
+    ]
+    assert len(set(positions)) > 1
+    screen.resize(1400, 700)
+    qtbot.waitUntil(lambda: screen.columns == 3, timeout=2000)
+
+
+def test_engine_cards_never_scroll_sideways_while_resizing(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    screen, _context = _screen(env, qtbot)
+    screen.show()
+    for width in range(560, 1300, 2):
+        screen.resize(width, 700)
+        QApplication.processEvents()
+        assert screen.scroll_area.horizontalScrollBar().maximum() == 0, width
+        for card in screen.cards.values():
+            assert card.width() >= card.minimumSizeHint().width(), width

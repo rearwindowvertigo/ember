@@ -16,7 +16,6 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -29,9 +28,10 @@ from ember import choices, terminals
 from ember.app import icons, theme, widgets
 from ember.app.screens.common import (
     ToneLine,
+    TooltipRow,
+    align_controls,
     clear_layout,
     label,
-    name_and_help,
     screen_header,
     scrolled,
     titled_card,
@@ -95,8 +95,11 @@ class SettingsScreen(QWidget):
         self._other_open = False
         layout = scrolled(self)
         screen_header(layout, self.TITLE, SUBTITLE)
+        self.tip_rows: dict[str, TooltipRow] = {}
+        """Each setting's row with an info icon, by its name."""
         layout.addWidget(self._general())
         layout.addWidget(self._workers())
+        align_controls(self.tip_rows.values())
         layout.addStretch(1)
         context.settings_changed.connect(self._redraw)
         context.error.connect(self._redraw)
@@ -110,105 +113,92 @@ class SettingsScreen(QWidget):
 
     # Building
 
-    @staticmethod
-    def _card(title: str) -> tuple[widgets.Card, QGridLayout]:
-        card, column = titled_card(title)
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(24)
-        grid.setVerticalSpacing(16)
-        grid.setColumnStretch(0, 1)
-        column.addLayout(grid)
-        return card, grid
-
     def _general(self) -> widgets.Card:
-        card, grid = self._card("General")
-        grid.addWidget(
-            name_and_help(
-                "Start at login", "Ember starts in the tray when you log in."
-            ),
-            0,
-            0,
-        )
+        card, column = titled_card("General")
         self.autostart = widgets.Switch()
         self.autostart.setAccessibleName("Start at login")
         self.autostart.clicked.connect(
             lambda checked: self._save({"app.autostart": "on" if checked else "off"})
         )
-        grid.addWidget(self.autostart, 0, 1, Qt.AlignmentFlag.AlignRight)
-        self.autostart_line = ToneLine("warning")
-        grid.addWidget(self.autostart_line, 1, 0, 1, 2)
-        grid.addWidget(
-            name_and_help("Theme", "System follows the desktop's light or dark mode."),
-            2,
-            0,
+        self._row(
+            column,
+            "Start at login",
+            "Ember starts in the tray when you log in.",
+            self.autostart,
         )
+        self.autostart_line = ToneLine("warning")
+        column.addWidget(self.autostart_line)
         self.theme = widgets.Segmented(THEMES)
         self.theme.setAccessibleName("Theme")
         self.theme.changed.connect(self._theme_picked)
-        grid.addWidget(self.theme, 2, 1, Qt.AlignmentFlag.AlignRight)
+        self._row(
+            column,
+            "Theme",
+            "Light or dark. System follows the desktop's light or dark mode.",
+            self.theme,
+        )
         return card
 
     def _workers(self) -> widgets.Card:
-        card, grid = self._card("Workers")
-        grid.addWidget(
-            name_and_help(
-                "Worker network",
-                "Lets Codex workers and Claude's web tools reach the network. "
-                "OpenCode keeps network for OpenRouter.",
-            ),
-            0,
-            0,
-        )
+        card, column = titled_card("Workers")
         self.network = widgets.Switch()
         self.network.setAccessibleName("Worker network")
         self.network.clicked.connect(
             lambda checked: self._save({"worker.network": "on" if checked else "off"})
         )
-        grid.addWidget(self.network, 0, 1, Qt.AlignmentFlag.AlignRight)
-
-        grid.addWidget(
-            name_and_help("Terminal", "Opens worker sessions and commands you run."),
-            1,
-            0,
+        self._row(
+            column,
+            "Worker network",
+            "Lets Codex workers and Claude's web tools reach the network. "
+            "OpenCode keeps network for OpenRouter.",
+            self.network,
         )
         self.terminal = widgets.Picker()
         self.terminal.setAccessibleName("Terminal")
-        self.terminal.setMinimumWidth(240)
         self.terminal.activated.connect(self._terminal_picked)
-        grid.addWidget(self.terminal, 1, 1, Qt.AlignmentFlag.AlignRight)
+        self._row(
+            column,
+            "Terminal",
+            "The terminal that opens worker sessions and the commands you run.",
+            self.terminal,
+        )
         self.other = QLineEdit()
         self.other.setAccessibleName("Terminal command")
         self.other.setPlaceholderText("Command line, such as gnome-terminal --")
         self.other.editingFinished.connect(self._other_entered)
         self.other.setVisible(False)
-        grid.addWidget(self.other, 2, 0, 1, 2)
+        column.addWidget(self.other)
         self.terminal_line = ToneLine("warning")
-        grid.addWidget(self.terminal_line, 3, 0, 1, 2)
-
-        grid.addWidget(
-            name_and_help(
-                "Sandbox read paths",
-                "Folders a sandboxed worker may read, besides its worktree.",
-            ),
-            4,
-            0,
-        )
+        column.addWidget(self.terminal_line)
         self.add_folder = widgets.button("Add folder", "secondary", size="sm")
         widgets.set_icon(
             self.add_folder, icons.icon("folder-plus", theme.color("text-primary"), 16)
         )
         self.add_folder.clicked.connect(self._add_folder)
-        grid.addWidget(self.add_folder, 4, 1, Qt.AlignmentFlag.AlignRight)
+        self._row(
+            column,
+            "Sandbox read paths",
+            "Folders a sandboxed worker may read, besides its worktree.",
+            self.add_folder,
+        )
         self.paths_box = QWidget()
         self.paths_layout = QVBoxLayout(self.paths_box)
         self.paths_layout.setContentsMargins(0, 0, 0, 0)
         self.paths_layout.setSpacing(4)
-        grid.addWidget(self.paths_box, 5, 0, 1, 2)
+        column.addWidget(self.paths_box)
         self.paths_line = ToneLine("warning")
-        grid.addWidget(self.paths_line, 6, 0, 1, 2)
+        column.addWidget(self.paths_line)
         self.path_rows: dict[str, QPushButton] = {}
         theme.signals.changed.connect(self._draw_icons)
         return card
+
+    def _row(
+        self, column: QVBoxLayout, name: str, tooltip: str, control: QWidget
+    ) -> None:
+        """Add a setting row to a card and keep it for `align_controls`."""
+        row = TooltipRow(name, tooltip, control)
+        self.tip_rows[name] = row
+        column.addWidget(row)
 
     def _draw_icons(self, *_args: object) -> None:
         color = theme.color("text-primary")
@@ -254,6 +244,7 @@ class SettingsScreen(QWidget):
                 picker.set_value(saved.prefix)
         finally:
             picker.blockSignals(False)
+        align_controls(self.tip_rows.values())
         other = picker.value() == OTHER
         if other and not self._other_open:
             self.other.setText(value)
@@ -281,7 +272,6 @@ class SettingsScreen(QWidget):
             remove = widgets.button("", "ghost", size="sm")
             remove.setIcon(icons.icon("x", color, 16))
             remove.setAccessibleName(f"Remove {path}")
-            remove.setToolTip(f"Remove {path}")
             remove.clicked.connect(lambda _checked=False, path=path: self._remove(path))
             line.addWidget(remove)
             self.paths_layout.addWidget(row)

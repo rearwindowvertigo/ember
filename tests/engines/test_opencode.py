@@ -303,6 +303,32 @@ def test_read_only_agent_cannot_edit(
     assert "openrouter/x/y:free" in spec.argv
 
 
+def test_read_only_agent_may_read_its_read_paths(
+    driver: OpenCodeDriver, env: dict[str, str], tmp_path: Path
+) -> None:
+    folder = tmp_path / "shared"
+    folder.mkdir()
+    note = Path(env["HOME"]) / "notes" / "brief.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("x")
+    run = dataclasses.replace(
+        make_run(env, tmp_path, read_only=True),
+        read_effective=(str(folder), str(note), f"{folder}/"),
+    )
+    config = json.loads(driver.command(run, "brief").env["OPENCODE_CONFIG_CONTENT"])
+    rules = config["agent"]["ember-worker"]["permission"]["external_directory"]
+    assert list(rules.items()) == [
+        ("*", "deny"),
+        (f"{folder}/*", "allow"),
+        (f"{note.parent}/*", "allow"),
+    ]
+
+
+def test_editing_agent_reaches_outside_its_checkout() -> None:
+    assert opencode.external_directory(False, ("/x",)) == "allow"
+    assert opencode.external_directory(True, ()) == "deny"
+
+
 def test_command_takes_a_new_port_each_time(driver: OpenCodeDriver, run: Run) -> None:
     driver.command(run, "brief")
     first = json.loads((run.folder / opencode.STATE_NAME).read_text())["port"]
@@ -907,3 +933,32 @@ def test_load_driver(env: dict[str, str]) -> None:
     loaded = engines.load_driver("opencode", env)
     assert isinstance(loaded, OpenCodeDriver)
     assert loaded.env is env
+
+
+@pytest.mark.parametrize(
+    ("screen", "age", "selects"),
+    [
+        (f"  {opencode.START_SCREEN} █▀▀▄\n  Ask anything", 5, 1),
+        ("  Brief from Claude\n  Thinking", 5, 0),
+        (f"  {opencode.START_SCREEN}", opencode.SHOW_SECONDS + 1, 0),
+    ],
+)
+def test_wait_shows_the_session_while_the_start_screen_returns(
+    driver: OpenCodeDriver,
+    run: Run,
+    server: Server,
+    monkeypatch: pytest.MonkeyPatch,
+    screen: str,
+    age: float,
+    selects: int,
+) -> None:
+    run = dataclasses.replace(
+        started(driver, run, server), started_at=time.time() - age
+    )
+    server.write("status.json", {"ses_test": {"type": "busy"}})
+    server.write("messages.json", [])
+    calls: list[str] = []
+    monkeypatch.setattr(tmux, "capture", lambda *_args, **_kwargs: screen)
+    monkeypatch.setattr(driver, "_select", lambda _run, session: calls.append(session))
+    assert driver.wait(run).state == engines.RUNNING
+    assert calls == ["ses_test"] * selects

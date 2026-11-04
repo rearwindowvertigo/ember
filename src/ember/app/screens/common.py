@@ -12,6 +12,7 @@ from collections.abc import Iterable, Sequence
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QBoxLayout,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -172,6 +173,33 @@ class ToneLine(QLabel):
         self.setVisible(bool(text))
 
 
+def fitting_columns(
+    tile: int, area: QScrollArea, most: int, gap: int, margins: int = 0
+) -> int:
+    """Return the most columns, up to `most`, whose tiles fit beside the scroll bar.
+
+    Args:
+        tile: The narrowest a tile can be, such as its `minimumSizeHint`.
+        area: The scroll area holding the tiles.
+        most: The most columns.
+        gap: The space between columns.
+        margins: The left and right margins, together, around the tiles
+            inside the scroll area.
+
+    Returns:
+        A column count from 1 to `most`.
+    """
+    width = (
+        area.contentsRect().width()
+        - area.verticalScrollBar().sizeHint().width()
+        - margins
+    )
+    for count in range(most, 1, -1):
+        if count * tile + (count - 1) * gap <= width:
+            return count
+    return 1
+
+
 def scroll_area() -> QScrollArea:
     """Return a frameless scroll area that resizes its widget to fit."""
     area = QScrollArea()
@@ -237,64 +265,74 @@ def screen_header(
     return line
 
 
-def name_and_help(name: str, help_text: str) -> QWidget:
-    """Return a setting's name over its line of help."""
-    box = QWidget()
-    column = QVBoxLayout(box)
-    column.setContentsMargins(0, 0, 0, 0)
-    column.setSpacing(2)
-    heading = QLabel(name)
-    heading.setFont(theme.font("label"))
-    column.addWidget(heading)
-    column.addWidget(label(help_text, "secondary"))
-    return box
+CONTROL_COLUMN = 280
+"""The narrowest control column; a wider control widens it."""
 
 
 class TooltipRow(QWidget):
-    """A setting's name over its help line, its control on the right, and a tooltip.
+    """A setting's name with an info icon, and its control on the right.
 
-    The tooltip explains the setting more fully than the help line. An info
-    icon after the name shows it; the name, help line and control have none.
-    `help` can be redrawn as the control's value changes.
+    The name stands alone; the icon's tooltip holds the description, or the
+    description and what to do. The control sits in `slot`, which
+    `align_controls` sizes so a screen's controls share one column.
     """
 
-    def __init__(
-        self, name: str, help_text: str, tooltip: str, control: QWidget
-    ) -> None:
+    def __init__(self, name: str, tooltip: str, control: QWidget) -> None:
         """Lay out the row.
 
         Args:
             name: The setting's name.
-            help_text: One line of help under the name.
-            tooltip: The fuller explanation.
-            control: The picker, segmented control or switch.
+            tooltip: What the setting does, shown by the info icon.
+            control: The picker, segmented control, switch or button.
         """
         super().__init__()
+        self.control = control
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(16)
-        column = QVBoxLayout()
-        column.setSpacing(2)
         self.heading = QLabel(name)
         self.heading.setFont(theme.font("label"))
         self.info = widgets.InfoTip(name, tooltip)
-        title = QHBoxLayout()
-        title.setSpacing(4)
-        title.addWidget(self.heading)
-        title.addWidget(self.info, 0, Qt.AlignmentFlag.AlignVCenter)
-        title.addStretch(1)
-        self.help = label(help_text, "secondary")
-        column.addLayout(title)
-        column.addWidget(self.help)
-        row.addLayout(column, 1)
-        row.addWidget(control, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.heading)
+        row.addWidget(self.info, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addStretch(1)
+        self.slot = QWidget()
+        slot = QHBoxLayout(self.slot)
+        slot.setContentsMargins(0, 0, 0, 0)
+        if not isinstance(control, QComboBox):
+            slot.addStretch(1)
+        slot.addWidget(control, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.slot, 0, Qt.AlignmentFlag.AlignVCenter)
+        if control.focusPolicy() != Qt.FocusPolicy.NoFocus:
+            # The control was made first; Tab reaches the icon before it.
+            QWidget.setTabOrder(self.info, control)
 
 
-def titled_card(title: str) -> tuple[widgets.Card, QVBoxLayout]:
+def align_controls(rows: Iterable[TooltipRow]) -> int:
+    """Give every row's control the same column, as wide as the widest control.
+
+    Pickers fill the column; segmented controls, switches and buttons sit at
+    its right edge.
+
+    Returns:
+        The column's width.
+    """
+    rows = list(rows)
+    width = max([CONTROL_COLUMN, *(row.control.sizeHint().width() for row in rows)])
+    for row in rows:
+        row.slot.setFixedWidth(width)
+    return width
+
+
+def titled_card(
+    title: str, tooltip: str | None = None
+) -> tuple[widgets.Card, QVBoxLayout]:
     """Return a card with a heading, and the layout under the heading.
 
     Args:
         title: The heading.
+        tooltip: What the card holds, shown by an info icon after the
+            heading, or `None` for no icon.
 
     Returns:
         `(card, layout)`; the layout has 20 px padding and 16 px gaps.
@@ -305,7 +343,16 @@ def titled_card(title: str) -> tuple[widgets.Card, QVBoxLayout]:
     layout.setSpacing(SCREEN_SPACING)
     heading = QLabel(title)
     heading.setFont(theme.font("heading"))
-    layout.addWidget(heading)
+    if tooltip is None:
+        layout.addWidget(heading)
+        return card, layout
+    line = QHBoxLayout()
+    line.setSpacing(4)
+    line.addWidget(heading)
+    info = widgets.InfoTip(title, tooltip)
+    line.addWidget(info, 0, Qt.AlignmentFlag.AlignVCenter)
+    line.addStretch(1)
+    layout.addLayout(line)
     return card, layout
 
 

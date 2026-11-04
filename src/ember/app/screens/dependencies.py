@@ -19,6 +19,7 @@ from ember.app.screens.common import (
     SCREEN_MARGIN,
     SCREEN_SPACING,
     discard,
+    fitting_columns,
     inline,
     label,
     plural,
@@ -188,6 +189,7 @@ class DependencyTile(widgets.Card):
         layout.addWidget(self.error)
         self.error.setVisible(bool(item.error) and item.error != item.link_state)
         self.resolved_path = label(item.resolved_path or "", "muted")
+        self.resolved_path.setFont(theme.font("code"))
         self.resolved_path.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
@@ -410,14 +412,7 @@ class DependenciesScreen(QWidget):
         if not self.tiles:
             return COLUMNS
         tile = max(t.minimumSizeHint().width() for t in self.tiles.values())
-        width = (
-            self.scroll_area.contentsRect().width()
-            - self.scroll_area.verticalScrollBar().sizeHint().width()
-        )
-        for count in range(COLUMNS, 1, -1):
-            if count * tile + (count - 1) * GAP <= width:
-                return count
-        return 1
+        return fitting_columns(tile, self.scroll_area, COLUMNS, GAP)
 
     def _place(self) -> None:
         for grid, tiles in self.grids:

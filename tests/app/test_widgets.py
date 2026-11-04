@@ -121,7 +121,8 @@ def test_elided_label_keeps_full_text_for_copy(
         name.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         name.resize(220, 36)
         name.show()
-        assert name.text() == name.toolTip() == text
+        assert name.text() == text
+        assert name.toolTip() == ""
         assert name.display_text().endswith("…")
         name.setFocus()
         qtbot.keyClick(name, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
@@ -132,7 +133,8 @@ def test_elided_label_keeps_full_text_for_copy(
         name.resize(name.fontMetrics().horizontalAdvance(text) + 20, 36)
         assert name.display_text() == text
         name.setText("short")
-        assert name.display_text() == name.text() == name.toolTip() == "short"
+        assert name.display_text() == name.text() == "short"
+        assert name.toolTip() == ""
         name.setText("")
         assert not name.grab().isNull()
     finally:
@@ -752,7 +754,7 @@ def test_tip_text_keeps_short_text() -> None:
 
 def test_tip_text_wraps_long_text_at_the_tip_width() -> None:
     shown = widgets.tip_text(LONG_TIP + " <b>")
-    assert shown.startswith(f'<table width="{widgets.TIP_WIDTH}"')
+    assert shown.startswith("<p>")
     assert "When Claude has a plan" in shown
     assert "&lt;b&gt;" in shown
     assert QtGui.Qt.mightBeRichText(shown)
@@ -765,23 +767,37 @@ def test_tip_text_breaks_long_paths_after_slashes() -> None:
     assert "<br>" in shown
 
 
-def test_tip_wrapper_shows_long_tooltips_wrapped(
+def _popup_shows(owner: QWidget) -> bool:
+    popup = widgets.tip_popup()
+    return popup.isVisible() and popup.owner is owner
+
+
+def test_tip_wrapper_lets_only_an_info_icon_show_a_tooltip(
     qapp: QApplication, qtbot: QtBot
 ) -> None:
     widgets.install_tooltips(qapp)
     assert widgets.install_tooltips(qapp) is qapp.findChild(widgets.TipWrapper)
     label = QLabel("x")
-    qtbot.addWidget(label)
-    label.setToolTip(LONG_TIP)
-    label.show()
+    info = widgets.InfoTip("Run the gap check", LONG_TIP)
+    for widget in (label, info):
+        qtbot.addWidget(widget)
+        widget.show()
+    label.setToolTip("Not shown")
     point = QPoint(2, 2)
-    event = QHelpEvent(QEvent.Type.ToolTip, point, label.mapToGlobal(point))
     try:
+        event = QHelpEvent(QEvent.Type.ToolTip, point, label.mapToGlobal(point))
         QApplication.sendEvent(label, event)
-        assert QToolTip.text() == widgets.tip_text(LONG_TIP)
-        assert label.toolTip() == LONG_TIP
+        assert not QToolTip.isVisible()
+        assert not widgets.tip_popup().isVisible()
+        event = QHelpEvent(QEvent.Type.ToolTip, point, info.mapToGlobal(point))
+        QApplication.sendEvent(info, event)
+        assert _popup_shows(info)
+        assert widgets.tip_popup().text() == widgets.tip_text(LONG_TIP)
+        assert not QToolTip.isVisible()
+        QApplication.sendEvent(info, QEvent(QEvent.Type.Leave))
+        assert not widgets.tip_popup().isVisible()
     finally:
-        QToolTip.hideText()
+        info.hide_tip()
 
 
 def _focus(widget: QWidget, kind: QEvent.Type, reason: Qt.FocusReason) -> None:
@@ -800,32 +816,23 @@ def test_info_tip_shows_on_click_and_keyboard_focus(qtbot: QtBot) -> None:
     assert info.focusPolicy() == Qt.FocusPolicy.StrongFocus
     try:
         info.click()
-        assert QToolTip.isVisible()
-        assert QToolTip.text() == widgets.tip_text(LONG_TIP)
-        QToolTip.hideText()
-        qtbot.waitUntil(lambda: not QToolTip.isVisible(), timeout=2000)
+        assert _popup_shows(info)
+        info.hide_tip()
         _focus(info, QEvent.Type.FocusIn, Qt.FocusReason.MouseFocusReason)
-        assert not QToolTip.isVisible()
+        assert not widgets.tip_popup().isVisible()
         _focus(info, QEvent.Type.FocusIn, Qt.FocusReason.TabFocusReason)
-        assert QToolTip.isVisible()
-        assert QToolTip.text() == widgets.tip_text(LONG_TIP)
+        assert _popup_shows(info)
+        qtbot.keyClick(info, Qt.Key.Key_Escape)
+        assert not widgets.tip_popup().isVisible()
+        _focus(info, QEvent.Type.FocusIn, Qt.FocusReason.TabFocusReason)
         _focus(info, QEvent.Type.FocusOut, Qt.FocusReason.TabFocusReason)
-        qtbot.waitUntil(lambda: not QToolTip.isVisible(), timeout=2000)
+        assert not widgets.tip_popup().isVisible()
+        info.set_text("Short.")
+        info.show_tip()
+        assert widgets.tip_popup().text() == "Short."
+        assert info.accessibleDescription() == "Short."
     finally:
-        QToolTip.hideText()
-
-
-def test_tip_text_caps_unbroken_text_at_the_tip_width(
-    qapp: QApplication, qtbot: QtBot
-) -> None:
-    name = "codex-" + "a" * 90 + ".md"
-    path = f"/home/owner/runs/{name}"
-    label = QLabel(widgets.tip_text(path))
-    qtbot.addWidget(label)
-    label.setWordWrap(True)
-    label.adjustSize()
-    assert label.width() <= widgets.TIP_WIDTH + 8
-    assert widgets.PATH_BREAK in widgets.tip_text(name)
+        info.hide_tip()
 
 
 def test_info_tip_stays_open_after_tab_key_release(qtbot: QtBot) -> None:
@@ -847,9 +854,67 @@ def test_info_tip_stays_open_after_tab_key_release(qtbot: QtBot) -> None:
         qtbot.keyPress(other, Qt.Key.Key_Tab)
         qtbot.waitUntil(info.hasFocus, timeout=2000)
         qtbot.keyRelease(info, Qt.Key.Key_Tab)
-        qtbot.waitUntil(QToolTip.isVisible, timeout=2000)
         qtbot.wait(50)
-        assert QToolTip.isVisible()
-        assert QToolTip.text() == widgets.tip_text(LONG_TIP)
+        assert _popup_shows(info)
     finally:
-        QToolTip.hideText()
+        info.hide_tip()
+
+
+def test_tip_popup_is_rounded_and_wraps_at_the_tip_width(
+    qapp: QApplication, qtbot: QtBot
+) -> None:
+    host = QWidget()
+    qtbot.addWidget(host)
+    host.show()
+    popup = widgets.tip_popup()
+    try:
+        popup.show_for(host, LONG_TIP)
+        assert popup.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert popup.width() <= widgets.TIP_WIDTH + 2 * widgets.TipPopup.PADDING[0] + 8
+        image = popup.grab().toImage()
+        assert image.pixelColor(0, 0).alpha() < 255
+        middle = image.pixelColor(popup.width() // 2, 2)
+        assert middle.name() == theme.color("fill-primary").name()
+        popup.show_for(host, "Short.")
+        assert popup.text() == "Short."
+    finally:
+        popup.hide_for(host)
+
+
+def test_escape_closes_a_tooltip_wherever_focus_is(
+    qapp: QApplication, qtbot: QtBot
+) -> None:
+    widgets.install_tooltips(qapp)
+    host = QWidget()
+    qtbot.addWidget(host)
+    layout = QVBoxLayout(host)
+    field = QLineEdit()
+    info = widgets.InfoTip("Terminal", LONG_TIP)
+    layout.addWidget(field)
+    layout.addWidget(info)
+    host.show()
+    try:
+        info.show_tip()
+        assert widgets.tip_popup().isVisible()
+        qtbot.keyClick(field, Qt.Key.Key_Escape)
+        assert not widgets.tip_popup().isVisible()
+    finally:
+        info.hide_tip()
+
+
+def test_tip_popup_stays_on_the_screen(qapp: QApplication, qtbot: QtBot) -> None:
+    host = QWidget()
+    qtbot.addWidget(host)
+    host.resize(40, 20)
+    host.show()
+    screen = host.screen()
+    assert screen is not None
+    area = screen.availableGeometry()
+    host.move(area.right() - 40, area.bottom() - 20)
+    popup = widgets.tip_popup()
+    try:
+        popup.show_for(host, LONG_TIP)
+        assert area.contains(popup.geometry())
+        assert popup.geometry().bottom() < host.mapToGlobal(QPoint(0, 0)).y()
+    finally:
+        popup.hide_for(host)
