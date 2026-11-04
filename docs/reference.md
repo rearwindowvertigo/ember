@@ -2829,8 +2829,9 @@ Finished appears and counts as a top-level run in the tray.
 Clicking the icon also shows the window. Closing the window hides it to the
 tray. When the desktop has no tray, the window shows at start and closing it
 quits. A menu click gives Ember an activation token; Quit Ember uses it on
-the window before quitting when the window is shown. With the window hidden
-the token is not used, and the desktop's busy cursor runs until its timeout.
+the window before quitting when the window is shown. With the window hidden,
+a separate invisible helper window is shown, activated and hidden to use the
+token before quitting; the main window stays hidden.
 
 A run, flow or panel change updates the icon and tooltip at once. The menu
 keeps its lines until it next opens, when it rebuilds them. A click from a
