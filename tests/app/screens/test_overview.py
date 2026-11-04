@@ -125,18 +125,55 @@ def loaded(env: dict[str, str], context: AppContext, qtbot: QtBot) -> OverviewSc
 
 def test_empty(context: AppContext, qtbot: QtBot) -> None:
     screen = screen_for(context, qtbot)
-    assert screen.subtitle.text() == "No runs live"
+    assert screen.subtitle.isHidden()
     assert screen.live_empty.isVisible()
     assert screen.finished_empty.isVisible()
     assert screen.live_card.isVisible()
     assert screen.finished_card.isVisible()
 
 
+def test_live_header_collapses_when_empty(
+    env: dict[str, str], context: AppContext, qtbot: QtBot
+) -> None:
+    screen = screen_for(context, qtbot)
+    heading = next(
+        label
+        for label in screen.live_card.findChildren(QLabel)
+        if label.text() == "Live"
+    )
+    empty = screen.live_empty
+    assert empty.text() == "Nothing running"
+    assert empty.property("role") == "secondary"
+    assert empty.isVisible()
+    # Font metrics differ between machines, so the centres may differ by 1 px.
+    assert (
+        abs(
+            heading.mapTo(screen.live_card, heading.rect().center()).y()
+            - empty.mapTo(screen.live_card, empty.rect().center()).y()
+        )
+        <= 1
+    )
+    assert empty.geometry().left() > heading.geometry().right()
+    layout = screen.live_card.layout()
+    assert layout is not None
+    margins = layout.contentsMargins()
+    assert screen.live_card.height() == (
+        max(heading.height(), empty.height()) + margins.top() + margins.bottom()
+    )
+
+    write_run(make_run(env, LIVE_A))
+    context.runs.reload()
+    qtbot.waitUntil(lambda: LIVE_A in screen.live_rows)
+    row = screen.live_rows[LIVE_A]
+    qtbot.waitUntil(lambda: row.isVisible() and row.y() > heading.geometry().bottom())
+    assert not empty.isVisible()
+
+
 def test_rows_and_badges(
     env: dict[str, str], context: AppContext, qtbot: QtBot
 ) -> None:
     screen = loaded(env, context, qtbot)
-    assert screen.subtitle.text() == "2 runs live"
+    assert screen.subtitle.isHidden()
     assert list(screen.live_rows) == [LIVE_A, LIVE_B]
     first, second = screen.live_rows.values()
     assert (first.badge.text(), first.badge.tone()) == ("Starting", "neutral")
@@ -177,7 +214,7 @@ def test_running_badge(env: dict[str, str], context: AppContext, qtbot: QtBot) -
     screen = screen_for(context, qtbot)
     row = screen.live_rows[LIVE_A]
     assert (row.badge.text(), row.badge.tone()) == ("Running", "info")
-    assert screen.subtitle.text() == "1 run live"
+    assert screen.subtitle.isHidden()
     assert not screen.finished_empty.isHidden()
 
 
@@ -1230,6 +1267,9 @@ def test_unreadable_line_combines_counts_inside_live(
         == "1 run, 1 flow, 1 panel could not be read."
     )
     assert screen.live_empty.isVisible() and screen.finished_empty.isVisible()
+    qtbot.waitUntil(
+        lambda: screen.unreadable_alert.y() > screen.live_empty.geometry().bottom()
+    )
     assert overview.unreadable_line(0, 2, 0) == "2 flows could not be read."
 
 
@@ -1610,7 +1650,7 @@ def test_nested_row_is_not_hidden_or_reparented_on_refresh(
     ("status", "expected"),
     [("running", "1 flow, 1 panel live"), ("cancelled", "1 run, 1 panel live")],
 )
-def test_subtitle_matches_tray_top_level_counts(
+def test_subtitle_stays_hidden_with_live_parents(
     env: dict[str, str], context: AppContext, qtbot: QtBot, status: str, expected: str
 ) -> None:
     flow = make_flow(env, status=status)
@@ -1623,7 +1663,8 @@ def test_subtitle_matches_tray_top_level_counts(
     qtbot.waitUntil(lambda: len(context.runs.live()) == 2)
     screen = screen_for(context, qtbot)
     icon = tray.Tray(context, lambda: None, lambda: None, lambda: None)
-    assert screen.subtitle.text() == icon.lines()[0] == expected
+    assert screen.subtitle.isHidden()
+    assert icon.lines()[0] == expected
     icon.menu.deleteLater()
 
 

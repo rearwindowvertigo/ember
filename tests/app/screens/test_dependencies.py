@@ -12,6 +12,7 @@ from ember import deps
 from ember.app import theme
 from ember.app.context import AppContext
 from ember.app.screens import dependencies as screen_module
+from ember.app.screens.common import SCREEN_MARGIN
 from ember.app.screens.dependencies import DependenciesScreen, subtitle
 from ember.app.window import MainWindow
 
@@ -325,6 +326,26 @@ def test_tiles_never_run_under_the_scroll_bar(
     for tile in widget.tiles.values():
         right = tile.mapTo(content, tile.rect().topRight()).x()
         assert right < area.viewport().width()
+
+
+@pytest.mark.parametrize("width", [1100, 900, 700, 500])
+def test_tiles_keep_a_margin_beside_the_scroll_bar(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, width: int
+) -> None:
+    report = _report(
+        *(_component(f"tool-{index}", deps.CURRENT) for index in range(30))
+    )
+    widget, _context, _calls = _screen(env, qtbot, monkeypatch, report)
+    widget.resize(width, 300)
+    area = widget.scroll_area
+    bar = area.verticalScrollBar()
+    qtbot.waitUntil(bar.isVisible, timeout=2000)
+    qtbot.wait(100)
+    assert area.geometry().right() == widget.rect().right()
+    bar_left = bar.mapTo(area, bar.rect().topLeft()).x()
+    for tile in widget.tiles.values():
+        tile_right = tile.mapTo(area, tile.rect().topRight()).x()
+        assert bar_left - tile_right - 1 >= SCREEN_MARGIN
 
 
 def test_first_report_in_a_wide_window_uses_three_columns(
