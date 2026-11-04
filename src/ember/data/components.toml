@@ -72,7 +72,7 @@ id = "claude"
 label = "Claude Code"
 group = "apps"
 installed = { kind = "command", engine = "claude", pattern = '^(\S+) \(Claude Code\)$' }
-newest = { kind = "text", url = "https://downloads.claude.ai/claude-code-releases/latest" }
+newest = { kind = "text", url = "https://downloads.claude.ai/claude-code-releases/{channel}", channel = "claude-code" }
 updater = "claude update"
 install = "curl -fsSL https://claude.ai/install.sh | bash"
 

@@ -350,22 +350,22 @@ CODEX_URL = "https://example.test/codex"
 
 
 @pytest.mark.parametrize(
-    ("installed", "newest", "state"),
+    ("installed", "newest", "state", "shown"),
     [
-        ("0.164.0", "0.166.0", deps.UPDATE_AVAILABLE),
-        ("0.164.0", "0.164.0", deps.CURRENT),
-        ("0.166.0", "v0.166", deps.CURRENT),
-        ("0.167.0", "0.166.0", deps.CURRENT),
+        ("0.164.0", "0.166.0", deps.UPDATE_AVAILABLE, "0.166.0"),
+        ("0.164.0", "0.164.0", deps.CURRENT, "0.164.0"),
+        ("0.166.0", "v0.166", deps.CURRENT, "v0.166"),
+        ("0.167.0", "0.166.0", deps.CURRENT, "0.167.0"),
     ],
 )
 def test_command_and_json(
-    env: dict[str, str], installed: str, newest: str, state: str
+    env: dict[str, str], installed: str, newest: str, state: str, shown: str
 ) -> None:
     _stub(env, "codex", f'[ "$1" = --version ] && echo "codex-cli {installed}"\n')
     fetch = Fetcher({CODEX_URL: json.dumps({"version": newest})})
     item = _one(_read(env, CODEX, fetch))
     assert item.status == state
-    assert (item.installed, item.newest) == (installed, newest)
+    assert (item.installed, item.newest) == (installed, shown)
     assert fetch.calls == [CODEX_URL]
 
 
@@ -807,7 +807,9 @@ def _engine_read(
         deps.read(
             env,
             components=(spec,),
-            fetch=Fetcher({spec.newest.url or "": body}),
+            fetch=Fetcher(
+                {(spec.newest.url or "").replace("{channel}", "latest"): body}
+            ),
             installed=installed,
             newest=newest,
             deadline=deadline,
@@ -1541,3 +1543,38 @@ def ember_version(monkeypatch: pytest.MonkeyPatch) -> list[str | None]:
 
     monkeypatch.setattr(deps.importlib.metadata, "version", version)
     return versions
+
+
+@pytest.mark.parametrize(
+    ("settings", "channel"),
+    [
+        (None, "latest"),
+        ({}, "latest"),
+        ({"autoUpdatesChannel": "stable"}, "stable"),
+        ({"autoUpdatesChannel": "latest"}, "latest"),
+        ({"autoUpdatesChannel": "rc"}, "latest"),
+        ("not json", "latest"),
+    ],
+)
+def test_claude_channel_follows_claude_code_settings(
+    env: dict[str, str], settings: object, channel: str
+) -> None:
+    folder = Path(env["HOME"]) / ".claude"
+    folder.mkdir(parents=True, exist_ok=True)
+    if settings is not None:
+        text = settings if isinstance(settings, str) else json.dumps(settings)
+        (folder / "settings.json").write_text(text)
+    assert deps.claude_channel(env) == channel
+    other = Path(env["HOME"]) / "other"
+    other.mkdir()
+    (other / "settings.json").write_text(json.dumps({"autoUpdatesChannel": "stable"}))
+    assert deps.claude_channel({**env, "CLAUDE_CONFIG_DIR": str(other)}) == "stable"
+
+
+def test_a_text_channel_needs_its_placeholder() -> None:
+    with pytest.raises(deps.ComponentsError, match="channel"):
+        deps._source(
+            "c.newest",
+            "newest",
+            {"kind": "text", "url": "https://x.test/latest", "channel": "claude-code"},
+        )

@@ -120,6 +120,10 @@ class Source:
     commands: Mapping[str, str] = dataclasses.field(default_factory=dict)
     """Install commands by link state, for `skill`."""
 
+    channel: str | None = None
+    """Whose release channel fills `{channel}` in `url`, for `text`:
+    `claude-code` reads Claude Code's `autoUpdatesChannel`."""
+
 
 @dataclass(frozen=True)
 class Method:
@@ -323,7 +327,7 @@ _SOURCE_FIELDS: dict[tuple[str, str], tuple[tuple[str, ...], tuple[str, ...]]] =
     ("newest", "none"): ((), ()),
     ("newest", "apt"): (("package",), ()),
     ("newest", "json"): (("url", "field"), ()),
-    ("newest", "text"): (("url",), ()),
+    ("newest", "text"): (("url",), ("channel",)),
     ("newest", "pypi"): (("package",), ()),
 }
 """For each (role, kind): the required fields and the optional ones."""
@@ -365,11 +369,20 @@ def _source(where: str, role: str, value: object) -> Source:
         url = value.get("url")
         if url is not None and not url.startswith("https://"):
             raise ComponentsError(f"{where}: url must start with https://")
+        channel = value.get("channel")
+        if channel is not None and (
+            channel not in CHANNELS or "{channel}" not in str(url)
+        ):
+            raise ComponentsError(
+                f"{where}: channel must be one of {', '.join(CHANNELS)} "
+                "with {channel} in url"
+            )
         return Source(
             kind=kind,
             package=value.get("package"),
             url=url,
             field=value.get("field"),
+            channel=channel,
         )
     if ("engine" in value) == ("argv" in value):
         raise ComponentsError(f"{where}: give exactly one of engine and argv")
@@ -808,6 +821,8 @@ def _read_newest(
         url = PYPI_URL.format(package=source.package)
         return _json_field(url, _fetch(url, fetch), ("info", "version"))
     url = source.url or ""
+    if source.channel == "claude-code":
+        url = url.replace("{channel}", claude_channel(env))
     body = _fetch(url, fetch)
     if source.kind == "json":
         return _json_field(url, body, (source.field or "",))
@@ -815,6 +830,29 @@ def _read_newest(
     if not version or len(version.split()) != 1:
         raise ReadError(f"{url} did not return a single version")
     return version
+
+
+CHANNELS = ("claude-code",)
+"""The release channels a newest-version url can follow."""
+
+CLAUDE_CHANNELS = ("latest", "stable")
+"""Claude Code's release channels that have a newest-version file."""
+
+
+def claude_channel(env: Mapping[str, str]) -> str:
+    """Return the release channel Claude Code updates from.
+
+    Claude Code reads `autoUpdatesChannel` from `settings.json` in its
+    configuration folder (`CLAUDE_CONFIG_DIR`, else `~/.claude`); without it,
+    or with a value that has no newest-version file, it is `latest`.
+    """
+    folder = env.get("CLAUDE_CONFIG_DIR") or str(paths.home_dir(env) / ".claude")
+    try:
+        settings = json.loads((Path(folder) / "settings.json").read_text("utf-8"))
+    except OSError, UnicodeError, ValueError:
+        return "latest"
+    value = settings.get("autoUpdatesChannel") if isinstance(settings, dict) else None
+    return value if value in CLAUDE_CHANNELS else "latest"
 
 
 # Comparison
@@ -1076,8 +1114,19 @@ def _evaluate_versions(
         except ReadError as error:
             errors.append(f"comparison: {error}")
         else:
-            state = UPDATE_AVAILABLE if older else CURRENT
-            return _Outcome(_row(spec, state, installed, newest, None), found, reported)
+            if older:
+                row = _row(spec, UPDATE_AVAILABLE, installed, newest, None)
+                return _Outcome(row, found, reported)
+            # A source can report an older release than the installed one,
+            # such as apt lists read before a newer package was installed.
+            with contextlib.suppress(ReadError):
+                if installed != newest and _older(
+                    spec, newest, installed, options.env, options.deadline
+                ):
+                    newest = installed
+            return _Outcome(
+                _row(spec, CURRENT, installed, newest, None), found, reported
+            )
     row = _row(spec, CHECK_FAILED, installed, newest, "; ".join(errors))
     return _Outcome(row, found, reported)
 
