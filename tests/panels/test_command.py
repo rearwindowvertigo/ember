@@ -838,17 +838,23 @@ def test_status_elapsed_collection_intervals(
     assert record.load(panel_id, h.env) == panel
 
 
+@pytest.mark.parametrize("startup", [False, True])
 def test_status_reports_member_denials_with_run_and_turn(
-    h: Harness, monkeypatch: pytest.MonkeyPatch
+    h: Harness, monkeypatch: pytest.MonkeyPatch, startup: bool
 ) -> None:
     from ember import sandbox
 
-    folder = Path(h.env["HOME"]) / ".toolchain"
-    folder.mkdir()
+    folder = Path(h.env["HOME"]) / (".profile" if startup else ".toolchain")
+    if startup:
+        folder.touch()
+    else:
+        folder.mkdir()
+    denied = folder if startup else folder / "python"
+    reason = "startup file" if startup else "hidden"
     choices.set_settings({"sandbox.codex": "on"}, env=h.env)
     monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
     monkeypatch.setattr(Core, "_sandboxed", lambda self, spec, run, common: spec)
-    h.script("codex", f"@reply Permission denied: {folder}/python")
+    h.script("codex", f"@reply bash: {denied}: Permission denied")
     code, out, _ = h.start("--member", "codex:x", "--json")
     assert code == 0
     panel_id = json.loads(out)["panel"]
@@ -858,8 +864,8 @@ def test_status_reports_member_denials_with_run_and_turn(
     member = panel["members"][0]
     item = {
         "path": str(folder),
-        "reason": "hidden",
-        "allow_path": str(folder),
+        "reason": reason,
+        "allow_path": None if startup else str(folder),
         "run": member["run"],
         "turn": 1,
     }
@@ -875,4 +881,24 @@ def test_status_reports_member_denials_with_run_and_turn(
     ]
     code, out, _ = h.invoke("--status", panel_id)
     assert code == 0
-    assert f"denied {folder} (hidden) run {member['run']} turn 1" in out
+    assert f"denied {folder} ({reason}) run {member['run']} turn 1" in out
+
+
+def test_status_preserves_legacy_hidden_startup_denial(h: Harness) -> None:
+    panel_id = h.create()
+    panel = record.load(panel_id, h.env)
+    item = {
+        "path": str(Path(h.env["HOME"]) / ".profile"),
+        "reason": "hidden",
+        "allow_path": None,
+        "run": "codex-20260101-000000-abcdef",
+        "turn": 1,
+    }
+    panel["members"][0]["denied_paths"] = [item]
+    record.save(panel, h.env)
+    code, out, _ = h.invoke("--status", panel_id, "--json")
+    assert code == 0
+    assert json.loads(out)["denied_paths"] == [{**item, "member": 1}]
+    code, out, _ = h.invoke("--status", panel_id)
+    assert code == 0
+    assert f"denied {item['path']} (hidden) run {item['run']} turn 1" in out
