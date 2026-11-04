@@ -17,6 +17,7 @@ import contextlib
 import json
 import math
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -376,8 +377,18 @@ def _codex_signed_in(binary: str, env: Mapping[str, str]) -> bool:
     raise ProbeError(f"codex login status printed {first_line(output)!r}")
 
 
-def _opencode_signed_in(binary: str, env: Mapping[str, str]) -> bool:
-    code, output = run_probe([binary, "auth", "list"], env)
+def _opencode_signed_in(
+    binary: str, env: Mapping[str, str], version: str | None
+) -> bool:
+    """Read OpenRouter sign-in, using standalone mode for OpenCode 2 and later."""
+    match = re.fullmatch(
+        r"(?:opencode\s+)?v?([0-9]+)\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?",
+        version or "",
+    )
+    argv = [binary, "auth", "list"]
+    if match is not None and int(match[1]) >= 2:
+        argv.append("--standalone")
+    code, output = run_probe(argv, env)
     if code != 0:
         raise ProbeError(f"opencode auth list exited {code}: {first_line(output)}")
     return "openrouter" in output.lower()
@@ -385,7 +396,6 @@ def _opencode_signed_in(binary: str, env: Mapping[str, str]) -> bool:
 
 _SIGNED_IN = {
     "codex": _codex_signed_in,
-    "opencode": _opencode_signed_in,
     "claude": _claude_signed_in,
 }
 
@@ -423,7 +433,11 @@ def _check(engine: str, env: Mapping[str, str], now: float | None) -> EngineStat
         failures.append(failure)
     signed_in: bool | None
     try:
-        signed_in = _SIGNED_IN[engine](binary, run_env)
+        signed_in = (
+            _opencode_signed_in(binary, run_env, version)
+            if engine == "opencode"
+            else _SIGNED_IN[engine](binary, run_env)
+        )
     except ProbeError as error:
         signed_in = None
         failures.append(str(error))
