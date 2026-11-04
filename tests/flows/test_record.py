@@ -488,3 +488,68 @@ def test_record_without_common_loads(
     assert loaded["common"] is None
     record.save(loaded, env)
     assert record.load(flow["id"], env)["common"] is None
+
+
+@pytest.mark.parametrize(
+    "model", ["anthropic/claude-x", "openrouter/anthropic/claude-x"]
+)
+@pytest.mark.parametrize("marked", [False, True])
+def test_opencode_workers_migrate_at_load(
+    flow: dict[str, Any], created: Path, env: dict[str, str], model: str, marked: bool
+) -> None:
+    worker = {
+        "engine": "opencode",
+        "model": model,
+        "effort": "high",
+        "source": "setting",
+    }
+    flow["writer"] = dict(worker)
+    flow["reviewer"] = dict(worker)
+    for task in flow["tasks"]:
+        task["writer"] = dict(worker)
+        task["reviewer"] = dict(worker)
+    if not marked:
+        flow.pop("opencode_id_format")
+    path = created / record.FLOW_NAME
+    path.write_text(json.dumps(flow))
+    before = path.read_bytes()
+    loaded = record.load(flow["id"], env)
+    expected = (
+        model if marked or model.startswith("openrouter/") else "openrouter/" + model
+    )
+    for row in (loaded, *loaded["tasks"]):
+        for name in ("writer", "reviewer"):
+            assert row[name] == {**worker, "model": expected}
+    assert path.read_bytes() == before
+    record.save(loaded, env)
+    assert record.load(flow["id"], env) == loaded
+    assert json.loads(path.read_text())["opencode_id_format"] == 1
+
+
+def test_pending_worker_answers_migrate_without_rewriting_log(
+    flow: dict[str, Any], created: Path, env: dict[str, str]
+) -> None:
+    path = created / record.ANSWERS_NAME
+    path.write_text(
+        json.dumps(
+            {
+                "kind": "worker",
+                "task": "a",
+                "worker": "opencode:anthropic/claude-x@high",
+                "n": 1,
+            }
+        )
+        + "\n"
+    )
+    before = path.read_bytes()
+    old = record.read_answers(flow["id"], env)[0]
+    assert old is not None
+    assert old["worker"] == "opencode:openrouter/anthropic/claude-x@high"
+    assert path.read_bytes() == before
+    current = record.append_answer(
+        flow["id"],
+        {"kind": "worker", "task": "a", "worker": "opencode:anthropic/claude-x@high"},
+        env,
+    )
+    assert current["opencode_id_format"] == 1
+    assert record.read_answers(flow["id"], env)[1] == current

@@ -23,7 +23,6 @@ from ember.engines.opencode import (
     DOWN,
     GIT_DENIED,
     HOST,
-    PROVIDER,
     UNKNOWN,
     UP,
     OpenCodeDriver,
@@ -87,12 +86,12 @@ def run_config(model: str, read_only: bool, read: Sequence[str] = ()) -> str:
     """Return OpenCode 2's provider configuration and ordered agent permissions.
 
     Args:
-        model: The OpenRouter model id.
+        model: The full OpenCode integration/model id.
         read_only: The run edits nothing.
         read: The run's effective read paths.
 
     Returns:
-        JSON with OpenRouter zero data retention and the Ember worker agent.
+        JSON with zero data retention for OpenRouter and the Ember worker agent.
     """
     provider = json.loads(opencode.run_config(model, read_only, read))["provider"]
     permissions = [
@@ -137,7 +136,7 @@ class OpenCode2Driver(OpenCodeDriver):
         state = self._save(run, session=session, created=False)
         variables = {
             "OPENCODE_CONFIG_CONTENT": run_config(
-                run.model.removeprefix(f"{PROVIDER}/"),
+                run.model,
                 run.read_only,
                 run.read_effective,
             ),
@@ -213,7 +212,8 @@ class OpenCode2Driver(OpenCodeDriver):
         if state.get("created"):
             return True
         session = self._session(state)
-        model = {"id": run.model.removeprefix(f"{PROVIDER}/"), "providerID": PROVIDER}
+        provider, model_id = run.model.split("/", 1)
+        model = {"id": model_id, "providerID": provider}
         if run.effort is not None:
             model["variant"] = run.effort
         body = {"id": session, "agent": AGENT, "model": model, "title": run.subject}
@@ -356,6 +356,8 @@ class OpenCode2Driver(OpenCodeDriver):
             signed_out = (
                 error.get("type") == "provider.auth" or error.get("status") == 401
             )
+            if not signed_out:
+                reason = self._payment_reason(run, reason, error.get("status"))
             return TurnOutcome(
                 engines.FAILED,
                 reason=reason,

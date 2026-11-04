@@ -85,7 +85,10 @@ def env(tmp_path: Path) -> dict[str, str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     stub = bin_dir / "opencode"
-    stub.write_text("#!/bin/sh\nexit 0\n")
+    stub.write_text(
+        '#!/bin/sh\ncase "$*" in --version) echo 1.0.0;;\n'
+        "'auth list') echo 'OpenRouter api';; esac\n"
+    )
     stub.chmod(0o755)
     return {
         "HOME": str(tmp_path / "home"),
@@ -103,7 +106,7 @@ def make_run(
     *,
     read_only: bool = False,
     effort: str | None = "high",
-    model: str = "deepseek/deepseek-v4-pro",
+    model: str = "openrouter/deepseek/deepseek-v4-pro",
 ) -> Run:
     return Run(
         id=RUN_ID,
@@ -140,7 +143,12 @@ def make_run(
 
 @pytest.fixture
 def driver(env: dict[str, str]) -> OpenCodeDriver:
-    return OpenCodeDriver(env, stop_seconds=5, poll_seconds=0.01)
+    return OpenCodeDriver(
+        env,
+        stop_seconds=5,
+        poll_seconds=0.01,
+        fetch=lambda url, timeout: {"openrouter": {"name": "OpenRouter", "models": {}}},
+    )
 
 
 @pytest.fixture
@@ -902,25 +910,13 @@ def test_valid_effort() -> None:
     assert not driver.valid_effort("2x")
 
 
-def test_default_effort_comes_from_the_openrouter_list(env: dict[str, str]) -> None:
-    reply = {
-        "data": [
-            {"id": "a/thinker", "reasoning": {"default_effort": "medium"}},
-            {"id": "a/plain"},
-        ]
-    }
-    fetched: list[str] = []
-
+def test_default_effort_uses_opencode_default(env: dict[str, str]) -> None:
     def fetch(url: str, timeout: float) -> object:
-        fetched.append(url)
-        return reply
+        pytest.fail("default effort must not discover models")
 
     driver = OpenCodeDriver(env, fetch=fetch)
-    assert driver.default_effort("a/thinker") == "medium"
-    assert driver.default_effort("openrouter/a/thinker:free") == "medium"
-    assert driver.default_effort("a/plain") is None
-    assert driver.default_effort("a/missing") is None
-    assert len(fetched) == 1
+    assert driver.default_effort("anthropic/claude-x") is None
+    assert driver.default_effort("openrouter/a/thinker:free") is None
 
 
 def test_default_effort_without_a_list(env: dict[str, str]) -> None:
@@ -989,3 +985,59 @@ def test_turn_output_contains_current_tool_parts_only(
     output = driver.turn_output(run)
     assert "Permission denied: /home/owner/tools/python" in output
     assert "old denial" not in output
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "anthropic/claude-x",
+        "openai/gpt-4o",
+        "custom/nested/model",
+        "openrouter/deepseek/model",
+    ],
+)
+def test_routes_full_id_in_command_and_prompt(
+    driver: OpenCodeDriver, run: Run, server: Server, model: str
+) -> None:
+    run = dataclasses.replace(run, model=model)
+    spec = driver.command(run, "brief")
+    assert spec.argv[spec.argv.index("--model") + 1] == model
+    config = json.loads(spec.env["OPENCODE_CONFIG_CONTENT"])
+    provider, model_id = model.split("/", 1)
+    if provider == "openrouter":
+        assert list(config["provider"]["openrouter"]["models"]) == [model_id]
+    else:
+        assert config["provider"] == {}
+    server.start()
+    assert driver.ready(run)
+    run = dataclasses.replace(run, turn=1)
+    driver.send(run, "brief")
+    sent = [r for r in server.requests() if r["path"].endswith("/prompt_async")]
+    assert sent[-1]["body"]["model"] == {"providerID": provider, "modelID": model_id}
+
+
+@pytest.mark.parametrize(
+    "provider,name",
+    [("anthropic", "Anthropic"), ("openai", "OpenAI"), ("company", "Company Gateway")],
+)
+def test_payment_note_uses_integration_name(
+    driver: OpenCodeDriver,
+    run: Run,
+    provider: str,
+    name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ember.engines.models import Integration, ModelList
+
+    monkeypatch.setattr(
+        opencode.models,
+        "list_models",
+        lambda *a, **kw: ModelList(
+            (), "cache", 0, None, (Integration(provider, name),)
+        ),
+    )
+    run = dataclasses.replace(run, model=provider + "/model")
+    assert (
+        driver._payment_reason(run, "payment required", 402)
+        == f"payment required ({name} credit is exhausted)"
+    )

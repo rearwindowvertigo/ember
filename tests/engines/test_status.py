@@ -246,7 +246,7 @@ def test_claude_output_not_json_is_check_failed(env: dict[str, str]) -> None:
     ("output", "signed_in"),
     [
         ("Credentials\nOpenRouter api", True),
-        ("Anthropic oauth", False),
+        ("Anthropic oauth", True),
         ("No authenticated integrations", False),
     ],
 )
@@ -274,9 +274,7 @@ def test_opencode_sign_in_uses_version(
     assert result.signed_in is signed_in
     assert result.connected is signed_in
     assert result.state == (status.CONNECTED if signed_in else status.NOT_SIGNED_IN)
-    assert result.requirements[1].fix == (
-        None if signed_in else "opencode auth login --provider openrouter"
-    )
+    assert result.requirements[1].fix == (None if signed_in else "opencode auth login")
 
 
 @pytest.mark.parametrize("version", ["1.19.5", "opencode v2.2.5"])
@@ -313,11 +311,13 @@ def test_opencode_failed_version_uses_legacy_auth(env: dict[str, str]) -> None:
 
 def test_opencode_found_in_its_install_folder(env: dict[str, str]) -> None:
     folder = Path(env["HOME"]) / ".opencode" / "bin"
-    binary = _stub(folder, "opencode", OPENCODE_OK.replace("OpenRouter api", "none"))
+    binary = _stub(
+        folder, "opencode", OPENCODE_OK.replace("OpenRouter api", "0 credentials")
+    )
     result = status.check("opencode", env)
     assert result.installed is True
     assert result.binary == str(binary)
-    assert result.requirements[1].fix == f"{binary} auth login --provider openrouter"
+    assert result.requirements[1].fix == f"{binary} auth login"
 
 
 def test_unknown_engine_raises(env: dict[str, str]) -> None:

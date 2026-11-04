@@ -10,8 +10,8 @@ session's messages and the session status, and aborts a turn through the
 API. A user message in the session whose id the driver did not record was
 typed by someone else, such as the owner in a terminal window.
 
-Every run uses OpenRouter as the provider, with zero data retention required
-for every request, and the agent `ember-worker`, defined in the configuration
+OpenRouter runs require zero data retention for every request. Every run
+uses the agent `ember-worker`, defined in the configuration
 the driver passes in `OPENCODE_CONFIG_CONTENT`. A read-only run's agent may
 not edit, write or patch files, or reach folders outside its checkout.
 
@@ -61,7 +61,7 @@ HOST = "127.0.0.1"
 """The address the server listens on."""
 
 PROVIDER = "openrouter"
-"""The provider every run uses."""
+"""The integration whose routing options require zero data retention."""
 
 AGENT = "ember-worker"
 """The OpenCode agent every run uses."""
@@ -150,13 +150,13 @@ def run_config(model: str, read_only: bool, read: Sequence[str] = ()) -> str:
     """Return the OpenCode configuration of a run, as JSON.
 
     Args:
-        model: The OpenRouter model id.
+        model: The full OpenCode integration/model id.
         read_only: The run edits nothing.
         read: The run's read paths, which a read-only run may read.
 
     Returns:
-        The configuration: OpenRouter with zero data retention for every
-        request, no title generation, and the `ember-worker` agent.
+        The configuration: zero data retention for OpenRouter requests,
+        no title generation, and the `ember-worker` agent.
     """
     bash: dict[str, str] = {"*": "allow", **dict.fromkeys(GIT_DENIED, "deny")}
     permission: dict[str, Any] = {
@@ -172,7 +172,11 @@ def run_config(model: str, read_only: bool, read: Sequence[str] = ()) -> str:
             PROVIDER: {
                 # Provider-wide routing also covers summary and compaction calls.
                 "options": {"extraBody": {"provider": {"zdr": True}}},
-                "models": {model: {"options": {"provider": {"zdr": True}}}},
+                "models": {
+                    model.removeprefix("openrouter/"): {
+                        "options": {"provider": {"zdr": True}}
+                    }
+                },
             }
         },
         "agent": {
@@ -184,6 +188,8 @@ def run_config(model: str, read_only: bool, read: Sequence[str] = ()) -> str:
             },
         },
     }
+    if not model.startswith("openrouter/"):
+        config["provider"] = {}
     return json.dumps(config, separators=(",", ":"))
 
 
@@ -338,7 +344,7 @@ class OpenCodeDriver(Driver):
         Args:
             env: The environment for `HOME`, XDG and `PATH`; `None` reads
                 `os.environ`.
-            fetch: Reads OpenRouter's model list; `None` uses
+            fetch: Reads the models.dev catalogue; `None` uses
                 `models.fetch_json`.
             stop_seconds: Seconds `close` waits for the server to stop.
             poll_seconds: Seconds between reads while waiting.
@@ -571,7 +577,7 @@ class OpenCodeDriver(Driver):
             raise DriverError(
                 "OPENCODE_CONFIG_CONTENT is already set; Ember sets it for each run"
             )
-        model = run.model.removeprefix(f"{PROVIDER}/")
+        model = run.model
         password = secrets.token_hex(16)
         try:
             record.write_private(run.folder / PASSWORD_NAME, password)
@@ -586,7 +592,7 @@ class OpenCodeDriver(Driver):
             binary,
             "--port", str(port),
             "--hostname", HOST,
-            "--model", f"{PROVIDER}/{model}",
+            "--model", model,
             "--agent", AGENT,
         )  # fmt: skip
         variables = {
@@ -685,8 +691,8 @@ class OpenCodeDriver(Driver):
         body: dict[str, Any] = {
             "messageID": message_id,
             "model": {
-                "providerID": PROVIDER,
-                "modelID": run.model.removeprefix(f"{PROVIDER}/"),
+                "providerID": run.model.split("/", 1)[0],
+                "modelID": run.model.split("/", 1)[1],
             },
             "agent": AGENT,
             "parts": [{"type": "text", "text": text}],
@@ -788,8 +794,7 @@ class OpenCodeDriver(Driver):
             reason = f"{name}: {detail}" if detail else name
             if name == "ProviderAuthError" or data.get("statusCode") == 401:
                 return TurnOutcome(engines.FAILED, reason=reason, signed_out=True)
-            if re.search(r"402|credit|insufficient", reason.lower()):
-                reason += " (OpenRouter credit is exhausted)"
+            reason = self._payment_reason(run, reason, data.get("statusCode"))
             return TurnOutcome(
                 engines.FAILED,
                 reason=reason,
@@ -805,6 +810,18 @@ class OpenCodeDriver(Driver):
             and isinstance(part.get("text"), str)
         ]
         return TurnOutcome(engines.DONE, reply="\n".join(texts))
+
+    def _payment_reason(self, run: Run, reason: str, code: object) -> str:
+        """Name the serving integration in a payment-error note."""
+        if code != 402 and not re.search(r"402|credit|insufficient", reason.lower()):
+            return reason
+        provider = run.model.split("/", 1)[0]
+        listing = models.list_models("opencode", self.env, fetch=self.fetch)
+        name = next(
+            (item.name for item in listing.integrations if item.id == provider),
+            provider,
+        )
+        return f"{reason} ({name} credit is exhausted)"
 
     def idle_state(self, run: Run) -> IdleState:
         """Return whether the session can take a message, from its status.
@@ -991,20 +1008,8 @@ class OpenCodeDriver(Driver):
         return _EFFORT.fullmatch(effort) is not None
 
     def default_effort(self, model: str) -> str | None:
-        """Return the model's default reasoning effort from OpenRouter's list.
-
-        Args:
-            model: The OpenRouter model id; a `:<variant>` id matches its
-                base id too.
-
-        Returns:
-            The effort, or `None` when the list has none or cannot be read.
-        """
-        model = model.removeprefix(f"{PROVIDER}/")
-        listed = models.list_models("opencode", self.env, fetch=self.fetch).models
-        by_id = {entry.id: entry for entry in listed}
-        entry = by_id.get(model) or by_id.get(model.split(":", 1)[0])
-        return None if entry is None else entry.default_effort
+        """Use OpenCode's default; the catalogue does not specify a default effort."""
+        return None
 
 
 def driver(env: Mapping[str, str] | None = None) -> Driver:

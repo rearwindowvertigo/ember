@@ -1533,3 +1533,84 @@ def test_sandbox_read_json_lists_preserve_commas_and_quotes(
     for invalid in ("[", "[1]", '["/a", null]'):
         with pytest.raises(choices.InvalidChoiceError):
             choices.parse_value("sandbox.read", invalid)
+
+
+@pytest.mark.parametrize(
+    "legacy_model", ["anthropic/claude-x", "openrouter/anthropic/claude-x"]
+)
+def test_legacy_opencode_settings_all_layers_migrate_atomically(
+    env: dict[str, str], legacy_model: str
+) -> None:
+    selection = f"opencode:{legacy_model}"
+    values = {
+        "shortlist.opencode": [legacy_model + "@high"],
+        "single.writer": selection,
+        "single.reviewer": selection,
+        "flow.writer": selection,
+        "flow.reviewer": selection,
+        "gapcheck.reviewer": selection,
+        "panel.members": [selection],
+    }
+    choices.set_settings(values, env=env, now=T0)
+    once = {"single.writer": selection, "panel.members": [selection]}
+    choices.set_once(once, env=env, now=T0)
+    choices.claim("old-claim", env=env, now=T0)
+    choices.set_once(once, env=env, now=T0 + 1)
+    _raw(env, "DELETE FROM meta WHERE key = ?", choices.OPENCODE_ID_FORMAT)
+    before = _generation(env)
+    expected = "openrouter/anthropic/claude-x"
+
+    def stored() -> list[list[tuple[Any, ...]]]:
+        with sqlite3.connect(_db_path(env)) as conn:
+            return [
+                list(conn.execute(f"SELECT * FROM {table}"))
+                for table in ("meta", "settings", "once", "claims")
+            ]
+
+    original = stored()
+    snap = choices.snapshot(env=env, now=T0 + 2)
+    assert snap["settings"]["shortlist.opencode"] == [expected + "@high"]
+    assert snap["settings"]["panel.members"] == ["opencode:" + expected]
+    assert snap["once"]["values"]["single.writer"] == "opencode:" + expected
+    assert snap["once"]["set_at"] == T0 + 1
+    for row in (*choices.MENU_KEYS, *choices.DERIVED_KEYS):
+        assert snap["menu"][row]["model"] == expected
+        assert snap["menu"][row]["effort"] == "high"
+    held = choices.read("old-claim", env=env, now=T0 + 2)
+    assert held["menu"]["single.writer"]["model"] == expected
+    assert held["answers"]["panel.members"]["value"] == ["opencode:" + expected]
+    assert held["claim"]["status"] == "claimed"
+    assert stored() == original
+    with pytest.raises(db.StaleGenerationError):
+        choices.set_settings(
+            {"worker.network": "off"}, expect_generation=before - 1, env=env, now=T0 + 2
+        )
+    assert stored() == original
+    changed = choices.set_settings(
+        {"worker.network": "off"}, expect_generation=before, env=env, now=T0 + 2
+    )
+    assert changed["generation"] == before + 1
+    assert choices.snapshot(env=env, now=T0 + 2)["once"] == snap["once"]
+    assert choices.read("old-claim", env=env, now=T0 + 2)["menu"] == held["menu"]
+    with sqlite3.connect(_db_path(env)) as conn:
+        assert conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (choices.OPENCODE_ID_FORMAT,)
+        ).fetchone() == ("1",)
+        assert conn.execute(
+            "SELECT at FROM claims WHERE id = 'old-claim'"
+        ).fetchone() == (T0,)
+    pending = choices.claim("new-claim", env=env, now=T0 + 3)
+    assert pending["menu"]["single.writer"]["model"] == expected
+    assert pending["answers"]["panel.members"]["value"] == ["opencode:" + expected]
+    choices.set_settings(
+        {
+            "shortlist.opencode": ["anthropic/claude-x@max"],
+            "single.writer": "opencode:anthropic/claude-x",
+        },
+        env=env,
+        now=T0 + 4,
+    )
+    assert (
+        choices.read(env=env, now=T0 + 5)["menu"]["single.writer"]["model"]
+        == "anthropic/claude-x"
+    )

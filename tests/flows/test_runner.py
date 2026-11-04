@@ -1805,3 +1805,25 @@ def test_accept_after_reconciliation_is_not_refused(h: Harness) -> None:
         for event in record.read_events(h.id, h.env)
         if event.get("kind") == "lead_stop" and "refused" in event.get("reason", "")
     ]
+
+
+def test_recovered_flow_routes_legacy_opencode_workers(h: Harness) -> None:
+    h.create()
+    h.driver = StubDriver("opencode", script_path(h.env), scripts=h.scripts)
+    flow = h.flow()
+    for role in ("writer", "reviewer"):
+        flow[role] = {
+            "engine": "opencode",
+            "model": "anthropic/claude-x",
+            "effort": "high",
+            "source": "option",
+        }
+    flow.pop("opencode_id_format")
+    path = record.folder(h.id, h.env) / record.FLOW_NAME
+    path.write_text(json.dumps(flow))
+    result = h.run()
+    for role in ("writer", "reviewer"):
+        assert result[role]["model"] == "openrouter/anthropic/claude-x"
+    saved, errors = runs.list_runs(h.env)
+    assert not errors and len(saved) >= 2
+    assert all(worker.model == "openrouter/anthropic/claude-x" for worker in saved)

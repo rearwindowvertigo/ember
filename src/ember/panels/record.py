@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ember import paths
+from ember import choices, paths
 from ember.runs import record
 
 PANEL_ID = re.compile(r"panel-\d{8}-\d{6}-[0-9a-f]{6}")
@@ -131,6 +131,7 @@ def new_panel(
     at = time.time() if now is None else now
     panel = {
         "schema_version": 1,
+        choices.OPENCODE_ID_FORMAT: 1,
         "id": panel_id,
         "status": "running",
         "dir": dir,
@@ -183,7 +184,10 @@ def _fields(
 
 def _validate(panel_id: str, panel: object) -> None:
     """Validate the record and each nested member, attempt and exclusion."""
-    _fields(panel_id, panel, _PANEL_FIELDS, PANEL_NAME)
+    fields = dict(_PANEL_FIELDS)
+    if isinstance(panel, dict) and choices.OPENCODE_ID_FORMAT in panel:
+        fields[choices.OPENCODE_ID_FORMAT] = "int"
+    _fields(panel_id, panel, fields, PANEL_NAME)
     assert isinstance(panel, dict)
     if not is_panel_id(panel_id) or panel["id"] != panel_id:
         raise PanelError(panel_id, "panel.json names an invalid or different panel")
@@ -258,12 +262,18 @@ def load(panel_id: str, env: Mapping[str, str] | None = None) -> dict[str, Any]:
     if isinstance(value, dict):
         value.setdefault("base", None)
     _validate(panel_id, value)
+    if choices.OPENCODE_ID_FORMAT not in value:
+        for member in value["members"]:
+            if member["engine"] == "opencode":
+                member["model"] = choices.full_opencode_id(member["model"])
+        value[choices.OPENCODE_ID_FORMAT] = 1
     return value
 
 
 def save(panel: dict[str, Any], env: Mapping[str, str] | None = None) -> None:
     """Validate and atomically replace the record with an updated timestamp."""
     _validate(panel["id"], panel)
+    panel[choices.OPENCODE_ID_FORMAT] = 1
     panel["updated_at"] = time.time()
     record.write_private(
         folder(panel["id"], env) / PANEL_NAME, json.dumps(panel, indent=2) + "\n"

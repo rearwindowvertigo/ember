@@ -12,8 +12,10 @@ member on an unknown installed version.
 
 Pass the owner's named models as repeatable
 `--member <engine>:<model>[@<effort>]` options. An OpenCode model is the
-bare OpenRouter id, such as `opencode:deepseek/deepseek-v4.1-flash-1017`;
-Ember adds the provider itself, so never prefix it with `openrouter/`. Without named models, use
+full `<integration>/<model>` id from `emb engines --models opencode --json`,
+such as `opencode:openrouter/deepseek/deepseek-v4.1-flash-1017` or
+`opencode:anthropic/claude-sonnet-4`. Ember uses the id unchanged.
+Without named models, use
 saved `panel.members` by omitting `--member`. If none are saved, ask the
 owner in plain text and pass the answer as explicit members. Never set
 `panel.members` yourself. A panel accepts one to eight distinct
@@ -26,8 +28,7 @@ Do not repeat an unchanged refusal. Claude members run through the CLI;
 do not add a subagent the owner did not pick.
 
 Before starting, post one visible line to the owner naming the members
-and their efforts and that OpenCode members spend OpenRouter credit,
-whatever the dry run returns. Add `--dry-run` to the
+and their efforts, whatever the dry run returns. Add `--dry-run` to the
 start command to resolve members and efforts without starting any run.
 
 ## Question and start

@@ -315,7 +315,11 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
                 conn.execute(statement)
         conn.executemany(
             "INSERT INTO meta (key, value) VALUES (?, ?)",
-            [("schema", str(SCHEMA_VERSION)), ("generation", "0")],
+            [
+                ("schema", str(SCHEMA_VERSION)),
+                ("generation", "0"),
+                ("opencode_id_format", "1"),
+            ],
         )
     return _check_schema(conn)
 

@@ -364,6 +364,10 @@ def test_settings_rows_are_names_with_info_icons(
     _context, screen = _screen(env, qtbot)
     names = ["Start at login", "Theme", "Worker network", "Terminal"]
     names.append("Sandbox read paths")
+    assert screen.tip_rows["Worker network"].info.toolTip() == (
+        "Lets Codex workers and Claude's web tools reach the network. "
+        "OpenCode keeps network for its providers."
+    )
     assert list(screen.tip_rows) == names
     for row in screen.tip_rows.values():
         assert [label.text() for label in row.findChildren(QLabel)] == [

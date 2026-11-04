@@ -1972,7 +1972,7 @@ def test_panel_start_writes_summary(
         (
             3,
             "opencode",
-            "deepseek/deepseek-v4.1-flash-1017",
+            "openrouter/deepseek/deepseek-v4.1-flash-1017",
             "opencode-20261102-120000-aaaaa3",
         ),
     ):
@@ -2000,6 +2000,9 @@ def test_panel_json_keeps_completion_lines_on_stderr(
     assert len(document["members"]) == 3
     assert document["members"][0]["exit"] == 0
     assert document["members"][2]["bytes"] == 0
+    assert document["members"][2]["model"] == (
+        "openrouter/deepseek/deepseek-v4.1-flash-1017"
+    )
     assert " · answered · 31s · exit 0 · " in result.stderr
     assert " · failed · 33s · exit 80 · 0 bytes · " in result.stderr
 
