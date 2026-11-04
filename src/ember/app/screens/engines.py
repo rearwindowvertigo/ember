@@ -1010,6 +1010,7 @@ class EnginesScreen(QWidget):
         self._reading_engines = False
 
         layout = scrolled(self)
+        self.content_layout = layout
         self.check_button = button("Check now", "secondary")
         self.check_button.setAccessibleName("Check now")
         self.check_button.clicked.connect(self.check_now)
@@ -1087,7 +1088,14 @@ class EnginesScreen(QWidget):
     def fitting_columns(self) -> int:
         """Return how many engine cards, up to three, fit side by side."""
         tile = max(card.minimumSizeHint().width() for card in self.cards.values())
-        return fitting_columns(tile, self.scroll_area, len(self.cards), CARD_GAP)
+        margins = self.content_layout.contentsMargins()
+        return fitting_columns(
+            tile,
+            self.scroll_area,
+            len(self.cards),
+            CARD_GAP,
+            margins.left() + margins.right(),
+        )
 
     def _place_cards(self) -> None:
         for card in self.cards.values():

@@ -1357,3 +1357,16 @@ def test_engine_cards_fit_the_window_width(env: dict[str, str], qtbot: QtBot) ->
     assert len(set(positions)) > 1
     screen.resize(1400, 700)
     qtbot.waitUntil(lambda: screen.columns == 3, timeout=2000)
+
+
+def test_engine_cards_never_scroll_sideways_while_resizing(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    screen, _context = _screen(env, qtbot)
+    screen.show()
+    for width in range(560, 1300, 2):
+        screen.resize(width, 700)
+        QApplication.processEvents()
+        assert screen.scroll_area.horizontalScrollBar().maximum() == 0, width
+        for card in screen.cards.values():
+            assert card.width() >= card.minimumSizeHint().width(), width
