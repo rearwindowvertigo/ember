@@ -1007,11 +1007,11 @@ claim to the run.
 | `--model MODEL` | Use this model, whether or not shortlisted; requires `--engine` |
 | `--effort EFFORT` | Use this effort; requires `--engine` |
 | `--claim ID` | Read choices with this claim and pass it to the run |
-| `--read PATH` | Add a readable path to the run; repeatable |
+| `--read PATH` | Add a readable path to the run; repeatable; also accepted with `--brief`, where it only covers citations and lists sources |
 | `--window` | Open a terminal window on the run's session |
 | `--stall MINUTES` | Stop waiting after this many minutes without a screen change; default 10 |
 | `--json` | Print the result as JSON |
-| `--brief` | Print the brief and start nothing; accepts `--dir` |
+| `--brief` | Print the brief and start nothing; accepts `--dir` and `--read` |
 | `--reply FILE` | Read a reply from another worker and start nothing; accepts `--json` |
 | `--previous FILE` | Read an earlier complete result; the reviewer gives a disposition for every active and settled gap |
 | `--confirmed` | Run the check although `gapcheck.when` skips the plan or leaves it to the owner |
@@ -1472,6 +1472,15 @@ Warnings do not refuse a plan:
   is a tree at `base`, read with `git cat-file -t`
 - `<id>: no test file in its files`, when no file is under `test` or `tests`,
   starts with `test_`, or has a name matching `*_test.*`
+- `<where> cites <reference>, which no read path supplies`, once per
+  reference at its first citation, where `<where>` is `the context`, `the
+  failure model` or `task <id>` (its subject, task text and review focus).
+  A reference is a URL, `#<n>` or `<owner>/<repo>#<n>`. A read path that is
+  a file, or a file directly inside a read folder, supplies a reference when
+  the reference appears in its first 20 lines, or, for `#<n>` and
+  `<owner>/<repo>#<n>`, when its file name holds the number as its own
+  token, such as `issue-93.md`. The warning applies whatever the engines'
+  sandbox switches say.
 
 A failed or timed-out folder probe emits no folder warning. It does not
 change plan validation. Git probes omit checkout override variables and
@@ -1640,13 +1649,16 @@ the run open and is reported by the runner.
 
 The writer brief starts with the task's commit subject and preserves the
 task text as written. It lists the task's files, the other tasks' files in
-the wave, context and failure model when present, limits, the rule against
-running git, checks and closing report headings. Lead corrections also
+the wave, a `## Sources to read` section listing the plan's read files when
+there are any, context and failure model when present, limits, the git rule
+(git commands that only read are allowed; Ember makes the commit), checks
+and closing report headings. Lead corrections also
 preserve their text as written.
 
 The review brief starts with `Review of task <id>, round <n>, in flow
 <flow id>: a read-only review; change no file.` It includes the task and
-subject, declared files and the other tasks' files, review focus, context,
+subject, declared files and the other tasks' files, the `## Sources to read`
+section when the plan has read files, review focus, context,
 failure model, the base and head for `git diff` and `git log`, changed and
 outside files, and up to 20,000 characters of the writer's last report.
 It includes the review bar from `skill/SKILL.md` and the whole reply schema

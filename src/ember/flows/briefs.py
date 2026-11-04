@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from textwrap import indent
 from typing import TYPE_CHECKING
 
+from ember import citations
 from ember.flows import verdict
 from ember.flows.verdict import Finding
 
@@ -40,8 +41,10 @@ REVIEW_FIRST = (
 FIX_FIRST = "Fix round {round} of task {task} in flow {flow}."
 
 _GIT = (
-    "## Git\n\nDo not run git. Ember commits your edits on its run branch "
-    "at the end of each turn."
+    "## Git\n\nYou may run git commands that only read, such as `git log`, "
+    "`git show`, `git diff`, `git status` and `git blame`. Run no git command "
+    "that changes the index, a tracked file's state, a branch or a ref: Ember "
+    "commits your edits on its run branch at the end of each turn."
 )
 _CLOSING = (
     "## Closing report\n\nState what you changed and how you checked it. "
@@ -72,6 +75,9 @@ def writer_brief(
 ) -> str:
     """Build an editing brief, keeping the task text and commit subject intact."""
     parts = [task.subject, task.task, "## Files\n\n" + _files(task.files, wave_files)]
+    sources = citations.sources_section(citations.source_files(plan.read))
+    if sources:
+        parts.append(sources)
     if plan.context.strip():
         parts.append("## Context\n\n" + plan.context)
     if plan.failure_model.strip():
@@ -127,6 +133,9 @@ def review_brief(
         "## Task\n\n" + indent(task.subject + "\n\n" + task.task, "    "),
         "## Files\n\n" + indent(_files(task.files, wave_files), "    "),
     ]
+    sources = citations.sources_section(citations.source_files(plan.read))
+    if sources:
+        parts.append(sources)
     for heading, text in (
         ("Review focus", task.review),
         ("Context", plan.context),

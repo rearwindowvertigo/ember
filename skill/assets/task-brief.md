@@ -42,8 +42,9 @@ by this task's own checks in this task's files.>
 <Keep the line that applies; remove the others.>
 
 `emb run` worker:
-Do not run git. Ember commits your edits on its run branch at the end of
-each turn.
+You may run git commands that only read, such as `git log`, `git show` and
+`git diff`. Run no git command that changes the index, a branch or a ref:
+Ember commits your edits on its run branch at the end of each turn.
 
 Editing Claude subagent or Workflow agent:
 Commit on your own branch in this worktree, with this exact trailer:

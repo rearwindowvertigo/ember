@@ -1,5 +1,9 @@
 """Build a read-only gap check brief with the entire plan and reply schema."""
 
+from collections.abc import Sequence
+from pathlib import Path
+
+from ember import citations
 from ember.gapcheck.plan import Plan
 from ember.gapcheck.previous import Previous
 from ember.gapcheck.reply import schema_text
@@ -70,13 +74,25 @@ def _earlier(previous: Previous | None) -> list[str]:
     return [*lines, ""]
 
 
-def text(plan: Plan, checkout: str, previous: Previous | None = None) -> str:
+def _sources(files: Sequence[Path]) -> list[str]:
+    """Return the sources section and a blank line, or nothing without files."""
+    section = citations.sources_section(files)
+    return [section, ""] if section else []
+
+
+def text(
+    plan: Plan,
+    checkout: str,
+    previous: Previous | None = None,
+    sources: Sequence[Path] = (),
+) -> str:
     """Describe the review, list every step and paste the numbered plan.
 
     Args:
         plan: The plan under review.
         checkout: The source checkout, omitted from the review instructions.
         previous: An earlier result whose gaps and answers the brief lists.
+        sources: The read files the lead supplied, listed for the reviewer.
 
     Returns:
         The brief, ending with a newline.
@@ -114,6 +130,7 @@ def text(plan: Plan, checkout: str, previous: Previous | None = None) -> str:
             "- why: the reason for the harm, in one line",
             "- default: the behaviour you propose when no one decides otherwise",
             "",
+            *_sources(sources),
             *_earlier(previous),
             "Do not redesign the plan and do not decide missing behaviour; "
             "name each gap and propose a default.",

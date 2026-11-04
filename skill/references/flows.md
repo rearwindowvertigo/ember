@@ -41,6 +41,10 @@ Stall after (`flow.stall`) unless you pass `--stall`.
 - `check`: an argv list for the repository's full check.
 - `failure_model`: the cases that must work and those accepted.
 - `context`: only settled decisions and the rules tasks need.
+- `read`: the files that hold each source the plan cites, such as an
+  exported issue (`gh issue view <n> --comments > <scratch>/issue-<n>.md`);
+  workers cannot open an issue tracker. Writers and reviewers see them
+  listed under "Sources to read".
 - `tasks`: each has `id`, `subject`, `task`, `files`, `after` and `review`.
   Every new task requires a nonblank one-line `subject`, at most 72
   characters. Write it in the repository's commit convention, read from
