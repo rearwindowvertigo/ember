@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pytest
 from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QFontMetricsF, QImage
-from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QScrollArea, QWidget
 from pytestqt.qtbot import QtBot
 
 from ember import choices, sandbox
@@ -1627,3 +1627,64 @@ def test_opencode_filters_fit_the_default_window(
     ]
     assert len(rows) == 2
     assert all(row.minimumSize().width() <= 880 - 2 * 24 for row in rows)
+
+
+@pytest.mark.parametrize(("width", "scrolls"), [(880, False), (680, True)])
+def test_opencode_table_stays_inside_the_window(
+    env: dict[str, str],
+    qtbot: QtBot,
+    stubs: dict[str, Any],
+    width: int,
+    scrolls: bool,
+) -> None:
+    listed = _integrations_list()
+    long_id = replace(
+        listed.models[0],
+        id="openrouter/~anthropic/claude-fable-latest-with-a-long-name-1017",
+    )
+    stubs["lists"] = {
+        "opencode": replace(listed, models=(long_id, *listed.models)),
+        "codex": _codex_list(),
+    }
+    screen, context = _screen(env, qtbot)
+    screen.resize(width, 720)
+    screen.show()
+    page = screen.findChildren(QScrollArea)[0]
+    content = page.widget()
+    assert content is not None
+    for engine in ("codex", "opencode", "codex", "opencode"):
+        panel = _open(screen, context, qtbot, engine)
+        qtbot.waitUntil(
+            lambda p=panel: p.table_area.height() >= p.table.sizeHint().height()
+        )
+        assert content.width() <= page.viewport().width()
+        assert panel.width() <= page.viewport().width()
+    area = panel.table_area
+    qtbot.waitUntil(lambda: area.horizontalScrollBar().isVisible() is scrolls)
+    assert panel.name_width < panel.measured_name
+    assert all(row.name.width() == panel.name_width for row in panel.rows)
+    assert panel.name_header.width() == panel.name_width
+
+
+def test_opencode_table_height_follows_its_scroll_bar(
+    env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
+) -> None:
+    listed = _integrations_list()
+    long_id = replace(
+        listed.models[0],
+        id="openrouter/~anthropic/claude-fable-latest-with-a-long-name-1017",
+    )
+    stubs["lists"] = {"opencode": replace(listed, models=(long_id, *listed.models))}
+    choices.set_settings(
+        {"shortlist.opencode": ["openrouter/acme/gone-from-the-list"]}, env=env
+    )
+    screen, context = _screen(env, qtbot)
+    screen.resize(900, 720)
+    screen.show()
+    panel = _open(screen, context, qtbot, "opencode")
+    assert panel.missing
+    area = panel.table_area
+    for width in range(850, 835, -1):
+        screen.resize(width, 720)
+        qtbot.wait(50)
+        assert area.viewport().height() >= panel.table.sizeHint().height()
