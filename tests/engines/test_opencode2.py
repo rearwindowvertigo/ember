@@ -190,8 +190,12 @@ class Server:
         if pane:
             binary = Path(self.run.env["PATH"].split(os.pathsep)[0]) / "opencode"
             binary.write_text(f"#!{sys.executable}\n" + STUB_SERVER)
+            # The pane has Python and sleep available, with no curl on PATH.
+            (binary.parent / "python3").symlink_to(sys.executable)
+            (binary.parent / "sleep").symlink_to("/bin/sleep")
+            variables["PATH"] = str(binary.parent)
             args = [
-                "sh", "-c", opencode2.PANE_SCRIPT, "ember-opencode2",
+                "/bin/sh", "-c", opencode2.PANE_SCRIPT, "ember-opencode2",
                 str(binary), str(state["port"]), state["session"],
             ]  # fmt: skip
         self.process = subprocess.Popen(args, env=variables, start_new_session=True)
@@ -312,32 +316,63 @@ def test_pane_waits_for_session_and_attaches(
     driver.close(run)
 
 
-@pytest.mark.parametrize("curl_code", ["000", "401", "404"])
-def test_pane_exits_when_session_never_answers(
-    driver: OpenCode2Driver, run: Run, tmp_path: Path, curl_code: str
+@pytest.mark.parametrize("http_code", ["000", "401", "404"])
+def test_pane_handles_an_unavailable_session(
+    driver: OpenCode2Driver, run: Run, tmp_path: Path, http_code: str
 ) -> None:
     spec = driver.command(run, "brief")
     folder = tmp_path / "script-bin"
     folder.mkdir()
     server_binary = folder / "opencode"
-    server_binary.write_text("#!/bin/sh\nexec /bin/sleep 30\n")
+    server_pid = folder / "server.pid"
+    view_args = folder / "view.args"
+    server_binary.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = serve ]; then\n'
+        '    echo $$ > "$SERVER_PID"\n'
+        "    exec /bin/sleep 30\n"
+        "fi\n"
+        'printf "%s\\n" "$@" > "$VIEW_ARGS"\n'
+    )
     server_binary.chmod(0o755)
-    for name, text in {"curl": f"echo {curl_code}", "sleep": ":"}.items():
+    for name, text in {"python3": f"echo {http_code}", "sleep": ":"}.items():
         binary = folder / name
         binary.write_text(f"#!/bin/sh\n{text}\n")
         binary.chmod(0o755)
-    result = subprocess.run(
+    process = subprocess.Popen(
         ["/bin/sh", *spec.argv[1:4], str(server_binary), *spec.argv[5:]],
-        env={**run.env, **spec.env, "PATH": str(folder)},
-        capture_output=True,
-        timeout=10,
+        env={
+            **run.env,
+            **spec.env,
+            "PATH": str(folder),
+            "SERVER_PID": str(server_pid),
+            "VIEW_ARGS": str(view_args),
+        },
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
     )
-    assert result.returncode == 1
-    assert (
-        b"password" in result.stderr
-        if curl_code == "401"
-        else b"ready" in result.stderr
-    )
+    try:
+        _, stderr = process.communicate(timeout=10)
+        if http_code == "401":
+            assert process.returncode == 1
+            assert b"password" in stderr
+            assert not view_args.exists()
+        else:
+            assert process.returncode == 0
+            assert b"ready" in stderr
+            assert view_args.read_text().splitlines() == [
+                "--server",
+                f"http://127.0.0.1:{spec.argv[-2]}",
+            ]
+            # Attaching the fallback view must leave the private server alive.
+            pid = int(server_pid.read_text())
+            os.kill(pid, 0)
+            assert opencode.process_identity(pid)["pid"] == pid
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=10)
 
 
 def test_config(tmp_path: Path) -> None:

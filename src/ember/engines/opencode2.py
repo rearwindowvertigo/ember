@@ -44,9 +44,27 @@ trap 'kill "$server" 2>/dev/null; wait "$server" 2>/dev/null' EXIT
 trap 'exit 1' HUP INT TERM
 attempt=0
 while kill -0 "$server" 2>/dev/null; do
-    code=$(curl --silent --noproxy '*' --max-time 2 --output /dev/null \
-        --write-out '%{http_code}' --user "opencode:$OPENCODE_SERVER_PASSWORD" \
-        "$url/api/session/$session")
+    code=$(python3 - "$url/api/session/$session" <<'PY'
+import base64
+import os
+import sys
+from urllib.error import HTTPError
+from urllib.request import ProxyHandler, Request, build_opener
+
+token = base64.b64encode(
+    ("opencode:" + os.environ["OPENCODE_SERVER_PASSWORD"]).encode()
+).decode("ascii")
+request = Request(sys.argv[1], headers={"Authorization": "Basic " + token})
+opener = build_opener(ProxyHandler({}))
+try:
+    with opener.open(request, timeout=2) as response:
+        print(response.status)
+except HTTPError as error:
+    print(error.code)
+except OSError:
+    print("000")
+PY
+    )
     case "$code" in
         200) exec "$binary" --server "$url" --session "$session" ;;
         401) echo "OpenCode refused the run's password" >&2; exit 1 ;;
@@ -54,14 +72,14 @@ while kill -0 "$server" 2>/dev/null; do
     attempt=$((attempt + 1))
     if [ "$attempt" -ge 600 ]; then
         echo "OpenCode session did not become ready" >&2
-        exit 1
+        exec "$binary" --server "$url"
     fi
     sleep 0.2
 done
 echo "OpenCode server stopped before its session was ready" >&2
 exit 1
 """
-"""Start a private server, wait for Ember's session, then attach the view."""
+"""Start a server and attach its view, selecting Ember's session when ready."""
 
 
 def run_config(model: str, read_only: bool, read: Sequence[str] = ()) -> str:
