@@ -509,3 +509,36 @@ def test_status_read_fallback(
         lambda name: StubDriver(name, script_path(env)),
     )
     assert calls == [env]
+
+
+def test_cited_sources_warn_until_a_read_file_supplies_them(
+    raw: dict[str, Any], tmp_path: Path, env: dict[str, str]
+) -> None:
+    repo = make_repo(tmp_path, env)
+    raw.update(check=["true"], failure_model="cases", context="Decided in #12.")
+    raw["tasks"][0].update(task="Implement #93", files=["tests/test_a.py"])
+    assert plan.warnings(parsed(raw, tmp_path), str(repo), env) == [
+        "the context cites #12, which no read path supplies",
+        "task a cites #93, which no read path supplies",
+    ]
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    (sources / "issue-93.md").write_text("title: a\n")
+    (sources / "decision.md").write_text("From #12\n")
+    raw["read"] = [str(sources)]
+    assert plan.warnings(parsed(raw, tmp_path), str(repo), env) == []
+
+
+def test_standing_read_paths_supply_citations(
+    raw: dict[str, Any], tmp_path: Path, env: dict[str, str]
+) -> None:
+    repo = make_repo(tmp_path, env)
+    raw.update(check=["true"], failure_model="cases")
+    raw["tasks"][0].update(task="Implement #93", files=["tests/test_a.py"])
+    issue = tmp_path / "issue-93.md"
+    issue.write_text("x\n")
+    item = parsed(raw, tmp_path)
+    assert plan.warnings(item, str(repo), env) == [
+        "task a cites #93, which no read path supplies"
+    ]
+    assert plan.warnings(item, str(repo), env, [str(issue)]) == []
