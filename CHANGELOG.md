@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.13.0](https://github.com/rearwindowvertigo/ember/compare/v0.12.0...v0.13.0) (2026-11-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* emb merge requires --subject for an Ember run branch and lands it as one squash commit with Ember-Verdict and Ember-Task-Tip trailers; flow tasks land as one squash commit each.
+* **panel:** the list form of emb panel --status --json gives member_count and running_members in place of members.
+* **gapcheck:** gap check results give each gap an id, store answers once in steps, and list ranked gaps by reference; emb gapcheck --previous and --answer read and write this format.
+
+### Added
+
+* add emb run --dry-run and a start line naming the resolved worker ([4f19cff](https://github.com/rearwindowvertigo/ember/commit/4f19cff5a95352b146a71e4b38d010de906557c0))
+* classify provider errors and retry capacity errors with Team-set limits ([4f19cff](https://github.com/rearwindowvertigo/ember/commit/4f19cff5a95352b146a71e4b38d010de906557c0))
+* detect a stale loaded ember skill at each claim ([4f19cff](https://github.com/rearwindowvertigo/ember/commit/4f19cff5a95352b146a71e4b38d010de906557c0))
+* **gapcheck:** carry settled gap answers into repeat gap checks ([4f19cff](https://github.com/rearwindowvertigo/ember/commit/4f19cff5a95352b146a71e4b38d010de906557c0)), closes [#102](https://github.com/rearwindowvertigo/ember/issues/102)
+* name the hidden folders a sandboxed worker was denied ([4f19cff](https://github.com/rearwindowvertigo/ember/commit/4f19cff5a95352b146a71e4b38d010de906557c0))
+* **panel:** show panel members' progress while a panel runs ([4f19cff](https://github.com/rearwindowvertigo/ember/commit/4f19cff5a95352b146a71e4b38d010de906557c0)), closes [#98](https://github.com/rearwindowvertigo/ember/issues/98)
+* run read-only runs and panel members in a detached worktree ([4f19cff](https://github.com/rearwindowvertigo/ember/commit/4f19cff5a95352b146a71e4b38d010de906557c0))
+* show each turn's result in emb run --status ([4f19cff](https://github.com/rearwindowvertigo/ember/commit/4f19cff5a95352b146a71e4b38d010de906557c0))
+* squash worker branches at emb merge under a lead-written subject ([4f19cff](https://github.com/rearwindowvertigo/ember/commit/4f19cff5a95352b146a71e4b38d010de906557c0)), closes [#94](https://github.com/rearwindowvertigo/ember/issues/94)
+
+
+### Fixed
+
+* **app:** drop the Overview subtitle and collapse the empty Live card ([5bef095](https://github.com/rearwindowvertigo/ember/commit/5bef0950a6c85dda521206bde6d218e030324ff7))
+* **app:** keep the Dependencies scroll bar clear of the tiles ([da37777](https://github.com/rearwindowvertigo/ember/commit/da377776c79da8499c799f3e96c5680f8e5ba8ee))
+* create worktrees outside the repository checkout ([4f19cff](https://github.com/rearwindowvertigo/ember/commit/4f19cff5a95352b146a71e4b38d010de906557c0)), closes [#93](https://github.com/rearwindowvertigo/ember/issues/93)
+* **flow:** record a hand-merged conflict task as merged ([4f19cff](https://github.com/rearwindowvertigo/ember/commit/4f19cff5a95352b146a71e4b38d010de906557c0))
+* keep and report runs whose starting command ended ([4f19cff](https://github.com/rearwindowvertigo/ember/commit/4f19cff5a95352b146a71e4b38d010de906557c0))
+
 ## [0.12.0](https://github.com/rearwindowvertigo/ember/compare/v0.11.0...v0.12.0) (2026-11-04)
 
 
