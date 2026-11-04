@@ -1,4 +1,4 @@
-"""The OpenCode driver.
+"""The OpenCode 1 driver and installed-version driver selection.
 
 The run's pane runs OpenCode's interactive view with its built-in server
 listening on a free port of `127.0.0.1`, protected by a password. The core
@@ -30,6 +30,7 @@ import re
 import secrets
 import signal
 import socket
+import subprocess
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -320,6 +321,8 @@ class OpenCodeDriver(Driver):
     """Runs OpenCode's interactive view and its built-in server in a run's pane."""
 
     name = "opencode"
+    server_path = "/session"
+    """The session endpoint used to check whether the server answers."""
 
     def __init__(
         self,
@@ -533,7 +536,7 @@ class OpenCodeDriver(Driver):
             # The password is written before the server starts.
             return DOWN
         try:
-            self._request(run, "GET", "/session")
+            self._request(run, "GET", self.server_path)
         except _RefusedError:
             if not self._has_identity(state) or self._server_process(run) == STOPPED:
                 return DOWN
@@ -977,12 +980,36 @@ class OpenCodeDriver(Driver):
 
 
 def driver(env: Mapping[str, str] | None = None) -> Driver:
-    """Return the OpenCode driver.
+    """Return the driver for the installed OpenCode major version.
 
     Args:
         env: The run's environment; `None` reads `os.environ`.
 
     Returns:
-        A new driver.
+        The OpenCode 2 driver for major version 2 or later; otherwise the
+        OpenCode 1 driver, including when the version cannot be read.
     """
+    environment = os.environ if env is None else env
+    binary = status.locate("opencode", environment)
+    if binary is not None:
+        try:
+            result = subprocess.run(
+                [binary, "--version"],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except OSError, subprocess.SubprocessError, UnicodeError:
+            pass
+        else:
+            version = re.fullmatch(
+                r"(?:opencode\s+v)?(\d+)\.\d+\.\d+(?:[-+][\w.-]+)?",
+                result.stdout.strip(),
+            )
+            if result.returncode == 0 and version and int(version[1]) >= 2:
+                from ember.engines.opencode2 import OpenCode2Driver
+
+                return OpenCode2Driver(env)
     return OpenCodeDriver(env)
