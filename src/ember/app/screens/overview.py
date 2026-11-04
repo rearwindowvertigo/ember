@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from ember import prune, sandbox
-from ember.app import icons, state, theme, tray
+from ember.app import icons, state, theme
 from ember.app.flows import FlowItem, PanelItem, plan_wave
 from ember.app.runs import DONE, FINISHED_LIMIT, LIVE
 from ember.app.screens.common import (
@@ -1020,6 +1020,7 @@ class OverviewScreen(QWidget):
         self.records = context.flows
         layout = scrolled(self)
         self.subtitle = screen_header(layout, self.TITLE)
+        self.subtitle.hide()
 
         self.alerts = QVBoxLayout()
         self.alerts.setSpacing(8)
@@ -1041,9 +1042,22 @@ class OverviewScreen(QWidget):
         self.panel_rows: dict[str, _RecordRow] = {}
 
         self.live_card, self.live_rows_layout, self.live_empty = _card("Live")
-        self.live_empty.setText("No runs, flows or panels live.")
+        self.live_empty.setText("Nothing running")
+        self.live_empty.setProperty("role", "secondary")
         live_layout = self.live_card.layout()
-        assert live_layout is not None
+        assert isinstance(live_layout, QVBoxLayout)
+        live_heading_item = live_layout.takeAt(0)
+        live_heading = (
+            live_heading_item.widget() if live_heading_item is not None else None
+        )
+        assert live_heading is not None
+        live_layout.removeWidget(self.live_empty)
+        live_header = QHBoxLayout()
+        live_header.setSpacing(12)
+        live_header.addWidget(live_heading, 0, Qt.AlignmentFlag.AlignVCenter)
+        live_header.addWidget(self.live_empty, 0, Qt.AlignmentFlag.AlignVCenter)
+        live_header.addStretch(1)
+        live_layout.insertLayout(0, live_header)
         live_layout.addWidget(self.unreadable_alert)
         layout.addWidget(self.live_card)
         self.finished_card, self.finished_rows_layout, self.finished_empty = _card(
@@ -1163,7 +1177,7 @@ class OverviewScreen(QWidget):
     # Drawing
 
     def refresh(self) -> None:
-        """Redraw the subtitle, records and run rows after either model changes."""
+        """Redraw the records and run rows after either model changes."""
         self._stale = False
         runs = self.context.runs
         parents: list[FlowItem | PanelItem] = [
@@ -1204,8 +1218,6 @@ class OverviewScreen(QWidget):
             )
             else "No finished runs, flows or panels yet."
         )
-        tray_items, _children = tray.live_items(runs.live(), parents)
-        self.subtitle.setText(tray.status_line(*tray.counts(tray_items)))
         unreadable = (
             runs.unreadable()
             + self.records.unreadable_flows()
