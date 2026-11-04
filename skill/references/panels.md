@@ -83,8 +83,11 @@ attempts, with `path`, `reason`, `allow_path`, `run` and `turn`. Panel status
 also gives their union with the `member` number. Empty lists mean no
 recorded denials. Panels have no denial event stream. Report every denied
 path with its member, run, turn and reason, including for answered members.
-Follow the Settings, Sandbox read paths owner action in
-`references/runs.md`; never change `sandbox.read` yourself.
+This includes `startup file` denials, which have no Overview notice or
+read-path suggestion. Older records keep their stored reasons, including
+`hidden` for a startup file. Report printed owner actions and hidden-path
+restrictions as described in `references/runs.md`; never change
+`sandbox.read` yourself.
 
 ## Read and compare
 

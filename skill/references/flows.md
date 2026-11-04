@@ -191,8 +191,11 @@ Each task's status and watch report includes `denied_paths` with `path`,
 with a `task` id on each entry. The runner adds new denials to its
 `denied_paths` events with the task and worker role. Empty lists mean no
 recorded denials. Report each path with its task, run, turn and reason,
-even when the task succeeds. Follow the Settings, Sandbox read paths owner
-action in `references/runs.md`; never change `sandbox.read` yourself.
+even when the task succeeds. This includes `startup file` denials, which
+have no Overview notice or read-path suggestion. Older records keep their
+stored reasons, including `hidden` for a startup file. Report printed owner
+actions and hidden-path restrictions as described in `references/runs.md`;
+never change `sandbox.read` yourself.
 
 ## Exits
 
