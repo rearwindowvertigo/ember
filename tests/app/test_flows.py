@@ -250,7 +250,7 @@ def test_order_all_ended_and_broken_records(
         3,
     ]
     assert result.unreadable_flows == result.unreadable_panels == 1
-    assert result.panels[0].question == "A question"
+    assert result.panels[0].question == "A question\nMore"
     assert len(result.watch) == 1 + 11 * 2 + 12 * 2 + 10
 
 

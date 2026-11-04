@@ -35,10 +35,8 @@ from ember.app import icons, state, theme, tray
 from ember.app.flows import FlowItem, PanelItem, plan_wave
 from ember.app.runs import DONE, FINISHED_LIMIT, LIVE
 from ember.app.screens.common import (
-    MONTHS,
     chain_tab_order,
     discard,
-    duration,
     engine_name,
     inline,
     plural,
@@ -219,10 +217,10 @@ def _clock(stamp: float) -> str:
 def span_text(started: float, ended: float | None, now: float | None = None) -> str:
     """Return a record's times for its detail line.
 
-    An ended record reads "08:17 to 08:33 · 16 min"; a live one reads
-    "started 08:01 · 4 min 12 s". The start names its day only when it falls
-    on an earlier day than the end, or than now while live: "yesterday 23:50
-    to 00:10 · 20 min".
+    An ended record reads "08:17 to 08:33"; its duration shows in the time
+    column. A live one reads "started 08:01 · 4 min 12 s". The start names
+    its day only when it falls on an earlier day than the end, or than now
+    while live: "yesterday 23:50 to 00:10".
     """
     now = time.time() if now is None else now
     last = now if ended is None else ended
@@ -233,19 +231,22 @@ def span_text(started: float, ended: float | None, now: float | None = None) -> 
         start = _clock(started)
     if ended is None:
         return f"started {start} · {elapsed(now - started)}"
-    return f"{start} to {_clock(ended)} · {duration(ended - started)}"
+    return f"{start} to {_clock(ended)}"
 
 
-def end_text(ended: float | None, now: float | None = None) -> str:
-    """Return the right column's time: the end time, or "Live"."""
-    return "Live" if ended is None else when(ended, now)
+def took(seconds: float) -> str:
+    """Return a finished duration: "45 s", "2 min 5 s", or "1 h 12 min" from an hour."""
+    total = max(0, int(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours} h {minutes} min"
+    return f"{minutes} min {secs} s" if minutes else f"{secs} s"
 
 
-def end_tooltip(started: float, ended: float | None) -> str:
-    """Return the right column's tooltip: "Ended at 08:33 on 3 Nov"."""
-    stamp, word = (started, "Started") if ended is None else (ended, "Ended")
-    moment = datetime.datetime.fromtimestamp(stamp)
-    return f"{word} at {_clock(stamp)} on {moment.day} {MONTHS[moment.month - 1]}"
+def end_text(started: float, ended: float | None) -> str:
+    """Return the right column's text: "Elapsed 2 min 5 s", or "" while live."""
+    return "" if ended is None else f"Elapsed {took(ended - started)}"
 
 
 def worker_line(run: Run) -> str:
@@ -262,8 +263,9 @@ def branch_text(run: Run) -> str:
 
 
 def run_title(run: Run) -> str:
-    """Return "Run · <Engine> · <model> · <effort>"."""
-    return f"Run · {worker_line(run)}"
+    """Return "Run · <subject>", or "Run · <worker>" for a run without one."""
+    subject = " ".join(run.subject.split())
+    return f"Run · {subject}" if subject else f"Run · {worker_line(run)}"
 
 
 def run_ended(run: Run) -> float | None:
@@ -286,10 +288,14 @@ def run_result(run: Run) -> str:
 
 
 def run_detail(run: Run, now: float | None = None) -> str:
-    """Return "<repository folder> · <result> · <times>"."""
+    """Return "<worker> · <repository folder> · <result> · <times>".
+
+    The worker leads the line when the title holds the run's subject.
+    """
     folder = PurePosixPath(run.repo).name or run.repo
     times = span_text(run.started_at, run_ended(run), now)
-    return f"{folder} · {run_result(run)} · {times}"
+    worker = f"{worker_line(run)} · " if run.subject.strip() else ""
+    return f"{worker}{folder} · {run_result(run)} · {times}"
 
 
 def parent_label(parent: FlowItem | PanelItem) -> str:
@@ -594,10 +600,6 @@ class _ExpandableRow(QWidget):
         self.detail_label.setProperty("role", "secondary")
         lines.addWidget(self.title_label)
         lines.addWidget(self.detail_label)
-        self.question_label = ElidedLabel()
-        self.question_label.setProperty("role", "secondary")
-        self.question_label.hide()
-        lines.addWidget(self.question_label)
         header.addLayout(lines, 1)
         self.time_label = QLabel()
         self.time_label.setProperty("role", "secondary")
@@ -650,8 +652,7 @@ class _Row(_ExpandableRow):
         if self.parent_label:
             detail = f"{self.parent_label} · {detail}"
         self.detail_label.setText(detail)
-        self.time_label.setText(end_text(ended, now))
-        self.time_label.setToolTip(end_tooltip(self.run.started_at, ended))
+        self.time_label.setText(end_text(self.run.started_at, ended))
 
     def set_run(self, run: Run) -> None:
         """Store the run and draw its badge."""
@@ -734,7 +735,7 @@ class _FinishedRow(_Row):
             run.status,
             run_title(run),
             run_detail(run),
-            end_text(run_ended(run)),
+            end_text(run.started_at, run_ended(run)),
             tuple(record_rows(run)),
         )
 
@@ -803,10 +804,6 @@ class _RecordRow(_ExpandableRow):
             parts.append(plural(self.run_count, "run"))
         detail = " · ".join([*parts, detail])
         self.base_detail = detail
-        self.question_label.setText(
-            item.question if isinstance(item, PanelItem) else ""
-        )
-        self.question_label.setVisible(bool(self.question_label.text()))
         entries = self.entries()
         values = (
             badge,
@@ -841,8 +838,7 @@ class _RecordRow(_ExpandableRow):
             ended = data["updated_at"]
         times = span_text(data["started_at"], ended, now)
         self.detail_label.setText(f"{self.base_detail} · {times}")
-        self.time_label.setText(end_text(ended, now))
-        self.time_label.setToolTip(end_tooltip(data["started_at"], ended))
+        self.time_label.setText(end_text(data["started_at"], ended))
 
     def show_details(self, shown: bool) -> None:
         """Expand or collapse the selectable body and its file buttons."""
@@ -950,9 +946,13 @@ class _PanelRow(_RecordRow):
     """A panel with member answers, omissions and a Summary button."""
 
     def entries(self) -> list[tuple[str, bool]]:
-        """Return member details followed by omissions."""
+        """Return the question, then member details, then omissions."""
         result: list[tuple[str, bool]] = []
         data = self.item.record
+        question = self.item.question if isinstance(self.item, PanelItem) else ""
+        if question:
+            result.append(("Question", False))
+            result.append((question, True))
         for member in data["members"]:
             result.append((member_line(member), False))
             if member["reason"]:
@@ -1063,6 +1063,12 @@ class OverviewScreen(QWidget):
             filters.addWidget(name)
             filters.addWidget(combo)
             combo.currentTextChanged.connect(self.refresh)
+        self.finished_cap = QLabel(
+            f"Filters cover the newest {FINISHED_LIMIT} records."
+        )
+        self.finished_cap.setProperty("role", "secondary")
+        self.finished_cap.hide()
+        filters.addWidget(self.finished_cap)
         filters.addStretch(1)
         self.clear_button = button("Clear", "danger-outline", size="sm")
         self.clear_button.clicked.connect(self.clear_finished)
@@ -1219,9 +1225,14 @@ class OverviewScreen(QWidget):
     def _draw_finished_header(self, total: int) -> None:
         """Show the pickers and Clear only while the full list is open."""
         self.filter_bar.setVisible(self.finished_open)
-        self.finished_toggle.setText(
-            "Show fewer" if self.finished_open else f"Show all {total}"
-        )
+        if self.finished_open:
+            label = "Show fewer"
+        elif total >= FINISHED_LIMIT:
+            label = f"Newest {FINISHED_LIMIT}"
+        else:
+            label = f"Show all {total}"
+        self.finished_toggle.setText(label)
+        self.finished_cap.setVisible(self.finished_open and total >= FINISHED_LIMIT)
         self.finished_toggle.setVisible(self.finished_open or total > FINISHED_PREVIEW)
 
     def _draw_clear_icon(self, *_args: object) -> None:

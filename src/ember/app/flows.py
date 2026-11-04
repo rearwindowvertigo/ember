@@ -45,7 +45,7 @@ class FlowItem:
 
 @dataclass(frozen=True)
 class PanelItem:
-    """A stored panel, its question line and its process lock state."""
+    """A stored panel, its question and its process lock state."""
 
     record: dict[str, Any]
     question: str
@@ -124,10 +124,9 @@ def _selected(
 
 
 def _question(path: Path) -> str:
-    """Read the first non-empty question line, or an empty string on error."""
+    """Read the whole question without its surrounding blank space, or ""."""
     try:
-        with path.open(encoding="utf-8") as source:
-            return next((line.strip() for line in source if line.strip()), "")
+        return path.read_text(encoding="utf-8").strip()
     except OSError, UnicodeError:
         return ""
 

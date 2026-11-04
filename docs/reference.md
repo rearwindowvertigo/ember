@@ -2898,10 +2898,12 @@ runs, flows and panels. Each empty section shows its empty state.
 Live comes first. Finished starts as a preview of its three newest
 top-level rows, each with its nested runs, and a `Show all <n>` button in
 its header, where `<n>` is the number of rows the full list shows. The
-button is hidden when the preview already holds every row. Show all opens
+button reads `Newest 20` once Finished holds twenty rows, the most it
+reads, and is hidden when the preview already holds every row. It opens
 the full list with the Type, Status and Engine pickers and Clear; `Show
 fewer` returns to the preview. The pickers and Clear show only while the
-full list is open. Whether it is open is kept in `app.json` as
+full list is open; with twenty rows, `Filters cover the newest 20 records.`
+shows beside the pickers. Whether it is open is kept in `app.json` as
 `finished_open` and restored when the app starts.
 
 Finished filters this capped list by Type (all, Run, Flow, Panel), Status
@@ -2978,9 +2980,9 @@ merged count.
 Its second line includes its branch, active plan wave and reason. Expanded,
 it shows the pass count and task, writer and review details. A panel's title,
 after `Panel`, shows its member and answer counts; its second line includes the repository
-folder. The first non-empty question line appears on a third line, elided
-to fit, with its full text in the tooltip. Expanded, a panel shows member
-status, worker, duration, reason and changed paths, and left-out members.
+folder. Expanded, a panel shows its whole question under `Question`, then
+member status, worker, duration, reason and changed paths, and left-out
+members.
 
 Expanded panel details have a Summary button for `summary.md`. Expanded
 flow details have Briefs for the `briefs/` folder and one Check logs button.
@@ -2994,22 +2996,23 @@ Buttons pass a file URL to `QDesktopServices.openUrl` for the desktop's
 default viewer. If it returns false, a warning names the path and says no
 viewer opened it.
 
-A run's title, after `Run`, shows engine, model and effort. Its second line
-shows the repository folder, the result and the times:
+A run's title, after `Run`, shows its subject on one line, or engine, model
+and effort for a run without one. Its second line shows engine, model and
+effort when the title holds the subject, then the repository folder, the
+result and the times:
 
 - live: `turn <n>` and the commits so far (`1 commit`, `<n> commits`), or
   `read-only`; then `started <start> · <elapsed>`, the elapsed time to the
   second, such as `4 min 12 s`;
 - done: the commit count or `read-only`; failed: the last reason, or
-  `No reason recorded`; then `<start> to <end> · <duration>`, such as
-  `08:17 to 08:33 · 16 min`.
+  `No reason recorded`; then `<start> to <end>`, such as `08:17 to 08:33`.
 
 The start names its day only when it falls on an earlier day than the end,
-or than now while live: `yesterday 23:50 to 00:10 · 20 min`. Flow and panel
-rows end their second line with the same times. The right column of every
-row shows the end time (`Today 08:33`), or `Live`; its tooltip names it:
-`Ended at 08:33 on 3 Nov`, or `Started at 08:01 on 3 Nov` while live. The
-subject and branch are in the expanded record. Live runs have Open terminal, which
+or than now while live: `yesterday 23:50 to 00:10`. Flow and panel rows end
+their second line with the same times. The right column of an ended row
+shows `Elapsed` and its duration: `Elapsed 2 min 5 s` under an hour,
+`Elapsed 1 h 12 min` from an hour on. It is empty while the row is live,
+and has no tooltip. The branch is in the expanded record. Live runs have Open terminal, which
 opens a terminal window on the run as `emb run --attach` does. Expanding a
 run shows its record, including last exit and reason; a live run's Ended is
 `Not yet`. Rows and expanded
