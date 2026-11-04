@@ -375,3 +375,19 @@ def test_settings_rows_are_names_with_info_icons(
     while widget is not None and not widget.focusPolicy() & Qt.FocusPolicy.TabFocus:
         widget = widget.nextInFocusChain()
     assert widget is screen.autostart
+
+
+def test_add_folder_refuses_ember_private_paths(
+    env: dict[str, str],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ember import paths
+
+    context, screen = _screen(env, qtbot)
+    private = paths.state_dir(env) / "runs"
+    monkeypatch.setattr(settings_module, "choose_folder", lambda *args: str(private))
+    screen._add_folder()
+    assert _stored(env, "sandbox.read") == []
+    assert "Ember's configuration or state" in screen.paths_line.text()
+    assert context.tasks.pending() == 0

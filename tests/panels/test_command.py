@@ -5,6 +5,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from ember.runs.core import Core
 from runs.stub_engine import (  # pyrefly: ignore[missing-import]
     StubDriver,
     engine_cache,
+    git,
     kill_sessions,
     make_env,
     make_repo,
@@ -356,8 +358,9 @@ def test_start_output_and_run_options(h: Harness, as_json: bool) -> None:
     else:
         assert out.splitlines()[0].startswith("panel panel-")
         panel_id = out.splitlines()[0].split()[1]
-        assert "member 1 codex:x · low · answered" in out
-        assert " · exit 0 · " in out
+        assert "member 1 codex:x · low · answered" in err
+        assert " · exit 0 · " in err
+        assert "member " not in out
         assert out.splitlines()[-1].startswith("summary ")
     panel = record.load(panel_id, h.env)
     for member in panel["members"]:
@@ -487,7 +490,9 @@ def test_status_empty_and_broken(h: Harness) -> None:
             "started_at": record.load(panel_id, h.env)["started_at"],
             "live": False,
             "answered": 0,
-            "members": 1,
+            "member_count": 1,
+            "running_members": [],
+            "denied_paths": [],
         }
     ]
     assert h.invoke("--status", broken_id)[0] == 1
@@ -617,7 +622,8 @@ def test_retry_result_and_empty_close(h: Harness, as_json: bool) -> None:
         assert result["members"][0]["run"] != old_run
         assert "attempts" not in result["members"][0]
     else:
-        assert "member 1 codex:gpt-5" in out and " · answered · " in out
+        assert "member 1 codex:gpt-5" in err and " · answered · " in err
+        assert "member " not in out
     assert len(actions(err)) == 1
     code, out, err = h.invoke("--close", first["panel"], *options)
     assert code == 0
@@ -674,3 +680,199 @@ def test_close_prints_successful_run(h: Harness, as_json: bool) -> None:
         assert out == f"member 1 · run {run_id} · closed\n"
     assert actions(err) == [f"next: emb panel --status {panel['panel']}"]
     assert runs.load(run_id, h.env).status == runs.CLOSED
+
+
+def test_close_keeps_changed_detached_worktree_and_prints_discard(h: Harness) -> None:
+    h.drivers["codex"].foreign = "owner message"
+    code, out, err = h.start("--member", "codex:x", "--json")
+    assert code == 0, err
+    panel_id = json.loads(out)["panel"]
+    member = record.load(panel_id, h.env)["members"][0]
+    saved = runs.load(member["run"], h.env)
+    evidence = Path(saved.worktree) / "evidence.txt"
+    evidence.write_text("keep\n")
+    h.drivers["codex"].foreign = None
+    code, out, err = h.invoke("--close", panel_id, "--json")
+    assert code == 0, err
+    assert json.loads(out)["members"][0]["closed"]
+    assert evidence.read_text() == "keep\n"
+    assert f"git worktree remove --force {saved.worktree}" in err
+    assert runs.load(saved.id, h.env).worktree == saved.worktree
+    code, out, err = h.invoke("--close", panel_id, "--json")
+    assert code == 0 and json.loads(out)["members"][0]["closed"]
+    assert f"git worktree remove --force {saved.worktree}" in err
+    evidence.unlink()
+    code, out, err = h.invoke("--close", panel_id, "--json")
+    assert code == 0, err
+    assert json.loads(out)["members"][0]["run"] == saved.id
+    assert not Path(saved.worktree).exists()
+    assert saved.worktree not in git(h.repo, "worktree", "list", env=h.env)
+    code, out, err = h.invoke("--close", panel_id, "--json")
+    assert code == 0 and json.loads(out)["members"] == []
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_progress_before_panel_ends(h: Harness, as_json: bool) -> None:
+    h.script("claude", "@hang")
+    args = build_parser().parse_args(
+        [
+            "panel",
+            "--question-file",
+            str(h.question),
+            "--dir",
+            str(h.repo),
+            "--member",
+            "codex:x",
+            "--member",
+            "claude:x",
+            *(["--json"] if as_json else []),
+        ]
+    )
+    finished = threading.Event()
+
+    class ProgressStream(io.StringIO):
+        def flush(self) -> None:
+            super().flush()
+            if "member 1 codex:x · medium · answered" in self.getvalue():
+                finished.set()
+
+    out, err = io.StringIO(), ProgressStream()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            command.main,
+            args,
+            h.env,
+            core_factory=h.factory,
+            spacing=0,
+            poll_seconds=0.02,
+            out=out,
+            err=err,
+        )
+        try:
+            assert finished.wait(20), err.getvalue()
+            assert not future.done()
+            assert "member 2 " not in err.getvalue()
+            panels, errors = record.list_panels(h.env)
+            assert len(panels) == 1 and not errors
+            panel_id = panels[0]["id"]
+            deadline = time.monotonic() + 20
+            while True:
+                first = json.loads(h.invoke("--status", panel_id, "--json")[1])
+                running = first["members"][1]
+                if running["last_screen_change_at"] is not None:
+                    break
+                assert time.monotonic() < deadline
+                time.sleep(0.02)
+            assert running["seconds"] > 0
+            assert running["last_screen_change_at"] > 0
+            before = h.invoke("--status", panel_id)[1]
+            time.sleep(1.1)
+            second = json.loads(h.invoke("--status", panel_id, "--json")[1])
+            assert second["members"][1]["seconds"] > running["seconds"]
+            after = h.invoke("--status", panel_id)[1]
+            assert before != after
+            assert "last screen change " in after
+            assert "member 2 claude:x" in after
+            listed = json.loads(h.invoke("--status", "--json")[1])[0]
+            assert listed["member_count"] == 2 and "members" not in listed
+            assert len(listed["running_members"]) == 1
+            progress = listed["running_members"][0]
+            assert progress["n"] == 2
+            assert progress["seconds"] >= running["seconds"]
+            saved = runs.load(running["run"], h.env)
+            assert progress["last_screen_change_at"] == saved.last_screen_change_at
+            assert "member 2 claude:x" in h.invoke("--status")[1]
+            assert not future.done()
+            if as_json:
+                assert out.getvalue() == ""
+        finally:
+            h.release()
+        assert future.result(20) == 0
+    assert err.getvalue().count("member 1 codex:x") == 1
+    assert err.getvalue().count("member 2 claude:x") == 1
+    if as_json:
+        assert json.loads(out.getvalue())["exit"] == 0
+    else:
+        assert out.getvalue().splitlines()[-1].startswith("summary ")
+
+
+@pytest.mark.parametrize("activity", [None, 0, 1234.5])
+def test_status_activity_missing_or_zero(h: Harness, activity: float | None) -> None:
+    _, out, _ = h.start("--member", "codex:x", "--json")
+    result = json.loads(out)
+    saved = runs.load(result["members"][0]["run"], h.env)
+    document = saved.to_json()
+    if activity is None:
+        del document["last_screen_change_at"]
+    else:
+        document["last_screen_change_at"] = activity
+    (saved.folder / "run.json").write_text(json.dumps(document))
+    panel_id = result["panel"]
+    member = json.loads(h.invoke("--status", panel_id, "--json")[1])["members"][0]
+    assert member["last_screen_change_at"] == activity
+    assert member["seconds"] == result["members"][0]["seconds"]
+    shown = "-" if activity is None else str(float(activity))
+    assert f"last screen change {shown}" in h.invoke("--status", panel_id)[1]
+
+
+@pytest.mark.parametrize("kind", ["start", "recover", "retry"])
+def test_status_elapsed_collection_intervals(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    panel_id = h.create()
+    panel = record.load(panel_id, h.env)
+    member = panel["members"][0]
+    member.update(
+        status="running",
+        seconds=12 if kind == "recover" else None,
+        attempts=[
+            {"kind": kind, "at": 100, "exit": 124},
+            {"kind": "stall", "at": 110, "exit": None},
+        ],
+    )
+    record.save(panel, h.env)
+    monkeypatch.setattr(command.time, "time", lambda: 120.0)
+    result = json.loads(h.invoke("--status", panel_id, "--json")[1])["members"][0]
+    assert result["seconds"] == (32 if kind == "recover" else 20)
+    assert result["last_screen_change_at"] is None
+    assert record.load(panel_id, h.env) == panel
+
+
+def test_status_reports_member_denials_with_run_and_turn(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ember import sandbox
+
+    folder = Path(h.env["HOME"]) / ".toolchain"
+    folder.mkdir()
+    choices.set_settings({"sandbox.codex": "on"}, env=h.env)
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    monkeypatch.setattr(Core, "_sandboxed", lambda self, spec, run, common: spec)
+    h.script("codex", f"@reply Permission denied: {folder}/python")
+    code, out, _ = h.start("--member", "codex:x", "--json")
+    assert code == 0
+    panel_id = json.loads(out)["panel"]
+    code, out, _ = h.invoke("--status", panel_id, "--json")
+    assert code == 0
+    panel = json.loads(out)
+    member = panel["members"][0]
+    item = {
+        "path": str(folder),
+        "reason": "hidden",
+        "allow_path": str(folder),
+        "run": member["run"],
+        "turn": 1,
+    }
+    assert member["denied_paths"] == [item]
+    assert panel["denied_paths"] == [{**item, "member": 1}]
+    assert json.loads(h.invoke("--status", "--json")[1])[0]["denied_paths"] == [
+        {**item, "member": 1}
+    ]
+    # Keep the retained diagnostic when the underlying run record is unavailable.
+    (runs.run_dir(member["run"], h.env) / "run.json").unlink()
+    assert json.loads(h.invoke("--status", panel_id, "--json")[1])["denied_paths"] == [
+        {**item, "member": 1}
+    ]
+    code, out, _ = h.invoke("--status", panel_id)
+    assert code == 0
+    assert f"denied {folder} (hidden) run {member['run']} turn 1" in out

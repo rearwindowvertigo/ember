@@ -11,10 +11,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
+from ember import paths
 from ember.engines import Driver
 from ember.panels import record
 from ember.runs import record as runs
-from ember.runs.core import Core, StartOptions
+from ember.runs import worktrees
+from ember.runs.core import (
+    Core,
+    RunError,
+    StartOptions,
+    WorkerSelection,
+    worktree_removal_reason,
+)
 
 START_SPACING = 1.0
 POLL_SECONDS = 1.0
@@ -131,6 +139,17 @@ def exit_code(panel: Mapping[str, Any], stopped: bool) -> int:
     )
 
 
+def member_line(member: Mapping[str, Any]) -> str:
+    """Format one member, preserving zero exits and unknown elapsed time."""
+    seconds = "-" if member["seconds"] is None else f"{member['seconds']:.0f}s"
+    code = "-" if member["exit"] is None else str(member["exit"])
+    return (
+        f"member {member['n']} {member['engine']}:{member['model']} · "
+        f"{member['effort'] or 'default'} · {member['status']} · {seconds} · "
+        f"exit {code} · {member['bytes']} bytes · run {member['run'] or '-'}"
+    )
+
+
 class _Coordinator:
     """Serialize panel writes and freeze all member effects at finalization."""
 
@@ -227,7 +246,7 @@ class _Coordinator:
         def frozen_select(
             options: StartOptions,
             settings: Mapping[str, Any],
-        ) -> tuple[Driver, str, str | None]:
+        ) -> tuple[Driver, WorkerSelection]:
             """Keep engine gates while excluding the single-run menu rows."""
             return select(options, {**settings, "menu": None})
 
@@ -264,10 +283,16 @@ class _Coordinator:
                 return False
             if kind == "start":
                 job.member["status"] = "starting"
+            else:
+                job.member["status"] = "running"
+            if job.began is None:
+                job.began = time.monotonic()
             if kind != "start" or not self.retrying:
                 job.member["attempts"].append(
                     {"kind": kind, "at": time.time(), "exit": None}
                 )
+            else:
+                job.member["attempts"][-1]["at"] = time.time()
             self.persist()
             return True
 
@@ -285,7 +310,16 @@ class _Coordinator:
     def collect(self, job: _Job, code: int, diagnostics: str) -> dict[str, Any]:
         """Read any available reply and restore previous change evidence."""
         member = job.member
-        result: dict[str, Any] = {"exit": code, "reason": None}
+        ids = [member.get("run"), *(a.get("run") for a in member["attempts"])]
+        denials = list(member.get("denied_paths", []))
+        for item in runs.referenced_denials(ids, self.env):
+            if item not in denials:
+                denials.append(item)
+        result: dict[str, Any] = {
+            "exit": code,
+            "reason": None,
+            "denied_paths": denials,
+        }
         run_id = member["run"]
         run = None
         reply = ""
@@ -377,7 +411,6 @@ class _Coordinator:
         try:
             if not self.attempt(job, "recover" if recovering else "start"):
                 return
-            job.began = time.monotonic()
             core = self.core(job)
             member = job.member
             if recovering:
@@ -408,6 +441,8 @@ class _Coordinator:
                             model=member["model"],
                             effort=member["effort"],
                             read_only=True,
+                            base=self.panel["base"],
+                            parent=runs.parent("panel", self.panel["id"]),
                             read=tuple(self.panel["read"]),
                             trailers=(),
                             claim=None,
@@ -457,6 +492,7 @@ class _Coordinator:
         self.flush(job)
         self.persist(summary=True)
         self.active.discard(job.member["n"])
+        print(member_line(job.member), file=self.err, flush=True)
 
     def pause(self, seconds: float) -> None:
         """Wait in bounded ticks while observing stop, failure and deadline."""
@@ -512,6 +548,7 @@ class _Coordinator:
                             )
                         ),
                     )
+                    print(member_line(member), file=self.err, flush=True)
                 elif member["n"] in self.active:
                     status = "interrupted" if stopped else "timed out"
                     prefix = (
@@ -528,6 +565,7 @@ class _Coordinator:
                         else " before its run started"
                     )
                     member.update(status=status, reason=prefix + suffix)
+                    print(member_line(member), file=self.err, flush=True)
             self.panel.update(
                 status="incomplete"
                 if any(
@@ -556,7 +594,30 @@ def start(
     coordinator = _Coordinator(panel_id, env, core_factory, stop, poll_seconds, err)
     if any(member["status"] != "pending" for member in coordinator.panel["members"]):
         raise record.PanelError(panel_id, "a start requires every member to be pending")
+    _pin_base(coordinator)
     return coordinator.drive(coordinator.panel["members"], False, spacing)
+
+
+def _pin_base(coordinator: _Coordinator) -> None:
+    """Save one commit before any member starts, including legacy retries."""
+    panel = coordinator.panel
+    if panel["base"] is not None:
+        return
+    for member in panel["members"]:
+        ids = [member["run"], *(item.get("run") for item in member["attempts"])]
+        for run_id in ids:
+            if run_id:
+                saved = runs.load(run_id, coordinator.env)
+                if saved.base:
+                    panel["base"] = saved.base
+                    coordinator.persist()
+                    return
+    core = Core(coordinator.env)
+    base = core._git_out(panel["dir"], "rev-parse", "--verify", "HEAD^{commit}")
+    if not base:
+        raise record.PanelError(panel["id"], "the checkout has no commit to read")
+    panel["base"] = base
+    coordinator.persist()
 
 
 def recover(
@@ -603,16 +664,90 @@ def _close_run(
     run_id: str,
     env: Mapping[str, str],
     core_factory: CoreFactory,
+    err: TextIO | None = None,
 ) -> dict[str, Any]:
     """Close one run without force and append its diagnostics to the member log."""
     output, errors = io.StringIO(), io.StringIO()
     core = core_factory(env, quiet=True, out=output, err=errors)
     code = core.execute(lambda: core.close(run_id))
     reason = None if code == 0 else _reason(errors.getvalue(), f"close exited {code}")
-    record.append_log(
-        panel["id"], member["n"], output.getvalue() + errors.getvalue(), env
+    return _close_result(
+        panel,
+        member,
+        run_id,
+        env,
+        output.getvalue() + errors.getvalue(),
+        errors.getvalue(),
+        code == 0,
+        reason,
+        err,
     )
-    return {"n": member["n"], "run": run_id, "closed": code == 0, "close_error": reason}
+
+
+def _cleanup_run(
+    panel: dict[str, Any],
+    member: dict[str, Any],
+    existing: runs.Run,
+    env: Mapping[str, str],
+    err: TextIO | None,
+) -> dict[str, Any] | None:
+    """Check an ended run under its locks and clean its detached worktree."""
+    diagnostics = ""
+    reason = None
+    try:
+        with Core(env)._turn_lock(existing.id, "close"), runs.record_lock(existing):
+            existing = runs.load(existing.id, env)
+            reason = worktree_removal_reason(existing)
+            if reason is None:
+                with paths.worktree_lock(Path(existing.common or existing.repo), env):
+                    try:
+                        if not worktrees.remove_detached(existing):
+                            return None
+                    except OSError as error:
+                        diagnostics = f"WARNING: read-only run {existing.id}: {error}\n"
+    except (RunError, runs.RecordError, paths.RuntimeDirError, OSError) as error:
+        reason = str(error)
+    if reason:
+        diagnostics = f"WARNING: read-only run {existing.id}: {reason}\n"
+        return _close_result(
+            panel,
+            member,
+            existing.id,
+            env,
+            diagnostics,
+            diagnostics,
+            False,
+            reason,
+            err,
+        )
+    return _close_result(
+        panel, member, existing.id, env, diagnostics, diagnostics, True, None, err
+    )
+
+
+def _close_result(
+    panel: dict[str, Any],
+    member: dict[str, Any],
+    run_id: str,
+    env: Mapping[str, str],
+    log: str,
+    diagnostics: str,
+    closed: bool,
+    reason: str | None,
+    err: TextIO | None,
+) -> dict[str, Any]:
+    """Log a close or cleanup and forward its warnings to the caller."""
+    record.append_log(panel["id"], member["n"], log, env)
+    if err is not None:
+        for line in diagnostics.splitlines():
+            if line.startswith("WARNING: "):
+                print(
+                    f"WARNING: member {member['n']} "
+                    f"({member['engine']}:{member['model']}): "
+                    + line.removeprefix("WARNING: "),
+                    file=err,
+                )
+    return {"n": member["n"], "run": run_id, "closed": closed, "close_error": reason}
 
 
 def close(
@@ -620,8 +755,9 @@ def close(
     env: Mapping[str, str],
     *,
     core_factory: CoreFactory = Core,
+    err: TextIO | None = None,
 ) -> list[dict[str, Any]]:
-    """Close open current and retained runs while the caller holds the panel lock."""
+    """Close runs and clean terminal runs' worktrees under the panel lock."""
     panel = record.load(panel_id, env)
     results = []
     for member in panel["members"]:
@@ -629,7 +765,7 @@ def close(
             [member["run"]]
             + [a.get("run") for a in member["attempts"] if a["kind"] == "retry"]
         )
-        targets: dict[str, str | None] = {}
+        targets: dict[str, str | runs.Run | None] = {}
         for run_id in run_ids:
             if not run_id:
                 continue
@@ -640,10 +776,14 @@ def close(
             else:
                 if existing.status not in (runs.CLOSED, runs.FAILED):
                     targets[run_id] = None
+                elif existing.read_only and existing.detached:
+                    targets[run_id] = existing
         remaining = set(targets)
         refused = []
         for run_id, error in targets.items():
-            if error is not None:
+            if isinstance(error, runs.Run):
+                result = _cleanup_run(panel, member, error, env, err)
+            elif error is not None:
                 result = {
                     "n": member["n"],
                     "run": run_id,
@@ -651,9 +791,10 @@ def close(
                     "close_error": error,
                 }
             else:
-                result = _close_run(panel, member, run_id, env, core_factory)
-            results.append(result)
-            if not result["closed"]:
+                result = _close_run(panel, member, run_id, env, core_factory, err)
+            if result is not None:
+                results.append(result)
+            if result is not None and not result["closed"]:
                 refused.append(f"{run_id}: {result['close_error']}")
             else:
                 remaining.remove(run_id)
@@ -692,9 +833,10 @@ def retry(
         "not started",
     ):
         raise RetryRefused(f"member {n} is {member['status']}")
+    _pin_base(coordinator)
     old_run = member["run"]
     if old_run:
-        result = _close_run(panel, member, old_run, env, core_factory)
+        result = _close_run(panel, member, old_run, env, core_factory, coordinator.err)
         member.update(closed=result["closed"], close_error=result["close_error"])
         record.save(panel, env)
         if not result["closed"]:

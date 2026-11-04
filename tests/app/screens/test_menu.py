@@ -321,6 +321,7 @@ def test_cards_and_subtitle(env: dict[str, str], qtbot: QtBot) -> None:
         "Work of several tasks",
         "Flows",
         "Claude Workflows",
+        "Provider capacity",
         "Panel",
     ]
     assert menu.SUBTITLE in _texts(screen)
@@ -1078,3 +1079,24 @@ def test_add_member_says_why_when_every_shortlisted_model_is_a_member(
     assert screen.add_warning.isVisibleTo(screen)
     assert screen.add_warning.text() == menu.ALL_ADDED
     assert not screen.empty.isVisibleTo(screen)
+
+
+def test_capacity_rows_show_ranges_and_save(env: dict[str, str], qtbot: QtBot) -> None:
+    context, screen = _screen(env, qtbot)
+    retries = screen.capacity["provider.capacity_retries"]
+    wait = screen.capacity["provider.capacity_wait"]
+    assert retries.accessibleName() == "Capacity retries"
+    assert wait.accessibleName() == "Wait before a retry"
+    assert retries.value() == "2"
+    assert wait.value() == "30"
+    assert {str(n) for n in range(11)} == {item[1] for item in _items(retries)}
+    assert {str(n) for n in range(5, 601)} == {item[1] for item in _items(wait)}
+    assert "limit" in screen.tip_rows["provider.capacity_retries"].info.toolTip()
+    _pick(context, retries, "0", qtbot)
+    _pick(context, wait, "600", qtbot)
+    assert _stored(env, "provider.capacity_retries") == "0"
+    assert _stored(env, "provider.capacity_wait") == "600"
+    other = MenuScreen(context)
+    qtbot.addWidget(other)
+    assert other.capacity["provider.capacity_retries"].value() == "0"
+    assert other.capacity["provider.capacity_wait"].value() == "600"

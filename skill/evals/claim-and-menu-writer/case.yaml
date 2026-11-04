@@ -1,14 +1,18 @@
 schema_version: "1.1"
 name: claim-and-menu-writer
 expected_outcome: |
-  Claude claims the run with `emb choices --claim --id <id>` before any worker
-  question, read or start. The claim is `none` and the menu row Single runs
+  Claude claims the run with `emb choices --claim --id <id> --skill <loaded version>` before any worker
+  question, read, dry run or start. The claim is `none` and the Team row Single tasks
   Writer is `codex:gpt-6.1-sol` at `high`, `set`, so Claude names the row, model
-  and effort in one line and asks no worker question. It starts `emb run --engine
-  codex` as a background command with `--claim <id>` and `--trailer`, runs
+  and effort by running `emb run --dry-run` with the start's exact options
+  and copying its output line before the start. It asks no worker question.
+  It starts `emb run --engine codex` as a background command with
+  `--claim <id>` and `--trailer`, runs
   `scripts/verify_branch.py` on the run's branch and worktree, runs a check of
   its own, gives a Keep verdict (the run's commit is correct and complete),
-  merges with `emb merge <branch> --into claude/report-since --verdict keep`, and
+  merges with `emb merge <branch> --into claude/report-since --verdict keep`
+  with a Keep `--note` and a nonblank `--subject` in the repository's commit
+  convention describing the reviewed result, and
   then runs `emb choices --finish <id>`.
 context:
   scaffold_script: place-files.sh

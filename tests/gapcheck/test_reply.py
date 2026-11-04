@@ -27,16 +27,19 @@ def test_valid_reply_forms(form: str) -> None:
         "steps": [{"step": 1, "gaps": [gap("Retention")]}, {"step": 2, "gaps": []}]
     }
     result = reply.read(form.format(json.dumps(document)), STEPS)
+    made = {"id": "g1", **gap("Retention"), "earlier": None, "answer": None}
     assert result == {
         "steps": [
-            {"step": 1, "title": "Read", "gaps": [gap("Retention")]},
+            {"step": 1, "title": "Read", "gaps": [made]},
             {"step": 2, "title": "Build", "gaps": []},
         ],
-        "ranked": [{"step": 1, **gap("Retention")}],
+        "ranked": [{"id": "g1", "step": 1, "harm": "high"}],
         "counts": {"high": 1, "medium": 0, "low": 0},
         "uncovered_steps": [],
         "unknown_steps": [],
         "parse_error": None,
+        "next_id": 2,
+        "dispositions": [],
     }
 
 
@@ -180,7 +183,9 @@ def test_duplicates_rank_by_harm_preserving_reply_order() -> None:
         "a",
         "f",
     ]
-    assert [entry["gap"] for entry in result["ranked"]] == [
+    texts = {gap["id"]: gap["gap"] for step in result["steps"] for gap in step["gaps"]}
+    assert list(texts) == ["g1", "g2", "g3", "g4", "g5", "g6"]
+    assert [texts[entry["id"]] for entry in result["ranked"]] == [
         "b",
         "c",
         "e",
@@ -188,6 +193,7 @@ def test_duplicates_rank_by_harm_preserving_reply_order() -> None:
         "a",
         "f",
     ]
+    assert all(set(entry) == {"id", "step", "harm"} for entry in result["ranked"])
     assert result["counts"] == {"high": 3, "medium": 1, "low": 2}
     assert result["parse_error"] is None
 
@@ -209,6 +215,18 @@ def test_schema_integer_and_nonempty_string_semantics() -> None:
 
 def test_schema_agrees_with_every_validator_rule() -> None:
     schema = json.loads(reply.schema_text())
+    dispositions = schema["properties"].pop("dispositions")
+    assert dispositions.pop("description")
+    assert dispositions == {"type": "array", "items": {"$ref": "#/$defs/disposition"}}
+    disposition = schema["$defs"].pop("disposition")
+    assert disposition["required"] == ["id", "status", "reason"]
+    assert disposition["properties"]["status"]["enum"] == [
+        "settled",
+        "reopened",
+        "closed",
+    ]
+    earlier = schema["$defs"]["gap"]["properties"]["earlier"]
+    assert isinstance(earlier.pop("description"), str)
     assert schema.pop("$schema") == "https://json-schema.org/draft/2020-12/schema"
     assert schema.pop("$id") == "ember/gapcheck-reply/1"
     assert isinstance(schema.pop("title"), str)
@@ -238,8 +256,124 @@ def test_schema_agrees_with_every_validator_rule() -> None:
                         "minLength": reply.STRING_MIN_LENGTH,
                         **({"enum": list(reply.HARMS)} if key == "harm" else {}),
                     }
-                    for key in reply.GAP_KEYS
+                    for key in (*reply.GAP_KEYS, *reply.OPTIONAL_GAP_KEYS)
                 },
             },
         },
     }
+
+
+def test_ids_continue_after_the_first_number() -> None:
+    document = {"steps": [{"step": 2, "gaps": [gap("a", "low"), gap("b")]}]}
+    result = reply.read(json.dumps(document), STEPS[1:], first_number=4)
+    assert [item["id"] for item in result["steps"][0]["gaps"]] == ["g4", "g5"]
+    assert [item["gap"] for item in result["steps"][0]["gaps"]] == ["b", "a"]
+
+
+def test_earlier_names_a_previous_gap() -> None:
+    item = {**gap("Reopened"), "earlier": "g2"}
+    document = {
+        "steps": [{"step": 1, "gaps": [item]}],
+        "dispositions": [
+            {"id": "g1", "status": "closed", "reason": "Removed"},
+            {"id": "g2", "status": "reopened", "reason": "Changed"},
+        ],
+    }
+    result = reply.read(json.dumps(document), STEPS[:1], earlier_ids={"g1", "g2"})
+    assert result["parse_error"] is None
+    assert result["steps"][0]["gaps"][0]["earlier"] == "g2"
+
+
+def test_earlier_must_exist_in_the_previous_result() -> None:
+    items = [{**gap("a"), "earlier": "g9"}, {**gap("b"), "earlier": "g9"}]
+    document = {"steps": [{"step": 1, "gaps": items}]}
+    result = reply.read(json.dumps(document), STEPS[:1], earlier_ids={"g1"})
+    assert result["parse_error"] == (
+        "the reply names earlier gap g9, which the previous result does not have "
+        "as an active or settled gap; "
+        "the reply misses earlier gap g1"
+    )
+    result = reply.read(json.dumps(document), STEPS[:1])
+    assert result["parse_error"] == (
+        "the reply names earlier gap g9, but the check has no previous result"
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "message"), [("", "a non-empty string"), (3, "a string")]
+)
+def test_earlier_is_a_non_empty_string(value: object, message: str) -> None:
+    item = {**gap("a"), "earlier": value}
+    result = reply.read(json.dumps({"steps": [{"step": 1, "gaps": [item]}]}), STEPS[:1])
+    assert result["parse_error"] == (
+        f"the reply does not match the schema at $.steps[0].gaps[0].earlier: "
+        f"expected {message}; the reply misses step 1"
+    )
+
+
+@pytest.mark.parametrize(
+    ("entries", "gaps", "message"),
+    [
+        ([], [], "misses earlier gap g1"),
+        (
+            [{"id": "g9", "status": "closed", "reason": "Removed"}],
+            [],
+            "unknown earlier id g9",
+        ),
+        (
+            [{"id": "g1", "status": "settled", "reason": "Same"}],
+            [],
+            "unanswered gap g1 cannot be settled",
+        ),
+        (
+            [{"id": "g1", "status": "reopened", "reason": "Changed"}],
+            [],
+            "needs exactly one new gap",
+        ),
+        (
+            [{"id": "g1", "status": "reopened", "reason": "Changed"}],
+            [{**gap("a"), "earlier": "g1"}, {**gap("b"), "earlier": "g1"}],
+            "needs exactly one new gap",
+        ),
+        (
+            [{"id": "g1", "status": "closed", "reason": "Removed"}],
+            [{**gap("a"), "earlier": "g1"}],
+            "is closed but a new gap names it",
+        ),
+        (
+            [{"id": "g1", "status": "closed", "reason": "Removed"}] * 2,
+            [],
+            "duplicate disposition for g1",
+        ),
+        ([{"id": "g1", "status": "closed"}], [], "missing required key 'reason'"),
+        ([{"id": "g1", "status": "other", "reason": "Same"}], [], "expected one of"),
+        (
+            [{"id": "g1", "status": "closed", "reason": ""}],
+            [],
+            "expected a non-empty string",
+        ),
+        ({}, [], "expected an array"),
+    ],
+)
+def test_dispositions_require_coverage_and_exact_reopened_links(
+    entries: object, gaps: list[dict[str, str]], message: str
+) -> None:
+    document = {"steps": [{"step": 1, "gaps": gaps}], "dispositions": entries}
+    made = reply.read(json.dumps(document), STEPS[:1], earlier_ids={"g1"})
+    assert message in made["parse_error"]
+
+
+def test_settled_needs_an_answer_and_no_new_gap() -> None:
+    document = {
+        "steps": [{"step": 1, "gaps": []}],
+        "dispositions": [{"id": "g1", "status": "settled", "reason": "Same"}],
+    }
+    made = reply.read(
+        json.dumps(document), STEPS[:1], earlier_ids={"g1"}, answered_ids={"g1"}
+    )
+    assert made["parse_error"] is None
+    document["steps"][0]["gaps"].append({**gap("a"), "earlier": "g1"})
+    made = reply.read(
+        json.dumps(document), STEPS[:1], earlier_ids={"g1"}, answered_ids={"g1"}
+    )
+    assert "is settled but a new gap names it" in made["parse_error"]

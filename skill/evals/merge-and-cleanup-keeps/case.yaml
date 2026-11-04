@@ -5,7 +5,8 @@ expected_outcome: |
   `__pycache__` folders in its worktree. Claude claims the run, starts `emb run`
   with the claim, checks the branch and gives a Keep verdict. It asks no merge
   question and runs `emb merge <branch> --into claude/report-since --verdict
-  keep`; the cleanup keeps the worktree and branch. Claude reports the tip and
+  keep` with a Keep `--note` and a nonblank `--subject` in the repository's
+  commit convention describing the reviewed result; the cleanup keeps the worktree and branch. Claude reports the tip and
   the keep without removing anything by force, and finishes the claim last.
 context:
   scaffold_script: place-files.sh

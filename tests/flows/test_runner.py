@@ -69,6 +69,7 @@ class Harness:
             parsed,
             top=str(branch.top),
             main=str(branch.main),
+            worktree=str(branch.worktree),
             base=branch.base,
             writer=worker,
             reviewer=worker,
@@ -109,6 +110,7 @@ def task(
 ) -> dict[str, Any]:
     return {
         "id": name,
+        "subject": f"feat: {name}",
         "task": text or f"@write {name} value",
         "files": files or [name],
         "after": after or [],
@@ -133,13 +135,31 @@ def test_parallel_wave_merges_cleans_and_checks(h: Harness) -> None:
     assert flow["wave"] == 1
     assert [t["status"] for t in flow["tasks"]] == ["merged", "merged"]
     commits = git(
-        h.repo, "rev-list", "--first-parent", "--merges", flow["branch"], env=h.env
+        h.repo,
+        "rev-list",
+        "--first-parent",
+        f"{flow['base']}..{flow['branch']}",
+        env=h.env,
     ).splitlines()
     assert commits == [t["merge_commit"] for t in reversed(flow["tasks"])]
     assert len(flow["checks"]) == 1
     assert Path(flow["checks"][0]["log"]).read_text() == "checked\n"
     assert flow["writer"]["effort"] == "medium"
     for item in flow["tasks"]:
+        message = git(
+            h.repo, "show", "-s", "--format=%B", item["merge_commit"], env=h.env
+        )
+        assert message.splitlines()[0] == item["subject"]
+        assert "Ember-Verdict: pass" in message
+        assert f"Ember-Task-Tip: {item['head']}" in message
+        assert (
+            len(
+                git(
+                    h.repo, "show", "-s", "--format=%P", item["merge_commit"], env=h.env
+                ).split()
+            )
+            == 1
+        )
         writer = runs.load(item["writer_run"], h.env)
         reviewer = runs.load(item["reviews"][0]["run"], h.env)
         assert writer.status == reviewer.status == "closed"
@@ -590,7 +610,9 @@ def test_recovery_without_captured_writer(h: Harness) -> None:
     assert h.run()["tasks"][0]["status"] == "merged"
 
 
-def started_writer(h: Harness) -> tuple[dict[str, Any], runs.Run]:
+def started_writer(
+    h: Harness, *, trailers: tuple[str, ...] = ()
+) -> tuple[dict[str, Any], runs.Run]:
     flow = h.flow()
     path = h.tmp / "writer.md"
     path.write_text("Implement a\n@write a value")
@@ -600,7 +622,12 @@ def started_writer(h: Harness) -> tuple[dict[str, Any], runs.Run]:
         core.execute(
             lambda: core.start(
                 StartOptions(
-                    "codex", flow["worktree"], str(path), model="gpt-5", effort="low"
+                    "codex",
+                    flow["worktree"],
+                    str(path),
+                    model="gpt-5",
+                    effort="low",
+                    trailers=trailers,
                 )
             )
         )
@@ -626,14 +653,15 @@ def test_recover_writer_or_completed_merge(h: Harness, merged: bool) -> None:
         wave=1,
     )
     if merged:
-        git(
+        assert writer.branch is not None
+        repo = branches.open_repository(flow["worktree"], h.env, "merge")
+        branches._merge(
+            repo,
+            writer.branch,
+            flow["branch"],
             Path(flow["worktree"]),
-            "merge",
-            "--no-ff",
-            "-m",
-            "merge",
-            str(writer.branch),
-            env=h.env,
+            "pass",
+            item["subject"],
         )
     record.save(flow, h.env)
     flow = h.run()
@@ -1502,3 +1530,278 @@ def test_cancel_live_runner_keeps_turns_and_stops_check(
     final = h.run()
     assert final["status"] == "done", final["tasks"]
     assert final["tasks"][0]["status"] == "merged"
+
+
+def test_recorded_plan_without_subject_keeps_resolved_subject(h: Harness) -> None:
+    h.create()
+    stored = record.folder(h.id, h.env) / record.PLAN_NAME
+    data = json.loads(stored.read_text())
+    del data["tasks"][0]["subject"]
+    stored.write_text(json.dumps(data))
+    flow = h.run()
+    assert flow["status"] == "done"
+    item = flow["tasks"][0]
+    assert (
+        git(h.repo, "show", "-s", "--format=%s", item["merge_commit"], env=h.env)
+        == "feat: a"
+    )
+
+
+@pytest.mark.parametrize("subject", ["feat: update API", "feat!: update API"])
+def test_breaking_change_warning_is_recorded_in_merge_event(
+    h: Harness,
+    subject: str,
+) -> None:
+    item = task("a")
+    item["subject"] = subject
+    h.create([item], trailers=["BREAKING CHANGE: use the new API"])
+    flow = h.run()
+    assert flow["status"] == "done"
+    saved = flow["tasks"][0]
+    writer = runs.load(saved["writer_run"], h.env)
+    warning = f"WARNING: {writer.branch} holds a breaking change; the subject has no !"
+    expected = [] if "!:" in subject else [warning]
+    event = next(
+        event
+        for event in record.read_events(h.id, h.env)
+        if event["kind"] == "task" and event.get("status") == "merged"
+    )
+    assert event["warnings"] == expected
+    assert saved.get("warnings", []) == expected
+
+
+@pytest.mark.parametrize("separator", ["=", "%"])
+def test_recover_squash_after_target_edit_with_noncolon_worker_separator(
+    h: Harness,
+    separator: str,
+) -> None:
+    h.create(check=[sys.executable, "-c", "print('recovered check')"])
+    git(h.repo, "config", "trailer.separators", separator, env=h.env)
+    flow, writer = started_writer(h, trailers=(f"Reviewed-by {separator} A",))
+    assert writer.branch is not None
+    item = flow["tasks"][0]
+    item.update(
+        status="merging",
+        writer_run=writer.id,
+        branch=writer.branch,
+        worktree=writer.worktree,
+        task_base=writer.base,
+        head=writer.expected_head,
+        merge_tip=writer.expected_head,
+        wave=1,
+    )
+    worktree = Path(flow["worktree"])
+    repo = branches.open_repository(worktree, h.env, "merge")
+    landed, _ = branches._merge(
+        repo,
+        writer.branch,
+        flow["branch"],
+        worktree,
+        "pass",
+        item["subject"],
+    )
+    assert landed is not None
+    (worktree / "a").write_text("later target edit")
+    git(worktree, "commit", "-am", "fix: edit task result", env=h.env)
+    later = git(worktree, "rev-parse", "HEAD", env=h.env)
+    record.save(flow, h.env)
+    recovered = h.run()
+    saved = recovered["tasks"][0]
+    assert saved["status"] == "merged"
+    assert saved["merge_commit"] == landed
+    assert recovered["tip"] == later
+    assert saved["cleanup"][0]["action"] == "removed"
+    assert not Path(writer.worktree).exists()
+    assert saved["branch"] is None
+    assert recovered["checks"][0]["exit"] == 0
+
+
+@pytest.mark.parametrize("parallel", [1, 2])
+def test_capacity_exhaustion_does_not_halt_other_flow_tasks(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, parallel: int
+) -> None:
+    choices.set_settings({"provider.capacity_retries": "0"}, env=h.env)
+    original = h.driver.wait
+
+    def wait(run: runs.Run) -> Any:  # noqa: ANN401
+        outcome = original(run)
+        if outcome.provider_error and outcome.reason == "capacity":
+            from dataclasses import replace
+
+            return replace(outcome, provider_kind="capacity")
+        return outcome
+
+    monkeypatch.setattr(h.driver, "wait", wait)
+    h.create([task("a", text="@provider capacity"), task("b")], parallel=parallel)
+    flow = h.run()
+    assert flow["halted"] is None
+    assert flow["tasks"][0]["status"] == "stopped"
+    assert flow["tasks"][1]["status"] == "merged"
+
+
+def test_denied_paths_are_saved_and_emitted_after_successful_turn(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ember import sandbox
+
+    folder = Path(h.env["HOME"]) / ".toolchain"
+    folder.mkdir()
+    choices.set_settings({"sandbox.codex": "on"}, env=h.env)
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    monkeypatch.setattr(Core, "_sandboxed", lambda self, spec, run, common: spec)
+    h.create(
+        [task("a", text=f"@write a value\n@reply Permission denied: {folder}/python")]
+    )
+    flow = h.run()
+    saved = flow["tasks"][0]["denied_paths"]
+    assert len(saved) == 1
+    assert saved[0]["path"] == str(folder)
+    assert saved[0]["run"] == flow["tasks"][0]["writer_run"]
+    assert saved[0]["turn"] == 1
+    events = [
+        event
+        for event in record.read_events(h.id, h.env)
+        if event["kind"] == "denied_paths"
+    ]
+    assert len(events) == 1
+    assert events[0]["task"] == "a"
+    assert events[0]["role"] == "writer"
+    assert events[0]["denied_paths"] == saved
+
+
+def _conflicted(h: Harness) -> dict[str, Any]:
+    h.create(
+        [
+            task("a", text="@write README.md first"),
+            task("b", text="@write README.md second"),
+        ]
+    )
+    flow = h.run()
+    assert [t["status"] for t in flow["tasks"]] == ["merged", "conflict"]
+    return flow
+
+
+def _merge_by_hand(h: Harness, flow: dict[str, Any]) -> str:
+    worktree = flow["worktree"]
+    tip = flow["tasks"][1]["merge_tip"]
+
+    def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", worktree, *args],
+            env=h.env,
+            capture_output=True,
+            text=True,
+            check=check,
+        )
+
+    assert git("merge", "--no-ff", "--no-edit", tip, check=False).returncode
+    Path(worktree, "README.md").write_text("resolved\n")
+    git("add", "README.md")
+    git("commit", "--no-edit")
+    return git("rev-parse", "HEAD").stdout.strip()
+
+
+def test_conflict_reason_names_how_a_hand_merge_is_recorded(h: Harness) -> None:
+    flow = _conflicted(h)
+    reason = flow["tasks"][1]["reason"]
+    assert f"emb flow --resume {h.id}" in reason
+    assert f"emb flow --lead {h.id} b --accept" in reason
+
+
+def test_hand_merged_conflict_is_recorded_as_merged_on_resume(h: Harness) -> None:
+    flow = _conflicted(h)
+    merge = _merge_by_hand(h, flow)
+    resumed = h.run()
+    item = resumed["tasks"][1]
+    assert item["status"] == "merged" and item["merge_commit"] == merge
+    assert resumed["status"] == "done" and resumed["reason"] is None
+
+
+def test_accept_on_a_conflict_needs_the_tip_in_the_flow_branch(h: Harness) -> None:
+    flow = _conflicted(h)
+    tip = flow["tasks"][1]["merge_tip"]
+    record.append_answer(h.id, {"task": "b", "kind": "accept", "commit": tip}, h.env)
+    refused = h.run()
+    assert refused["tasks"][1]["status"] == "conflict"
+    stops = [
+        event
+        for event in record.read_events(h.id, h.env)
+        if event.get("kind") == "lead_stop" and event.get("task") == "b"
+    ]
+    assert stops and f"{tip} is not in" in stops[-1]["reason"]
+    _merge_by_hand(h, refused)
+    record.append_answer(h.id, {"task": "b", "kind": "accept", "commit": tip}, h.env)
+    assert h.run()["tasks"][1]["status"] == "merged"
+
+
+def test_accept_on_a_conflict_takes_only_the_approved_tip(h: Harness) -> None:
+    flow = _conflicted(h)
+    record.append_answer(
+        h.id, {"task": "b", "kind": "accept", "commit": flow["base"]}, h.env
+    )
+    refused = h.run()
+    assert refused["tasks"][1]["status"] == "conflict"
+    stops = [
+        event
+        for event in record.read_events(h.id, h.env)
+        if event.get("kind") == "lead_stop" and event.get("task") == "b"
+    ]
+    assert "is not the approved tip" in stops[-1]["reason"]
+
+
+def test_squashed_hand_merge_records_a_commit_on_the_flow_branch(
+    h: Harness,
+) -> None:
+    flow = _conflicted(h)
+    worktree = flow["worktree"]
+    tip = flow["tasks"][1]["merge_tip"]
+
+    def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", worktree, *args],
+            env=h.env,
+            capture_output=True,
+            text=True,
+            check=check,
+        )
+
+    git("merge", "--squash", tip, check=False)
+    git("checkout", tip, "--", ".")
+    git("add", "-A")
+    git("commit", "-m", "squash b by hand")
+    squash = git("rev-parse", "HEAD").stdout.strip()
+    item = h.run()["tasks"][1]
+    assert item["status"] == "merged" and item["merge_commit"] == squash
+    assert (
+        git(
+            "merge-base", "--is-ancestor", squash, flow["branch"], check=False
+        ).returncode
+        == 0
+    )
+
+
+def test_reconcile_runs_before_a_failing_pending_check(h: Harness) -> None:
+    flow = _conflicted(h)
+    merge = _merge_by_hand(h, flow)
+    saved = record.load(h.id, h.env)
+    saved.update(check=["false"], check_pending=True)
+    record.save(saved, h.env)
+    code = runner.run(h.id, h.env, core_factory=h.factory, poll_seconds=0.01)
+    item = h.flow()["tasks"][1]
+    assert code != 0 or h.flow()["status"] == "failed"
+    assert item["status"] == "merged" and item["merge_commit"] == merge
+
+
+def test_accept_after_reconciliation_is_not_refused(h: Harness) -> None:
+    flow = _conflicted(h)
+    tip = flow["tasks"][1]["merge_tip"]
+    _merge_by_hand(h, flow)
+    record.append_answer(h.id, {"task": "b", "kind": "accept", "commit": tip}, h.env)
+    done = h.run()
+    assert done["tasks"][1]["status"] == "merged" and done["status"] == "done"
+    assert done["answers_seen"] == 1
+    assert not [
+        event
+        for event in record.read_events(h.id, h.env)
+        if event.get("kind") == "lead_stop" and "refused" in event.get("reason", "")
+    ]

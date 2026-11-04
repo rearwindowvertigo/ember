@@ -6,6 +6,10 @@ decide whether a plan is checked (Run the gap check: off, always, from a
 task count, or ask) and which gaps reach the owner (Gaps Claude asks you
 about). Ember applies both; do not decide them yourself.
 
+Use the run's claim after its skill-version check (SKILL.md step 2).
+Reload a stale skill before the next step and keep that claim; start no
+reviewer on an unknown installed version.
+
 Write the plan in the session scratchpad with the cases it must handle and
 those it accepts: a nonblank `failure_model` string in a flow plan, or a
 "Failure model" section in a Workflow plan. Keep it to the request: no
@@ -35,11 +39,20 @@ Then:
 
 ## Run and read
 
-Run as a background Bash command, unpiped, and take its exit code:
+Run as a background Bash command, unpiped, and take its exit code. Save
+the JSON result to a numbered scratch file; it is where answers are
+recorded and what a repeat check reads:
 
 ```bash
-emb gapcheck --plan <file> --dir <repo> --claim <id> --json
+emb gapcheck --plan <file> --dir <repo> --claim <id> --json > <scratch>/gapcheck-<plan stem>-1.json
 ```
+
+The reviewer reads the repository in its own detached worktree at the
+source checkout's `HEAD`. The brief includes the plan text, including an
+uncommitted plan, and tells it to use its own working folder without
+naming the source checkout. Other uncommitted repository edits are absent;
+report every uncommitted-path warning. A successful close removes the
+clean detached worktree; changes are kept with a discard-command warning.
 
 Use the run's existing claim. `emb gapcheck` uses the owner's Gap check
 reviewer row (`gapcheck.reviewer`, which follows `single.reviewer` while
@@ -50,18 +63,35 @@ the row cannot answer, ask the owner using the skill's worker question.
 Never change settings to make the check run.
 
 For a flow, run the exact `gapcheck` command from the dry run (also printed
-after `gap check:`; it already carries `--confirmed` after an `ask`). Add
-`--claim <id>` when absent. For a Claude Workflow, run the command above.
+after `gap check:`; it already carries `--json` and `--confirmed` after an
+`ask`). Add `--claim <id>` when absent and the redirect above. For a Claude
+Workflow, run the command above.
 Should `emb gapcheck` itself report `status` `skipped` or `ask`, the
 settings changed since you read them: treat it as the decision above.
 
 Read the JSON or text before starting work. Check `parse_error`,
 `uncovered_steps` and `unknown_steps`: any error or missing or unknown
-step leaves the check incomplete. Empty gap lists and zero counts are
-valid only with coverage of every expected step. Exit 81: follow `next:`
+step leaves the check incomplete. With `--previous`, a missing or unknown
+earlier gap disposition also leaves it incomplete. Empty gap lists and
+zero counts are valid only with coverage of every expected step. Exit 81: follow `next:`
 to obtain a complete reply. On a `WARNING:` about a missing failure model,
 add it and check again. Read every warning and follow `next:` within the
-skill's rules; bring `owner:` lines to the owner.
+skill's rules; bring `owner:` lines to the owner. For a CLI reviewer's
+denied paths, inspect its run status and follow `references/runs.md`: name
+each path and reason, give the Settings, Sandbox read paths owner action
+when present, and never add paths to `sandbox.read` yourself.
+
+Check for tasks whose `files` overlap only on a shared file, even when
+they edit different sections: a reference document, changelog, index or
+registration point such as a command-line parser. Raise that overlap as a
+gap when the shared edits can be separated from the tasks' own checks.
+The default is a separate shared-file task with `after` on every
+implementation task whose results it describes or registers; remove the
+shared file from those implementation tasks' `files` and name the boundary
+in their briefs. The lead may instead make those edits while merging.
+When a task's own checks need the shared edit, keep it with that task and
+serialize the overlap. A parser option exercised by the task's tests is
+such a case. Keep the one-file rule; section scopes do not remove overlap.
 
 ## Claude subagent reviewer
 
@@ -70,26 +100,38 @@ as a Claude subagent:
 
 1. Print the brief, with `--confirmed` when the owner approved an `ask`
    check:
-   `emb gapcheck --plan <file> --dir <repo> --brief [--confirmed] > <scratch>/gap-brief.md`.
+   `emb gapcheck --plan <file> --dir <repo> --brief [--confirmed] [--previous <result>] > <scratch>/gap-brief.md`.
 2. Give it to a read-only general-purpose subagent without isolation.
    Follow `references/claude-agents.md` for its model and tools.
-3. Save its final message to a scratch file, then parse it:
-   `emb gapcheck --plan <file> --reply <reply-file> --json`.
+3. Save its final message to a scratch file, then parse it with the same
+   `--previous`:
+   `emb gapcheck --plan <file> --reply <reply-file> [--previous <result>] --json > <scratch>/gapcheck-<plan stem>-<n>.json`.
 
 These two commands start no run and use no claim. Check the parsed result
 for coverage and errors as above.
 
 ## Owner answers
 
-Each gap carries `ask_owner`, from the owner's Gaps Claude asks you about.
-Take the default of every gap whose `ask_owner` is false: write it into the
-failure model, ask nothing, and list each one in your report. For the rest,
+Each gap in `steps` carries an `id` and `ask_owner`, from the owner's Gaps
+Claude asks you about. Take the default of every gap whose `ask_owner` is
+false: write it into the failure model, ask nothing, and list each one in
+your report. For the rest,
 ask each `high` gap as its own question, in task order, waiting for its
 answer before the next question. Give the gap, its scenario and its
 proposed default as the recommended answer. Then offer the remaining
 `medium` and `low` gaps together as one question whose recommended answer
 accepts their defaults into the failure model. An empty gap list needs no
 question.
+
+Record every owner answer and every default taken with:
+
+```bash
+emb gapcheck --answer <scratch>/gapcheck-<plan stem>-<n>.json --id <gap id> --text '<answer>'
+```
+
+Ember validates and updates the result. Do not edit the JSON by hand.
+The answer is stored once, on its gap in `steps` (or `settled` for an
+earlier settled gap). `ranked` refers to active gaps by id, step and harm.
 
 Before putting a `high` gap to the owner, check its factual premise
 against a live source, such as a log, a rollout file, a record file or the
@@ -100,6 +142,37 @@ With the owner away and no answer possible, work waits. Do not take a
 default for a `high` gap yourself. Write the answers into the failure
 model, context or task text before `--start` or the Workflow. If answers
 materially change task scope, files, dependencies or ordering, repeat the
-flow dry run and gap check (the gap check alone for a Workflow). Recording
-answers without such changes needs no repeat. The reviewer finds gaps;
+flow dry run with `--previous <last result>` and its printed gap check
+command (the gap check alone for a Workflow, with the same `--previous`).
+Recording answers without such changes needs no repeat. The reviewer finds gaps;
 it decides nothing.
+
+## Repeat checks
+
+Every repeat check passes the last result, with its answers recorded, as
+`--previous <scratch>/gapcheck-<plan stem>-<n>.json`, and saves its own
+result as the next number. Keep the plan stem in each result filename; report a
+`WARNING:` when the earlier result names a different plan path. The result
+records `plan` and `previous_plan`; check that the earlier file belongs to
+this review chain.
+
+The reviewer sees the ids, original steps, gap text and answers of every
+active and settled earlier gap and gives each a `dispositions` entry:
+`{id, status: settled|reopened|closed, reason}`. An unanswered gap cannot
+be settled. Every current plan step still needs coverage. In the new result:
+
+- `settled` lists answered gaps that stay answered. Ask nothing about them;
+  they carry into the next result.
+- A gap with `earlier` repeats an earlier gap or reopens its answer after
+  the plan change. Ask it again as a new gap, giving the earlier answer
+  from the previous result, and record the new answer on the new gap.
+- Other gaps are new.
+- `closed` keeps earlier gaps with their closure reasons. Ask nothing
+  about them. They carry forward as history and need no disposition on
+  later checks; a closed concern that matters again is raised as a new gap.
+
+Every `reopened` disposition must link to exactly one new gap through
+`earlier`. Ember assigns new ids from the earlier result's `next_id`, so
+ids are never reused in a chain. Missing or unknown dispositions and
+invalid links leave the check incomplete (exit 81); finish that check
+before using its result for another repeat.

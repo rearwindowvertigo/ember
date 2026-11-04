@@ -44,7 +44,9 @@ def test_choices_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exit_info:
         main(["choices", "--help"])
     assert exit_info.value.code == 0
-    assert "--expect-generation" in capsys.readouterr().out
+    help_text = capsys.readouterr().out
+    assert "--expect-generation" in help_text
+    assert "--skill X.Y.Z" in help_text
 
 
 @pytest.mark.parametrize(
@@ -52,6 +54,30 @@ def test_choices_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
     [
         ["--nope"],
         ["nope"],
+        [
+            "merge",
+            "ember/codex/test-run",
+            "--into",
+            "main",
+            "--verdict",
+            "keep",
+            "--note",
+            "Keep",
+            "--subject",
+            " ",
+        ],
+        [
+            "merge",
+            "ember/codex/test-run",
+            "--into",
+            "main",
+            "--verdict",
+            "keep",
+            "--note",
+            "Keep",
+            "--subject",
+            "feat: x\nbody",
+        ],
         ["choices", "--nope"],
         ["choices", "--expect-generation", "x", "--clear-once"],
     ],
@@ -192,6 +218,99 @@ def test_empty_list_value(
     assert data["settings"] == {"sandbox.read": []}
 
 
+@pytest.mark.parametrize("loaded", ["0.12.0", "0.13.0", "1.0.0"])
+def test_claim_skill_version_reply_and_warning(
+    env: dict[str, str], tmp_path: Path, capsys: pytest.CaptureFixture[str], loaded: str
+) -> None:
+    installed = tmp_path / "installed-skill"
+    installed.mkdir()
+    (installed / "SKILL.md").write_text(
+        "---\nname: ember\n---\n"
+        "Skill version: 0.13.0 <!-- x-release-please-version -->\n"
+    )
+    link = skill.link_path(env)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(installed)
+    choices.set_once({"single.writer_as": "subagent"}, env=env)
+
+    code, data, err = _run(
+        ["--claim", "--id", "run-000001", "--skill", loaded], env, capsys
+    )
+
+    assert code == 0
+    assert data["skill"] == ("current" if loaded == "0.13.0" else "stale")
+    assert data["loaded_skill_version"] == loaded
+    assert data["installed_skill_version"] == "0.13.0"
+    assert data["claim"]["status"] == "claimed"
+    assert err == (
+        ""
+        if loaded == "0.13.0"
+        else (
+            f"WARNING: the loaded ember skill is {loaded}; "
+            "the installed skill is 0.13.0\n"
+            "next: reload the ember skill before the next step\n"
+        )
+    )
+
+
+@pytest.mark.parametrize("version_line", [None, "", "Skill version: invalid\n"])
+def test_claim_unknown_skill_warns_and_keeps_claim(
+    env: dict[str, str],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    version_line: str | None,
+) -> None:
+    if version_line is not None:
+        installed = tmp_path / "installed-skill"
+        installed.mkdir()
+        (installed / "SKILL.md").write_text("---\nname: ember\n---\n" + version_line)
+        link = skill.link_path(env)
+        link.parent.mkdir(parents=True)
+        link.symlink_to(installed)
+    choices.set_once({"single.writer_as": "subagent"}, env=env)
+
+    code, data, err = _run(
+        ["--claim", "--id", "run-000001", "--skill", "0.12.0"], env, capsys
+    )
+
+    assert code == 0
+    assert data["skill"] == "unknown"
+    assert data["installed_skill_version"] is None
+    assert data["claim"]["status"] == "claimed"
+    assert choices.read("run-000001", env=env)["claim"]["status"] == "claimed"
+    assert choices.snapshot(env=env)["once"] is None
+    assert err.startswith("WARNING: the installed ember skill version is ")
+    assert "owner:" in err
+    assert "before starting a worker" in err
+
+
+@pytest.mark.parametrize("loaded", ["", "0.12", "v0.12.0", "0.12.0\n"])
+def test_claim_invalid_skill_exits_64_and_keeps_once(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str], loaded: str
+) -> None:
+    choices.set_once({"single.writer_as": "subagent"}, env=env)
+    before = choices.snapshot(env=env)
+    code, data, err = _run(
+        ["--claim", "--id", "run-000001", "--skill", loaded], env, capsys
+    )
+    assert code == 64
+    assert data is None
+    assert "--skill needs a version in x.y.z form" in err
+    assert choices.snapshot(env=env) == before
+    assert choices.read("run-000001", env=env)["claim"]["status"] == "unknown"
+
+
+def test_claim_without_skill_has_no_skill_fields_or_warning(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, data, err = _run(["--claim", "--id", "run-000001"], env, capsys)
+    assert code == 0
+    assert err == ""
+    assert "skill" not in data
+    assert "loaded_skill_version" not in data
+    assert "installed_skill_version" not in data
+
+
 @pytest.mark.parametrize(
     "argv",
     [
@@ -218,6 +337,11 @@ def test_owner_options_without_terminal_exit_77(
     "argv",
     [
         ["--claim"],
+        ["--skill", "0.12.0"],
+        ["--id", "run-000001", "--skill", "0.12.0"],
+        ["--finish", "run-000001", "--skill", "0.12.0"],
+        ["--once", "single.writer=ask", "--skill", "0.12.0"],
+        ["--set", "app.theme=dark", "--skill", "0.12.0"],
         ["--claim", "--id", "run-000001", "--finish", "run-000001"],
         ["--set", "app.theme=dark", "--clear", "app.theme"],
         ["--once", "single.writer=ask", "--clear-once"],
@@ -587,7 +711,14 @@ def test_run_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
         main(["run", "--help"])
     assert exit_info.value.code == 0
     out = capsys.readouterr().out
-    for option in ("--engine", "--task-file", "--recover", "--stall", "--trailer"):
+    for option in (
+        "--engine",
+        "--task-file",
+        "--recover",
+        "--stall",
+        "--trailer",
+        "--dry-run",
+    ):
         assert option in out
 
 
@@ -600,7 +731,9 @@ def test_run_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
         (["--send", "r"], "--send and --message-file go together"),
         (["--status", "--message-file", "f"], "--send and --message-file go together"),
         (["--status", "--force"], "--force needs --close or --send"),
-        (["--close", "r", "--json"], "--json needs --status"),
+        (["--close", "r", "--json"], "--json needs --status or --dry-run"),
+        (["--status", "--dry-run"], "--dry-run cannot be used with --status"),
+        (["--dry-run"], "a new run needs --engine, --dir, --task-file"),
     ],
 )
 def test_run_usage_errors_exit_64(
@@ -627,6 +760,72 @@ def test_run_status_with_no_runs(
 ) -> None:
     assert main(["run", "--status", "--json"], env=run_env) == 0
     assert json.loads(capsys.readouterr().out) == []
+
+
+@pytest.mark.parametrize(
+    ("options", "model", "effort", "model_source", "effort_source"),
+    [
+        ([], "opus", "high", "single.writer", "single.writer"),
+        (["--read-only"], "opus", "high", "single.reviewer", "single.reviewer"),
+        (["--model", "opus"], "opus", "high", "--model", "single.writer"),
+        (["--model", "sonnet"], "sonnet", "medium", "--model", "--model"),
+        (["--effort", "low"], "opus", "low", "single.writer", "--effort"),
+        (
+            ["--model", "sonnet", "--effort", "low"],
+            "sonnet",
+            "low",
+            "--model",
+            "--effort",
+        ),
+    ],
+)
+def test_run_dry_run_text_and_json_sources(
+    tmp_path: Path,
+    run_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    options: list[str],
+    model: str,
+    effort: str,
+    model_source: str,
+    effort_source: str,
+) -> None:
+    from ember import engines, paths
+
+    stub = _stub_engine()
+    driver = stub.StubDriver("claude", stub.script_path(run_env))
+    monkeypatch.setattr(engines, "load_driver", lambda name, env=None: driver)
+    repo = stub.make_repo(tmp_path, run_env)
+    brief = tmp_path / "brief.md"
+    brief.write_text("Task\n")
+    argv = [
+        "run", "--engine", "claude", "--dir", str(repo), "--task-file", str(brief),
+        "--dry-run", *options,
+    ]  # fmt: skip
+    row = "Single tasks Reviewer" if "--read-only" in options else "Single tasks Writer"
+    assert main([*argv, "--json"], env=run_env) == 0
+    out, err = capsys.readouterr()
+    assert err == ""
+    assert json.loads(out) == {
+        "screen": "Team",
+        "row": row,
+        "engine": "claude",
+        "model": model,
+        "effort": effort,
+        "model_source": model_source,
+        "effort_source": effort_source,
+    }
+    assert main(argv, env=run_env) == 0
+    out, err = capsys.readouterr()
+    source = (
+        model_source
+        if model_source == effort_source
+        else f"model: {model_source}, effort: {effort_source}"
+    )
+    assert out == f"Team, {row}: claude {model} · {effort} ({source})\n"
+    assert err == ""
+    assert driver.commands == []
+    assert not paths.runs_dir(run_env).exists()
 
 
 def test_run_start_status_and_close(
@@ -708,6 +907,10 @@ def test_gapcheck_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
         "--json",
         "--brief",
         "--reply",
+        "--previous",
+        "--answer",
+        "--id",
+        "--text",
     ):
         assert option in output
 
@@ -904,6 +1107,7 @@ def test_flow_help_and_order(capsys: pytest.CaptureFixture[str]) -> None:
     output = capsys.readouterr().out
     assert "--lead FLOW TASK" in output and "--resume FLOW" in output
     assert "--cancel FLOW" in output and "--reason TEXT" in output
+    assert "--previous FILE" in output
     with pytest.raises(SystemExit) as result:
         main(["--help"])
     assert result.value.code == 0

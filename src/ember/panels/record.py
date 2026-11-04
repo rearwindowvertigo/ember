@@ -42,6 +42,7 @@ _PANEL_FIELDS = {
     "id": "str",
     "status": "str",
     "dir": "str",
+    "base": "str?",
     "question_file": "str",
     "read": "[str]",
     "claim": "str?",
@@ -123,6 +124,7 @@ def new_panel(
     timeout_minutes: float,
     members: Sequence[Mapping[str, Any]],
     left_out: Sequence[Mapping[str, str]],
+    base: str | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
     """Build a panel record with independent nested member and attempt lists."""
@@ -132,6 +134,7 @@ def new_panel(
         "id": panel_id,
         "status": "running",
         "dir": dir,
+        "base": base,
         "question_file": question_file,
         "read": list(read),
         "claim": claim,
@@ -190,7 +193,10 @@ def _validate(panel_id: str, panel: object) -> None:
         if panel[key] <= 0:
             raise PanelError(panel_id, f"panel.json has an invalid {key}")
     for n, member in enumerate(panel["members"], 1):
-        _fields(panel_id, member, _MEMBER_FIELDS, f"member {n}")
+        fields = {**_MEMBER_FIELDS}
+        if "denied_paths" in member:
+            fields["denied_paths"] = "[dict]"
+        _fields(panel_id, member, fields, f"member {n}")
         if member["n"] != n or member["status"] not in MEMBER_STATUSES:
             raise PanelError(panel_id, f"member {n} has an invalid number or status")
         if member["bytes"] < 0 or (
@@ -249,6 +255,8 @@ def load(panel_id: str, env: Mapping[str, str] | None = None) -> dict[str, Any]:
         raise PanelMissingError(panel_id, "no such panel") from error
     except (OSError, ValueError) as error:
         raise PanelError(panel_id, f"cannot read panel.json: {error}") from error
+    if isinstance(value, dict):
+        value.setdefault("base", None)
     _validate(panel_id, value)
     return value
 

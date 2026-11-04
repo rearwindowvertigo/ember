@@ -2,26 +2,27 @@
 
 Each run has a folder `runs/<run id>/` in Ember's state folder, at mode 700,
 holding `run.json` (mode 600, replaced atomically), `brief.md` and one
-`turn-<n>.md` per reply. Paths are absolute strings and times are seconds
-since the epoch.
+`turn-<n>.md` per reply and `turn-<n>.outcome.json` per turn result. Paths
+are absolute strings and timestamps are seconds since the epoch.
 
-Every function takes an optional `env` mapping, which defaults to
-`os.environ`.
+Functions that locate run folders take an optional `env` mapping, which
+defaults to `os.environ`.
 """
 
 import contextlib
 import fcntl
 import json
+import math
 import os
 import re
 import secrets
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
-from ember import paths
+from ember import engines, paths, processes
 
 RECORD_NAME = "run.json"
 BRIEF_NAME = "brief.md"
@@ -43,6 +44,9 @@ TURN_STATES = (SENT, COLLECTED, COMMITTED)
 
 SANDBOXES = ("codex", "bubblewrap", "none")
 """The values of `sandbox`: who provides the run's sandbox."""
+
+PARENT_COMMANDS = ("gapcheck", "panel", "flow")
+"""The Ember commands that start runs of their own and record themselves as parent."""
 
 _PANEL_ID = re.compile(r"panel-\d{8}-\d{6}-[0-9a-f]{6}")
 _FLOW_ID = re.compile(r"flow-\d{8}-\d{6}-[0-9a-f]{6}")
@@ -93,8 +97,7 @@ class Run:
     """The top of the checkout Claude named."""
 
     worktree: str
-    """The worker's working folder: its worktree, or the checkout itself for a
-    read-only run."""
+    """The worker's worktree; older read-only records name the source checkout."""
 
     branch: str | None
     """`ember/<engine>/<id>`, or `None` for a read-only run."""
@@ -160,8 +163,32 @@ class Run:
     subject: str
     """The brief's first non-empty line."""
 
+    capacity_retries: int = 2
+    """The retry limit saved at start."""
+
+    capacity_wait: int = 30
+    """Seconds before each capacity resend, saved at start."""
+
     base_branch: str | None = None
     """The source checkout's branch when the run started, or None if detached."""
+
+    main: str | None = None
+    """The main checkout at start; None for a bare repository or an older record."""
+
+    common: str | None = None
+    """The common git folder at start; None in records written before this field."""
+
+    detached: bool = False
+    """Whether Ember owns a detached worktree for this read-only run."""
+
+    last_screen_change_at: float | None = None
+    """When a wait loop last observed a changed screen, or None before activity."""
+
+    sandbox_paths: dict[str, Any] = field(default_factory=dict)
+    """Launch-time hidden paths, resolved names and credential inventory."""
+
+    parent: dict[str, Any] | None = None
+    """The Ember command that started the run, from `parent()`; None for `emb run`."""
 
     folder: Path = field(default=Path(), compare=False)
     """The run's folder."""
@@ -195,8 +222,16 @@ _TYPES: dict[str, tuple[tuple[type, ...], bool]] = {
     "worktree": (_STR, False),
     "branch": (_STR, True),
     "base": (_STR, True),
+    "capacity_retries": ((int,), False),
+    "capacity_wait": ((int,), False),
     "base_branch": (_STR, True),
+    "main": (_STR, True),
+    "common": (_STR, True),
+    "detached": ((bool,), False),
+    "last_screen_change_at": ((int, float), True),
+    "parent": ((dict,), True),
     "sandbox": (_STR, False),
+    "sandbox_paths": ((dict,), False),
     "network": ((bool,), False),
     "read": ((list,), False),
     "read_effective": ((list,), False),
@@ -216,6 +251,171 @@ _TYPES: dict[str, tuple[tuple[type, ...], bool]] = {
     "subject": (_STR, False),
 }
 """Each stored field's JSON types and whether it may be null."""
+
+_OUTCOME_TYPES: dict[str, tuple[type, ...]] = {
+    "exit": (int,),
+    "state": (str,),
+    "reason": (str,),
+    "provider_error": (bool,),
+    "signed_out": (bool,),
+    "incomplete": (str,),
+    "seconds": (int, float),
+    "denied_paths": (list,),
+}
+
+
+def outcome_path(run: Run, turn: int) -> Path:
+    """Return the file holding a turn's result.
+
+    Args:
+        run: The run.
+        turn: The turn number.
+
+    Returns:
+        The outcome file's path.
+    """
+    return run.folder / f"turn-{turn}.outcome.json"
+
+
+def _nonnegative_number(value: object) -> bool:
+    """Return whether a JSON value is a finite nonnegative number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return value >= 0 and math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def load_outcome(run: Run, turn: int) -> dict[str, Any]:
+    """Read a turn's result, with null exit and seconds for older records.
+
+    Args:
+        run: The run.
+        turn: The turn number.
+
+    Returns:
+        The result's fields.
+
+    Raises:
+        RecordError: The outcome file is missing, unreadable or malformed.
+    """
+    path = outcome_path(run, turn)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError) as error:
+        raise RecordError(run.id, f"cannot read {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise RecordError(run.id, f"{path} is not an object")
+    value = {"exit": None, "seconds": None, "denied_paths": [], **value}
+    result: dict[str, Any] = {}
+    for key, types in _OUTCOME_TYPES.items():
+        if key not in value:
+            raise RecordError(run.id, f"{path} has no {key}")
+        item = value[key]
+        if item is not None and (
+            not isinstance(item, types)
+            or (isinstance(item, bool) and bool not in types)
+        ):
+            raise RecordError(run.id, f"{path} has an invalid {key}")
+        result[key] = item
+    denials = result["denied_paths"]
+    if not isinstance(denials, list) or not all(
+        isinstance(item, dict)
+        and isinstance(item.get("path"), str)
+        and Path(item["path"]).is_absolute()
+        and item.get("reason") in ("hidden", "secret location", "protected")
+        and (
+            item.get("allow_path") is None
+            or (
+                isinstance(item["allow_path"], str)
+                and Path(item["allow_path"]).is_absolute()
+            )
+        )
+        and (item["reason"] == "hidden" or item.get("allow_path") is None)
+        for item in denials
+    ):
+        raise RecordError(run.id, f"{path} has invalid denied_paths")
+    if result["state"] not in (None, engines.DONE, engines.FAILED):
+        raise RecordError(run.id, f"{path} has an invalid state")
+    if result["state"] is None and result["exit"] is not None:
+        raise RecordError(run.id, f"{path} has no completed state")
+    if result["state"] is not None:
+        for key in ("provider_error", "signed_out"):
+            if result[key] is None:
+                raise RecordError(run.id, f"{path} has an invalid {key}")
+    seconds = result["seconds"]
+    if seconds is not None and not _nonnegative_number(seconds):
+        raise RecordError(run.id, f"{path} has invalid seconds")
+    if "provider_kind" in value:
+        if value["provider_kind"] not in (None, *engines.PROVIDER_KINDS):
+            raise RecordError(run.id, f"{path} has an invalid provider_kind")
+        result["provider_kind"] = value["provider_kind"]
+    for key in ("attempts", "retry_at", "retry_clock"):
+        if key in value:
+            result[key] = value[key]
+    attempts = result.get("attempts", [])
+    if not isinstance(attempts, list) or not all(
+        isinstance(attempt, dict)
+        and isinstance(attempt.get("id"), str)
+        and type(attempt.get("sent")) is bool
+        and type(attempt.get("sending")) is bool
+        and attempt.get("provider_kind") in (None, *engines.PROVIDER_KINDS)
+        and attempt.get("result") in (None, engines.DONE, engines.FAILED)
+        and _nonnegative_number(attempt.get("seconds"))
+        for attempt in attempts
+    ):
+        raise RecordError(run.id, f"{path} has invalid attempts")
+    for key in ("retry_at", "retry_clock"):
+        item = result.get(key)
+        if item is not None and not _nonnegative_number(item):
+            raise RecordError(run.id, f"{path} has invalid {key}")
+    return result
+
+
+def turn_results(run: Run) -> tuple[list[dict[str, Any]], list[RecordError]]:
+    """Read one result per recorded turn, oldest first.
+
+    Args:
+        run: The run.
+
+    Returns:
+        The numbered results and errors. A broken outcome has null fields.
+    """
+    results: list[dict[str, Any]] = []
+    errors: list[RecordError] = []
+    for turn in range(1, run.turn + 1):
+        try:
+            outcome = load_outcome(run, turn)
+        except RecordError as error:
+            errors.append(error)
+            outcome = dict.fromkeys(_OUTCOME_TYPES)
+        results.append({"turn": turn, **outcome})
+    return results, errors
+
+
+def run_denials(run: Run) -> list[dict[str, Any]]:
+    """Return denied paths with the run and turn that reported each one."""
+    turns, _ = turn_results(run)
+    return [
+        {**item, "run": run.id, "turn": turn["turn"]}
+        for turn in turns
+        for item in (turn.get("denied_paths") or [])
+    ]
+
+
+def referenced_denials(
+    run_ids: Iterable[str | None],
+    env: Mapping[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Read the union of denials from referenced runs, tolerating old records."""
+    result: list[dict[str, Any]] = []
+    for run_id in dict.fromkeys(run_ids):
+        if not run_id:
+            continue
+        with contextlib.suppress(RecordError):
+            result.extend(run_denials(load(run_id, env)))
+    return result
 
 
 def check_id(run_id: object) -> str:
@@ -303,7 +503,18 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
     name = folder.name
     if not isinstance(value, dict):
         raise RecordError(name, "run.json is not an object")
-    value = {"base_branch": None, **value}
+    value = {
+        "sandbox_paths": {},
+        "capacity_retries": 2,
+        "capacity_wait": 30,
+        "base_branch": None,
+        "main": None,
+        "common": None,
+        "detached": False,
+        "last_screen_change_at": None,
+        "parent": None,
+        **value,
+    }
     values: dict[str, Any] = {}
     for key, (types, nullable) in _TYPES.items():
         if key not in value:
@@ -321,6 +532,14 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
                 raise RecordError(name, f"run.json has an invalid {key}")
             item = tuple(item)
         values[key] = item
+    from ember import sandbox
+
+    if not sandbox.valid_snapshot(values["sandbox_paths"]):
+        raise RecordError(name, "run.json has invalid sandbox_paths")
+    if not 0 <= values["capacity_retries"] <= 10:
+        raise RecordError(name, "run.json has an invalid capacity_retries")
+    if not 5 <= values["capacity_wait"] <= 600:
+        raise RecordError(name, "run.json has an invalid capacity_wait")
     if values["id"] != name:
         raise RecordError(name, "run.json names another run")
     if values["sandbox"] not in SANDBOXES:
@@ -329,10 +548,61 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
         raise RecordError(name, "run.json has an invalid status")
     if values["turn_state"] is not None and values["turn_state"] not in TURN_STATES:
         raise RecordError(name, "run.json has an invalid turn_state")
-    for key in ("started_at", "updated_at", "ended_at"):
+    if values["parent"] is not None and not _valid_parent(values["parent"]):
+        raise RecordError(name, "run.json has an invalid parent")
+    for key in ("started_at", "updated_at", "ended_at", "last_screen_change_at"):
         if values[key] is not None:
             values[key] = float(values[key])
     return Run(**values, folder=folder, env=_env(env))
+
+
+def _valid_parent(value: dict[str, Any]) -> bool:
+    """Return whether a stored parent has the shape `parent()` writes."""
+    return (
+        set(value) == {"command", "id", "pid", "start"}
+        and value["command"] in PARENT_COMMANDS
+        and (value["id"] is None or isinstance(value["id"], str))
+        and all(
+            isinstance(value[key], int) and not isinstance(value[key], bool)
+            for key in ("pid", "start")
+        )
+    )
+
+
+def parent(command: str, parent_id: str | None = None) -> dict[str, Any] | None:
+    """Return the parent entry for a run that this process starts.
+
+    Args:
+        command: The starting command, one of `PARENT_COMMANDS`.
+        parent_id: The flow or panel id; `None` for a gap check.
+
+    Returns:
+        The command, the id, and this process's id and start time in clock
+        ticks since boot; `None` when `/proc` cannot identify this process.
+    """
+    found = processes.current()
+    if found is None:
+        return None
+    return {"command": command, "id": parent_id, "pid": found[0], "start": found[1]}
+
+
+def orphaned(run: Run) -> bool:
+    """Return whether a run's parent command ended and left the run uncollected.
+
+    A run started by `emb run` has no parent and is never orphaned. A process
+    id reused by another process does not count as the parent, because the
+    start time is compared too.
+
+    Args:
+        run: The run.
+
+    Returns:
+        True when the run is starting, running or waiting, it records a
+        parent, and that parent process is no longer running.
+    """
+    if run.parent is None or run.status not in (STARTING, RUNNING, WAITING):
+        return False
+    return not processes.running((run.parent["pid"], run.parent["start"]))
 
 
 def load(run_id: str, env: Mapping[str, str] | None = None) -> Run:

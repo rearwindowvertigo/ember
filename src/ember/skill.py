@@ -15,6 +15,7 @@ their own.
 """
 
 import os
+import re
 import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -34,6 +35,11 @@ CONFIG_DIR_VARIABLE = "CLAUDE_CONFIG_DIR"
 
 PARENT_MODE = 0o755
 """The mode of each parent folder Ember creates, as Claude Code's own."""
+
+_VERSION = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+_VERSION_LINE = re.compile(
+    rf"Skill version: (?P<version>{_VERSION})(?: <!-- x-release-please-version -->)?"
+)
 
 EX_OK = 0
 EX_NOINPUT = 66
@@ -176,6 +182,35 @@ def checkout_skill() -> Path:
         Ember runs from a source checkout.
     """
     return Path(ember.__file__).resolve().parents[2] / "skill"
+
+
+def is_valid_version(version: str) -> bool:
+    """Return whether `version` is a release version in `x.y.z` form."""
+    return re.fullmatch(_VERSION, version) is not None
+
+
+def installed_version(env: Mapping[str, str] | None = None) -> str | None:
+    """Read the version from the installed skill link's target.
+
+    Args:
+        env: The environment; `None` reads `os.environ`.
+
+    Returns:
+        The version, or `None` when the link, Ember skill or single version
+        line is missing, unreadable or malformed. No source fallback is used.
+    """
+    link = link_path(env)
+    try:
+        if not link.is_symlink() or not is_ember_skill(link):
+            return None
+        text = (link / "SKILL.md").read_text(encoding="utf-8")
+    except OSError, UnicodeDecodeError:
+        return None
+    lines = [line for line in text.splitlines() if line.startswith("Skill version:")]
+    if len(lines) != 1:
+        return None
+    match = _VERSION_LINE.fullmatch(lines[0])
+    return None if match is None else match["version"]
 
 
 def source_candidates() -> tuple[Path, ...]:

@@ -23,8 +23,18 @@ def flow(tmp_path: Path, env: dict[str, str]) -> dict[str, Any]:
         {
             "dir": str(tmp_path),
             "tasks": [
-                {"id": "a", "task": "Implement a", "files": ["a"]},
-                {"id": "b", "task": "Implement b", "files": ["b"]},
+                {
+                    "id": "a",
+                    "subject": "feat: a",
+                    "task": "Implement a",
+                    "files": ["a"],
+                },
+                {
+                    "id": "b",
+                    "subject": "feat: b",
+                    "task": "Implement b",
+                    "files": ["b"],
+                },
             ],
         },
         tmp_path / "plan.json",
@@ -35,6 +45,8 @@ def flow(tmp_path: Path, env: dict[str, str]) -> dict[str, Any]:
         source,
         top=str(tmp_path),
         main=str(tmp_path),
+        common=str(tmp_path / ".git"),
+        worktree=str(tmp_path / "worktrees" / "flow"),
         base="a" * 40,
         writer=worker,
         reviewer=worker,
@@ -167,6 +179,7 @@ def test_broken_json(
     ("key", "value"),
     [
         ("status", "unknown"),
+        ("common", 42),
         ("wave", True),
         ("plan_waves", None),
         ("plan_waves", ["a"]),
@@ -340,7 +353,7 @@ def test_no_flows(env: dict[str, str]) -> None:
     [
         ("stopped", "branch", record.ANSWER_KINDS),
         ("stopped", None, ("worker", "drop")),
-        ("conflict", "branch", ("worker", "drop")),
+        ("conflict", "branch", ("accept", "worker", "drop")),
         ("blocked", None, ("drop",)),
         ("pending", None, ("drop",)),
         *[
@@ -464,3 +477,14 @@ def test_record_without_base_branch_loads(
     del flow["base_branch"]
     (created / record.FLOW_NAME).write_text(json.dumps(flow))
     assert record.load(flow["id"], env)["base_branch"] is None
+
+
+def test_record_without_common_loads(
+    flow: dict[str, Any], created: Path, env: dict[str, str]
+) -> None:
+    del flow["common"]
+    (created / record.FLOW_NAME).write_text(json.dumps(flow))
+    loaded = record.load(flow["id"], env)
+    assert loaded["common"] is None
+    record.save(loaded, env)
+    assert record.load(flow["id"], env)["common"] is None

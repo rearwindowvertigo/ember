@@ -1,6 +1,7 @@
 """Build a read-only gap check brief with the entire plan and reply schema."""
 
 from ember.gapcheck.plan import Plan
+from ember.gapcheck.previous import Previous
 from ember.gapcheck.reply import schema_text
 
 FIRST_LINE = "Gap check of the plan {name}: a read-only review; change no file."
@@ -25,8 +26,61 @@ def _path_text(value: str) -> str:
     return value.translate(_LINE_BREAK_ESCAPES)
 
 
-def text(plan: Plan, checkout: str) -> str:
-    """Describe the review, list every step and paste the numbered plan."""
+def _earlier(previous: Previous | None) -> list[str]:
+    """List the earlier check's gaps with their ids and answers."""
+    if previous is None:
+        return [
+            "This plan has no earlier gap check: leave out the earlier field "
+            "and dispositions.",
+            "",
+        ]
+    lines = [
+        "An earlier gap check of this plan found the gaps below. Give a "
+        "dispositions entry {id, status, reason} for every active and settled "
+        "earlier gap. A gap with an answer is settled: keep it settled unless "
+        "a change invalidates its answer. An unanswered gap must be reopened "
+        "or closed, never settled. Explain each disposition in reason. For "
+        "every reopened id, report exactly one new gap with earlier set to "
+        "that id; explain in gap what reopens it. Closed history needs no "
+        "disposition; raise a closed concern that matters again as a new gap "
+        "without earlier. Earlier step numbers may differ from the steps "
+        "below; report gaps under their current steps. Every step below "
+        "still needs an entry.",
+        "",
+    ]
+    for gap in previous.gaps:
+        answer = (
+            f"Answer: {_path_text(gap.answer)}"
+            if gap.answer is not None
+            else "Unanswered."
+        )
+        lines.append(
+            f"- {_path_text(gap.id)}, earlier step {gap.step} "
+            f"({_path_text(gap.title)}): {_path_text(gap.gap)} {answer}"
+        )
+    if not previous.gaps:
+        lines.append("The earlier result has no active or settled gaps.")
+    if previous.closed:
+        lines.append("Closed history (no disposition required):")
+        for gap in previous.closed:
+            lines.append(
+                f"- {_path_text(gap['id'])}: {_path_text(gap['gap'])} "
+                f"Reason: {_path_text(gap['reason'])}"
+            )
+    return [*lines, ""]
+
+
+def text(plan: Plan, checkout: str, previous: Previous | None = None) -> str:
+    """Describe the review, list every step and paste the numbered plan.
+
+    Args:
+        plan: The plan under review.
+        checkout: The source checkout, omitted from the review instructions.
+        previous: An earlier result whose gaps and answers the brief lists.
+
+    Returns:
+        The brief, ending with a newline.
+    """
     listing = []
     for step in plan.steps:
         where = (
@@ -42,7 +96,7 @@ def text(plan: Plan, checkout: str) -> str:
         [
             FIRST_LINE.format(name=_path_text(plan.path.name)),
             "",
-            f"Read the plan below and the repository at {_path_text(checkout)}. "
+            "Read the plan below and the repository in your own working folder. "
             "For every step, list the behaviours the plan leaves undefined or "
             "contradictory: what a writer following the plan would have to invent, "
             "where two parts disagree, files shared by tasks that can run at the "
@@ -60,6 +114,7 @@ def text(plan: Plan, checkout: str) -> str:
             "- why: the reason for the harm, in one line",
             "- default: the behaviour you propose when no one decides otherwise",
             "",
+            *_earlier(previous),
             "Do not redesign the plan and do not decide missing behaviour; "
             "name each gap and propose a default.",
             "",

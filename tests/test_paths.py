@@ -27,6 +27,7 @@ def home(tmp_path: Path) -> Path:
     [
         ("XDG_CONFIG_HOME", paths.config_dir),
         ("XDG_STATE_HOME", paths.state_dir),
+        ("XDG_DATA_HOME", paths.data_dir),
         ("XDG_CACHE_HOME", paths.cache_dir),
     ],
 )
@@ -41,6 +42,7 @@ def test_absolute_variable_is_used(
 DEFAULTS = [
     ("XDG_CONFIG_HOME", paths.config_dir, (".config",)),
     ("XDG_STATE_HOME", paths.state_dir, (".local", "state")),
+    ("XDG_DATA_HOME", paths.data_dir, (".local", "share")),
     ("XDG_CACHE_HOME", paths.cache_dir, (".cache",)),
 ]
 
@@ -83,6 +85,20 @@ def test_named_paths(home: Path, tmp_path: Path) -> None:
     }
     assert paths.settings_db_path(env) == tmp_path / "config/ember/settings.db"
     assert paths.runs_dir(env) == tmp_path / "state/ember/runs"
+
+
+def test_worker_cache_dir(home: Path, tmp_path: Path) -> None:
+    assert paths.worker_cache_dir({"HOME": str(home)}) == home / ".cache/ember/worker"
+    env = {"HOME": str(home), "XDG_CACHE_HOME": str(tmp_path / "cache")}
+    assert paths.worker_cache_dir(env) == tmp_path / "cache/ember/worker"
+
+
+def test_ensure_worker_cache_dir_creates_it_at_700(home: Path) -> None:
+    env = {"HOME": str(home)}
+    folder = paths.ensure_worker_cache_dir(env)
+    assert folder == home / ".cache/ember/worker"
+    assert _mode(folder) == 0o700
+    assert _mode(home / ".cache/ember") == 0o700
 
 
 def test_runtime_variable_is_used(tmp_path: Path) -> None:
@@ -235,3 +251,192 @@ def test_ensure_private_dir_rejects_symlink(tmp_path: Path) -> None:
     (root / "runs").symlink_to(real)
     with pytest.raises(NotADirectoryError, match="symlink"):
         paths.ensure_private_dir(root / "runs", root=root)
+
+
+def test_worktree_path_is_in_the_data_folder(home: Path, tmp_path: Path) -> None:
+    env = {"HOME": str(home)}
+    expected = home / ".local/share/ember/worktrees/codex-20261104-000000-abcdef"
+    assert paths.worktrees_dir(env) == home / ".local/share/ember/worktrees"
+    assert paths.worktree_path("codex-20261104-000000-abcdef", env) == expected
+    env["XDG_DATA_HOME"] = str(tmp_path / "data")
+    expected = tmp_path / "data/ember/worktrees/flow-1"
+    assert paths.worktree_path("flow-1", env) == expected
+
+
+def test_worktree_path_resolves_symlinks(home: Path, tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    env = {"HOME": str(home), "XDG_DATA_HOME": str(tmp_path / "link")}
+    assert paths.worktree_path("run-1", env) == real / "ember/worktrees/run-1"
+
+
+@pytest.mark.parametrize("name", ["", ".", "..", "a/b", "a\0b"])
+def test_worktree_path_refuses_a_name_that_is_not_an_id(home: Path, name: str) -> None:
+    with pytest.raises(ValueError, match="not a worktree id"):
+        paths.worktree_path(name, {"HOME": str(home)})
+
+
+@pytest.mark.parametrize("setting", ["XDG_DATA_HOME", "HOME"])
+def test_check_worktree_path_refuses_a_path_inside_a_repository_folder(
+    tmp_path: Path, setting: str
+) -> None:
+    checkout = tmp_path / "project"
+    checkout.mkdir()
+    if setting == "HOME":
+        env = {"HOME": str(checkout)}
+    else:
+        env = {"HOME": str(tmp_path / "home"), setting: str(checkout / "data")}
+    worktree = paths.worktree_path("run-1", env)
+    other = tmp_path / "other"
+    paths.check_worktree_path(worktree, [other], env)
+    with pytest.raises(paths.WorktreeDirError) as caught:
+        paths.check_worktree_path(worktree, [other, checkout], env)
+    assert str(caught.value) == (
+        f"the worktree folder {worktree.parent} is inside the repository folder "
+        f"{checkout}; {setting} places it there"
+    )
+
+
+def test_check_worktree_path_accepts_no_folders(home: Path) -> None:
+    env = {"HOME": str(home)}
+    paths.check_worktree_path(paths.worktree_path("run-1", env), [], env)
+
+
+def test_ensure_worktrees_dir_creates_it_at_700(home: Path, tmp_path: Path) -> None:
+    env = {"HOME": str(home), "XDG_DATA_HOME": str(tmp_path / "data")}
+    folder = paths.ensure_worktrees_dir(env)
+    assert folder == tmp_path / "data/ember/worktrees"
+    assert _mode(folder) == 0o700
+    assert _mode(folder.parent) == 0o700
+
+
+@pytest.mark.parametrize("name", ["ember", "ember/worktrees"])
+def test_ensure_worktrees_dir_accepts_a_private_symlink_target(
+    home: Path, tmp_path: Path, name: str
+) -> None:
+    data = tmp_path / "data"
+    target = tmp_path / "private"
+    target.mkdir(mode=0o700)
+    link = data / name
+    link.parent.mkdir(parents=True, mode=0o700)
+    link.symlink_to(target, target_is_directory=True)
+    env = {"HOME": str(home), "XDG_DATA_HOME": str(data)}
+    expected = target / "worktrees" if name == "ember" else target
+    assert paths.ensure_worktrees_dir(env) == expected
+    assert paths.worktree_path("run-1", env) == expected / "run-1"
+    assert _mode(expected) == 0o700
+    assert link.is_symlink()
+
+
+@pytest.mark.parametrize("name", ["ember", "ember/worktrees"])
+@pytest.mark.parametrize("mode", [0o755, 0o770, 0o1700])
+def test_ensure_worktrees_dir_refuses_a_symlink_target_without_mode_700(
+    home: Path, tmp_path: Path, name: str, mode: int
+) -> None:
+    data = tmp_path / "data"
+    target = tmp_path / "public"
+    target.mkdir()
+    target.chmod(mode)
+    link = data / name
+    link.parent.mkdir(parents=True, mode=0o700)
+    link.symlink_to(target, target_is_directory=True)
+    env = {"HOME": str(home), "XDG_DATA_HOME": str(data)}
+    with pytest.raises(PermissionError, match=f"{target} must have mode 700"):
+        paths.ensure_worktrees_dir(env)
+    assert _mode(target) == mode
+
+
+@pytest.mark.parametrize("name", ["ember", "ember/worktrees"])
+def test_ensure_worktrees_dir_refuses_another_owners_symlink_target(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    data = tmp_path / "data"
+    target = tmp_path / "private"
+    target.mkdir(mode=0o700)
+    link = data / name
+    link.parent.mkdir(parents=True, mode=0o700)
+    link.symlink_to(target, target_is_directory=True)
+    env = {"HOME": str(home), "XDG_DATA_HOME": str(data)}
+    owner = os.getuid()
+    monkeypatch.setattr(paths.os, "getuid", lambda: owner + 1)
+    with pytest.raises(PermissionError, match="not owned by the current user"):
+        paths.ensure_worktrees_dir(env)
+
+
+@pytest.mark.parametrize("kind", ["file", "missing"])
+def test_ensure_worktrees_dir_refuses_a_symlink_to_a_nonfolder(
+    tmp_path: Path, kind: str
+) -> None:
+    target = tmp_path / "target"
+    if kind == "file":
+        target.write_text("")
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "ember").symlink_to(target)
+    with pytest.raises(OSError):
+        paths.ensure_worktrees_dir({"XDG_DATA_HOME": str(data)})
+
+
+@pytest.mark.parametrize("marker", ["folder", "absolute-file", "relative-file"])
+@pytest.mark.parametrize("symlink", [False, True])
+def test_check_worktree_path_refuses_an_unrelated_git_working_tree(
+    home: Path, tmp_path: Path, marker: str, symlink: bool
+) -> None:
+    checkout = tmp_path / "unrelated"
+    checkout.mkdir()
+    dotgit = checkout / ".git"
+    if marker == "folder":
+        git = dotgit
+        common = git
+    else:
+        common = tmp_path / "other.git"
+        git = common / "worktrees/linked"
+        pointer = (
+            git if marker == "absolute-file" else Path("../other.git/worktrees/linked")
+        )
+        dotgit.write_text(f"gitdir: {pointer}\n")
+        git.mkdir(parents=True)
+        (git / "commondir").write_text("../..\n")
+    (common / "objects").mkdir(parents=True)
+    (common / "refs").mkdir()
+    (git / "HEAD").write_text("ref: refs/heads/main\n")
+    data = checkout / "data"
+    if symlink:
+        link = tmp_path / "link"
+        link.symlink_to(checkout, target_is_directory=True)
+        data = link / "data"
+    env = {"HOME": str(home), "XDG_DATA_HOME": str(data)}
+    worktree = paths.worktree_path("run-1", env)
+    with pytest.raises(paths.WorktreeDirError) as caught:
+        paths.check_worktree_path(worktree, [tmp_path / "source"], env)
+    assert str(caught.value) == (
+        f"the worktree folder {worktree.parent} is inside the repository folder "
+        f"{checkout}; XDG_DATA_HOME places it there"
+    )
+
+
+def test_check_worktree_path_refuses_a_worktrees_folder_that_is_a_checkout(
+    tmp_path: Path,
+) -> None:
+    env = {"XDG_DATA_HOME": str(tmp_path)}
+    root = paths.worktrees_dir(env)
+    (root / ".git/objects").mkdir(parents=True)
+    (root / ".git/refs").mkdir()
+    (root / ".git/HEAD").write_text("ref: refs/heads/main\n")
+    with pytest.raises(paths.WorktreeDirError, match=str(root)):
+        paths.check_worktree_path(paths.worktree_path("run-1", env), [], env)
+
+
+@pytest.mark.parametrize("marker", ["empty-folder", "file", "missing-gitdir"])
+def test_check_worktree_path_accepts_a_folder_with_invalid_git_metadata(
+    tmp_path: Path, marker: str
+) -> None:
+    if marker == "empty-folder":
+        (tmp_path / ".git").mkdir()
+    else:
+        (tmp_path / ".git").write_text(
+            "not a git file\n" if marker == "file" else "gitdir: missing\n"
+        )
+    env = {"XDG_DATA_HOME": str(tmp_path)}
+    paths.check_worktree_path(paths.worktree_path("run-1", env), [], env)

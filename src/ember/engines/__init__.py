@@ -29,6 +29,9 @@ FAILED = "failed"
 TURN_STATES = (RUNNING, DONE, FAILED)
 """The states of `TurnOutcome`."""
 
+PROVIDER_KINDS = ("capacity", "usage_limit", "outage")
+"""The kinds of provider failure."""
+
 IDLE = "idle"
 BUSY = "busy"
 UNKNOWN = "unknown"
@@ -86,12 +89,17 @@ class TurnOutcome:
     signed_out: bool = False
     """The failure is a sign-in failure."""
 
+    provider_kind: str | None = None
+    """`capacity`, `usage_limit` or `outage`; None for older outcomes."""
+
     def __post_init__(self) -> None:
-        """Check the state.
+        """Check the state and provider kind.
 
         Raises:
-            ValueError: The state is not one of `TURN_STATES`.
+            ValueError: The state or provider kind is unknown.
         """
+        if self.provider_kind is not None and self.provider_kind not in PROVIDER_KINDS:
+            raise ValueError(f"unknown provider kind {self.provider_kind!r}")
         if self.state not in TURN_STATES:
             raise ValueError(f"unknown turn state {self.state!r}")
 
@@ -187,7 +195,8 @@ class Driver(ABC):
 
         Returns:
             `running`; `done` with the final reply; or `failed` with a reason,
-            `provider_error` for a provider limit or outage and `signed_out`
+            `provider_error` and `provider_kind` for a provider limit or outage,
+            and `signed_out`
             for a sign-in failure.
         """
 
@@ -239,6 +248,14 @@ class Driver(ABC):
             run: The run.
         """
         tmux.interrupt(run.id, env=run.env)
+
+    def turn_output(self, run: Run) -> str:
+        """Return this attempt's tool output for denied-access detection.
+
+        Drivers without a transcript return an empty string; the core also
+        checks the reply and new pane lines.
+        """
+        return ""
 
     def screen(self, run: Run) -> str:
         """Return the text of the session's pane.

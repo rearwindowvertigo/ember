@@ -504,6 +504,9 @@ def test_an_error_fails_the_turn(
     assert outcome.state == engines.FAILED
     assert outcome.signed_out is signed_out
     assert outcome.provider_error is not signed_out
+    assert outcome.provider_kind == (
+        None if signed_out else codex.provider_kind(message)
+    )
     assert outcome.reason == f"Codex reported an error: {message}"
 
 
@@ -516,6 +519,7 @@ def test_a_captured_capacity_completion_fails_the_turn(setup: Setup) -> None:
         engines.FAILED,
         reason=f"Codex reported an error: {CAPACITY_MESSAGE}",
         provider_error=True,
+        provider_kind="capacity",
     )
     turns = codex.read_turns(path)
     assert turns.errors == []
@@ -937,3 +941,63 @@ def test_discovery_skips_rollouts_older_than_the_launch(setup: Setup) -> None:
     os.utime(path, (past, past))
     assert driver.wait(run).state == engines.RUNNING
     assert _saved(run) == ("", "")
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (CAPACITY_MESSAGE, "capacity"),
+        # Codex's bundled usage-limit strings use a curly apostrophe.
+        ("You’ve hit your usage limit.", "usage_limit"),
+        ("You've hit your usage limit. Try again later.", "usage_limit"),
+        ("unexpected status 503 Service Unavailable", "outage"),
+        ("an unrecognized provider refusal", "outage"),
+    ],
+)
+def test_provider_error_kinds(message: str, expected: str) -> None:
+    assert codex.error_outcome(message).provider_kind == expected
+
+
+def test_resending_capacity_uses_a_new_rollout_baseline(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    driver, run = _started(setup)
+    path = _rollout(setup, _line("task_started"), CAPACITY_COMPLETE)
+    assert driver.wait(run).provider_kind == "capacity"
+    with _tmux_calls(monkeypatch):
+        driver.send(run, BRIEF)
+    assert driver.wait(run).state == engines.RUNNING
+    _append(path, _line("task_started"))
+    _append(path, _line("task_complete", last_agent_message="done"))
+    assert driver.wait(run) == engines.TurnOutcome(engines.DONE, reply="done")
+
+
+def test_turn_output_selects_tool_responses_for_current_attempt(setup: Setup) -> None:
+    driver, run = _started(setup)
+
+    def tool(text: str) -> str:
+        return json.dumps(
+            {
+                "type": "response_item",
+                "payload": {"type": "function_call_output", "output": text},
+            }
+        )
+
+    path = _rollout(
+        setup,
+        _line("task_started"),
+        tool("old denial"),
+        _line("task_complete", last_agent_message="done"),
+        _line("task_started"),
+        tool("Permission denied: /home/owner/tools/python"),
+        _line("task_complete", last_agent_message="done"),
+        tool("later denial"),
+    )
+    state = driver._load_state(run)
+    state["turns"][str(run.turn)] = {"ended": 1, "errors": 0}
+    driver._save_state(run, state)
+    output = driver.turn_output(run)
+    assert "Permission denied: /home/owner/tools/python" in output
+    assert "old denial" not in output
+    assert "later denial" not in output
+    path.unlink()

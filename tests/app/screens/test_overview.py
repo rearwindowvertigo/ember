@@ -1504,7 +1504,15 @@ def test_clear_prunes_nested_records_and_rechecks_state(
     flow["tasks"][0]["writer_run"] = DONE_A
     flow_record.save(flow, env)
     for ident in (DONE_A, DONE_B):
-        run = write_run(make_run(env, ident, status=record.CLOSED, ended_at=200))
+        run = write_run(
+            make_run(
+                env,
+                ident,
+                status=record.CLOSED,
+                turn_state=record.COMMITTED,
+                ended_at=200,
+            )
+        )
         (run.folder / "worker.log").write_text("log")
     context.runs.reload()
     qtbot.waitUntil(lambda: len(context.runs.runs()) == 2)
@@ -1917,3 +1925,167 @@ def test_a_run_without_a_subject_keeps_its_worker_in_the_title(
     assert not overview.run_detail(run).startswith(overview.worker_line(run))
     run = replace(run, subject="Fix the\nbug")
     assert overview.run_title(run) == "Run · Fix the bug"
+
+
+def _write_denial(
+    run: record.Run, path: Path, *, reason: str = "hidden", allow: str | None = None
+) -> None:
+    record.write_private(
+        record.outcome_path(run, run.turn),
+        json.dumps(
+            {
+                "state": "done",
+                "reason": None,
+                "provider_error": False,
+                "signed_out": False,
+                "incomplete": None,
+                "denied_paths": [
+                    {"path": str(path), "reason": reason, "allow_path": allow}
+                ],
+            }
+        ),
+    )
+
+
+def test_denial_notice_confirms_and_saves_read_permission(
+    context: AppContext,
+    qtbot: QtBot,
+    env: dict[str, str],
+) -> None:
+    from ember import choices
+
+    folder = Path(env["HOME"]) / ".toolchain"
+    folder.mkdir()
+    run = write_run(make_run(env, LIVE_A))
+    _write_denial(run, folder, allow=str(folder))
+    with qtbot.waitSignal(context.settings_changed):
+        context.reload_settings()
+    with qtbot.waitSignal(context.runs.reloaded):
+        context.runs.reload()
+    screen = screen_for(context, qtbot)
+    assert len(screen.denied_notices) == 1
+    notice = next(iter(screen.denied_notices.values()))
+    assert notice.title_label.text() == f"A worker could not read {folder}"
+    assert run.id in notice.text_label.text()
+    assert [b.text() for b in notice.buttons] == ["Allow reading", "Dismiss"]
+    # Redrawing an unchanged notice keeps its buttons and keyboard focus.
+    screen.check_denials()
+    assert next(iter(screen.denied_notices.values())) is notice
+    notice.buttons[0].click()
+    dialog = screen._denied_dialog
+    assert dialog is not None
+    assert f"Every future worker can read {folder}" in dialog.report.text()
+    assert "No worker can change it" in dialog.report.text()
+    assert choices.read(env=env)["answers"]["sandbox.read"]["value"] == []
+    dialog.reject()
+    assert choices.read(env=env)["answers"]["sandbox.read"]["value"] == []
+    notice.buttons[0].click()
+    assert screen._denied_dialog is not None
+    with qtbot.waitSignal(context.settings_changed):
+        screen._denied_dialog.accept()
+    assert choices.read(env=env)["answers"]["sandbox.read"]["value"] == [str(folder)]
+    assert screen.denied_notices == {}
+
+
+@pytest.mark.parametrize("reason", ["secret location", "protected"])
+def test_restricted_denial_notice_has_only_dismiss(
+    context: AppContext,
+    qtbot: QtBot,
+    env: dict[str, str],
+    reason: str,
+) -> None:
+    folder = Path(env["HOME"]) / ".ssh"
+    run = write_run(make_run(env, LIVE_A))
+    _write_denial(run, folder, reason=reason)
+    with qtbot.waitSignal(context.settings_changed):
+        context.reload_settings()
+    with qtbot.waitSignal(context.runs.reloaded):
+        context.runs.reload()
+    screen = screen_for(context, qtbot)
+    notice = next(iter(screen.denied_notices.values()))
+    assert [b.text() for b in notice.buttons] == ["Dismiss"]
+    assert ("credentials" in notice.text_label.text()) is (reason == "secret location")
+    notice.buttons[0].click()
+    assert screen.denied_notices == {}
+    screen.check_denials()
+    assert screen.denied_notices == {}
+    # Persisted dismissal survives a fresh screen, until another turn reports it.
+    screen.close()
+    screen = screen_for(context, qtbot)
+    assert screen.denied_notices == {}
+    later = write_run(replace(run, turn=2, updated_at=run.updated_at + 1))
+    _write_denial(later, folder, reason=reason)
+    with qtbot.waitSignal(context.runs.reloaded):
+        context.runs.reload()
+    qtbot.waitUntil(lambda: len(screen.denied_notices) == 1)
+
+
+def test_showing_overview_rechecks_paths_allowed_while_hidden(
+    context: AppContext, qtbot: QtBot, env: dict[str, str]
+) -> None:
+    folder = Path(env["HOME"]) / ".toolchain"
+    folder.mkdir()
+    run = write_run(make_run(env, LIVE_A))
+    _write_denial(run, folder, allow=str(folder))
+    with qtbot.waitSignal(context.settings_changed):
+        context.reload_settings()
+    with qtbot.waitSignal(context.runs.reloaded):
+        context.runs.reload()
+    screen = screen_for(context, qtbot)
+    assert len(screen.denied_notices) == 1
+    screen.hide()
+    with qtbot.waitSignal(context.settings_changed):
+        context.save_settings({"sandbox.read": [str(folder)]})
+    screen.show()
+    screen.shown()
+    assert screen.denied_notices == {}
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        ("hidden", "secret location", "secret location"),
+        ("secret location", "hidden", "secret location"),
+        ("secret location", "protected", "protected"),
+        ("protected", "secret location", "protected"),
+    ],
+)
+def test_denial_notice_keeps_strongest_reason_across_turns(
+    context: AppContext,
+    qtbot: QtBot,
+    env: dict[str, str],
+    first: str,
+    second: str,
+    expected: str,
+) -> None:
+    folder = Path(env["HOME"]) / ".docker"
+    folder.mkdir()
+    run = write_run(make_run(env, LIVE_A))
+    _write_denial(run, folder, reason=first)
+    later = write_run(replace(run, turn=2, updated_at=run.updated_at + 1))
+    _write_denial(later, folder, reason=second)
+    with qtbot.waitSignal(context.settings_changed):
+        context.reload_settings()
+    with qtbot.waitSignal(context.runs.reloaded):
+        context.runs.reload()
+    screen = screen_for(context, qtbot)
+    assert len(screen.denied_notices) == 1
+    notice = next(iter(screen.denied_notices.values()))
+    assert [action.text() for action in notice.buttons] == ["Dismiss"]
+    assert ("holds credentials" in notice.text_label.text()) is (
+        expected == "secret location"
+    )
+    assert ("protected from workers" in notice.text_label.text()) is (
+        expected == "protected"
+    )
+
+
+def test_orphaned_badge(env: dict[str, str], context: AppContext, qtbot: QtBot) -> None:
+    parent = record.parent("gapcheck")
+    assert parent is not None
+    write_run(make_run(env, LIVE_A, parent={**parent, "start": parent["start"] + 1}))
+    context.runs.reload()
+    qtbot.waitUntil(lambda: len(context.runs.live()) == 1)
+    screen = screen_for(context, qtbot)
+    row = screen.live_rows[LIVE_A]
+    assert (row.badge.text(), row.badge.tone()) == ("Orphaned", "warning")

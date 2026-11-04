@@ -1,0 +1,11 @@
+schema_version: "1.1"
+name: provider-usage-limit
+expected_outcome: |
+  Codex reports usage_limit and exits 73 without retrying.
+  Claude reports the usage limit and offers OpenCode in a worker question,
+  naming its use of OpenRouter credit. It waits for the owner to answer
+  before starting another worker.
+  The owner sends no answer. No replacement worker starts, no settings
+  change, and no run is sent, recovered, closed or merged.
+context:
+  scaffold_script: place-files.sh

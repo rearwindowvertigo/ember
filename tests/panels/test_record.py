@@ -225,3 +225,13 @@ def test_retry_attempt_rejects_invalid_fields(
     ]
     with record.hold(data["id"], env), pytest.raises(record.PanelError):
         record.create(data, "q", "b", env)
+
+
+def test_saved_commit_and_legacy_panel(tmp_path: Path) -> None:
+    env = make_env(tmp_path)
+    data = panel(base="a" * 40)
+    directory = record.create(data, "q", "b", env)
+    assert record.load(data["id"], env)["base"] == "a" * 40
+    del data["base"]
+    (directory / "panel.json").write_text(json.dumps(data))
+    assert record.load(data["id"], env)["base"] is None

@@ -77,6 +77,8 @@ def _usage(args: argparse.Namespace) -> str:
         answers = [name for name in record.ANSWER_KINDS if getattr(args, name)]
         if planning != (args.plan is not None):
             problem = "--plan is required only with --dry-run or --start"
+        elif args.previous is not None and mode != "dry_run":
+            problem = "--previous needs --dry-run"
         elif (mode == "lead" and len(answers) != 1) or (mode != "lead" and answers):
             problem = (
                 "--lead needs exactly one of --send, --accept, "
@@ -389,11 +391,22 @@ def _dry_run(
 
     The gap check command names the flow's reviewer when it was given with
     `--reviewer` or in the plan; otherwise `emb gapcheck` uses the owner's
-    Gap check reviewer row. A plan the settings skip gets no
-    command; one they leave to the owner gets the command with `--confirmed`.
+    Gap check reviewer row. The command requests JSON and forwards `--previous`
+    when given. A plan the settings skip gets no command; one they leave to
+    the owner gets the command with `--confirmed`.
     """
     decision, why = _gapcheck_decision(document, settings)
-    gapcheck = ["emb", "gapcheck", "--plan", str(document.path), "--dir", str(top)]
+    gapcheck = [
+        "emb",
+        "gapcheck",
+        "--plan",
+        str(document.path),
+        "--dir",
+        str(top),
+        "--json",
+    ]
+    if args.previous is not None:
+        gapcheck += ["--previous", args.previous]
     if reviewer.source != "menu":
         # A reviewer named for this flow, by option or in the plan, also
         # checks its plan; the Gap check reviewer row covers the rest.
@@ -486,7 +499,8 @@ def _start(
         tmux.socket_path(env)
     except OSError as error:
         raise CommandError(69, str(error), exits.line(69, "runtime") or "") from error
-    base_ref = branches.open_repository(top, env, "flow").git(
+    repository = branches.open_repository(top, env, "flow")
+    base_ref = repository.git(
         "rev-parse",
         "--symbolic-full-name",
         "--verify",
@@ -500,11 +514,15 @@ def _start(
         else None
     )
     flow_id = record.new_id()
+    # The record and the branch name the same path, resolved once.
+    worktree = paths.worktree_path(flow_id, env)
     flow = record.new_flow(
         flow_id,
         document,
         top=str(top),
         main=str(main),
+        common=str(repository.common),
+        worktree=str(worktree),
         base=base,
         base_branch=base_branch,
         writer=writer,
@@ -519,7 +537,9 @@ def _start(
     record.create(flow, document.text, env)
     with lifecycle(flow_id, env):
         try:
-            branches.create_flow_branch(document.dir, flow_id, base, env)
+            branches.create_flow_branch(
+                document.dir, flow_id, base, env, worktree=worktree
+            )
         except branches.BranchError as error:
             flow.update(status="failed", reason=str(error), ended_at=time.time())
             record.save(flow, env)
@@ -789,6 +809,28 @@ def _lead(
                     64, f"the correction {source} is empty", "next: emb flow --help"
                 )
             answer["file"] = str(source)
+        elif kind == "accept" and task["status"] == "conflict":
+            _require_tool("git", env)
+            _, _, commit = branches.resolve_base(
+                flow["dir"], args.commit or task["merge_tip"], env
+            )
+            if commit != task["merge_tip"]:
+                raise CommandError(
+                    64,
+                    f"task {task_id} is conflict; --accept takes only its "
+                    f"approved tip {task['merge_tip']}",
+                    f"next: emb flow --lead {flow_id} {task_id} --accept",
+                )
+            if not branches.is_contained(flow["worktree"], commit, flow["branch"], env):
+                raise CommandError(
+                    75,
+                    f"task {task_id} is conflict and {flow['branch']} does not "
+                    f"hold {commit}",
+                    f"next: git -C {shlex.quote(flow['worktree'])} merge --no-ff "
+                    f"--no-edit {commit}, resolve the conflicts and commit, then "
+                    f"emb flow --lead {flow_id} {task_id} --accept",
+                )
+            answer["commit"] = commit
         elif kind == "accept":
             _require_tool("git", env)
             _, _, commit = branches.resolve_base(
@@ -848,6 +890,7 @@ def _task_report(flow_id: str, task: Mapping[str, Any]) -> dict[str, Any]:
         severity: sum(item.get("severity") == severity for item in task["findings"])
         for severity in ("must", "should", "lead")
     }
+    result["denied_paths"] = task.get("denied_paths", [])
     result["finding_details"] = task["findings"]
     result["choices"] = answer_choices(flow_id, task)
     return result
@@ -1020,6 +1063,23 @@ def _watch(
         time.sleep(POLL_SECONDS)
 
 
+def _denial_status(flow: dict[str, Any], env: Mapping[str, str]) -> None:
+    """Add retained and current worker denials to a flow status snapshot."""
+    for task in flow["tasks"]:
+        ids = [task.get("writer_run"), task.get("reviewer_run")]
+        ids.extend(review.get("run") for review in task["reviews"])
+        denials = list(task.get("denied_paths", []))
+        for item in run_record.referenced_denials(ids, env):
+            if item not in denials:
+                denials.append(item)
+        task["denied_paths"] = denials
+    flow["denied_paths"] = [
+        {**item, "task": task["id"]}
+        for task in flow["tasks"]
+        for item in task["denied_paths"]
+    ]
+
+
 def _status(
     flow_id: str, as_json: bool, env: Mapping[str, str], out: TextIO, err: TextIO
 ) -> None:
@@ -1027,6 +1087,7 @@ def _status(
     if flow_id:
         flow = _load(flow_id, env)
         flow["runner_live"] = lock.live(flow_id, env)
+        _denial_status(flow, env)
         if as_json:
             print(json.dumps(flow, indent=2), file=out)
         else:
@@ -1035,13 +1096,21 @@ def _status(
                     print(f"{key}: {value}", file=out)
             for task in flow["tasks"]:
                 print(_task_line(task), file=out)
+                for item in task["denied_paths"]:
+                    print(
+                        f"  denied {item['path']} ({item['reason']}) "
+                        f"run {item['run']} turn {item['turn']}",
+                        file=out,
+                    )
         return
     flows, errors = record.list_flows(env)
     for error in errors:
         print(f"emb flow: skipped {error}", file=err)
     items = []
     for flow in flows:
+        _denial_status(flow, env)
         item = {key: flow[key] for key in ("id", "status", "reason", "dir", "branch")}
+        item["denied_paths"] = flow["denied_paths"]
         item.update(
             runner_live=lock.live(flow["id"], env),
             merged=sum(task["status"] == "merged" for task in flow["tasks"]),
@@ -1060,6 +1129,12 @@ def _status(
                 f"{item['merged']}/{item['tasks']} merged  {item['dir']}",
                 file=out,
             )
+            for denial in item["denied_paths"]:
+                print(
+                    f"  task {denial['task']} denied {denial['path']} "
+                    f"({denial['reason']}) run {denial['run']} turn {denial['turn']}",
+                    file=out,
+                )
 
 
 def main(

@@ -51,8 +51,19 @@ def plan_file(tmp_path: Path, repo: Path) -> Path:
                 "writer": {"engine": "codex", "model": "gpt-5", "effort": "high"},
                 "reviewer": {"engine": "codex", "model": "gpt-5", "effort": "low"},
                 "tasks": [
-                    {"id": "a", "task": "First", "files": ["a.py"]},
-                    {"id": "b", "task": "Second", "files": ["b.py"], "after": ["a"]},
+                    {
+                        "id": "a",
+                        "subject": "feat: a",
+                        "task": "First",
+                        "files": ["a.py"],
+                    },
+                    {
+                        "id": "b",
+                        "subject": "feat: b",
+                        "task": "Second",
+                        "files": ["b.py"],
+                        "after": ["a"],
+                    },
                 ],
             }
         )
@@ -97,6 +108,7 @@ def flow(plan_file: Path, env: dict[str, str]) -> dict[str, Any]:
         document,
         top=str(branch.top),
         main=str(branch.main),
+        worktree=str(branch.worktree),
         base=branch.base,
         writer=worker,
         reviewer=worker,
@@ -139,15 +151,18 @@ def end(flow: dict[str, Any], env: Mapping[str, str], code: int = 0) -> None:
 
 
 @pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("with_previous", [False, True])
 def test_dry_run(
     tmp_path: Path,
     env: dict[str, str],
     plan_file: Path,
     repo: Path,
     as_json: bool,
+    with_previous: bool,
 ) -> None:
     choices.claim("flow-claim", env=env)
     before = git(repo, "branch", "--list", env=env)
+    previous = str(tmp_path / "owner's previous result.json")
     code, out, err = invoke(
         env,
         "--plan",
@@ -155,6 +170,7 @@ def test_dry_run(
         "--dry-run",
         "--claim",
         "flow-claim",
+        *(["--previous", previous] if with_previous else []),
         *(["--json"] if as_json else []),
     )
     assert code == 0, err
@@ -175,6 +191,8 @@ def test_dry_run(
         str(plan_file),
         "--dir",
         str(repo),
+        "--json",
+        *(["--previous", previous] if with_previous else []),
         "--engine",
         "codex",
         "--model",
@@ -258,6 +276,25 @@ def test_usage(env: dict[str, str], options: list[str]) -> None:
 
 
 @pytest.mark.parametrize(
+    "options",
+    [
+        ["--start", "--plan", "missing-plan.json"],
+        ["--watch", "missing-flow"],
+        ["--status"],
+        ["--lead", "missing-flow", "a", "--drop"],
+        ["--resume", "missing-flow"],
+        ["--cancel", "missing-flow"],
+    ],
+)
+def test_previous_requires_dry_run(env: dict[str, str], options: list[str]) -> None:
+    code, out, err = invoke(env, *options, "--previous", "missing-result.json")
+    assert code == 64 and not out
+    assert "--previous needs --dry-run" in err
+    assert err.endswith("next: emb flow --help\n")
+    assert not paths.runs_dir(env).exists()
+
+
+@pytest.mark.parametrize(
     ("case", "code"),
     [
         ("missing", 66),
@@ -334,10 +371,17 @@ def test_start(
         f"worktree {current['worktree']}",
     ]
     assert current["status"] == "starting"
+    assert current["common"] == str((repo / ".git").resolve())
     assert current["base_branch"] == git(repo, "branch", "--show-current", env=env)
     assert current["writer"]["effort_frozen"] is True
     assert git(repo, "rev-parse", current["branch"], env=env) == current["base"]
-    assert Path(current["worktree"]).is_dir()
+    assert current["worktree"] == str(paths.worktree_path(flow_id, env))
+    assert not Path(current["worktree"]).is_relative_to(repo)
+    assert (
+        git(current["worktree"], "branch", "--show-current", env=env)
+        == (current["branch"])
+    )
+    assert not (repo / ".ember").exists()
     calls = tmux_log(tmp_path)
     launch = next(call for call in calls if "new-session" in call)
     assert launch[launch.index("-s") + 1] == flow_id
@@ -346,7 +390,8 @@ def test_start(
 
 
 @pytest.mark.parametrize(
-    ("case", "expected"), [("tmux", 69), ("branch", 70), ("runtime", 69)]
+    ("case", "expected"),
+    [("tmux", 69), ("branch", 70), ("inside", 69), ("runtime", 69)],
 )
 def test_start_failure(
     env: dict[str, str], plan_file: Path, repo: Path, case: str, expected: int
@@ -354,15 +399,18 @@ def test_start_failure(
     if case == "tmux":
         (Path(env["PATH"].split(os.pathsep)[0]) / "tmux").unlink()
     elif case == "branch":
-        (repo / ".ember").mkdir()
-        (repo / ".ember" / "worktrees").write_text("file")
+        paths.worktrees_dir(env).parent.mkdir(parents=True)
+        paths.worktrees_dir(env).write_text("file")
+    elif case == "inside":
+        env["XDG_DATA_HOME"] = str(repo / "data")
     else:
         Path(env["XDG_RUNTIME_DIR"]).write_text("file")
     code, out, err = invoke(env, "--plan", str(plan_file), "--start")
     assert code == expected and not out, err
-    if case == "branch":
+    if case in ("branch", "inside"):
         flows, errors = record.list_flows(env)
         assert not errors and flows[0]["status"] == "failed"
+        assert not (repo / "data").exists()
     else:
         assert not paths.runs_dir(env).exists()
 
@@ -1324,7 +1372,106 @@ def test_dry_run_reports_the_gap_check_decision(
     assert (result["gapcheck"] is not None) == has_command
     if has_command:
         assert result["gapcheck"].endswith("--confirmed")
+        assert "--json" in shlex.split(result["gapcheck"])
     code, out, err = invoke(env, "--plan", str(plan_file), "--dry-run")
     assert code == 0, err
     line = out.split("gap check: ")[1]
     assert line.startswith("skipped, " if status == "skipped" else "ask the owner")
+
+
+def test_status_keeps_denial_provenance_from_completed_workers(
+    env: dict[str, str], flow: dict[str, Any]
+) -> None:
+    item = {
+        "path": "/home/owner/tools",
+        "reason": "hidden",
+        "allow_path": "/home/owner/tools/bin",
+        "run": "codex-20260101-000000-abcdef",
+        "turn": 2,
+    }
+    flow["tasks"][0]["denied_paths"] = [item]
+    record.save(flow, env)
+    code, out, _ = invoke(env, "--status", flow["id"], "--json")
+    assert code == 0
+    report = json.loads(out)
+    assert report["tasks"][0]["denied_paths"] == [item]
+    assert report["denied_paths"] == [{**item, "task": "a"}]
+    assert json.loads(invoke(env, "--status", "--json")[1])[0]["denied_paths"] == [
+        {**item, "task": "a"}
+    ]
+    code, out, _ = invoke(env, "--status", flow["id"])
+    assert code == 0
+    assert f"denied {item['path']} (hidden) run {item['run']} turn 2" in out
+
+
+@pytest.mark.parametrize("held", [True, False])
+def test_accept_on_a_conflict_checks_the_flow_branch(
+    env: dict[str, str], flow: dict[str, Any], held: bool
+) -> None:
+    stopped(flow, env)
+    tip = flow["tip"]
+    if not held:
+        blob = subprocess.run(
+            ["git", "-C", flow["dir"], "hash-object", "-w", "--stdin"],
+            input="not merged\n",
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        tree = subprocess.run(
+            ["git", "-C", flow["dir"], "mktree"],
+            input=f"100644 blob {blob}\tother.txt\n",
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        tip = subprocess.run(
+            ["git", "-C", flow["dir"], "commit-tree", tree, "-p", tip, "-m", "x"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    flow["tasks"][0].update(status="conflict", merge_tip=tip)
+    record.save(flow, env)
+    with lock.hold(flow["id"], env):
+        code, out, err = invoke(env, "--lead", flow["id"], "a", "--accept")
+    answers = record.read_answers(flow["id"], env)
+    if held:
+        assert code == 0 and "queued answer 1: accept for a" in out, err
+        assert answers[0] is not None and answers[0]["commit"] == tip
+    else:
+        assert code == 75 and not out
+        assert f"does not hold {tip}" in err
+        assert err.splitlines()[-1].endswith(f"emb flow --lead {flow['id']} a --accept")
+        assert not answers
+
+
+def test_accept_on_a_conflict_refuses_another_commit(
+    env: dict[str, str], flow: dict[str, Any]
+) -> None:
+    stopped(flow, env)
+    tree = subprocess.run(
+        ["git", "-C", flow["dir"], "rev-parse", f"{flow['tip']}^{{tree}}"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    approved = subprocess.run(
+        ["git", "-C", flow["dir"], "commit-tree", tree, "-p", flow["tip"], "-m", "a"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    flow["tasks"][0].update(status="conflict", merge_tip=approved)
+    record.save(flow, env)
+    with lock.hold(flow["id"], env):
+        code, out, err = invoke(
+            env, "--lead", flow["id"], "a", "--accept", "--commit", flow["tip"]
+        )
+    assert code == 64 and not out and "approved tip" in err
+    assert not record.read_answers(flow["id"], env)

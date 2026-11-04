@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ember import choices, terminals
+from ember import choices, sandbox, terminals
 from ember.app import icons, theme, widgets
 from ember.app.screens.common import (
     ToneLine,
@@ -356,6 +356,10 @@ class SettingsScreen(QWidget):
         if not chosen:
             return
         path = os.path.abspath(chosen)
+        problem = sandbox.read_path_problem(path, self.context.env)
+        if problem:
+            self.paths_line.show_text(f"Not saved: {problem}.")
+            return
         paths = self._paths()
         if path in paths:
             self.paths_line.show_text(f"{path} is already in the list.")

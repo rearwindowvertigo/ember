@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from ember import choices, db, paths
+from ember import choices, db, paths, skill
 from ember.engines import status
 
 T0 = 1_800_000_000.0
@@ -169,6 +169,8 @@ def test_defaults(env: dict[str, str]) -> None:
         "workflow.agents": "8",
         "workflow.late": "ask",
         "panel.members": [],
+        "provider.capacity_retries": "2",
+        "provider.capacity_wait": "30",
         "sandbox.codex": "off",
         "sandbox.opencode": "off",
         "sandbox.claude": "off",
@@ -463,6 +465,100 @@ def test_invalid_claim_copy_fails_closed(env: dict[str, str]) -> None:
 
 
 # Claims
+
+
+@pytest.mark.parametrize("loaded", ["0.0.0", "0.12.0", "0.13.0", "1.0.0"])
+def test_claim_compares_skill_versions(
+    env: dict[str, str], tmp_path: Path, loaded: str
+) -> None:
+    installed = tmp_path / "installed"
+    installed.mkdir()
+    (installed / "SKILL.md").write_text(
+        "---\nname: ember\n---\nSkill version: 0.13.0\n"
+    )
+    link = skill.link_path(env)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(installed)
+    choices.set_once({"single.writer_as": "subagent"}, env=env, now=T0)
+
+    reply = choices.claim("run-000001", skill_version=loaded, env=env, now=T0)
+
+    assert reply["skill"] == ("current" if loaded == "0.13.0" else "stale")
+    assert reply["loaded_skill_version"] == loaded
+    assert reply["installed_skill_version"] == "0.13.0"
+    assert reply["claim"]["status"] == "claimed"
+    assert _answer(reply, "single.writer_as") == ("subagent", "one-time")
+    assert choices.snapshot(env=env, now=T0)["once"] is None
+
+
+def test_claim_rechecks_skill_on_retry(env: dict[str, str], tmp_path: Path) -> None:
+    installed = tmp_path / "installed"
+    installed.mkdir()
+    text = "---\nname: ember\n---\nSkill version: {}\n"
+    document = installed / "SKILL.md"
+    document.write_text(text.format("0.12.0"))
+    link = skill.link_path(env)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(installed)
+    choices.set_once({"single.writer_as": "subagent"}, env=env, now=T0)
+    first = choices.claim("run-000001", skill_version="0.12.0", env=env, now=T0)
+    assert first["skill"] == "current"
+    choices.set_once({"single.writer_as": "cli"}, env=env, now=T0)
+    generation = _generation(env)
+    document.write_text(text.format("0.13.0"))
+
+    retry = choices.claim("run-000001", skill_version="0.12.0", env=env, now=T0)
+
+    assert retry["skill"] == "stale"
+    assert retry["installed_skill_version"] == "0.13.0"
+    assert retry["generation"] == generation
+    assert retry["claim"]["status"] == "claimed"
+    assert _answer(retry, "single.writer_as") == ("subagent", "one-time")
+    assert choices.snapshot(env=env, now=T0)["once"]["values"] == {
+        "single.writer_as": "cli"
+    }
+    link.unlink()
+    unknown = choices.claim("run-000001", skill_version="0.12.0", env=env, now=T0)
+    assert unknown["skill"] == "unknown"
+    assert unknown["claim"]["status"] == "claimed"
+
+
+def test_unknown_skill_does_not_prevent_claim(env: dict[str, str]) -> None:
+    choices.set_once({"single.writer_as": "subagent"}, env=env, now=T0)
+    reply = choices.claim("run-000001", skill_version="0.12.0", env=env, now=T0)
+    assert reply["skill"] == "unknown"
+    assert reply["loaded_skill_version"] == "0.12.0"
+    assert reply["installed_skill_version"] is None
+    assert reply["claim"]["status"] == "claimed"
+    assert _answer(reply, "single.writer_as") == ("subagent", "one-time")
+    assert choices.snapshot(env=env, now=T0)["once"] is None
+    assert reply["source_error"] is False
+    assert reply["errors"] == []
+
+
+def test_claim_without_skill_skips_comparison(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unexpected(env: object) -> None:
+        pytest.fail("claim without a loaded version reads the skill")
+
+    monkeypatch.setattr(skill, "installed_version", unexpected)
+    reply = choices.claim("run-000001", env=env, now=T0)
+    assert "skill" not in reply
+    assert "loaded_skill_version" not in reply
+    assert "installed_skill_version" not in reply
+
+
+@pytest.mark.parametrize("loaded", ["", "0.12", "v0.12.0", "0.12.0\n", "01.2.3"])
+def test_invalid_skill_version_leaves_pending_once_unchanged(
+    env: dict[str, str], loaded: str
+) -> None:
+    choices.set_once({"single.writer_as": "subagent"}, env=env, now=T0)
+    before = choices.snapshot(env=env, now=T0)
+    with pytest.raises(choices.InvalidChoiceError, match="--skill"):
+        choices.claim("run-000001", skill_version=loaded, env=env, now=T0)
+    assert choices.snapshot(env=env, now=T0) == before
+    assert choices.read("run-000001", env=env, now=T0)["claim"]["status"] == "unknown"
 
 
 def test_claim_with_pending_once(env: dict[str, str]) -> None:
@@ -1100,7 +1196,7 @@ def test_flow_plan_schema_agreement(env: dict[str, str]) -> None:
     assert schema["properties"]["tasks"]["minItems"] == 1
     assert schema["additionalProperties"] is False
     definitions = schema["$defs"]
-    assert definitions["task"]["required"] == ["id", "task", "files"]
+    assert definitions["task"]["required"] == ["id", "subject", "task", "files"]
     assert definitions["task"]["additionalProperties"] is False
     assert definitions["worker"]["required"] == ["engine", "model"]
     assert definitions["worker"]["additionalProperties"] is False
@@ -1369,3 +1465,71 @@ def test_derived_rows_refuse_a_model_off_the_shortlist(env: dict[str, str]) -> N
         choices.set_settings({"flow.writer": "codex:typo"}, env=env)
     choices.set_settings({"flow.writer": "codex:gpt-5"}, env=env)
     choices.set_settings({"flow.writer": "same"}, env=env)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("provider.capacity_retries", "0"),
+        ("provider.capacity_retries", "10"),
+        ("provider.capacity_wait", "5"),
+        ("provider.capacity_wait", "600"),
+    ],
+)
+def test_provider_settings_bounds(env: dict[str, str], key: str, value: str) -> None:
+    choices.set_settings({key: value}, env=env)
+    assert choices.read(env=env)["answers"][key]["value"] == value
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("provider.capacity_retries", "-1"),
+        ("provider.capacity_retries", "11"),
+        ("provider.capacity_retries", ""),
+        ("provider.capacity_retries", 0),
+        ("provider.capacity_wait", "4"),
+        ("provider.capacity_wait", "601"),
+        ("provider.capacity_wait", "30.5"),
+        ("provider.capacity_wait", True),
+    ],
+)
+def test_invalid_provider_settings(
+    env: dict[str, str], key: str, value: object
+) -> None:
+    with pytest.raises(choices.InvalidChoiceError):
+        choices.set_settings({key: value}, env=env)
+
+
+@pytest.mark.parametrize("folder", ["config", "state"])
+def test_sandbox_read_refuses_ember_private_folder_and_alias(
+    env: dict[str, str], tmp_path: Path, folder: str
+) -> None:
+    private = paths.config_dir(env) if folder == "config" else paths.state_dir(env)
+    private.mkdir(parents=True, exist_ok=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(private, target_is_directory=True)
+    for path in (private, private / "child", alias / "child"):
+        with pytest.raises(
+            choices.InvalidChoiceError, match="Ember's configuration or state"
+        ):
+            choices.set_settings({"sandbox.read": [str(path)]}, env=env)
+    secret = str(Path(env["HOME"]) / ".ssh")
+    choices.set_settings({"sandbox.read": [secret]}, env=env)
+    assert choices.read(env=env)["answers"]["sandbox.read"]["value"] == [secret]
+
+
+def test_sandbox_read_json_lists_preserve_commas_and_quotes(
+    env: dict[str, str],
+) -> None:
+    folders = [
+        str(Path(env["HOME"]) / 'tool, "version"'),
+        str(Path(env["HOME"]) / "cache"),
+    ]
+    value = choices.parse_value("sandbox.read", json.dumps(folders))
+    choices.set_settings({"sandbox.read": value}, env=env)
+    assert choices.read(env=env)["answers"]["sandbox.read"]["value"] == folders
+    assert choices.parse_value("sandbox.read", "/a,/b") == ["/a", "/b"]
+    for invalid in ("[", "[1]", '["/a", null]'):
+        with pytest.raises(choices.InvalidChoiceError):
+            choices.parse_value("sandbox.read", invalid)

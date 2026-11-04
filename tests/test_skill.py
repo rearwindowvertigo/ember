@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from ember import skill
+from ember import __version__, skill
 
 
 def make_skill(folder: Path, name: str = "ember") -> Path:
@@ -81,6 +81,132 @@ def test_find_source_takes_the_first_ember_skill(tmp_path: Path) -> None:
 def test_checkout_skill_is_beside_src() -> None:
     assert skill.checkout_skill() == Path(__file__).resolve().parents[1] / "skill"
     assert skill.source_candidates()[1] == skill.SYSTEM_SKILL
+
+
+@pytest.mark.parametrize("version", ["0.0.0", "0.12.0", "1.2.3", "12.34.567"])
+def test_valid_skill_versions(version: str) -> None:
+    assert skill.is_valid_version(version)
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "",
+        "1",
+        "1.2",
+        "1.2.3.4",
+        "v1.2.3",
+        "1.2.3-beta",
+        "1.2.3+build",
+        "01.2.3",
+        "1.02.3",
+        "1.2.03",
+        "-1.2.3",
+        "1.2.3\n",
+        " 1.2.3",
+        "１.2.3",
+    ],
+)
+def test_invalid_skill_versions(version: str) -> None:
+    assert not skill.is_valid_version(version)
+
+
+@pytest.mark.parametrize("annotation", ["", " <!-- x-release-please-version -->"])
+def test_installed_version_reads_link_target(
+    env: dict[str, str], source: Path, annotation: str
+) -> None:
+    document = source / "SKILL.md"
+    document.write_text(document.read_text() + f"\nSkill version: 0.12.0{annotation}\n")
+    link = skill.link_path(env)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(source)
+    assert skill.installed_version(env) == "0.12.0"
+
+
+def test_installed_version_uses_config_dir_and_not_checkout(
+    env: dict[str, str], source: Path, tmp_path: Path
+) -> None:
+    env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "custom-config")
+    document = source / "SKILL.md"
+    document.write_text(document.read_text() + "\nSkill version: 98.76.54\n")
+    link = skill.link_path(env)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(source)
+    assert skill.installed_version(env) == "98.76.54"
+
+
+@pytest.mark.parametrize(
+    "version_line",
+    [
+        "",
+        "Skill version: ",
+        "Skill version: 0.12",
+        "Skill version: v0.12.0",
+        "Skill version: 0.12.0 garbage",
+        "Skill version: 0.12.0\nSkill version: 0.13.0",
+        "Skill version: 0.12.0\nSkill version: broken",
+    ],
+)
+def test_installed_version_missing_or_malformed(
+    env: dict[str, str], source: Path, version_line: str
+) -> None:
+    document = source / "SKILL.md"
+    document.write_text(document.read_text() + f"\n{version_line}\n")
+    link = skill.link_path(env)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(source)
+    assert skill.installed_version(env) is None
+
+
+@pytest.mark.parametrize("state", ["missing", "broken", "loop", "folder", "file"])
+def test_installed_version_needs_readable_link(
+    env: dict[str, str], tmp_path: Path, state: str
+) -> None:
+    link = skill.link_path(env)
+    link.parent.mkdir(parents=True)
+    if state == "broken":
+        link.symlink_to(tmp_path / "missing")
+    elif state == "loop":
+        link.symlink_to(link)
+    elif state == "folder":
+        make_skill(link)
+        with (link / "SKILL.md").open("a") as document:
+            document.write("Skill version: 0.12.0\n")
+    elif state == "file":
+        link.write_text("Skill version: 0.12.0\n")
+    assert skill.installed_version(env) is None
+
+
+@pytest.mark.parametrize("content", [b"\xff", b"Skill version: 0.12.0\n"])
+def test_installed_version_needs_ember_skill(
+    env: dict[str, str], source: Path, content: bytes
+) -> None:
+    (source / "SKILL.md").write_bytes(content)
+    link = skill.link_path(env)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(source)
+    assert skill.installed_version(env) is None
+
+
+def test_installed_version_handles_unreadable_skill(
+    env: dict[str, str], source: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    link = skill.link_path(env)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(source)
+
+    def unreadable(*args: object, **kwargs: object) -> str:
+        raise PermissionError("unreadable skill")
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+    assert skill.installed_version(env) is None
+
+
+def test_installed_version_reads_repository_skill(env: dict[str, str]) -> None:
+    link = skill.link_path(env)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(skill.checkout_skill())
+    assert skill.installed_version(env) == __version__
 
 
 # Status

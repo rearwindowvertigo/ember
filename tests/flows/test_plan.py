@@ -27,7 +27,14 @@ def env(tmp_path: Path) -> dict[str, str]:
 def raw(env: dict[str, str]) -> dict[str, Any]:
     return {
         "dir": env["HOME"],
-        "tasks": [{"id": "a", "task": "Implement a", "files": ["src/a.py"]}],
+        "tasks": [
+            {
+                "id": "a",
+                "subject": "feat: a",
+                "task": "Implement a",
+                "files": ["src/a.py"],
+            }
+        ],
     }
 
 
@@ -44,7 +51,7 @@ def test_defaults_and_lookup(raw: dict[str, Any], tmp_path: Path) -> None:
     assert item.trailers == item.check == item.read == ()
     assert item.path.is_absolute()
     assert item.task("a") == plan.Task(
-        "a", "a: Implement a", "Implement a", ("src/a.py",), (), ""
+        "a", "feat: a", "Implement a", ("src/a.py",), (), ""
     )
     with pytest.raises(KeyError):
         item.task("missing")
@@ -188,7 +195,7 @@ def test_invalid_task_field(
     assert key in str(caught.value)
 
 
-@pytest.mark.parametrize("key", ["id", "task", "files"])
+@pytest.mark.parametrize("key", ["id", "subject", "task", "files"])
 def test_missing_task_key(raw: dict[str, Any], tmp_path: Path, key: str) -> None:
     del raw["tasks"][0][key]
     with pytest.raises(plan.PlanError, match=key):
@@ -209,9 +216,11 @@ def test_collects_three_problems(raw: dict[str, Any], tmp_path: Path) -> None:
     assert len(caught.value.problems) == 3
 
 
-def test_default_subject_cut(raw: dict[str, Any], tmp_path: Path) -> None:
-    raw["tasks"][0]["task"] = "x" * 100 + "\nsecond"
-    assert parsed(raw, tmp_path).task("a").subject == "a: " + "x" * 69
+def test_saved_plan_keeps_resolved_subject(raw: dict[str, Any], tmp_path: Path) -> None:
+    del raw["tasks"][0]["subject"]
+    raw["tasks"][0]["task"] = "different objective"
+    item = plan.from_json(raw, tmp_path / "plan.json", subjects={"a": "feat: resolved"})
+    assert item.task("a").subject == "feat: resolved"
 
 
 def test_empty_tasks_refused(raw: dict[str, Any], tmp_path: Path) -> None:
@@ -240,7 +249,13 @@ def test_duplicate_id(raw: dict[str, Any], tmp_path: Path) -> None:
 
 def test_named_cycle(raw: dict[str, Any], tmp_path: Path) -> None:
     raw["tasks"] = [
-        {"id": name, "task": name, "files": [name], "after": [after]}
+        {
+            "id": name,
+            "subject": "feat: task",
+            "task": name,
+            "files": [name],
+            "after": [after],
+        }
         for name, after in [("a", "b"), ("b", "c"), ("c", "a")]
     ]
     with pytest.raises(plan.PlanError, match="cycle: a -> b -> c -> a"):
@@ -344,7 +359,13 @@ def test_waves(
     expected: list[list[str]],
 ) -> None:
     raw["tasks"] = [
-        {"id": chr(97 + i), "task": "work", "files": [file], "after": after}
+        {
+            "id": chr(97 + i),
+            "subject": "feat: work",
+            "task": "work",
+            "files": [file],
+            "after": after,
+        }
         for i, (file, after) in enumerate(zip(files, dependencies, strict=True))
     ]
     raw["parallel"] = 1

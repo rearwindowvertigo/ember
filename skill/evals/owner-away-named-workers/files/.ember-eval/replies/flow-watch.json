@@ -20,13 +20,14 @@
       "merge_commit": "{{TIP}}",
       "outside_files": [],
       "cleanup": [],
-      "choices": [],
       "findings": {
         "must": 0,
         "should": 0,
         "lead": 0
       },
-      "finding_details": []
+      "denied_paths": [],
+      "finding_details": [],
+      "choices": []
     },
     {
       "id": "decimals",
@@ -39,13 +40,14 @@
       "merge_commit": "{{TIP}}",
       "outside_files": [],
       "cleanup": [],
-      "choices": [],
       "findings": {
         "must": 0,
         "should": 0,
         "lead": 0
       },
-      "finding_details": []
+      "denied_paths": [],
+      "finding_details": [],
+      "choices": []
     }
   ],
   "stops": [],

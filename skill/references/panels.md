@@ -4,6 +4,10 @@ Use a panel when the owner asks for several models' views, or independent
 answers improve a design choice, review or gap check. It is not a routine
 research step. A panel has one question, one claim, and no branch or verdict.
 
+Complete the skill-version check at the claim (SKILL.md step 2) before
+choosing members. Reload a stale skill with the same claim; start no
+member on an unknown installed version.
+
 ## Members
 
 Pass the owner's named models as repeatable
@@ -31,8 +35,17 @@ start command to resolve members and efforts without starting any run.
 Write the question alone in a session-scratchpad file: what to answer,
 files to read, and the shape and length of the answer. For a review,
 include the skill's review bar exactly. For a gap check by a panel, use
-the text `emb gapcheck --plan <file> --brief` prints. Members must not
-write files; their answers belong in their final messages.
+the text `emb gapcheck --plan <file> --brief` prints, adding
+`--previous <last result>` on every repeat and using that same result when
+parsing the reply with `emb gapcheck --reply`. Members must not
+edit the reviewed source; their answers belong in their final messages.
+Tell them to read the repository in their own working folder, using relative
+paths. Each member gets its own detached worktree at one recorded source
+`HEAD`; retries use that same commit. The worktree is writable in both
+sandboxes so builds and tests can create project files. Members have no
+branch and Ember never commits their changes. Uncommitted edits and later source-checkout
+changes are absent. Start warnings name each uncommitted source path;
+report them even at exit 0.
 
 Run as a background Bash command, unpiped, and take its exit code:
 
@@ -41,8 +54,36 @@ emb panel --question-file <file> --dir <repo> --claim <id> [--member W]...
 ```
 
 Keep the panel id from the first line with the claim id. Read standard
-error, including warnings and action lines, even at exit 0. Follow `next:`
-within the skill's rules; bring `owner:` to the owner and wait.
+error, including warnings, member completion lines and action lines, even
+at exit 0. Each member's line arrives there when it ends, while other
+members may still be running; `--json` keeps standard output as one final
+JSON object. Follow `next:` within the skill's rules; bring `owner:` to the owner and wait.
+
+## Progress
+
+Use `emb panel --status <id> --json` to inspect a running panel. Its
+`members` array contains each member's status, elapsed `seconds` and
+`last_screen_change_at` from its current run. The timestamp is epoch
+seconds; null means no recorded activity, including older run records
+without the field. Preserve null as unknown and zero as zero. Elapsed
+time includes the current collection interval and accumulates across
+recovery; a retry's replacement run starts its own timing.
+
+`emb panel --status --json` lists panels with integer `member_count` and
+`running_members`, not `members`. Each running-member entry has `n`,
+`seconds` and `last_screen_change_at`; no running members gives `[]`.
+Read one panel's status for its full member records. Text status shows
+elapsed seconds and `last screen change <epoch or ->`; the list shows
+these lines for `starting` and `running` members and members with denied
+paths.
+
+Member diagnostics and status include `denied_paths`, retained across
+attempts, with `path`, `reason`, `allow_path`, `run` and `turn`. Panel status
+also gives their union with the `member` number. Empty lists mean no
+recorded denials. Panels have no denial event stream. Report every denied
+path with its member, run, turn and reason, including for answered members.
+Follow the Settings, Sandbox read paths owner action in
+`references/runs.md`; never change `sandbox.read` yourself.
 
 ## Read and compare
 
@@ -63,8 +104,8 @@ Compare in five parts, every part every time; an empty part says
 Then answer the question. Agreement is evidence, not proof. Check the
 claims your answer depends on yourself and say which you checked.
 
-Report one line per member from the output: engine, model, effort, status,
-seconds, exit and bytes. Then give the comparison and answer. Name every
+Report one line per member from standard error or status: engine, model,
+effort, status, seconds, exit and bytes. Then give the comparison and answer. Name every
 member that is not `answered`, including failed, stalled, timed-out and
 interrupted members, every left-out member and reason, and every member
 that changed paths even if it answered. Preserve zero counts as zero.
@@ -80,5 +121,13 @@ Exit 75 on recovery: follow `next:`.
 
 Member turns may still run after the panel stops waiting. Close one with
 `emb run --close <run> --force` only on the owner's go-ahead for that run.
-Report open runs and their reasons. Finish the claim after the report with
+Report open runs and their reasons. Closing a member removes its clean
+detached worktree. `emb panel --close <id>` closes open current and retained
+runs without force and retries cleanup of closed or failed runs' detached
+worktrees. Worktrees whose only new files are git-ignored are removed.
+Tracked changes and untracked non-ignored files keep the worktree and its
+recorded path with a
+warning naming `git worktree remove --force <path>`, including after a
+forced session close. Report it and leave discard to the owner's
+instruction. Finish the claim after the report with
 `emb choices --finish <id>`, using the claim id, not the panel id.

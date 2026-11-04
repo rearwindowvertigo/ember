@@ -47,6 +47,7 @@ from ember.engines import (
     models,
     status,
 )
+from ember.engines.diagnostics import output_text
 from ember.runs import record
 from ember.runs.record import Run
 
@@ -701,6 +702,28 @@ class OpenCodeDriver(Driver):
         if code != 204:
             raise DriverError(f"OpenCode did not take the message: HTTP {code}")
 
+    def turn_output(self, run: Run) -> str:
+        """Read tool and assistant result text belonging to this attempt's prompt."""
+        state = self._state(run)
+        message_id = state.get("turns", {}).get(str(run.turn))
+        messages = self._messages(run, self._session(state)) or []
+        output: list[str] = []
+        for message in messages:
+            if not isinstance(message, dict) or not isinstance(
+                message.get("info"), dict
+            ):
+                continue
+            if message["info"].get("parentID") != message_id:
+                continue
+            for part in message.get("parts", []):
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "tool":
+                    output.append(output_text(part.get("state", {})))
+                elif part.get("type") == "text":
+                    output.append(output_text(part))
+        return "\n\n".join(output)
+
     def wait(self, run: Run) -> TurnOutcome:
         """Observe the current turn once, from the session status and messages.
 
@@ -767,7 +790,12 @@ class OpenCodeDriver(Driver):
                 return TurnOutcome(engines.FAILED, reason=reason, signed_out=True)
             if re.search(r"402|credit|insufficient", reason.lower()):
                 reason += " (OpenRouter credit is exhausted)"
-            return TurnOutcome(engines.FAILED, reason=reason, provider_error=True)
+            return TurnOutcome(
+                engines.FAILED,
+                reason=reason,
+                provider_error=True,
+                provider_kind="outage",
+            )
         parts = last.get("parts")
         texts = [
             part["text"]

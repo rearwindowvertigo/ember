@@ -6,6 +6,7 @@ shown.
 
 import dataclasses
 import datetime
+import json
 import re
 import stat
 import time
@@ -71,14 +72,25 @@ FINISHED_PREVIEW = 3
 ELAPSED_MS = 1_000
 """How often active run, flow and panel elapsed times are redrawn while shown."""
 
+ORPHANED = "orphaned"
+"""The badge key of a run whose starting command ended without collecting it."""
+
 BADGES = {
     record.STARTING: ("Starting", "neutral"),
     record.RUNNING: ("Running", "info"),
     record.WAITING: ("Waiting for Claude", "warning"),
     record.CLOSED: ("Done", "success"),
     record.FAILED: ("Failed", "danger"),
+    ORPHANED: ("Orphaned", "warning"),
 }
-"""The badge word and tone of each run status."""
+"""The badge word and tone of each run status, and of an orphaned run."""
+
+
+def run_badge(run: Run) -> tuple[str, str]:
+    """Return a run's badge word and tone; an orphaned run shows Orphaned."""
+    key = ORPHANED if record.orphaned(run) else run.status
+    return BADGES.get(key, (run.status, "neutral"))
+
 
 FLOW_BADGES = {
     "starting": ("Starting", "neutral"),
@@ -430,7 +442,7 @@ def matches_filters(
     """Match a top-level row's type, chip and readable workers' engines."""
     if isinstance(item, Run):
         item_kind = "Run"
-        chip = BADGES[item.status][0]
+        chip = run_badge(item)[0]
         workers = [item]
     else:
         item_kind = "Flow" if isinstance(item, FlowItem) else "Panel"
@@ -473,7 +485,7 @@ def prune_text(result: prune.Result, *, dry_run: bool = False) -> str:
 
 
 class _PruneDialog(QDialog):
-    """A selectable pruning report with a screen-height-capped scroll area."""
+    """A selectable report with a screen-height-capped scroll area."""
 
     def __init__(
         self, title: str, text: str, parent: QWidget, *, confirm: bool = False
@@ -667,7 +679,7 @@ class _Row(_ExpandableRow):
     def set_run(self, run: Run) -> None:
         """Store the run and draw its badge."""
         self.run = run
-        text, tone = BADGES.get(run.status, (run.status, "neutral"))
+        text, tone = run_badge(run)
         self.badge.set_tone(tone, text)
         if self.details is not None and tuple(record_rows(run)) != self.detail_values:
             self._drop_details()
@@ -1026,6 +1038,11 @@ class OverviewScreen(QWidget):
         self.alerts.setSpacing(8)
         layout.addLayout(self.alerts)
         self.sandbox_alerts: dict[str, Alert] = {}
+        self.denied_area = QVBoxLayout()
+        self.denied_area.setSpacing(8)
+        layout.addLayout(self.denied_area)
+        self.denied_notices: dict[str, Alert] = {}
+        self._denied_dialog: _PruneDialog | None = None
 
         self.unreadable_alert = Alert("info", unreadable_line(0))
         self.unreadable_alert.hide()
@@ -1153,6 +1170,7 @@ class OverviewScreen(QWidget):
         if self._stale:
             self.refresh()
         self.check_sandboxes()
+        self.check_denials()
 
     def hideEvent(self, event: QHideEvent) -> None:  # noqa: D102
         super().hideEvent(event)
@@ -1173,6 +1191,7 @@ class OverviewScreen(QWidget):
     def _settings_changed(self, _snapshot: dict) -> None:
         if self.isVisible():
             self.check_sandboxes()
+            self.check_denials()
 
     # Drawing
 
@@ -1186,6 +1205,7 @@ class OverviewScreen(QWidget):
         ]
         live, finished, children = sections(runs.runs(), parents)
         self._parents = run_parents(parents)
+        self.check_denials()
         workers: dict[str, list[Run]] = {item_id(parent): [] for parent in parents}
         for run in runs.runs():
             owner = self._parents.get(run.id)
@@ -1527,7 +1547,7 @@ class OverviewScreen(QWidget):
     def _chain_focus(self) -> None:
         """Keep Tab in reading order through alerts, records and runs."""
         chain: list[QWidget] = []
-        for alert in self.sandbox_alerts.values():
+        for alert in (*self.sandbox_alerts.values(), *self.denied_notices.values()):
             chain.extend(alert.buttons)
         if not self.records_alert.isHidden():
             chain.extend(self.records_alert.buttons)
@@ -1596,6 +1616,132 @@ class OverviewScreen(QWidget):
             return
         self.expanded_finished = run_id
         row.show_details(True)
+
+    def check_denials(self) -> None:
+        """Show undismissed denied folders from all recorded worker turns."""
+        if not self.context.settings_ready():
+            return
+        saved = state.load(self.context.env)
+        reads = [
+            Path(path).resolve() for path in self.context.setting("sandbox.read") or []
+        ]
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for run in self.context.runs.runs():
+            for item in record.run_denials(run):
+                path = str(Path(item["path"]).resolve())
+                target = Path(item["allow_path"] or item["path"]).resolve()
+                if any(target.is_relative_to(read) for read in reads):
+                    continue
+                parent = self._parents.get(run.id)
+                item["source"] = (
+                    f"{parent_label(parent)} · {item_id(parent)} · {run.id}"
+                    if parent is not None
+                    else run.id
+                )
+                groups.setdefault(path, []).append(item)
+        wanted = {}
+        for key, items in groups.items():
+            occurrences = sorted({f"{item['run']}:{item['turn']}" for item in items})
+            if set(occurrences).issubset(saved.denied_dismissals.get(key, [])):
+                continue
+            item = items[0]
+            for occurrence in items[1:]:
+                item = sandbox.merge_denial(item, occurrence)
+            signature = json.dumps((items, occurrences), sort_keys=True)
+            existing = self.denied_notices.get(key)
+            if (
+                existing is not None
+                and existing.property("denied_signature") == signature
+            ):
+                wanted[key] = existing
+                continue
+            actions = []
+            allow = item["allow_path"]
+            if allow is not None:
+                actions.append(
+                    (
+                        "Allow reading",
+                        lambda _checked=False, p=allow: self._allow_reading(p),
+                    )
+                )
+            actions.append(
+                (
+                    "Dismiss",
+                    lambda _checked=False, p=key, seen=occurrences: (
+                        self._dismiss_denial(p, seen)
+                    ),
+                )
+            )
+            sources = "; ".join(dict.fromkeys(i["source"] for i in items))
+            text = f"Reported by {sources}."
+            if item["reason"] == "secret location":
+                text += " This folder holds credentials."
+            elif item["reason"] == "protected":
+                text += " This folder is protected from workers."
+            elif allow is None:
+                text += " Add a folder by hand in Settings, Sandbox read paths."
+            else:
+                text += f" Allow reading {allow} for future workers."
+            notice = Alert(
+                "warning", f"A worker could not read {item['path']}", text, actions
+            )
+            notice.title_label.setTextFormat(Qt.TextFormat.PlainText)
+            notice.text_label.setTextFormat(Qt.TextFormat.PlainText)
+            notice.setProperty("denied_signature", signature)
+            wanted[key] = notice
+        for key, notice in self.denied_notices.items():
+            if wanted.get(key) is not notice:
+                discard(notice, self.denied_area)
+        self.denied_notices = wanted
+        _place(self.denied_area, list(wanted.values()))
+        self._chain_focus()
+
+    def _dismiss_denial(self, path: str, occurrences: list[str]) -> None:
+        """Keep dismissal until a later run or turn reports this folder."""
+        saved = state.load(self.context.env)
+        dismissals = {**saved.denied_dismissals, path: occurrences}
+        state.save(
+            dataclasses.replace(saved, denied_dismissals=dismissals), self.context.env
+        )
+        self.check_denials()
+
+    def _allow_reading(self, path: str) -> None:
+        """Confirm the folder's read permission for every future worker."""
+        if self._denied_dialog is not None:
+            return
+        dialog = _PruneDialog(
+            "Allow reading?",
+            f"Every future worker can read {path}. No worker can change it.",
+            self,
+            confirm=True,
+        )
+        for action in dialog.buttons.buttons():
+            if (
+                dialog.buttons.buttonRole(action)
+                == QDialogButtonBox.ButtonRole.AcceptRole
+            ):
+                action.setText("Allow reading")
+        self._denied_dialog = dialog
+
+        def confirmed(answer: int) -> None:
+            self._denied_dialog = None
+            dialog.deleteLater()
+            if answer != QDialog.DialogCode.Accepted:
+                return
+            # Recheck aliases and credential boundaries at confirmation time.
+            if not sandbox.allow_reading_path(path, self.context.env):
+                self.context.error.emit(
+                    f"Ember could not allow reading {path}: the folder is protected "
+                    "or can hold credentials. Review Settings, Sandbox read paths."
+                )
+                self.context.show_screen("settings")
+                return
+            reads = list(self.context.setting("sandbox.read") or [])
+            if path not in reads:
+                self.context.save_settings({"sandbox.read": [*reads, path]})
+
+        dialog.finished.connect(confirmed)
+        dialog.open()
 
     # Sandbox alerts
 

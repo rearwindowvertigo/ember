@@ -18,9 +18,11 @@ and the number of earlier calls on that route: the first of
     .reply       the turn's reply text, a template
     .summary     a panel's summary text, a template
 
-Templates replace `{{ID}}`, `{{RUN}}`, `{{BRANCH}}`, `{{WORKTREE}}`, `{{TIP}}`,
+Templates replace `{{ID}}`, `{{RUN}}`, `{{BRANCH}}`, `{{WORKTREE}}`,
+`{{WORKTREES}}`, `{{TIP}}`,
 `{{TARGET}}`, `{{EVAL}}`, `{{FLOW}}`, `{{PANEL}}`, `{{PLAN}}`, `{{DIR}}`
-and `{{SUMMARY}}`. A folder named `pycache` in a tree is placed as
+`{{SUMMARY}}` and `{{SKILL_VERSION}}` (the claim's `--skill` value). A folder
+named `pycache` in a tree is placed as
 `__pycache__` and a name ending in `.placeholder` loses that ending, which the
 repository's ignore rules would otherwise leave out of the kit.
 
@@ -32,23 +34,43 @@ its reply has `.summary`, including with a non-zero `.code`.
 `help` prints the matching section
 of `replies/help.out`. With `EMBER_EVAL_SETUP` set, a call is neither logged
 nor counted, so a case can start a run while it is set up.
+`run-dry-run` checks the brief and repository and resolves the worker
+without launch artifacts; a non-zero `.code` overrides it. Its default
+`.out` and `.json` fixtures describe the default writer.
+With `<eval>/real-flow-planner` present, `flow-dry-run` uses the production
+planner and formatter and saves the submitted plan at `<eval>/flow-plan.json`.
 
 No stub reaches the network, starts a model or opens a window. The only
 program it runs is git, on the case's own repository.
 """
 
+import argparse
 import contextlib
 import datetime
+import hashlib
+import io
 import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import subprocess
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
+
+# The installer copies these production modules beside the isolated stub.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ember import branches  # noqa: E402
+from ember.flows import plan as flow_plan  # noqa: E402
+from ember.gapcheck import brief as gap_brief  # noqa: E402
+from ember.gapcheck import plan as gap_plan  # noqa: E402
+from ember.gapcheck import previous as gap_previous  # noqa: E402
+from ember.gapcheck import reply as gap_reply  # noqa: E402
+from ember.runs.core import WorkerSelection  # noqa: E402
 
 EVAL = Path(os.environ.get("EMBER_EVAL_DIR") or Path(__file__).resolve().parent.parent)
 REPLIES = EVAL / "replies"
@@ -120,8 +142,12 @@ def option(args: list[str], name: str) -> str | None:
     """
     found = None
     for index, word in enumerate(args):
-        if word == name and index + 1 < len(args):
-            found = args[index + 1]
+        if word == name:
+            found = (
+                args[index + 1]
+                if index + 1 < len(args) and not args[index + 1].startswith("--")
+                else None
+            )
         elif word.startswith(name + "="):
             found = word[len(name) + 1 :]
     return found
@@ -185,11 +211,11 @@ def route(args: list[str]) -> str:
         for mode in RUN_MODES:
             if has(rest, f"--{mode}"):
                 return f"run-{mode}"
-        return "run-start"
+        return "run-dry-run" if has(rest, "--dry-run") else "run-start"
     if command in ("ground", "merge", "cleanup", "deps", "skill"):
         return command
     modes = {
-        "gapcheck": ("brief", "reply"),
+        "gapcheck": ("answer", "brief", "reply"),
         "flow": ("dry-run", "start", "watch", "status", "lead", "resume"),
         "panel": ("dry-run", "status", "recover"),
     }
@@ -414,6 +440,67 @@ def main_checkout(repo: Path) -> Path:
     return Path(first.split(" ", 1)[1])
 
 
+def worktrees_dir() -> Path:
+    """Return the resolved folder Ember uses for worktrees.
+
+    Returns:
+        `worktrees` in `$XDG_DATA_HOME/ember`, with `~/.local/share` as
+        the default base.
+    """
+    base = os.environ.get("XDG_DATA_HOME", "")
+    absolute = base and Path(base).is_absolute()
+    root = Path(base) if absolute else Path.home() / ".local" / "share"
+    return (root / "ember" / "worktrees").resolve()
+
+
+def worktree_path(worktree_id: str) -> Path:
+    """Return the path Ember gives a run's or flow's worktree.
+
+    Args:
+        worktree_id: The run id or flow id.
+
+    Returns:
+        The resolved `worktrees/<worktree_id>` in Ember's data folder,
+        with its parent folders created at mode 700.
+    """
+    folder = worktrees_dir()
+    folder.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return folder / worktree_id
+
+
+def recorded_worktree(
+    repo: Path, branch: str, worktree_id: str, state: dict[str, Any]
+) -> Path | None:
+    """Return a worker branch's worktree as `emb cleanup` finds it.
+
+    Args:
+        repo: A folder in the repository.
+        branch: The worker branch.
+        worktree_id: The run id or flow id in the branch's name.
+        state: The stub's state.
+
+    Returns:
+        The worktree its run or flow names, or else the worktree `git
+        worktree list` shows holding the branch in a folder named by the id;
+        `None` when there is neither.
+    """
+    entry = state["runs"].get(worktree_id) or state["flows"].get(worktree_id)
+    if entry and entry.get("worktree"):
+        return Path(entry["worktree"])
+    current: Path | None = None
+    for line in out(repo, "worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            current = Path(line.removeprefix("worktree "))
+        elif (
+            line == f"branch refs/heads/{branch}"
+            and current is not None
+            and current.name == worktree_id
+        ):
+            return current
+    return None
+
+
 def branch_exists(repo: Path, branch: str) -> bool:
     """Return whether a local branch exists.
 
@@ -440,6 +527,58 @@ def dirty(folder: Path) -> bool:
         Whether `git status --porcelain` lists anything.
     """
     return bool(out(folder, "status", "--porcelain", "--untracked-files=all"))
+
+
+def snapshot(folder: Path) -> dict[str, tuple[str, str | None]]:
+    """Read status and file hashes for a read-only turn or start warning."""
+    entries = git(
+        folder, "status", "--porcelain=v1", "-z", "--untracked-files=all"
+    ).stdout.split("\0")
+    result = {}
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        index += 1
+        if len(entry) < 4:
+            continue
+        code, name = entry[:2], entry[3:]
+        names = [name]
+        if code[0] in "RC" and index < len(entries):
+            names.append(entries[index])
+            index += 1
+        for name in names:
+            try:
+                digest = hashlib.sha256((folder / name).read_bytes()).hexdigest()
+            except OSError:
+                digest = None
+            result[name] = (code, digest)
+    return result
+
+
+def remove_detached(
+    run: dict[str, Any], *, dry_run: bool = False
+) -> tuple[bool, str | None]:
+    """Remove a clean recorded detached fixture worktree or return its warning."""
+    if not run.get("detached") or not run["read_only"]:
+        return False, None
+    folder = Path(run["worktree"])
+    listing = out(run["common"], "worktree", "list", "--porcelain", "-z")
+    entries = [entry.split("\0") for entry in listing.split("\0\0") if entry]
+    entry = next((item for item in entries if item[0] == f"worktree {folder}"), None)
+    if entry is None:
+        return False, None if not folder.exists() else f"{folder} is not registered"
+    if "detached" not in entry:
+        return False, f"{folder} is no longer a detached worktree"
+    if folder.exists() and (
+        dirty(folder) or out(folder, "rev-parse", "HEAD") != run["base"]
+    ):
+        command = shlex.join(["git", "worktree", "remove", "--force", str(folder)])
+        return False, f"kept worktree {folder} with changes; to discard: {command}"
+    if any(item.startswith("locked") for item in entry):
+        return False, f"kept locked worktree {folder}"
+    if not dry_run:
+        git(run["common"], "worktree", "remove", "--", str(folder))
+    return True, None
 
 
 def copy_tree(source: Path, target: Path) -> None:
@@ -527,19 +666,26 @@ def turn_block(run: dict[str, Any], files: int, commit: str | None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def do_turn(run: dict[str, Any], base: Path | None, variables: dict[str, str]) -> str:
+def do_turn(
+    run: dict[str, Any],
+    base: Path | None,
+    variables: dict[str, str],
+    warnings: list[str],
+) -> str:
     """Play one turn: commit the reply's files, write its reply text.
 
     Args:
         run: The run's record, updated in place.
         base: The reply.
         variables: The template values.
+        warnings: Read-only change warnings, appended for this turn.
 
     Returns:
         The turn's printed lines.
     """
     run["turn"] += 1
     worktree = Path(run["worktree"])
+    before = snapshot(worktree) if run["read_only"] else {}
     commit = None
     files = 0
     tree = part(base, ".files")
@@ -565,8 +711,30 @@ def do_turn(run: dict[str, Any], base: Path | None, variables: dict[str, str]) -
     folder.mkdir(parents=True, exist_ok=True)
     reply = folder / f"turn-{run['turn']}.md"
     variables.update(TIP=commit or variables.get("TIP", ""))
+    if run["read_only"]:
+        after = snapshot(worktree)
+        changed = [
+            str(worktree / name)
+            for name in sorted(before.keys() | after.keys())
+            if before.get(name) != after.get(name)
+        ]
+        warnings.extend(
+            f"WARNING: read-only run {run['id']} changed {name}\n" for name in changed
+        )
+        run["last_reason"] = "changed " + ", ".join(changed) if changed else None
     reply.write_text(read_part(base, ".reply", variables, DEFAULT_REPLY))
-    run.update(reply=str(reply), status="waiting", turn_state="committed")
+    outcome = {
+        "exit": 0,
+        "state": "done",
+        "reason": None,
+        "provider_error": False,
+        "signed_out": False,
+        "incomplete": None,
+        "seconds": SECONDS,
+    }
+    (folder / f"turn-{run['turn']}.outcome.json").write_text(json.dumps(outcome))
+    run.setdefault("turns", []).append({"turn": run["turn"], **outcome})
+    run.update(reply=str(reply), status="waiting", turn_state="committed", last_exit=0)
     return turn_block(run, files, commit)
 
 
@@ -620,8 +788,12 @@ def run_start(
     row_name = "single.reviewer" if read_only else "single.writer"
     model = option(args, "--model")
     effort = option(args, "--effort")
+    model_source = row_name if model is None else "--model"
+    effort_source = "--effort" if effort is not None else model_source
+    row = menu_row(row_name)
+    if model is not None and row and row.get("run_as") == "subagent":
+        row = None
     if model is None:
-        row = menu_row(row_name)
         if row is None or row.get("state") != "set" or row.get("engine") != engine:
             state_text = row.get("state") if row else "ask"
             return refuse(
@@ -630,31 +802,45 @@ def run_start(
                 "next: emb run --help",
             )
         model = row["model"]
+        if engine == "claude" and row.get("run_as") == "subagent":
+            return refuse(64, "the row runs as a subagent", "next: emb run --help")
         if effort is None:
             effort = row.get("effort")
+            if effort is not None:
+                effort_source = row_name
     elif effort is None:
-        row = menu_row(row_name)
-        if row and row.get("engine") == engine and row.get("model") == model:
+        if (
+            row
+            and row.get("state") == "set"
+            and row.get("engine") == engine
+            and row.get("model") == model
+        ):
             effort = row.get("effort")
-    run_id = new_run_id(engine)
+            if effort is not None:
+                effort_source = row_name
+    worker = WorkerSelection(
+        engine=engine,
+        model=model,
+        effort=effort,
+        model_source=model_source,
+        effort_source=effort_source,
+        row="Single tasks Reviewer" if read_only else "Single tasks Writer",
+    )
     head = out(directory, "rev-parse", "HEAD")
+    if has(args, "--dry-run"):
+        output = json.dumps(asdict(worker)) if has(args, "--json") else worker.line()
+        return Reply(0, output + "\n")
+    run_id = new_run_id(engine)
+    warnings = [worker.line() + "\n"]
+    worktree = worktree_path(run_id)
     if read_only:
-        worktree, branch = repo, None
-    else:
-        main = main_checkout(repo)
-        common = Path(
-            out(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        branch = None
+        warnings.extend(
+            f"WARNING: read-only run {run_id} does not see uncommitted {name}\n"
+            for name in snapshot(repo)
         )
-        exclude = common / "info" / "exclude"
-        exclude.parent.mkdir(parents=True, exist_ok=True)
-        current = exclude.read_text() if exclude.exists() else ""
-        if ".ember/" not in current.splitlines():
-            exclude.write_text(
-                current
-                + ("" if current.endswith("\n") or not current else "\n")
-                + ".ember/\n"
-            )
-        worktree = main / ".ember" / "worktrees" / run_id
+        git(repo, "worktree", "add", "-q", "--detach", str(worktree), head)
+    else:
         branch = f"ember/{engine}/{run_id}"
         git(repo, "worktree", "add", "-q", "-b", branch, str(worktree), head)
     run = {
@@ -663,7 +849,14 @@ def run_start(
         "model": model,
         "effort": effort,
         "read_only": read_only,
+        "detached": read_only,
         "repo": str(repo),
+        "main": str(main_checkout(repo)),
+        "common": str(
+            Path(
+                out(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+            ).resolve()
+        ),
         "worktree": str(worktree),
         "branch": branch,
         "base": head,
@@ -671,6 +864,9 @@ def run_start(
         "claim": option(args, "--claim"),
         "status": "running",
         "turn": 0,
+        "turns": [],
+        "last_exit": None,
+        "last_reason": None,
         "turn_state": "sent",
         "reply": None,
         "commits": [],
@@ -678,9 +874,13 @@ def run_start(
         "started_at": datetime.datetime.now(datetime.UTC).timestamp(),
     }
     variables.update(RUN=run_id, BRANCH=branch or "-", WORKTREE=str(worktree))
-    block = do_turn(run, base, variables)
+    block = do_turn(run, base, variables, warnings)
     state["runs"][run_id] = run
-    return Reply(0, f"run {run_id}\n{block}", read_part(base, ".err", variables))
+    return Reply(
+        0,
+        f"run {run_id}\n{block}",
+        "".join(warnings) + read_part(base, ".err", variables),
+    )
 
 
 def known_run(
@@ -754,7 +954,9 @@ def run_other(
         return Reply(0, "".join(f"{key}: {value}\n" for key, value in document.items()))
     if mode == "close":
         run["status"] = "closed"
-        return Reply(0, f"closed {run['id']}\n")
+        _, warning = remove_detached(run)
+        errors = f"WARNING: read-only run {run['id']}: {warning}\n" if warning else ""
+        return Reply(0, f"closed {run['id']}\n", errors)
     if run["status"] == "closed":
         return refuse(72, f"the run {run['id']} is closed", "next: a new start")
     if mode == "send":
@@ -767,9 +969,9 @@ def run_other(
             return refuse(
                 66, f"{message} does not exist", "next: a start with existing paths"
             )
-        return Reply(
-            0, do_turn(run, base, variables), read_part(base, ".err", variables)
-        )
+        warnings = []
+        block = do_turn(run, base, variables, warnings)
+        return Reply(0, block, "".join(warnings) + read_part(base, ".err", variables))
     commits = run["commits"]
     return Reply(0, turn_block(run, 0, commits[-1] if commits else None))
 
@@ -790,17 +992,15 @@ def flow_start(
         return Reply(
             66, err=f"emb flow: cannot read {plan_path}\nnext: ls -l {plan_path}\n"
         )
+    try:
+        document = flow_plan.from_json(plan, Path(plan_path))
+    except flow_plan.PlanError as error:
+        return Reply(error.code, err=f"emb flow: {error}\nnext: emb flow --help\n")
     directory = Path(plan.get("dir") or variables["DIR"]).resolve()
     repo = main_checkout(directory)
     flow_id = new_run_id("flow")
     branch = f"ember/flow/{flow_id}"
-    worktree = repo / ".ember" / "worktrees" / flow_id
-    common = Path(out(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
-    exclude = common / "info" / "exclude"
-    exclude.parent.mkdir(parents=True, exist_ok=True)
-    current = exclude.read_text() if exclude.exists() else ""
-    if ".ember/" not in current.splitlines():
-        exclude.write_text(current.rstrip("\n") + "\n.ember/\n")
+    worktree = worktree_path(flow_id)
     head = out(directory, "rev-parse", "HEAD")
     git(repo, "worktree", "add", "-q", "-b", branch, str(worktree), head)
     tree = part(base, ".files")
@@ -808,20 +1008,13 @@ def flow_start(
         copy_tree(tree, worktree)
         git(worktree, "add", "-A")
         if git(worktree, "diff", "--cached", "--quiet", check=False).returncode:
-            tasks = plan.get("tasks") or []
-            first = tasks[0] if tasks else {}
-            task = str(first.get("task", "")).splitlines()
-            subject = (
-                first.get("subject")
-                or (
-                    f"{first.get('id', flow_id)}: {task[0] if task else 'Flow changes'}"
-                )[:72]
-            )
+            subject = document.tasks[0].subject
             trailers = plan.get("trailers") or []
             message = subject + ("\n\n" + "\n".join(trailers) if trailers else "")
             git(worktree, "commit", "-q", "--no-verify", "-m", message)
     state["flows"][flow_id] = {
         "dir": str(directory),
+        "main": str(repo),
         "branch": branch,
         "worktree": str(worktree),
     }
@@ -843,7 +1036,7 @@ def panel_start(
     with summary.open("w", encoding="utf-8") as stream:
         os.fchmod(stream.fileno(), 0o600)
         stream.write(read_part(base, ".summary", variables))
-    state["panels"][panel_id] = {"summary": str(summary)}
+    state["panels"][panel_id] = {"summary": str(summary), "base": variables["HEAD"]}
     return canned_reply(base, variables, as_json)
 
 
@@ -885,6 +1078,7 @@ def record_variables(args: list[str], state: dict[str, Any]) -> dict[str, str]:
         "PANEL": panel_id,
         "PLAN": str(Path(plan_path).expanduser().resolve()) if plan_path else "",
         "DIR": str(Path(directory).expanduser().resolve()),
+        "WORKTREES": str(worktrees_dir()),
         "SUMMARY": str(EVAL / "runs" / panel_id / "summary.md") if panel_id else "",
     }
     with contextlib.suppress(Exception):
@@ -919,9 +1113,10 @@ def cleanup_branch(repo: Path, branch: str, state: dict[str, Any]) -> str:
         return f"kept {branch}: not an Ember run branch; next: git branch -d {branch}"
     run_id = match.group(2) if match else flow_match.group(1)
     main = main_checkout(repo)
-    worktree = main / ".ember" / "worktrees" / run_id
+    worktree = recorded_worktree(repo, branch, run_id, state)
+    present = worktree is not None and worktree.exists()
     parts = []
-    if worktree.exists() and dirty(worktree):
+    if worktree is not None and present and dirty(worktree):
         return (
             f"kept {branch}: the worktree {worktree} has changes; "
             f"next: git -C {worktree} status --short"
@@ -931,7 +1126,7 @@ def cleanup_branch(repo: Path, branch: str, state: dict[str, Any]) -> str:
         run["status"] = "closed"
         parts.append(f"closed {run_id}")
     tip = out(repo, "rev-parse", f"refs/heads/{branch}")
-    if worktree.exists():
+    if worktree is not None and present:
         git(main, "worktree", "remove", "--", str(worktree))
         parts.append(f"removed worktree {worktree}")
     git(main, "worktree", "prune")
@@ -941,7 +1136,7 @@ def cleanup_branch(repo: Path, branch: str, state: dict[str, Any]) -> str:
 
 
 def contained(repo: Path, branch: str, target: str) -> bool:
-    """Return whether a branch is an ancestor of the target.
+    """Return whether Ember considers the branch contained in the target.
 
     Args:
         repo: A folder in the repository.
@@ -951,15 +1146,9 @@ def contained(repo: Path, branch: str, target: str) -> bool:
     Returns:
         Whether the target contains the branch's tip.
     """
-    result = git(
-        repo,
-        "merge-base",
-        "--is-ancestor",
-        f"refs/heads/{branch}",
-        f"refs/heads/{target}",
-        check=False,
+    return branches.is_contained(
+        repo, f"refs/heads/{branch}", f"refs/heads/{target}", os.environ
     )
-    return result.returncode == 0
 
 
 def merge_failure(code: int, message: str, line: str) -> Reply:
@@ -993,7 +1182,8 @@ def merge(args: list[str], state: dict[str, Any], variables: dict[str, str]) -> 
         if not word.startswith("-")
         and (
             index == 0
-            or args[index - 1] not in ("--into", "--verdict", "--note", "--dir")
+            or args[index - 1]
+            not in ("--into", "--verdict", "--note", "--subject", "--dir")
         )
     ]
     branch = words[0] if words else None
@@ -1021,57 +1211,63 @@ def merge(args: list[str], state: dict[str, Any], variables: dict[str, str]) -> 
             )
     if branch == target:
         return merge_failure(64, "the branch and the target are the same", usage)
-    worktree = None
-    current = None
-    for line in out(repo, "worktree", "list", "--porcelain").splitlines():
-        if line.startswith("worktree "):
-            current = line.split(" ", 1)[1]
-        elif line == f"branch refs/heads/{target}":
-            worktree = current
-    if worktree is None:
+    squash = branches.WORKER_BRANCH.fullmatch(branch) and not (
+        branches.FLOW_BRANCH.fullmatch(branch)
+    )
+    subject = option(args, "--subject")
+    if squash and (
+        subject is None or not subject.strip() or any(c in subject for c in "\r\n\0")
+    ):
         return merge_failure(
-            75,
-            f"{target} is checked out in no worktree",
-            f"next: git -C {repo} switch {target}",
+            64,
+            "an Ember run branch requires --subject with one nonblank line",
+            f"next: emb merge {branch} --into {target} --verdict keep "
+            "--note '<verdict line>' --subject '<commit subject>'",
         )
-    tip = out(repo, "rev-parse", f"refs/heads/{branch}")
-    variables.update(BRANCH=branch, TARGET=target, TIP=tip)
-    if contained(repo, branch, target):
-        head = out(repo, "rev-parse", f"refs/heads/{target}")
-        first = f"already contained: {branch} at {tip} in {target} at {head}"
-    else:
-        if dirty(Path(worktree)):
-            return merge_failure(
-                75,
-                f"the tree of {worktree} is not clean",
-                f"next: git -C {worktree} status --short",
-            )
-        message = f"Merge branch '{branch}'"
-        if target not in ("main", "master"):
-            message += f" into {target}"
-        result = git(
+    warnings: list[str] = []
+    try:
+        opened = branches.open_repository(repo, os.environ, "merge", from_main=True)
+        worktree = branches._target_worktree(opened, target)
+        tip = out(repo, "rev-parse", f"refs/heads/{branch}")
+        variables.update(BRANCH=branch, TARGET=target, TIP=tip)
+        commit, first = branches._merge(
+            opened,
+            branch,
+            target,
             worktree,
-            "merge",
-            "--no-ff",
-            "--no-edit",
-            "-m",
-            message,
-            "-m",
-            f"Ember-Verdict: {note}",
-            f"refs/heads/{branch}",
-            check=False,
+            note,
+            subject.strip() if squash and subject is not None else None,
+            warnings=warnings,
         )
-        if result.returncode:
-            git(worktree, "merge", "--abort", check=False)
-            return merge_failure(
-                75,
-                f"merging {branch} into {target} conflicted; the merge was aborted",
-                f"next: git -C {worktree} merge --no-ff {branch} (resolve by hand)",
-            )
-        commit = out(worktree, "rev-parse", "HEAD")
-        first = f"merged {branch} at {tip} into {target}: {commit}"
-    lines = [f"Verdict: {note}", first, cleanup_branch(repo, branch, state)]
-    return Reply(0, "\n".join(lines) + "\n")
+    except branches.BranchError as error:
+        return merge_failure(error.code, str(error), error.line)
+    cleaned = cleanup_branch(repo, branch, state)
+    err = "".join(f"{warning}\n" for warning in warnings)
+    if has(args, "--json"):
+        action, _, reason = cleaned.partition(": ")
+        reason, separator, next_action = reason.partition("; next: ")
+        run_match = branches.WORKER_BRANCH.fullmatch(branch)
+        run = run_match["run"] if run_match else None
+        result = {
+            "branch": branch,
+            "target": target,
+            "note": note,
+            "warnings": warnings,
+            "merge_commit": commit,
+            "contained_before": commit is None,
+            "cleanup": [
+                {
+                    "branch": branch,
+                    "run": run,
+                    "action": action.split()[0],
+                    "reason": reason,
+                    "next": f"next: {next_action}" if separator else None,
+                }
+            ],
+        }
+        return Reply(0, json.dumps(result, indent=2) + "\n", err)
+    lines = [f"Verdict: {note}", first, cleaned]
+    return Reply(0, "\n".join(lines) + "\n", err)
 
 
 def cleanup(args: list[str], state: dict[str, Any], variables: dict[str, str]) -> Reply:
@@ -1113,12 +1309,34 @@ def cleanup(args: list[str], state: dict[str, Any], variables: dict[str, str]) -
         if not contained(repo, name, target):
             lines.append(
                 f"kept {name}: not contained in {target}; next: emb merge {name} "
-                f"--into {target} --verdict keep (after a Keep verdict)"
+                f"--into {target} --verdict keep --note '<verdict line>'"
+                " --subject '<commit subject>' (after a Keep verdict)"
             )
         elif has(args, "--dry-run"):
             lines.append(f"would remove {name}: deletes {name}")
         else:
             lines.append(cleanup_branch(repo, name, state))
+    if only is None:
+        common = Path(
+            out(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        )
+        for run in state["runs"].values():
+            if (
+                run["status"] != "closed"
+                or not run.get("common")
+                or Path(run["common"]).resolve() != common.resolve()
+            ):
+                continue
+            removed, warning = remove_detached(run, dry_run=has(args, "--dry-run"))
+            if warning:
+                lines.append(
+                    f"kept {run['id']}: {warning}; next: emb cleanup "
+                    f"--merged-into {target} --dir {repo}"
+                )
+            elif removed:
+                action = "would remove" if has(args, "--dry-run") else "removed"
+                verb = "removes" if has(args, "--dry-run") else "removed"
+                lines.append(f"{action} {run['id']}: {verb} worktree {run['worktree']}")
     if not lines:
         return Reply(0, err=f"emb cleanup: no Ember run branch against {target}\n")
     return Reply(0, "\n".join(lines) + "\n")
@@ -1316,7 +1534,175 @@ def help_reply(args: list[str]) -> Reply:
     return Reply(0, sections.get(key, ""))
 
 
+# Gap check -----------------------------------------------------------------
+
+
+def gapcheck_answer(args: list[str]) -> Reply:
+    """Record an answer with Ember's result validator and atomic writer."""
+    location = option(args, "--answer")
+    identity, text = option(args, "--id"), option(args, "--text")
+    if location is None or identity is None or text is None:
+        return Reply(
+            64,
+            err="emb gapcheck: --answer needs --id and --text\n"
+            "next: emb gapcheck --help\n",
+        )
+    try:
+        saved = gap_previous.load(location)
+        made = gap_previous.answer(saved, identity, text)
+    except gap_previous.PreviousError as error:
+        return Reply(
+            66 if error.unreadable else 65,
+            err=f"emb gapcheck: {error}\nnext: emb gapcheck --help\n",
+        )
+    except ValueError as error:
+        return Reply(64, err=f"emb gapcheck: {error}\nnext: emb gapcheck --help\n")
+    except OSError as error:
+        return Reply(74, err=f"emb gapcheck: {error}\nnext: ls -l {location}\n")
+    if has(args, "--json"):
+        return Reply(0, json.dumps(made, indent=2) + "\n")
+    return Reply(0, err=f"recorded answer for {identity} in {saved.path}\n")
+
+
+def gapcheck_repeat(
+    args: list[str], base: Path | None, variables: dict[str, str]
+) -> Reply:
+    """Parse a repeat review, carrying answers and history through real validators.
+
+    A case can supply the review as gapcheck-repeat.reply. Without that
+    fixture, answered concerns remain settled and unanswered concerns reopen.
+    """
+    try:
+        earlier = gap_previous.load(option(args, "--previous") or "")
+        document = gap_plan.load(option(args, "--plan") or variables["PLAN"])
+    except gap_previous.PreviousError as error:
+        return Reply(
+            66 if error.unreadable else 65,
+            err=f"emb gapcheck: {error}\nnext: emb gapcheck --help\n",
+        )
+    except gap_plan.PlanError as error:
+        return Reply(66, err=f"emb gapcheck: {error}\nnext: emb gapcheck --help\n")
+    if has(args, "--brief"):
+        return Reply(0, gap_brief.text(document, variables["DIR"], earlier))
+    fixture = REPLIES / "gapcheck-repeat.reply"
+    supplied_reply = option(args, "--reply")
+    if supplied_reply is not None:
+        text = Path(supplied_reply).read_text()
+    elif fixture.exists():
+        text = fixture.read_text()
+    else:
+        review: dict[str, Any] = {
+            "steps": [{"step": step.number, "gaps": []} for step in document.steps],
+            "dispositions": [],
+        }
+        for gap in earlier.gaps:
+            settled = gap.answer is not None
+            review["dispositions"].append(
+                dict(
+                    id=gap.id,
+                    status="settled" if settled else "reopened",
+                    reason="The answer remains valid."
+                    if settled
+                    else "The concern remains unanswered.",
+                )
+            )
+            if not settled:
+                step = next(
+                    (step for step in review["steps"] if step["step"] == gap.step),
+                    review["steps"][0],
+                )
+                step["gaps"].append(
+                    dict(
+                        gap=gap.gap,
+                        harm=gap.harm,
+                        why=gap.why,
+                        default=gap.default,
+                        earlier=gap.id,
+                    )
+                )
+        text = json.dumps(review)
+    fields = gap_reply.read(
+        text,
+        document.steps,
+        earlier_ids=earlier.ids(),
+        first_number=earlier.next_id,
+        answered_ids={gap.id for gap in earlier.gaps if gap.answer is not None},
+    )
+    settled, closed = gap_previous.history(earlier, fields["dispositions"])
+    made = json.loads(canned_reply(base, variables, True).out)
+    made.update(
+        fields,
+        plan=str(document.path),
+        plan_steps=document.kind,
+        failure_model=document.failure_model,
+        previous=str(earlier.path),
+        previous_plan=earlier.plan,
+        settled=settled,
+        closed=closed,
+    )
+    for step in made["steps"]:
+        for gap in step["gaps"]:
+            gap["ask_owner"] = (
+                made["ask"] == "all"
+                or gap["harm"] == "high"
+                or (made["ask"] == "medium" and gap["harm"] == "medium")
+            )
+    gap_previous.validate(made)
+    warning = (
+        ""
+        if earlier.plan == str(document.path)
+        else f"WARNING: the previous result's plan {earlier.plan} differs "
+        f"from --plan {document.path}\n"
+    )
+    code = 81 if made["parse_error"] else 0
+    if code:
+        warning += f"emb gapcheck: {made['parse_error']}\nnext: emb gapcheck --help\n"
+    return Reply(code, json.dumps(made, indent=2) + "\n", warning)
+
+
 # Main ----------------------------------------------------------------------
+
+
+def flow_dry_run(args: list[str], variables: dict[str, str]) -> Reply:
+    """Compute a planning case's dry run with Ember's planner and formatter."""
+    from ember.flows import command as flows
+    from ember.flows import plan as flow_plan
+
+    settings = json.loads(
+        canned_reply(reply_base("choices-read-id", 1), variables, True).out
+    )
+    try:
+        document = flow_plan.load(option(args, "--plan") or "")
+        document = flows._parallel(flows._review_rounds(document, settings), settings)
+        writer, reviewer = (
+            flow_plan.resolve(role, option(args, f"--{role}"), document, settings)
+            for role in flow_plan.ROLES
+        )
+        output, errors = io.StringIO(), io.StringIO()
+        flows._dry_run(
+            argparse.Namespace(
+                json=has(args, "--json"),
+                previous=option(args, "--previous"),
+                claim=option(args, "--claim"),
+                stall=None,
+            ),
+            document,
+            Path(document.dir),
+            out(document.dir, "rev-parse", document.base),
+            writer,
+            reviewer,
+            settings,
+            dict(os.environ),
+            output,
+            errors,
+        )
+    except flow_plan.PlanError as error:
+        return Reply(error.code, err=f"emb flow: {error}\nnext: emb flow --help\n")
+    except flow_plan.WorkerError as error:
+        return Reply(error.code, err=f"emb flow: {error}\n{error.line}\n")
+    # Keep the submitted plan even when the session wrote it in its scratchpad.
+    (EVAL / "flow-plan.json").write_text(document.text)
+    return Reply(0, output.getvalue(), errors.getvalue())
 
 
 def dispatch(
@@ -1339,6 +1725,13 @@ def dispatch(
         The reply.
     """
     rest = args[1:]
+    if name == "flow-dry-run" and (EVAL / "real-flow-planner").is_file():
+        return flow_dry_run(rest, variables)
+    if name == "gapcheck-answer":
+        return gapcheck_answer(rest)
+    if name.startswith("gapcheck") and has(rest, "--previous"):
+        # Repeat reviews use the case's base result for reviewer metadata.
+        return gapcheck_repeat(rest, reply_base("gapcheck", 1), variables)
     as_json = has(rest, "--json")
     if name == "help":
         return help_reply(args)
@@ -1352,6 +1745,12 @@ def dispatch(
         )
     if name.startswith("run-"):
         mode = name.removeprefix("run-")
+        if mode == "dry-run":
+            return (
+                canned_reply(base, variables, as_json)
+                if code_of(base) != 0
+                else run_start(rest, state, base, variables)
+            )
         if mode == "start":
             return (
                 canned_reply(base, variables, as_json)
@@ -1378,7 +1777,23 @@ def dispatch(
         return flow_start(rest, state, base, variables)
     if name == "panel-start" and part(base, ".summary") is not None:
         return panel_start(state, base, variables, as_json)
-    return canned_reply(base, variables, as_json)
+    response = canned_reply(base, variables, as_json)
+    if name == "choices-claim" and response.code == 0 and not has(rest, "--skill"):
+        document = json.loads(response.out)
+        for key in ("skill", "loaded_skill_version", "installed_skill_version"):
+            document.pop(key, None)
+        response.out = json.dumps(document, indent=2) + "\n"
+        response.err = ""
+    if name == "flow-dry-run" and has(rest, "--previous"):
+        extra = " --previous " + shlex.quote(option(rest, "--previous") or "")
+        if as_json:
+            document = json.loads(response.out)
+            if document["gapcheck"] is not None:
+                document["gapcheck"] += extra
+            response.out = json.dumps(document, indent=2) + "\n"
+        else:
+            response.out = response.out.rstrip("\n") + extra + "\n"
+    return response
 
 
 def main(argv: list[str]) -> int:
@@ -1401,6 +1816,7 @@ def main(argv: list[str]) -> int:
     variables = {
         **record_variables(argv, state),
         "EVAL": str(EVAL),
+        "SKILL_VERSION": option(argv, "--skill") or "",
         "ID": option(argv, "--id")
         or option(argv, "--finish")
         or option(argv, "--claim")

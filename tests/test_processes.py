@@ -70,3 +70,10 @@ def test_end_skips_a_reused_process_id(
     assert not processes.running(reused)
     assert processes.end([reused]) == []
     assert processes.running(found[1])
+
+
+def test_current_is_this_process() -> None:
+    found = processes.current()
+    assert found is not None and found[0] == os.getpid()
+    assert processes.running(found)
+    assert not processes.running((found[0], found[1] + 1))

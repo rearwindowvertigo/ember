@@ -55,6 +55,7 @@ _FLOW_FIELDS = {
     "plan_waves": "[[str]]",
     "dir": "str",
     "main": "str",
+    "common": "str?",
     "base": "str",
     "base_branch": "str?",
     "branch": "str",
@@ -157,6 +158,7 @@ def new_flow(
     *,
     top: str,
     main: str,
+    worktree: str,
     base: str,
     writer: Worker,
     reviewer: Worker,
@@ -165,8 +167,15 @@ def new_flow(
     now: float | None = None,
     base_branch: str | None = None,
     whole_review: bool = True,
+    common: str | None = None,
 ) -> dict[str, Any]:
-    """Build the initial flow record without creating any files."""
+    """Build the initial flow record without creating any files.
+
+    `top` is the checkout the plan names, `main` its main checkout and
+    `worktree` the flow worktree's resolved path, from
+    `ember.paths.worktree_path`. `common` is the resolved common git folder;
+    the record keeps these paths for merge, cleanup and prune.
+    """
     if not is_flow_id(flow_id):
         raise FlowError(flow_id, "not a valid flow id")
     at = time.time() if now is None else now
@@ -176,10 +185,11 @@ def new_flow(
         "plan_waves": [[task.id for task in wave] for wave in waves(plan)],
         "dir": top,
         "main": main,
+        "common": common,
         "base": base,
         "base_branch": base_branch,
         "branch": f"ember/flow/{flow_id}",
-        "worktree": str(Path(main) / ".ember" / "worktrees" / flow_id),
+        "worktree": worktree,
         "tip": base,
         "writer": writer.to_json(),
         "reviewer": reviewer.to_json(),
@@ -317,6 +327,7 @@ def load(flow_id: str, env: Mapping[str, str] | None = None) -> dict[str, Any]:
     if isinstance(value, dict):
         value.setdefault("plan_waves", [])
         value.setdefault("base_branch", None)
+        value.setdefault("common", None)
     _validate(flow_id, value)
     return value
 
@@ -573,7 +584,7 @@ def allowed_answers(task: Mapping[str, Any]) -> tuple[str, ...]:
         case "stopped":
             return ANSWER_KINDS if task.get("branch") else ("worker", "drop")
         case "conflict":
-            return ("worker", "drop")
+            return ("accept", "worker", "drop")
         case "pending" | "blocked":
             return ("drop",)
         case _:

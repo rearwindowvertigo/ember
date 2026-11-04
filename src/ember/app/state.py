@@ -1,15 +1,16 @@
 """The window's size and last screen, kept between starts.
 
 The file is `$XDG_STATE_HOME/ember/app.json`, mode 600 in a mode 700 folder:
-`{"width", "height", "screen", "finished_open"}`. Content that cannot be read
-or is not valid gives the defaults; a write that fails is ignored.
+`{"width", "height", "screen", "finished_open", "denied_dismissals"}`.
+Content that cannot be read or is not valid gives the defaults; a write that
+fails is ignored.
 """
 
 import contextlib
 import json
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ember import paths
@@ -37,6 +38,9 @@ class AppState:
     finished_open: bool = False
     """Whether Overview's Finished list was left open."""
 
+    denied_dismissals: dict[str, list[str]] = field(default_factory=dict)
+    """Denied folders dismissed with the run-and-turn occurrences seen then."""
+
     def to_json(self) -> dict[str, object]:
         """Return the state as a JSON-ready dict."""
         return {
@@ -44,6 +48,7 @@ class AppState:
             "height": self.height,
             "screen": self.screen,
             "finished_open": self.finished_open,
+            "denied_dismissals": self.denied_dismissals,
         }
 
 
@@ -82,7 +87,18 @@ def load(env: Mapping[str, str] | None = None) -> AppState:
     if not isinstance(value, dict):
         return AppState()
     screen = value.get("screen")
+    dismissals = value.get("denied_dismissals", {})
+    if not isinstance(dismissals, dict):
+        dismissals = {}
+    dismissals = {
+        key: entries
+        for key, entries in dismissals.items()
+        if isinstance(key, str)
+        and isinstance(entries, list)
+        and all(isinstance(entry, str) for entry in entries)
+    }
     return AppState(
+        denied_dismissals=dismissals,
         width=_size(value.get("width"), DEFAULT_WIDTH),
         height=_size(value.get("height"), DEFAULT_HEIGHT),
         screen=screen if isinstance(screen, str) and screen else DEFAULT_SCREEN,

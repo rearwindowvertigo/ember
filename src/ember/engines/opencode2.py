@@ -17,6 +17,7 @@ from urllib.parse import quote
 
 from ember import engines, tmux
 from ember.engines import DriverError, IdleState, LaunchSpec, TurnOutcome, opencode
+from ember.engines.diagnostics import output_text
 from ember.engines.opencode import (
     AGENT,
     DOWN,
@@ -282,6 +283,31 @@ class OpenCode2Driver(OpenCodeDriver):
         data = value.get("data") if value is not None else None
         return data if isinstance(data, dict) else None
 
+    def turn_output(self, run: Run) -> str:
+        """Read result text newer than this attempt's prompt in the v2 transcript."""
+        state = self._state(run)
+        message_id = state.get("turns", {}).get(str(run.turn))
+        output: list[str] = []
+        for message in self._messages(run, self._session(state)) or []:
+            if message.get("id") == message_id:
+                return "\n\n".join(output)
+            before = len(output)
+            blocks = message.get("content", [])
+            for block in blocks if isinstance(blocks, list) else []:
+                if isinstance(block, dict) and block.get("type") in (
+                    "text",
+                    "tool-result",
+                    "tool_result",
+                ):
+                    output.append(output_text(block))
+            if len(output) == before and message.get("type") in (
+                "tool",
+                "tool-result",
+                "tool_result",
+            ):
+                output.append(output_text(message))
+        return ""
+
     def wait(self, run: Run) -> TurnOutcome:
         """Read this turn's idle outcome and newest assistant text after its prompt."""
         state = self._state(run)
@@ -334,6 +360,9 @@ class OpenCode2Driver(OpenCodeDriver):
                 engines.FAILED,
                 reason=reason,
                 signed_out=signed_out,
+                provider_kind="outage"
+                if not signed_out and str(error.get("type", "")).startswith("provider.")
+                else None,
                 provider_error=not signed_out
                 and str(error.get("type", "")).startswith("provider."),
             )

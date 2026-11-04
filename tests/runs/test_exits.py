@@ -56,3 +56,10 @@ def test_no_reply_points_at_screen_then_send() -> None:
     assert exits.line(80, run="r1") == (
         "next: emb run --screen r1, then emb run --send r1 --message-file <file>"
     )
+
+
+@pytest.mark.parametrize("kind", ["capacity", "usage_limit", "outage"])
+def test_provider_next_line_names_the_kind(kind: str) -> None:
+    text = exits.line(73, kind, run="codex-1")
+    assert text is not None and text.startswith("next:")
+    assert kind in text

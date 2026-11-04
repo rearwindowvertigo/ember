@@ -1,5 +1,6 @@
 import contextlib
 import json
+import os
 import shlex
 import subprocess
 from collections.abc import Mapping
@@ -30,6 +31,7 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     return {
         "HOME": str(tmp_path / "home"),
         "XDG_STATE_HOME": str(tmp_path / "state"),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
         "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
     }
 
@@ -54,7 +56,7 @@ def run(env: dict[str, str], **changes: Any) -> runs.Run:  # noqa: ANN401
         claim=None,
         status="closed",
         turn=1,
-        turn_state="collected",
+        turn_state="committed",
         reply=None,
         expected_head=None,
         started_at=0.0,
@@ -77,7 +79,7 @@ def flow(env: dict[str, str], **changes: Any) -> dict[str, Any]:  # noqa: ANN401
     source = {
         "dir": "/checkout",
         "base": "main",
-        "tasks": [{"id": "a", "task": "Task", "files": ["a"]}],
+        "tasks": [{"id": "a", "subject": "feat: a", "task": "Task", "files": ["a"]}],
     }
     document = plan.from_json(source, Path("/plan.json"))
     worker = plan.Worker("codex", "model", None, "option")
@@ -86,6 +88,7 @@ def flow(env: dict[str, str], **changes: Any) -> dict[str, Any]:  # noqa: ANN401
         document,
         top="/checkout",
         main="/checkout",
+        worktree="/data/ember/worktrees/" + ident,
         base="a" * 40,
         writer=worker,
         reviewer=worker,
@@ -141,6 +144,287 @@ def panel(env: dict[str, str], *members: runs.Run, **changes: Any) -> dict[str, 
 
 def ids(result: prune.Result) -> set[str]:
     return {item["id"] for item in result.removed}
+
+
+def orphan(env: dict[str, str], name: str = "orphan tree") -> Path:
+    folder = paths.worktrees_dir(env) / name
+    folder.mkdir(parents=True)
+    (folder / ".git").write_text("gitdir: ../../removed clone/.git/worktrees/task\n")
+    (folder / "work.txt").write_text("work\n")
+    return folder
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("kind", ["unrecorded", "run", "flow", "task"])
+def test_prune_removes_orphan_worktrees(
+    env: dict[str, str], tmp_path: Path, kind: str, dry_run: bool
+) -> None:
+    folder = orphan(env)
+    if kind == "run":
+        child = run(
+            env,
+            repo=str(tmp_path / "gone source"),
+            main=str(tmp_path / "gone clone"),
+            common=str(tmp_path / "gone clone" / ".git"),
+            worktree=str(folder),
+            branch="ember/codex/task",
+            read_only=False,
+        )
+        record_folder = child.folder
+    elif kind in ("flow", "task"):
+        parent = flow(
+            env, dir=str(tmp_path / "gone clone"), main=str(tmp_path / "gone clone")
+        )
+        if kind == "flow":
+            parent["worktree"] = str(folder)
+        else:
+            parent["tasks"][0].update(branch="ember/codex/task", worktree=str(folder))
+        flows.save(parent, env)
+        record_folder = flows.folder(parent["id"], env)
+    else:
+        record_folder = None
+    result = prune.remove(0, dry_run=dry_run, env=env)
+    assert not result.errors
+    assert dict(id=str(folder), kind="worktree") in result.removed
+    assert folder.exists() == dry_run
+    if record_folder is not None:
+        assert record_folder.exists() == dry_run
+    assert not result.worktrees and not result.branches
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_scoped_prune_does_not_sweep_unrecorded_worktrees(
+    env: dict[str, str], dry_run: bool
+) -> None:
+    folder = orphan(env)
+    child = run(env)
+    result = prune.remove(0, [child.id], dry_run=dry_run, env=env)
+    assert str(folder) not in ids(result)
+    assert folder.is_dir()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_prune_lists_unrecorded_orphans(
+    env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    dry_run: bool,
+    as_json: bool,
+) -> None:
+    folder = orphan(env)
+    assert prune.main(0, dry_run=dry_run, as_json=as_json, env=env) == 0
+    captured = capsys.readouterr()
+    assert not captured.err
+    if as_json:
+        assert json.loads(captured.out)["removed"] == [
+            dict(id=str(folder), kind="worktree")
+        ]
+    else:
+        verb = "would remove" if dry_run else "removed"
+        assert captured.out == f"{verb} worktree {folder}\n"
+    assert folder.exists() == dry_run
+
+
+@pytest.mark.parametrize("offset, removed", [(86400, True), (86399, False)])
+def test_unrecorded_worktree_age_is_its_modification_time(
+    env: dict[str, str], offset: int, removed: bool
+) -> None:
+    folder = orphan(env)
+    os.utime(folder, (NOW - offset, NOW - offset))
+    preview = prune.remove(1, dry_run=True, env=env, now=NOW)
+    result = prune.remove(1, env=env, now=NOW)
+    assert preview.to_json() == result.to_json()
+    assert (str(folder) in ids(result)) == removed
+    assert folder.exists() != removed
+
+
+@pytest.mark.parametrize("kind", ["run", "flow", "task"])
+def test_sweep_keeps_folders_named_by_unselected_records(
+    env: dict[str, str], kind: str
+) -> None:
+    folder = orphan(env)
+    if kind == "run":
+        run(env, worktree=str(folder), status="running")
+    else:
+        parent = flow(env, status="running")
+        if kind == "flow":
+            parent["worktree"] = str(folder)
+        else:
+            parent["tasks"][0]["worktree"] = str(folder)
+        flows.save(parent, env)
+    result = prune.remove(0, env=env)
+    assert not result.errors and not result.removed
+    assert folder.is_dir()
+
+
+@pytest.mark.parametrize("kind", ["run", "flow", "panel", "invalid-id"])
+def test_sweep_keeps_folders_when_any_record_is_unreadable(
+    env: dict[str, str], kind: str
+) -> None:
+    folder = orphan(env)
+    if kind == "run":
+        broken = run(env).folder / runs.RECORD_NAME
+    elif kind == "flow":
+        broken = flows.folder(flow(env)["id"], env) / flows.FLOW_NAME
+    elif kind == "panel":
+        broken = panels.folder(panel(env)["id"], env) / "panel.json"
+    else:
+        broken = paths.runs_dir(env) / "unknown" / "run.json"
+        broken.parent.mkdir(parents=True)
+    broken.write_text("{")
+    result = prune.remove(0, env=env)
+    assert result.errors and not result.removed
+    assert folder.is_dir()
+    assert (
+        dict(id=str(folder), reason="cannot establish ownership: unreadable records")
+        in result.skipped
+    )
+
+
+@pytest.mark.parametrize(
+    "pointer",
+    [
+        "",
+        "garbage",
+        "gitdir: \n",
+        "gitdir: gone\nextra",
+        "gitdir: gone\rextra",
+        "gitdir: x\0y",
+    ],
+)
+def test_sweep_keeps_invalid_git_files(env: dict[str, str], pointer: str) -> None:
+    folder = orphan(env)
+    (folder / ".git").write_text(pointer)
+    result = prune.remove(0, env=env)
+    assert not result.removed and folder.is_dir()
+    assert dict(id=str(folder), reason="invalid .git file") in result.skipped
+
+
+@pytest.mark.parametrize("recorded", [False, True])
+@pytest.mark.parametrize("relative", [False, True])
+@pytest.mark.parametrize("ending", ["", "\n", "\r\n", "\r"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_prune_keeps_metadata_paths_with_trailing_spaces(
+    env: dict[str, str],
+    tmp_path: Path,
+    recorded: bool,
+    relative: bool,
+    ending: str,
+    dry_run: bool,
+) -> None:
+    folder = orphan(env)
+    metadata = tmp_path / "metadata "
+    metadata.mkdir()
+    name = os.path.relpath(metadata, folder) if relative else str(metadata)
+    (folder / ".git").write_bytes(os.fsencode(f"gitdir: {name}{ending}"))
+    if recorded:
+        run(
+            env,
+            worktree=str(folder),
+            common=str(metadata),
+            branch="ember/codex/task",
+            read_only=False,
+        )
+    result = prune.remove(0, env=env, dry_run=dry_run)
+    assert not result.errors
+    assert not any(item["kind"] == "worktree" for item in result.removed)
+    assert (folder / "work.txt").read_text() == "work\n"
+    if not recorded:
+        assert any(
+            item["id"] == str(folder)
+            and item["reason"].startswith("git folder still exists:")
+            for item in result.skipped
+        )
+
+
+@pytest.mark.parametrize("pointer", ["missing", "directory", "symlink", "live"])
+def test_sweep_keeps_folders_without_a_missing_git_folder(
+    env: dict[str, str], tmp_path: Path, pointer: str
+) -> None:
+    folder = orphan(env)
+    dot_git = folder / ".git"
+    dot_git.unlink()
+    if pointer == "directory":
+        dot_git.mkdir()
+    elif pointer in ("symlink", "live"):
+        metadata = tmp_path / "metadata"
+        metadata.mkdir()
+        if pointer == "live":
+            dot_git.write_text(f"gitdir: {metadata}\n")
+        else:
+            dot_git.symlink_to(metadata)
+    result = prune.remove(0, env=env)
+    assert not result.removed and folder.is_dir()
+    assert any(item["id"] == str(folder) and item["reason"] for item in result.skipped)
+
+
+def test_sweep_keeps_symlinks_and_external_recorded_worktrees(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    outside = tmp_path / "external"
+    outside.mkdir()
+    (outside / ".git").write_text(f"gitdir: {tmp_path / 'gone'}\n")
+    root = paths.worktrees_dir(env)
+    root.mkdir(parents=True)
+    link = root / "linked"
+    link.symlink_to(outside, target_is_directory=True)
+    run(
+        env,
+        worktree=str(outside),
+        main=str(tmp_path / "gone clone"),
+        common=str(tmp_path / "gone clone" / ".git"),
+        branch="ember/codex/task",
+    )
+    result = prune.remove(0, env=env)
+    assert outside.is_dir() and link.is_symlink()
+    assert not any(item["kind"] == "worktree" for item in result.removed)
+    assert any(item["id"] == str(outside) for item in result.skipped)
+
+
+@pytest.mark.parametrize("main_exists", [False, True])
+@pytest.mark.parametrize("kind", ["run", "flow"])
+@pytest.mark.parametrize("source_exists", [False, True])
+def test_prune_uses_recorded_checkout_without_discovering_from_worktree(
+    env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    main_exists: bool,
+    kind: str,
+    source_exists: bool,
+) -> None:
+    main = tmp_path / "main"
+    common = tmp_path / "metadata"
+    common.mkdir()
+    if main_exists:
+        main.mkdir()
+    source = tmp_path / "reused source"
+    if source_exists:
+        source.mkdir()
+    folder = orphan(env)
+    (folder / ".git").write_text(f"gitdir: {common}\n")
+    changes = dict(
+        main=str(main),
+        common=str(common),
+        worktree=str(folder),
+        branch="ember/codex/task",
+    )
+    if kind == "run":
+        run(env, repo=str(source), **changes)
+    else:
+        flow(env, dir=str(source), **changes)
+    queried: list[str] = []
+
+    def git(
+        directory: str, *args: str, env: Mapping[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        assert args[0] != "worktree"
+        queried.append(directory)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(prune, "_git", git)
+    result = prune.remove(0, dry_run=True, env=env)
+    assert not result.errors
+    assert set(queried) == {str(main if main_exists else common)}
 
 
 @pytest.mark.parametrize("status", runs.STATUSES)
@@ -289,7 +573,7 @@ def test_invalid_folder_names_and_empty_folder(env: dict[str, str]) -> None:
 
 
 @pytest.mark.parametrize(
-    "lock_kind", ["run", "flow_lifecycle", "flow_lifetime", "panel"]
+    "lock_kind", ["run", "run_command", "flow_lifecycle", "flow_lifetime", "panel"]
 )
 def test_busy_records_and_children_are_kept(
     env: dict[str, str], lock_kind: str
@@ -298,6 +582,11 @@ def test_busy_records_and_children_are_kept(
     if lock_kind == "run":
         ident = child.id
         held = runs.record_lock(child)
+    elif lock_kind == "run_command":
+        ident = child.id
+        root = paths.runtime_dir(env)
+        folder = paths.ensure_private_dir(root / "locks", root=root)
+        held = prune._file_lock(folder / f"{ident}.lock")
     elif lock_kind == "panel":
         ident = panel(env, child)["id"]
         held = panels.hold(ident, env)
@@ -564,13 +853,18 @@ def test_ancestry_uses_saved_base_after_checkout_switches(
         assert "branch -D" in result.branches[0]["command"]
 
 
+@pytest.mark.parametrize("legacy", [True, False])
 def test_run_whose_repo_folder_is_gone_uses_the_main_checkout(
-    env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy: bool
 ) -> None:
     main = tmp_path / "main"
-    worktree = main / ".ember" / "worktrees" / "codex-run"
-    worktree.mkdir(parents=True)
+    main.mkdir()
     child = run(env, base_branch="main")
+    if legacy:
+        worktree = main / ".ember" / "worktrees" / child.id
+    else:
+        worktree = paths.worktree_path(child.id, env)
+    worktree.mkdir(parents=True)
     runs.save(
         replace(
             child,
@@ -585,6 +879,13 @@ def test_run_whose_repo_folder_is_gone_uses_the_main_checkout(
     def git(
         directory: str, *args: str, env: Mapping[str, str]
     ) -> subprocess.CompletedProcess[str]:
+        if args[0] == "rev-parse":
+            assert directory == str(worktree)
+            return subprocess.CompletedProcess(args, 0, str(main / ".git"), "")
+        if args[0] == "worktree":
+            assert directory == str(worktree)
+            listing = f"worktree {main}\0HEAD {'a' * 40}\0branch refs/heads/main\0\0"
+            return subprocess.CompletedProcess(args, 0, listing, "")
         folders.append(directory)
         return subprocess.CompletedProcess(args, int(args[0] == "merge-base"), "", "")
 
@@ -596,6 +897,33 @@ def test_run_whose_repo_folder_is_gone_uses_the_main_checkout(
         f"git -C {main} branch -D ember/codex/{child.id}"
         in (result.branches[0]["command"])
     )
+
+
+def test_task_run_whose_flow_worktree_is_gone_uses_the_flow_main_checkout(
+    env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    main = tmp_path / "main"
+    main.mkdir()
+    gone = str(tmp_path / "removed-flow-worktree")
+    child = run(env)
+    branch = f"ember/codex/{child.id}"
+    runs.save(replace(child, repo=gone, worktree=gone, branch=branch, read_only=False))
+    parent = flow(env, dir=str(main), main=str(main))
+    parent["tasks"][0].update(branch=branch, writer_run=child.id, worktree=gone)
+    flows.save(parent, env)
+    folders: list[str] = []
+
+    def git(
+        directory: str, *args: str, env: Mapping[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        assert args[0] != "worktree"
+        folders.append(directory)
+        return subprocess.CompletedProcess(args, int(args[0] == "merge-base"), "", "")
+
+    monkeypatch.setattr(prune, "_git", git)
+    result = prune.remove(0, dry_run=True, env=env)
+    assert not result.errors
+    assert set(folders) == {str(main)}
 
 
 def test_busy_member_prevents_panel_removal(env: dict[str, str]) -> None:
@@ -682,6 +1010,8 @@ def test_deleted_target_uses_flow_base_without_error(
         directory: str, *args: str, env: Mapping[str, str]
     ) -> subprocess.CompletedProcess[str]:
         queries.append(args)
+        if args[0] in ("rev-parse", "worktree"):
+            return subprocess.CompletedProcess(args, 128, "", "not a repository")
         if args[0] == "show-ref":
             present = args[-1] == f"refs/heads/{branch}" or (
                 args[-1] == "refs/heads/main" and base_exists
@@ -1000,7 +1330,9 @@ def test_json_worktrees_match_text(
     def git(
         directory: str, *args: str, env: Mapping[str, str]
     ) -> subprocess.CompletedProcess[str]:
-        if args[0] == "show-ref":
+        if args[0] in ("rev-parse", "worktree"):
+            code = 128
+        elif args[0] == "show-ref":
             code = int(args[-1] == "refs/heads/ember/absent")
         else:
             assert args[0] == "merge-base"
@@ -1101,3 +1433,117 @@ def test_removed_flow_reports_merged_task_worktree(
     assert "branch -D" not in captured.out and "emb cleanup" not in captured.out
     assert not child.folder.exists() and not flows.folder(parent["id"], env).exists()
     assert (worktree / "kept.txt").read_text() == "task changes"
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("dirty", [False, True])
+def test_prune_detached_worktrees(tmp_path: Path, dry_run: bool, dirty: bool) -> None:
+    from runs.stub_engine import (  # pyrefly: ignore[missing-import]
+        git,
+        make_env,
+        make_repo,
+    )
+
+    environment = make_env(tmp_path)
+    checkout = make_repo(tmp_path, environment)
+    child = run(
+        environment,
+        detached=True,
+        repo=str(checkout),
+        main=str(checkout),
+        common=str(checkout / ".git"),
+        base=git(checkout, "rev-parse", "HEAD", env=environment),
+    )
+    worktree = paths.worktree_path(child.id, environment)
+    paths.ensure_worktrees_dir(environment)
+    git(checkout, "worktree", "add", "--detach", str(worktree), env=environment)
+    child = replace(child, worktree=str(worktree))
+    runs.save(child)
+    if dirty:
+        (worktree / "evidence.txt").write_text("keep\n")
+    result = prune.remove(0, env=environment, dry_run=dry_run)
+    assert worktree.exists() == (dry_run or dirty)
+    assert child.folder.exists() == (dry_run or dirty)
+    listing = git(checkout, "worktree", "list", env=environment)
+    assert (str(worktree) in listing) == (dry_run or dirty)
+    if dirty:
+        assert child.id not in ids(result)
+        assert any(
+            f"git worktree remove --force {worktree}" in e for e in result.errors
+        )
+    else:
+        assert not result.errors
+        assert {child.id, str(worktree)} <= ids(result)
+
+
+@pytest.mark.parametrize("parent_kind", [None, "panel", "flow"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_prune_keeps_uncertain_delivery_worktree(
+    tmp_path: Path, parent_kind: str | None, dry_run: bool
+) -> None:
+    from runs.stub_engine import (  # pyrefly: ignore[missing-import]
+        git,
+        make_env,
+        make_repo,
+    )
+
+    environment = make_env(tmp_path)
+    checkout = make_repo(tmp_path, environment)
+    child = run(
+        environment,
+        status=runs.FAILED,
+        turn_state=runs.SENT,
+        detached=True,
+        last_reason="capacity retry delivery is uncertain; ask the lead",
+        repo=str(checkout),
+        main=str(checkout),
+        common=str(checkout / ".git"),
+        base=git(checkout, "rev-parse", "HEAD", env=environment),
+    )
+    worktree = paths.worktree_path(child.id, environment)
+    paths.ensure_worktrees_dir(environment)
+    git(checkout, "worktree", "add", "--detach", str(worktree), env=environment)
+    child = replace(child, worktree=str(worktree))
+    runs.save(child)
+    parent_id = None
+    if parent_kind == "panel":
+        parent = panel(environment, child)
+        parent_id = parent["id"]
+    elif parent_kind == "flow":
+        parent = flow(environment)
+        parent.update(status="done", ended_at=0.0)
+        parent["tasks"][0]["writer_run"] = child.id
+        flows.save(parent, environment)
+        parent_id = parent["id"]
+    result = prune.remove(0, env=environment, dry_run=dry_run)
+    assert not result.errors
+    assert child.folder.exists() and worktree.exists()
+    assert child.id not in ids(result)
+    assert any("delivery is uncertain" in item["reason"] for item in result.skipped)
+    if parent_id:
+        assert runs.run_dir(parent_id, environment).exists()
+        assert parent_id not in ids(result)
+    assert str(worktree) in git(checkout, "worktree", "list", env=environment)
+
+
+@pytest.mark.parametrize("status", [runs.FAILED, runs.CLOSED])
+@pytest.mark.parametrize("pending", ["sent", "collected", "session"])
+def test_prune_keeps_pending_runs(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch, status: str, pending: str
+) -> None:
+    from ember import tmux
+
+    child = run(
+        env,
+        status=status,
+        turn_state=runs.SENT if pending == "sent" else runs.COLLECTED,
+        read_only=pending == "session",
+    )
+    monkeypatch.setattr(tmux, "exists", lambda *args, **kwargs: pending == "session")
+    monkeypatch.setattr(tmux, "pane_dead", lambda *args, **kwargs: False)
+    result = prune.remove(0, env=env)
+    assert not result.removed and not result.errors
+    assert child.folder.exists()
+    assert result.skipped[0]["id"] == child.id
+    expected = pending if pending != "session" else "still running"
+    assert expected in result.skipped[0]["reason"]

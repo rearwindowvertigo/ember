@@ -70,6 +70,13 @@ def tree(pid: int) -> list[Process]:
     return result
 
 
+def current() -> Process | None:
+    """Return this process with its start time; `None` if `/proc` has no entry."""
+    pid = os.getpid()
+    found = _stat(pid)
+    return None if found is None else (pid, found[1])
+
+
 def running(process: Process) -> bool:
     """Return whether the same process is still running."""
     found = _stat(process[0])

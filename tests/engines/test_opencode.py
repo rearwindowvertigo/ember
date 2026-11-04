@@ -542,6 +542,7 @@ def test_wait_reports_a_provider_error(
     outcome = driver.wait(run)
     assert outcome.state == engines.FAILED
     assert outcome.provider_error
+    assert outcome.provider_kind == "outage"
     assert outcome.reason == (
         "APIError: HTTP 402 payment required (OpenRouter credit is exhausted)"
     )
@@ -962,3 +963,29 @@ def test_wait_shows_the_session_while_the_start_screen_returns(
     monkeypatch.setattr(driver, "_select", lambda _run, session: calls.append(session))
     assert driver.wait(run).state == engines.RUNNING
     assert calls == ["ses_test"] * selects
+
+
+def test_turn_output_contains_current_tool_parts_only(
+    driver: OpenCodeDriver, run: Run, server: Server
+) -> None:
+    run = started(driver, run, server)
+    server.write(
+        "messages.json",
+        [
+            assistant("old-prompt", [text("old denial")]),
+            assistant(
+                prompt_id(server),
+                [
+                    {
+                        "type": "tool",
+                        "state": {
+                            "output": "Permission denied: /home/owner/tools/python"
+                        },
+                    }
+                ],
+            ),
+        ],
+    )
+    output = driver.turn_output(run)
+    assert "Permission denied: /home/owner/tools/python" in output
+    assert "old denial" not in output

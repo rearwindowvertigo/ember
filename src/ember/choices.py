@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ember import db
+from ember import db, skill
 from ember.engines import status
 
 EX_USAGE = 64
@@ -366,6 +366,14 @@ def _keys() -> dict[str, Key]:
             ),
         )
     )
+    for name, low, high, default in (
+        ("provider.capacity_retries", 0, 10, "2"),
+        ("provider.capacity_wait", 5, 600, "30"),
+    ):
+        values = tuple(str(value) for value in range(low, high + 1))
+        keys.append(
+            Key(name, _STANDING, _enum(*values), _constant(default), allowed=values)
+        )
     for engine in SANDBOXED:
         keys.append(
             Key(
@@ -439,7 +447,8 @@ def parse_value(name: str, text: str) -> object:
 
     Args:
         name: The key.
-        text: The text after `=`; a list value is comma-separated.
+        text: The text after `=`; lists are comma-separated. `sandbox.read`
+            also accepts a JSON string list for paths containing commas.
 
     Returns:
         A string, or a list of strings for a list key (`[]` for empty text).
@@ -450,6 +459,14 @@ def parse_value(name: str, text: str) -> object:
     key = KEYS.get(name)
     if key is None:
         raise InvalidChoiceError(f"unknown key {name!r}")
+    if name == "sandbox.read" and text.startswith("["):
+        try:
+            value = json.loads(text)
+        except ValueError as error:
+            raise InvalidChoiceError(
+                "sandbox.read is not a JSON string list"
+            ) from error
+        return _string_list(value)
     if key.is_list:
         return text.split(",") if text else []
     return text
@@ -862,6 +879,7 @@ def claim(
     id: str,
     request: Mapping[str, object] | None = None,
     *,
+    skill_version: str | None = None,
     expect_generation: int | None = None,
     env: Mapping[str, str] | None = None,
     now: float | None = None,
@@ -877,20 +895,27 @@ def claim(
     Args:
         id: The run's claim id.
         request: Request-layer values, validated before anything is read.
+        skill_version: The loaded skill's version; `None` skips the comparison.
         expect_generation: The generation the caller last read, or `None`.
         env: The environment; `None` reads `os.environ`.
         now: The time; `None` for the current time.
 
     Returns:
-        The read reply for `id`.
+        The read reply for `id`, with `skill`, `loaded_skill_version` and
+        `installed_skill_version` when `skill_version` is given. `skill` is
+        `current`, `stale` or `unknown` for an unreadable installed version.
 
     Raises:
-        InvalidChoiceError: The id or a request value is not valid.
+        InvalidChoiceError: The id, a request value or skill version is not valid.
         DatabaseError: The database cannot be written, is busy, has another
             schema, or is at another generation than `expect_generation`.
     """
     run_id = check_id(id)
     request = _check_values(request or {}, REQUEST)
+    if skill_version is not None and not skill.is_valid_version(skill_version):
+        raise InvalidChoiceError(
+            f"--skill needs a version in x.y.z form, not {skill_version!r}"
+        )
     at = _now(now)
 
     refused: list[bool] = []
@@ -920,7 +945,19 @@ def claim(
         state = _load(conn, generation, run_id, at, include_once=bool(refused))
         return _reply(state, run_id, request, env)
 
-    return _write(env, at, expect_generation, change, reply)
+    result = _write(env, at, expect_generation, change, reply)
+    if skill_version is not None:
+        installed = skill.installed_version(env)
+        result.update(
+            skill="unknown"
+            if installed is None
+            else "current"
+            if installed == skill_version
+            else "stale",
+            loaded_skill_version=skill_version,
+            installed_skill_version=installed,
+        )
+    return result
 
 
 def finish(
@@ -1050,6 +1087,13 @@ def set_settings(
             schema, or is at another generation than `expect_generation`.
     """
     values = _check_values(values, SETTING)
+    if "sandbox.read" in values:
+        from ember import sandbox
+
+        for path in _string_list(values["sandbox.read"]):
+            problem = sandbox.read_path_problem(path, env)
+            if problem:
+                _fail(problem)
 
     def change(conn: sqlite3.Connection) -> bool:
         _check_shortlisted(values, {**_stored_settings(conn), **values})

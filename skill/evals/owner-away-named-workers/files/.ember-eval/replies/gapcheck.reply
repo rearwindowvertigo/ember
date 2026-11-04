@@ -1,0 +1,19 @@
+{
+  "steps": [
+    {
+      "step": 1,
+      "gaps": []
+    },
+    {
+      "step": 2,
+      "gaps": [
+        {
+          "gap": "What prints when the cutoff excludes every order?",
+          "harm": "low",
+          "why": "The empty selection still needs formatted totals.",
+          "default": "Print zero quantity and revenue formatted as 0.00."
+        }
+      ]
+    }
+  ]
+}

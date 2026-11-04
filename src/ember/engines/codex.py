@@ -54,6 +54,7 @@ from ember.engines import (
     TurnOutcome,
     models,
 )
+from ember.engines.diagnostics import output_text
 from ember.runs import record
 from ember.runs.core import BRIEF_LINE
 from ember.runs.record import Run
@@ -252,6 +253,16 @@ def same_message(left: str, right: str) -> bool:
     return normal(left) == normal(right)
 
 
+def provider_kind(message: str) -> str:
+    """Classify Codex's provider refusal text; unmatched errors are outages."""
+    message = message.casefold().replace("’", "'")
+    if "selected model is at capacity" in message:
+        return "capacity"
+    if "you've hit your usage limit" in message:
+        return "usage_limit"
+    return "outage"
+
+
 def error_outcome(message: str) -> TurnOutcome:
     """Return the failed outcome of a turn that Codex reported an error for.
 
@@ -268,6 +279,7 @@ def error_outcome(message: str) -> TurnOutcome:
         reason=f"Codex reported an error: {message}",
         provider_error=not signed_out,
         signed_out=signed_out,
+        provider_kind=None if signed_out else provider_kind(message),
     )
 
 
@@ -923,6 +935,41 @@ class CodexDriver(Driver):
         if foreign:
             return f"{foreign} message(s) in the Codex session were not sent by Ember"
         return None
+
+    def turn_output(self, run: Run) -> str:
+        """Read tool result text after this attempt's saved rollout baseline."""
+        state = self._load_state(run)
+        rollout = self._rollout(run, state)
+        if rollout is None:
+            return ""
+        baseline, _ = self._baseline(run, state)
+        ended = 0
+        output: list[str] = []
+        try:
+            with Path(rollout).open(encoding="utf-8") as stream:
+                for line in stream:
+                    try:
+                        value = json.loads(line)
+                    except ValueError:
+                        break
+                    payload = value.get("payload", {})
+                    if not isinstance(payload, dict):
+                        continue
+                    kind = payload.get("type")
+                    if ended == baseline and kind in (
+                        "function_call_output",
+                        "custom_tool_call_output",
+                        "exec_command_end",
+                        "error",
+                    ):
+                        output.append(output_text(payload))
+                    if value.get("type") == "event_msg" and kind in ENDED:
+                        ended += 1
+                        if ended > baseline:
+                            break
+        except OSError, UnicodeError:
+            return ""
+        return "\n\n".join(output)
 
     def wait(self, run: Run) -> TurnOutcome:
         """Read the current turn from the rollout.

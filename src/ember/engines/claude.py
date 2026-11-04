@@ -26,6 +26,7 @@ read-only mode and its network value, and the host runs the CLI inside
 `ember.sandbox.claude_wrap`; the host itself runs outside the sandbox.
 """
 
+import contextlib
 import json
 import os
 import re
@@ -40,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 from ember import engines
 from ember.engines import DriverError, IdleState, LaunchSpec, TurnOutcome, models
 from ember.engines import status as engine_status
+from ember.engines.diagnostics import output_text
 
 if TYPE_CHECKING:
     from ember.runs.record import Run
@@ -422,7 +424,8 @@ class ClaudeDriver(engines.Driver):
         Returns:
             `None` unless the run's sandbox is `bubblewrap`; otherwise the
             worktree, the common git folder, the read paths, the read-only
-            mode and the stored network value, as `claude_wrap` takes them.
+            protection for a legacy source checkout and the stored network
+            value, as `claude_wrap` takes them. Detached worktrees are writable.
 
         Raises:
             DriverError: The repository's git folder cannot be found.
@@ -433,7 +436,7 @@ class ClaudeDriver(engines.Driver):
             "worktree": run.worktree,
             "common": self._common(run),
             "read": list(run.read_effective),
-            "read_only": run.read_only,
+            "read_only": run.read_only and not run.detached,
             "network": run.network,
         }
 
@@ -509,6 +512,26 @@ class ClaudeDriver(engines.Driver):
 
     # Turns
 
+    def turn_output(self, run: Run) -> str:
+        """Read this attempt's result text and standard error, excluding requests."""
+        files = turn_files(folder(run), run.turn)
+        output: list[str] = []
+        for event in read_events(files["jsonl"]):
+            message = event.get("message", {})
+            blocks = message.get("content", []) if isinstance(message, dict) else []
+            for block in blocks if isinstance(blocks, list) else []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_result" or (
+                    block.get("type") == "text" and event.get("type") == "assistant"
+                ):
+                    output.append(output_text(block))
+            if event.get("type") == "result":
+                output.append(output_text(event))
+        with contextlib.suppress(OSError):
+            output.append(files["stderr"].read_text(errors="replace"))
+        return "\n\n".join(output)
+
     def wait(self, run: Run) -> TurnOutcome:
         """Observe the current turn from its files.
 
@@ -565,6 +588,7 @@ class ClaudeDriver(engines.Driver):
                 engines.FAILED,
                 reason=f"the model server refused the turn: {error}",
                 provider_error=True,
+                provider_kind="outage",
             )
         return TurnOutcome(engines.FAILED, reason=f"claude failed: {error}")
 

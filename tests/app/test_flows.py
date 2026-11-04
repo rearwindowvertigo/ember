@@ -47,6 +47,7 @@ def make_flow(
         plan,
         top="/work/project",
         main="/work/project",
+        worktree="/data/ember/worktrees/" + flow_id,
         base="a" * 40,
         writer=worker,
         reviewer=worker,
