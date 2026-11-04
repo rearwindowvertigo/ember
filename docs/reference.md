@@ -347,8 +347,8 @@ source again when the cache is 6 hours old, not valid, or with `--refresh`.
 A list served from the cache has `source` `cache`. When the source cannot be
 read, the cached list is used however old, with `reason` set. With no cache,
 `source` names the source that was tried, `fetched_at` is `null` and `reason`
-is set. The list is empty except for the OpenCode auth-list failure described
-below. A failed read leaves the cache as it was.
+is set. The list is empty except for the OpenCode auth-list and catalogue
+failures described below. A failed read leaves the cache as it was.
 
 For OpenCode, `opencode models` supplies the models of its connected
 integrations, including its own `opencode` provider when listed. The
@@ -359,7 +359,12 @@ input and output prices (`cost.input`, `cost.output`) and tool support
 `null`; OpenCode's own default applies when no effort is selected. Saved
 efforts are kept.
 
-Integration names and login methods come from `opencode auth list`. A name
+Integration names and login methods come from `opencode auth list`
+(`--standalone` with OpenCode 2). Ember reads OpenCode 1's `●  <name>
+<method>` lines and OpenCode 2's `<name>  <method>  <state>` columns. The
+methods `oauth` and `OAuth` give the login method `oauth`; `api` and
+`API key` give `api`; `wellknown` and `env` connect the integration with an
+unknown login method. A name
 matches an integration id or its catalogue name, ignoring case. An unmatched
 or ambiguous name assigns no login method. An integration without a matched
 auth entry uses its catalogue name, or its id when that name is absent.
@@ -368,8 +373,9 @@ models as well as those in the model list.
 
 A failed or unreadable model command, auth-list command or catalogue uses
 the cached OpenCode list with a reason. With no cache, an auth-list failure
-returns the discovered models with unknown login methods and a reason;
-other failures return an empty list. A cache without `format_version` is
+returns the discovered models with unknown login methods and a reason, and
+a catalogue failure returns them with unknown details and a reason; a failed
+or unreadable model command returns an empty list. A cache without `format_version` is
 refreshed even when less than 6 hours old. Only if the refresh fails is that
 old cache used, with full `openrouter/` ids, provider OpenRouter, unknown
 login methods and no default effort. Connection metadata stays as cached
@@ -3193,7 +3199,7 @@ matched; dpkg is skipped and its method remains null.
 
 Every command runs with `LC_ALL=C`, standard input from `/dev/null` and a
 10-second deadline, in its own process group; at the deadline the whole group
-is killed. Every network read has a 10-second timeout.
+is killed. Every network read has a 10-second timeout. Every HTTP request Ember makes, here and for the OpenCode model list, sends `User-Agent: ember/<version>`.
 
 Versions read with apt are compared with `dpkg --compare-versions`, with the
 epoch and revision. Every other version is compared as dotted numbers: a

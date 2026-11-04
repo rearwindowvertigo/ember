@@ -537,7 +537,8 @@ def list_models(
     Returns:
         The list. When the source cannot be read it is the cached list with
         `source` `cache`. Without a cache, an auth-list failure returns models
-        with unknown login methods; other failures return an empty list.
+        with unknown login methods, a catalogue failure returns them with
+        unknown details, and a model-command failure returns an empty list.
         Failed refreshes set `reason` and never replace the cache.
 
     Raises:
