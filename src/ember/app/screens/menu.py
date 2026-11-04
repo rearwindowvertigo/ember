@@ -183,6 +183,27 @@ SEGMENTS = (
 """`(key, name, tooltip, choices)` for each segmented setting."""
 
 
+CAPACITY = (
+    (
+        "provider.capacity_retries",
+        "Capacity retries",
+        "The limit on resends of one turn after a capacity error. "
+        "Zero turns retries off. Runs keep the settings they started with.",
+        0,
+        10,
+    ),
+    (
+        "provider.capacity_wait",
+        "Wait before a retry",
+        "Seconds between a capacity error and its resend. "
+        "The model and effort stay the same.",
+        5,
+        600,
+    ),
+)
+"""The provider retry pickers and their inclusive ranges."""
+
+
 def when_hint(value: str) -> str:
     """Return the hint line under a Run the gap check option."""
     if value == "off":
@@ -488,6 +509,25 @@ class MenuScreen(QWidget):
         workflows.addWidget(rows["workflow.late"])
         layout.addWidget(self.workflow_card)
 
+        capacity_card, capacity_column = titled_card("Provider capacity")
+        self.capacity: dict[str, widgets.Picker] = {}
+        for key, name, tip, low, high in CAPACITY:
+            picker = widgets.Picker()
+            picker.setAccessibleName(name)
+            picker.setMinimumWidth(180)
+            for number in range(low, high + 1):
+                text = (
+                    ("Off" if number == 0 else f"Up to {number}")
+                    if key == "provider.capacity_retries"
+                    else f"{number}s"
+                )
+                picker.add_option(text, str(number))
+            picker.activated.connect(lambda _index, key=key: self._capacity_picked(key))
+            self.capacity[key] = picker
+            rows[key] = TooltipRow(name, tip, picker)
+            capacity_column.addWidget(rows[key])
+        layout.addWidget(capacity_card)
+
         panel_card, panel_layout = titled_card("Panel", PANEL_HELP)
         self.panel_info = panel_card.findChild(widgets.InfoTip)
         self.members_layout = QVBoxLayout()
@@ -560,6 +600,10 @@ class MenuScreen(QWidget):
         self.asks.set_value(asks)
         for key, control in self.segments.items():
             control.set_value(answers[key]["value"])
+        for key, picker in self.capacity.items():
+            picker.blockSignals(True)
+            picker.setCurrentIndex(picker.findData(answers[key]["value"]))
+            picker.blockSignals(False)
         self.whole.setChecked(answers["flow.whole_review"]["value"] == "on")
         self._fill_panel(answers, panel)
         align_controls(self.tip_rows.values())
@@ -668,6 +712,8 @@ class MenuScreen(QWidget):
         for key in ("workflow.agents", "workflow.late"):
             order.append(tips[key].info)
             order.extend(self.segments[key].buttons())
+        for key, picker in self.capacity.items():
+            order.extend((tips[key].info, picker))
         if self.panel_info is not None:
             order.append(self.panel_info)
         order.extend(self.member_removes.values())
@@ -815,6 +861,12 @@ class MenuScreen(QWidget):
         value = self.when.value()
         if value is not None and value != self.context.setting("gapcheck.when"):
             self._save({"gapcheck.when": value})
+
+    def _capacity_picked(self, key: str) -> None:
+        """Save a provider retry setting only when it changed."""
+        value = self.capacity[key].value()
+        if value is not None and value != self.context.setting(key):
+            self._save({key: value})
 
     def _segment_picked(self, key: str, value: str) -> None:
         """Save a segmented setting only when it changed."""

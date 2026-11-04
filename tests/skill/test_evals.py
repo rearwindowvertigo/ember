@@ -1,13 +1,19 @@
 import json
 import os
 import re
+import shlex
+import stat
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from ember import __version__, paths
 from ember.cli import main
+from ember.gapcheck import previous
+from ember.runs import exits
 
 TOP = Path(__file__).resolve().parents[2]
 SKILL = TOP / "skill"
@@ -22,13 +28,28 @@ CASES = (
     "connector-work-goes-to-subagent",
     "refuses-owner-setting",
     "claim-lost-then-gone",
+    "claim-stale-skill",
+    "claim-unknown-skill",
     "send-refused-foreign-messages",
     "owner-line-not-run",
     "merge-and-cleanup-keeps",
+    "turn-results-counted",
+    "sandbox-denied-paths",
+    "provider-capacity",
+    "provider-usage-limit",
+    "provider-outage",
+    "provider-uncertain",
     "flow-gap-check-first",
+    "flow-shared-document-task",
     "owner-away-named-workers",
     "flow-lead-stop-waits",
     "panel-named-members-compared",
+    "panel-progress-reported",
+)
+FLOW_CASES = (
+    "flow-gap-check-first",
+    "owner-away-named-workers",
+    "flow-lead-stop-waits",
 )
 
 REVIEW_BAR = """\
@@ -136,7 +157,7 @@ def test_parse_simple() -> None:
 # Case files
 
 
-def test_the_twelve_cases_and_no_others() -> None:
+def test_the_expected_cases_and_no_others() -> None:
     found = {
         p.name
         for p in EVALS.iterdir()
@@ -172,7 +193,12 @@ def test_case_files_parse(case: str) -> None:
 
 
 def test_shell_scripts_parse() -> None:
-    scripts = [RUNNER, STUBS / "install.sh", STUBS / "bin" / "emb"]
+    scripts = [
+        RUNNER,
+        STUBS / "install.sh",
+        STUBS / "generate.sh",
+        STUBS / "bin" / "emb",
+    ]
     scripts += [EVALS / case / "place-files.sh" for case in CASES]
     for script in scripts:
         result = subprocess.run(
@@ -182,7 +208,9 @@ def test_shell_scripts_parse() -> None:
 
 
 def test_help_reply_matches_the_parser(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    generated_eval_fixtures: Path,
 ) -> None:
     monkeypatch.setenv("COLUMNS", "80")
     monkeypatch.setenv("NO_COLOR", "1")
@@ -193,25 +221,26 @@ def test_help_reply_matches_the_parser(
             main([*command.split(), "--help"])
         expected += f"==> {' '.join(['emb', *command.split()])} --help <==\n"
         expected += capsys.readouterr().out
-    assert (STUBS / "replies" / "help.out").read_text() == expected, (
-        "regenerate skill/evals/_stubs/replies/help.out as skill/evals/README.md says"
-    )
+    help_file = generated_eval_fixtures / "_stubs/replies/help.out"
+    assert help_file.read_text() == expected
 
 
 # The stub kit, in a case's working directory
 
 
 @pytest.fixture
-def env(tmp_path: Path) -> dict[str, str]:
+def env(tmp_path: Path, generated_eval_fixtures: Path) -> dict[str, str]:
     home = tmp_path / "home"
     home.mkdir()
     runtime = tmp_path / "runtime"
     runtime.mkdir(mode=0o700)
     return {
         "HOME": str(home),
+        "EMBER_EVAL_FIXTURES": str(generated_eval_fixtures),
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "XDG_CONFIG_HOME": str(tmp_path / "config"),
         "XDG_STATE_HOME": str(tmp_path / "state"),
+        "XDG_DATA_HOME": str(tmp_path / "data"),
         "XDG_CACHE_HOME": str(tmp_path / "cache"),
         "XDG_RUNTIME_DIR": str(runtime),
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -267,6 +296,11 @@ class Case:
         return str(path)
 
 
+def worktree_path(work: Case, worktree_id: str) -> Path:
+    """The path the stub, as Ember, gives a run's or flow's worktree."""
+    return paths.worktree_path(worktree_id, work.env)
+
+
 def case(name: str, tmp_path: Path, env: dict[str, str]) -> Case:
     return Case(name, tmp_path / "work", env)
 
@@ -288,6 +322,78 @@ def test_install_sets_up_the_repository(tmp_path: Path, env: dict[str, str]) -> 
         assert (work.eval / name).exists()
     assert (work.eval / "calls.log").read_text() == ""
     assert (work.eval / "replies" / "run-start.reply").exists()
+
+
+@pytest.mark.parametrize("layout", ["shared", "split", "missing-dependency"])
+def test_shared_document_case_checks_submitted_plan(
+    tmp_path: Path, env: dict[str, str], layout: str
+) -> None:
+    work = case("flow-shared-document-task", tmp_path, env)
+    names = ["totals", "items", "summary"]
+    tasks = [
+        {
+            "id": name,
+            "subject": f"feat: add {name} helper",
+            "task": f"Implement and test {name}; reference edits belong to reference.",
+            "files": [f"tools/{name}.py", f"tests/test_{name}.py"]
+            + (["docs/reference.md"] if layout == "shared" else []),
+        }
+        for name in names
+    ]
+    if layout != "shared":
+        tasks.append(
+            {
+                "id": "reference",
+                "subject": "docs: describe the order helpers",
+                "task": "Describe all three helpers after their implementations.",
+                "files": ["docs/reference.md"],
+                "after": names if layout == "split" else names[:-1],
+            }
+        )
+    document = {
+        "dir": str(work.work),
+        "failure_model": "Empty rows return zero totals and no item names.",
+        "check": ["python3", "-m", "unittest", "discover", "-s", "tests"],
+        "tasks": tasks,
+    }
+    source = tmp_path / "plan.json"
+    source.write_text(json.dumps(document))
+    result = work.emb(
+        "flow",
+        "--plan",
+        str(source),
+        "--dry-run",
+        "--json",
+        "--writer",
+        "codex:gpt-6.1-sol@high",
+        "--reviewer",
+        "codex:gpt-6.1-sol-mini@medium",
+        "--claim",
+        "shared-document-eval",
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    expected = (
+        [[name] for name in names] if layout == "shared" else [names, ["reference"]]
+    )
+    assert [set(wave) for wave in report["waves"]] == [set(wave) for wave in expected]
+    assert json.loads((work.eval / "flow-plan.json").read_text()) == document
+    if layout != "shared":
+        assert report["warnings"] == ["reference: no test file in its files"]
+        assert "WARNING: reference: no test file" in result.stderr
+    # The checker grades the plan the lead submitted, even after its scratch
+    # file is gone; it does not grade a fixture or the lead's final report.
+    source.unlink()
+    checked = subprocess.run(
+        [sys.executable, "-I", str(work.eval / "check-plan.py")],
+        cwd=work.work,
+        env=work.env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (checked.returncode == 0) == (layout == "split"), checked.stderr
+    assert [call["route"] for call in work.calls()] == ["flow-dry-run"]
 
 
 @pytest.mark.parametrize(
@@ -351,11 +457,14 @@ def test_run_start_commits_on_its_branch(tmp_path: Path, env: dict[str, str]) ->
         "--trailer", trailer, "--claim", "run-abc123",
     )  # fmt: skip
     assert result.returncode == 0, result.stderr
+    assert result.stderr == (
+        "Team, Single tasks Writer: codex gpt-6.1-sol · high (single.writer)\n"
+    )
     lines = result.stdout.splitlines()
     run_id = lines[0].removeprefix("run ")
     assert re.fullmatch(r"codex-\d{8}-\d{6}-[0-9a-f]{6}", run_id)
     branch = f"ember/codex/{run_id}"
-    worktree = work.work / ".ember" / "worktrees" / run_id
+    worktree = worktree_path(work, run_id)
     commit = work.git("rev-parse", branch)
     reply = work.eval / "runs" / run_id / "turn-1.md"
     assert lines[1] == "codex gpt-6.1-sol · high · 240s · exit 0 · 2 files · turn 1"
@@ -378,13 +487,142 @@ def test_run_start_commits_on_its_branch(tmp_path: Path, env: dict[str, str]) ->
     )
     assert work.git("branch", "--show-current", cwd=worktree) == branch
     assert work.git("status", "--porcelain") == ""
+    assert not (work.work / ".ember").exists()
+    assert ".ember/" not in (work.work / ".git" / "info" / "exclude").read_text()
+    assert stat.S_IMODE(worktree.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(worktree.parent.parent.stat().st_mode) == 0o700
     state = json.loads((work.eval / "state.json").read_text())
     assert state["runs"][run_id]["claim"] == "run-abc123"
     status = work.emb("run", "--status", run_id, "--json")
-    assert json.loads(status.stdout)["branch"] == branch
+    document = json.loads(status.stdout)
+    assert document["branch"] == branch
+    assert document["worktree"] == str(worktree)
+    assert document["main"] == str(work.work)
+    assert document["common"] == str(work.work / ".git")
+    assert document["last_exit"] == 0
+    [turn] = document["turns"]
+    assert turn == {
+        "turn": 1,
+        "exit": 0,
+        "state": "done",
+        "reason": None,
+        "provider_error": False,
+        "signed_out": False,
+        "incomplete": None,
+        "seconds": 240,
+    }
+    assert json.loads(work.emb("run", "--status", "--json").stdout)[0]["turns"] == [
+        turn
+    ]
 
 
-def test_read_only_start_makes_no_branch(tmp_path: Path, env: dict[str, str]) -> None:
+@pytest.mark.parametrize(
+    ("options", "row", "model", "effort", "model_source", "effort_source"),
+    [
+        ([], "Writer", "gpt-6.1-sol", "high", "single.writer", "single.writer"),
+        (
+            ["--read-only"],
+            "Reviewer",
+            "gpt-6.1-sol-mini",
+            "medium",
+            "single.reviewer",
+            "single.reviewer",
+        ),
+        (
+            ["--model", "gpt-6.1-sol"],
+            "Writer",
+            "gpt-6.1-sol",
+            "high",
+            "--model",
+            "single.writer",
+        ),
+        (
+            ["--effort", "low"],
+            "Writer",
+            "gpt-6.1-sol",
+            "low",
+            "single.writer",
+            "--effort",
+        ),
+        (
+            ["--model", "gpt-6-astra", "--effort", "high"],
+            "Writer",
+            "gpt-6-astra",
+            "high",
+            "--model",
+            "--effort",
+        ),
+    ],
+)
+def test_run_preview_then_start(
+    tmp_path: Path,
+    env: dict[str, str],
+    options: list[str],
+    row: str,
+    model: str,
+    effort: str,
+    model_source: str,
+    effort_source: str,
+    generated_eval_fixtures: Path,
+) -> None:
+    work = case("claim-and-menu-writer", tmp_path, env)
+    args = [
+        "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief(),
+        "--claim", "preview-eval", "--trailer", "Co-Authored-By: Eval <eval@invalid>",
+        *options,
+    ]  # fmt: skip
+    branches = work.git("branch", "--list")
+    trees = work.git("worktree", "list", "--porcelain")
+    result = work.emb(*args, "--dry-run", "--json")
+    assert result.returncode == 0 and result.stderr == ""
+    expected = {
+        "screen": "Team",
+        "row": f"Single tasks {row}",
+        "engine": "codex",
+        "model": model,
+        "effort": effort,
+        "model_source": model_source,
+        "effort_source": effort_source,
+    }
+    assert json.loads(result.stdout) == expected
+    source = (
+        model_source
+        if model_source == effort_source
+        else f"model: {model_source}, effort: {effort_source}"
+    )
+    line = f"Team, Single tasks {row}: codex {model} · {effort} ({source})\n"
+    preview = work.emb(*args, "--dry-run")
+    assert preview.returncode == 0 and preview.stderr == ""
+    assert preview.stdout == line
+    if not options:
+        assert (
+            preview.stdout
+            == (generated_eval_fixtures / "_stubs/replies/run-dry-run.out").read_text()
+        )
+        assert expected == json.loads(
+            (generated_eval_fixtures / "_stubs/replies/run-dry-run.json").read_text()
+        )
+    assert work.git("branch", "--list") == branches
+    assert work.git("worktree", "list", "--porcelain") == trees
+    assert not (work.eval / "runs").exists()
+    assert not paths.worktrees_dir(env).exists()
+    assert not Path(env["XDG_CACHE_HOME"]).exists()
+    state = json.loads((work.eval / "state.json").read_text())
+    assert state["runs"] == {}
+    started = work.emb(*args)
+    assert started.returncode == 0
+    assert started.stdout.startswith("run codex-")
+    assert started.stderr == line
+    assert [call["route"] for call in work.calls()] == [
+        "run-dry-run",
+        "run-dry-run",
+        "run-start",
+    ]
+
+
+def test_read_only_start_makes_detached_worktree(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
     work = case("claim-and-menu-writer", tmp_path, env)
     result = work.emb(
         "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief(),
@@ -394,6 +632,166 @@ def test_read_only_start_makes_no_branch(tmp_path: Path, env: dict[str, str]) ->
     assert "codex gpt-6.1-sol-mini · medium · " in result.stdout
     assert "branch -\n" in result.stdout
     assert work.git("branch", "--list", "ember/*") == ""
+    assert result.stderr == (
+        "Team, Single tasks Reviewer: codex gpt-6.1-sol-mini · medium "
+        "(single.reviewer)\n"
+    )
+    run_id = result.stdout.splitlines()[0].removeprefix("run ")
+    tree = worktree_path(work, run_id)
+    assert tree.is_dir() and tree != work.work
+    assert work.git("branch", "--show-current", cwd=tree) == ""
+    assert work.git("rev-parse", "HEAD", cwd=tree) == work.git("rev-parse", "HEAD")
+    document = json.loads(work.emb("run", "--status", run_id, "--json").stdout)
+    assert document["detached"] and document["worktree"] == str(tree)
+    closed = work.emb("run", "--close", run_id)
+    assert closed.returncode == 0 and closed.stderr == ""
+    assert not tree.exists()
+    assert str(tree) not in work.git("worktree", "list")
+    assert work.emb("run", "--close", run_id).returncode == 0
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_run_records_main_checkout_from_linked_source(
+    tmp_path: Path, env: dict[str, str], read_only: bool
+) -> None:
+    work = case("claim-and-menu-writer", tmp_path, env)
+    linked = tmp_path / "linked"
+    work.git("worktree", "add", "-b", "source", str(linked))
+    result = work.emb(
+        "run", "--engine", "codex", "--dir", str(linked),
+        "--task-file", work.brief(), *(["--read-only"] if read_only else []),
+    )  # fmt: skip
+    assert result.returncode == 0, result.stderr
+    run_id = result.stdout.splitlines()[0].removeprefix("run ")
+    document = json.loads(work.emb("run", "--status", run_id, "--json").stdout)
+    assert document["repo"] == str(linked)
+    assert document["main"] == str(work.work)
+    assert document["common"] == str(work.work / ".git")
+    assert document["worktree"] == str(worktree_path(work, run_id))
+    assert document["detached"] == read_only
+
+
+@pytest.mark.parametrize("change", ["modified", "deleted", "renamed", "untracked"])
+def test_read_only_warns_for_uncommitted_paths_and_keeps_its_snapshot(
+    tmp_path: Path, env: dict[str, str], change: str
+) -> None:
+    work = case("claim-and-menu-writer", tmp_path, env)
+    source = work.work / "README.md"
+    committed = source.read_text()
+    names = ["README.md"]
+    if change == "modified":
+        source.write_text("Uncommitted owner edit.\n")
+    elif change == "deleted":
+        source.unlink()
+    elif change == "renamed":
+        work.git("mv", "README.md", "renamed.md")
+        names.append("renamed.md")
+    else:
+        (work.work / "notes.txt").write_text("Uncommitted owner note.\n")
+        names = ["notes.txt"]
+    result = work.emb(
+        "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief(),
+        "--read-only",
+    )  # fmt: skip
+    assert result.returncode == 0, result.stderr
+    run_id = result.stdout.splitlines()[0].removeprefix("run ")
+    tree = worktree_path(work, run_id)
+    assert set(result.stderr.splitlines()[1:]) == {
+        f"WARNING: read-only run {run_id} does not see uncommitted {name}"
+        for name in names
+    }
+    assert (tree / "README.md").read_text() == committed
+    assert not (tree / "notes.txt").exists()
+    assert not (tree / "renamed.md").exists()
+    source.write_text("Later owner edit.\n")
+    sent = work.emb("run", "--send", run_id, "--message-file", work.brief())
+    assert sent.returncode == 0 and sent.stderr == ""
+    assert (tree / "README.md").read_text() == committed
+    assert source.read_text() == "Later owner edit.\n"
+
+
+def test_read_only_change_warning_names_its_detached_worktree(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    work = case("claim-and-menu-writer", tmp_path, env)
+    files = work.eval / "replies" / "run-start.untracked"
+    files.mkdir()
+    (files / "evidence.txt").write_text("Worker evidence.\n")
+    result = work.emb(
+        "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief(),
+        "--read-only",
+    )  # fmt: skip
+    assert result.returncode == 0
+    run_id = result.stdout.splitlines()[0].removeprefix("run ")
+    evidence = worktree_path(work, run_id) / "evidence.txt"
+    assert result.stderr == (
+        "Team, Single tasks Reviewer: codex gpt-6.1-sol-mini · medium "
+        "(single.reviewer)\n"
+        f"WARNING: read-only run {run_id} changed {evidence}\n"
+    )
+    assert not (work.work / "evidence.txt").exists()
+    record = json.loads(work.emb("run", "--status", run_id, "--json").stdout)
+    assert record["last_reason"] == f"changed {evidence}"
+
+
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("changed_head", [False, True])
+def test_read_only_close_keeps_changes_and_recorded_path(
+    tmp_path: Path, env: dict[str, str], force: bool, changed_head: bool
+) -> None:
+    work = case("claim-and-menu-writer", tmp_path, env)
+    result = work.emb(
+        "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief(),
+        "--read-only",
+    )  # fmt: skip
+    run_id = result.stdout.splitlines()[0].removeprefix("run ")
+    tree = worktree_path(work, run_id)
+    (tree / "evidence.txt").write_text("Keep this.\n")
+    original = work.git("rev-parse", "HEAD", cwd=tree)
+    if changed_head:
+        work.git("add", "evidence.txt", cwd=tree)
+        work.git("commit", "-m", "test: record evidence", cwd=tree)
+    work.env["XDG_DATA_HOME"] = str(tmp_path / "changed-data")
+    closed = work.emb("run", "--close", run_id, *(["--force"] if force else []))
+    assert closed.returncode == 0
+    assert f"git worktree remove --force {tree}" in closed.stderr
+    assert (tree / "evidence.txt").read_text() == "Keep this.\n"
+    record = json.loads(work.emb("run", "--status", run_id, "--json").stdout)
+    assert record["status"] == "closed" and record["worktree"] == str(tree)
+    if changed_head:
+        work.git("reset", "--hard", original, cwd=tree)
+    else:
+        (tree / "evidence.txt").unlink()
+    assert work.emb("run", "--close", run_id).stderr == ""
+    assert not tree.exists() and str(tree) not in work.git("worktree", "list")
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_cleanup_read_only_worktrees_respects_branch_scope(
+    tmp_path: Path, env: dict[str, str], dry_run: bool
+) -> None:
+    work = case("claim-and-menu-writer", tmp_path, env)
+    result = work.emb(
+        "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief(),
+        "--read-only",
+    )  # fmt: skip
+    run_id = result.stdout.splitlines()[0].removeprefix("run ")
+    tree = worktree_path(work, run_id)
+    extra = tree / "evidence.txt"
+    extra.write_text("Keep this.\n")
+    assert work.emb("run", "--close", run_id).returncode == 0
+    cleanup = ["cleanup", "--merged-into", "claude/report-since"]
+    kept = work.emb(*cleanup)
+    assert f"git worktree remove --force {tree}" in kept.stdout
+    assert extra.exists()
+    extra.unlink()
+    assert work.emb(*cleanup, "--branch", "claude/report-since").returncode == 0
+    assert tree.exists()
+    cleaned = work.emb(*cleanup, *(["--dry-run"] if dry_run else []))
+    assert cleaned.returncode == 0, cleaned.stderr
+    assert f"worktree {tree}" in cleaned.stdout
+    assert tree.exists() == dry_run
+    assert (str(tree) in work.git("worktree", "list")) == dry_run
 
 
 def test_start_without_a_set_row_exits_64(tmp_path: Path, env: dict[str, str]) -> None:
@@ -411,12 +809,13 @@ def start(work: Case) -> tuple[str, str, Path]:
     )
     assert result.returncode == 0, result.stderr
     run_id = result.stdout.splitlines()[0].removeprefix("run ")
-    return run_id, f"ember/codex/{run_id}", work.work / ".ember" / "worktrees" / run_id
+    return run_id, f"ember/codex/{run_id}", worktree_path(work, run_id)
 
 
 def test_merge_merges_and_cleans_up(tmp_path: Path, env: dict[str, str]) -> None:
     work = case("claim-and-menu-writer", tmp_path, env)
     run_id, branch, worktree = start(work)
+    work.env["XDG_DATA_HOME"] = str(tmp_path / "changed-data")
     tip = work.git("rev-parse", branch)
     refused = work.emb("merge", branch, "--into", "claude/report-since")
     assert refused.returncode == 64
@@ -429,6 +828,8 @@ def test_merge_merges_and_cleans_up(tmp_path: Path, env: dict[str, str]) -> None
         "keep",
         "--note",
         "Keep",
+        "--subject",
+        "feat: add report date filtering",
     )
     assert missing.returncode == 65
     unnoted = work.emb(
@@ -444,6 +845,8 @@ def test_merge_merges_and_cleans_up(tmp_path: Path, env: dict[str, str]) -> None
         "keep",
         "--note",
         "Keep",
+        "--subject",
+        "feat: add report date filtering",
     )
     assert result.returncode == 0, result.stderr
     merge = work.git("rev-parse", "HEAD")
@@ -453,16 +856,90 @@ def test_merge_merges_and_cleans_up(tmp_path: Path, env: dict[str, str]) -> None
         f"removed {branch}: closed {run_id}; removed worktree {worktree}; "
         f"deleted at {tip}\n"
     )
-    assert work.git("log", "-1", "--format=%s") == (
-        f"Merge branch '{branch}' into claude/report-since"
-    )
-    assert work.git("rev-parse", "HEAD^2") == tip
+    assert work.git("log", "-1", "--format=%s") == ("feat: add report date filtering")
+    assert len(work.git("log", "-1", "--format=%P").split()) == 1
+    assert f"Ember-Task-Tip: {tip}" in work.git("log", "-1", "--format=%B")
     assert not worktree.exists()
     assert work.git("branch", "--list", branch) == ""
     again = work.emb("cleanup", "--merged-into", "claude/report-since")
     assert again.stdout == ""
     assert (
         again.stderr == "emb cleanup: no Ember run branch against claude/report-since\n"
+    )
+
+
+@pytest.mark.parametrize("subject", [None, "", " ", "feat: a\nbody", "a\rb"])
+def test_merge_requires_a_subject_before_changing_the_target(
+    tmp_path: Path, env: dict[str, str], subject: str | None
+) -> None:
+    work = case("claim-and-menu-writer", tmp_path, env)
+    _, branch, tree = start(work)
+    head = work.git("rev-parse", "HEAD")
+    args = ["--subject", subject] if subject is not None else []
+    result = work.emb(
+        "merge", branch, "--into", "claude/report-since",
+        "--verdict", "keep", "--note", "Keep", *args,
+    )  # fmt: skip
+    assert result.returncode == 64
+    assert "next:" in result.stderr and "--subject" in result.stderr
+    assert work.git("rev-parse", "HEAD") == head
+    assert tree.exists() and work.git("branch", "--list", branch)
+
+
+def test_merge_squashes_turns_with_trailers_and_json_warnings(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    work = case("claim-and-menu-writer", tmp_path, env)
+    trailer = "Co-Authored-By: Claude <noreply@anthropic.com>"
+    result = work.emb(
+        "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief(),
+        "--trailer", trailer, "--trailer", "Ember-Verdict: forged",
+    )  # fmt: skip
+    assert result.returncode == 0, result.stderr
+    run_id = result.stdout.splitlines()[0].removeprefix("run ")
+    branch = f"ember/codex/{run_id}"
+    tree = worktree_path(work, run_id)
+    base = work.git("rev-parse", "HEAD")
+    for turn in (2, 3):
+        files = work.eval / "replies" / f"run-send.{turn - 1}.files"
+        files.mkdir()
+        (files / "extra.txt").write_text(f"turn {turn}\n")
+        assert (
+            work.emb(
+                "run", "--send", run_id, "--message-file", work.brief("Correct it\n")
+            ).returncode
+            == 0
+        )
+    work.git("commit", "--amend", "-m", f"feat!: worker\n\n{trailer}", cwd=tree)
+    tip = work.git("rev-parse", branch)
+    assert work.git("rev-list", "--count", f"{base}..{branch}") == "3"
+    result = work.emb(
+        "merge", branch, "--into", "claude/report-since", "--verdict", "keep",
+        "--note", "Keep after review", "--subject", "feat: extend report", "--json",
+    )  # fmt: skip
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert set(report) == {
+        "branch",
+        "target",
+        "note",
+        "warnings",
+        "merge_commit",
+        "contained_before",
+        "cleanup",
+    }
+    assert report["warnings"] == [
+        f"WARNING: {branch} holds a breaking change; the subject has no !"
+    ]
+    assert result.stderr == report["warnings"][0] + "\n"
+    assert report["merge_commit"] == work.git("rev-parse", "HEAD")
+    assert report["contained_before"] is False
+    assert report["cleanup"][0]["action"] == "removed"
+    assert work.git("rev-list", "--count", f"{base}..HEAD") == "1"
+    assert work.git("log", "-1", "--format=%P") == base
+    assert work.git("log", "-1", "--format=%B") == (
+        f"feat: extend report\n\n{trailer}\n"
+        f"Ember-Verdict: Keep after review\nEmber-Task-Tip: {tip}"
     )
 
 
@@ -479,6 +956,8 @@ def test_merge_keeps_a_dirty_worktree(tmp_path: Path, env: dict[str, str]) -> No
         "keep",
         "--note",
         "Keep",
+        "--subject",
+        "feat: add report date filtering",
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines()[2] == (
@@ -487,9 +966,7 @@ def test_merge_keeps_a_dirty_worktree(tmp_path: Path, env: dict[str, str]) -> No
     )
     assert worktree.is_dir()
     assert work.git("branch", "--list", branch) != ""
-    assert work.git("log", "-1", "--format=%s") == (
-        f"Merge branch '{branch}' into claude/report-since"
-    )
+    assert work.git("log", "-1", "--format=%s") == ("feat: add report date filtering")
     again = work.emb(
         "merge",
         branch,
@@ -499,8 +976,19 @@ def test_merge_keeps_a_dirty_worktree(tmp_path: Path, env: dict[str, str]) -> No
         "keep",
         "--note",
         "Keep",
+        "--subject",
+        "feat: add report date filtering",
     )
     assert again.stdout.startswith(f"Verdict: Keep\nalready contained: {branch} at ")
+    (work.work / "later.txt").write_text("Later target edit\n")
+    work.git("add", "later.txt")
+    work.git("commit", "-m", "fix: update target after squash")
+    (worktree / "tools" / "__pycache__" / "report.cpython-314.pyc").unlink()
+    (worktree / "tests" / "__pycache__" / "test_report.cpython-314.pyc").unlink()
+    cleaned = work.emb("cleanup", "--merged-into", "claude/report-since")
+    assert cleaned.returncode == 0, cleaned.stderr
+    assert f"removed {branch}:" in cleaned.stdout
+    assert not worktree.exists() and work.git("branch", "--list", branch) == ""
 
 
 def test_merge_from_inside_the_run_worktree(
@@ -510,7 +998,14 @@ def test_merge_from_inside_the_run_worktree(
     _, branch, worktree = start(work)
     result = subprocess.run(
         ["emb", "merge", branch, "--into", "claude/report-since"]
-        + ["--verdict", "keep", "--note", "Keep"],
+        + [
+            "--verdict",
+            "keep",
+            "--note",
+            "Keep",
+            "--subject",
+            "feat: add report date filtering",
+        ],
         cwd=worktree,
         env=work.env,
         capture_output=True,
@@ -536,20 +1031,29 @@ def test_merge_refuses_a_dirty_target(tmp_path: Path, env: dict[str, str]) -> No
         "keep",
         "--note",
         "Keep",
+        "--subject",
+        "feat: add report date filtering",
     )
     assert result.returncode == 75
-    assert result.stderr.splitlines()[-1] == f"next: git -C {work.work} status --short"
+    assert f"next: git -C {work.work} status --short" in result.stderr
 
 
 def test_claim_lost_then_gone(tmp_path: Path, env: dict[str, str]) -> None:
     work = case("claim-lost-then-gone", tmp_path, env)
-    first = work.emb("choices", "--claim", "--id", "run-abc123")
+    first = work.emb("choices", "--claim", "--id", "run-abc123", "--skill", __version__)
     assert (first.returncode, first.stdout, first.stderr) == (75, "", "")
-    second = work.emb("choices", "--claim", "--id", "run-abc123")
+    second = work.emb(
+        "choices", "--claim", "--id", "run-abc123", "--skill", __version__
+    )
     assert second.returncode == 0
     reply = json.loads(second.stdout)
     assert reply["claim"] == {"id": "run-abc123", "status": "gone"}
-    assert {row["state"] for row in reply["menu"].values()} == {"ask"}
+    assert reply["skill"] == "current"
+    assert reply["loaded_skill_version"] == __version__
+    assert reply["installed_skill_version"] == __version__
+    assert second.stderr == ""
+    assert reply["menu"]["single.writer"]["state"] == "ask"
+    assert all(answer["layer"] == "default" for answer in reply["answers"].values())
     read = json.loads(work.emb("choices", "--json", "--id", "run-abc123").stdout)
     assert read["claim"]["status"] == "gone"
     preview = json.loads(work.emb("choices", "--json").stdout)
@@ -560,6 +1064,69 @@ def test_claim_lost_then_gone(tmp_path: Path, env: dict[str, str]) -> None:
         "choices-read-id",
         "choices-read",
     ]
+
+
+@pytest.mark.parametrize(
+    ("name", "outcome", "claim_status", "installed"),
+    [
+        ("claim-and-menu-writer", "current", "none", __version__),
+        ("claim-stale-skill", "stale", "claimed", "999.0.0"),
+        ("claim-unknown-skill", "unknown", "claimed", None),
+    ],
+)
+def test_claim_skill_replies(
+    tmp_path: Path,
+    env: dict[str, str],
+    name: str,
+    outcome: str,
+    claim_status: str,
+    installed: str | None,
+) -> None:
+    work = case(name, tmp_path, env)
+    result = work.emb(
+        "choices", "--claim", "--id", "run-abc123", "--skill", __version__
+    )
+    assert result.returncode == 0
+    reply = json.loads(result.stdout)
+    assert reply["claim"] == {"id": "run-abc123", "status": claim_status}
+    assert reply["skill"] == outcome
+    assert reply["loaded_skill_version"] == __version__
+    assert reply["installed_skill_version"] == installed
+    if outcome == "current":
+        assert result.stderr == ""
+    else:
+        assert reply["answers"]["single.writer"] == {
+            "value": "codex:gpt-6.1-sol-mini",
+            "layer": "one-time",
+        }
+        if outcome == "stale":
+            assert result.stderr == (
+                f"WARNING: the loaded ember skill is {__version__}; "
+                "the installed skill is 999.0.0\n"
+                "next: reload the ember skill before the next step\n"
+            )
+        else:
+            assert result.stderr == (
+                "WARNING: the installed ember skill version is missing, unreadable "
+                "or malformed\n"
+                "owner: repair or reinstall the ember skill, then reload it before "
+                "starting a worker\n"
+            )
+        # Reclaiming preserves the successful claim and its one-time answer.
+        again = work.emb(
+            "choices", "--claim", "--id", "run-abc123", "--skill", __version__
+        )
+        assert json.loads(again.stdout) == reply
+        assert again.stderr == result.stderr
+    unversioned = work.emb("choices", "--claim", "--id", "run-abc123")
+    assert unversioned.returncode == 0
+    assert unversioned.stderr == ""
+    document = json.loads(unversioned.stdout)
+    for key in ("skill", "loaded_skill_version", "installed_skill_version"):
+        assert key not in document
+    read = json.loads(work.emb("choices", "--json", "--id", "run-abc123").stdout)
+    assert read["claim"] == reply["claim"]
+    assert "skill" not in read
 
 
 def test_send_refused_then_forced(tmp_path: Path, env: dict[str, str]) -> None:
@@ -594,15 +1161,287 @@ def test_send_refused_then_forced(tmp_path: Path, env: dict[str, str]) -> None:
     ]
 
 
-def test_owner_line_start_makes_nothing(tmp_path: Path, env: dict[str, str]) -> None:
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_owner_line_start_makes_nothing(
+    tmp_path: Path, env: dict[str, str], dry_run: bool
+) -> None:
     work = case("owner-line-not-run", tmp_path, env)
     result = work.emb(
-        "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief()
-    )
+        "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief(),
+        *(["--dry-run"] if dry_run else []),
+    )  # fmt: skip
     assert result.returncode == 69
     assert result.stderr.splitlines()[-1] == "owner: sign in to Codex: codex login"
     assert result.stdout == ""
     assert work.git("branch", "--list", "ember/*") == ""
+
+
+@pytest.mark.parametrize("args", [("--status", "--json"), ("--json", "--status")])
+def test_status_without_runs(
+    tmp_path: Path, env: dict[str, str], args: tuple[str, ...]
+) -> None:
+    work = case("small-change-no-worker", tmp_path, env)
+    result = work.emb("run", *args)
+    assert result.returncode == 0 and result.stderr == ""
+    assert json.loads(result.stdout) == []
+
+
+def test_generators_write_expected_files(generated_eval_fixtures: Path) -> None:
+    result = subprocess.run(
+        [sys.executable, str(STUBS / "make_replies.py"), "--list-files"],
+        cwd=TOP,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    expected = set(result.stdout.splitlines()) | {"_stubs/replies/help.out"}
+    actual = {
+        str(path.relative_to(generated_eval_fixtures))
+        for path in generated_eval_fixtures.rglob("*")
+        if path.is_file()
+    }
+    assert actual == expected
+    for name in expected:
+        assert not (EVALS / name).exists(), name
+        assert (generated_eval_fixtures / name).read_text().strip(), name
+
+
+@pytest.mark.parametrize("name", CASES)
+def test_generated_case_files_are_installed(
+    tmp_path: Path, env: dict[str, str], generated_eval_fixtures: Path, name: str
+) -> None:
+    work = case(name, tmp_path, env)
+    case_files = generated_eval_fixtures / name / "files"
+    for source in case_files.rglob("*"):
+        if not source.is_file():
+            continue
+        relative = source.relative_to(case_files)
+        installed = work.work / relative
+        assert installed.is_file(), relative
+        # This case replaces path placeholders in its initial run state.
+        if name != "turn-results-counted":
+            assert installed.read_bytes() == source.read_bytes(), relative
+    assert (work.eval / "replies/help.out").is_file()
+
+
+@pytest.mark.parametrize(
+    ("stage", "message"),
+    [("help", "help generator"), ("replies", "make_replies.py")],
+)
+def test_setup_names_a_failed_generator(
+    tmp_path: Path, env: dict[str, str], stage: str, message: str
+) -> None:
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    uv = fakes / "uv"
+    uv.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$FAIL_STAGE" = help ] || [[ "$*" = *make_replies.py* ]]; then\n'
+        "    exit 17\n"
+        "fi\n"
+    )
+    uv.chmod(0o755)
+    work = tmp_path / "work"
+    work.mkdir()
+    setup_env = {
+        key: value for key, value in env.items() if key != "EMBER_EVAL_FIXTURES"
+    }
+    setup_env.update(
+        PATH=f"{fakes}:{env['PATH']}", FAIL_STAGE=stage, TMPDIR=str(tmp_path)
+    )
+    result = subprocess.run(
+        ["bash", str(EVALS / "claim-and-menu-writer/place-files.sh")],
+        cwd=work,
+        env=setup_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert list(work.iterdir()) == []
+    assert list(tmp_path.glob("ember-eval-fixtures.*")) == []
+
+
+def test_setup_generates_without_a_fixture_cache(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    setup_env = {
+        key: value for key, value in env.items() if key != "EMBER_EVAL_FIXTURES"
+    }
+    setup_env.update(UV_CACHE_DIR=str(tmp_path / "uv-cache"), TMPDIR=str(tmp_path))
+    work = case("flow-gap-check-first", tmp_path, setup_env)
+    assert (work.eval / "replies/help.out").read_text().startswith("==> emb --help <==")
+    assert json.loads((work.eval / "replies/choices-claim.out").read_text())["menu"]
+    assert (work.eval / "replies/flow-dry-run.json").is_file()
+    assert list(tmp_path.glob("ember-eval-fixtures.*")) == []
+    assert list(tmp_path.glob("ember-eval-defaults.*")) == []
+
+
+def test_setup_preserves_case_files_and_route_precedence(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    case_dir = tmp_path / "flow-gap-check-first"
+    replies = case_dir / "files/.ember-eval/replies"
+    replies.mkdir(parents=True)
+    (replies / "choices-claim.out").write_text("case claim\n")
+    (replies / "run-start.err").write_text("case error\n")
+    work = tmp_path / "work"
+    work.mkdir()
+    subprocess.run(
+        ["bash", str(STUBS / "install.sh"), str(case_dir)],
+        cwd=work,
+        env=env,
+        check=True,
+        capture_output=True,
+    )
+    installed = work / ".ember-eval/replies"
+    assert (installed / "choices-claim.out").read_text() == "case claim\n"
+    assert (installed / "run-start.err").read_text() == "case error\n"
+    assert not (installed / "run-start.reply").exists()
+    assert (installed / "flow-dry-run.json").is_file()
+    assert (installed / "menu.json").is_file()
+
+
+@pytest.mark.parametrize("args", [("--status", "--json"), ("--json", "--status")])
+def test_turn_result_case_matches_run_status(
+    tmp_path: Path,
+    env: dict[str, str],
+    args: tuple[str, ...],
+) -> None:
+    work = case("turn-results-counted", tmp_path, env)
+    listing = work.emb("run", *args)
+    assert listing.returncode == 0 and listing.stderr == ""
+    documents = json.loads(listing.stdout)
+    assert len(documents) == 3
+    first, older, unfinished = documents
+    assert first["last_exit"] == 0
+    assert [turn["exit"] for turn in first["turns"]] == [73, 0]
+    assert [turn["provider_error"] for turn in first["turns"]] == [True, False]
+    assert [turn["provider_kind"] for turn in first["turns"]] == ["usage_limit", None]
+    assert [a["provider_kind"] for a in first["turns"][1]["attempts"]] == [
+        "capacity",
+        None,
+    ]
+    assert first["turns"][1]["seconds"] == 45
+    assert sum(a["seconds"] for a in first["turns"][1]["attempts"]) == 15
+    assert "provider_kind" not in older["turns"][0]
+    assert "attempts" not in older["turns"][0]
+    assert older["turns"][0]["exit"] is None
+    assert older["turns"][0]["seconds"] is None
+    assert older["turns"][0]["provider_error"] is False
+    assert unfinished["turns"][0]["exit"] is None
+    assert unfinished["turns"][0]["state"] is None
+    assert unfinished["turns"][0]["provider_error"] is None
+    for document in documents:
+        assert all(turn["denied_paths"] == [] for turn in document["turns"])
+        assert document["last_screen_change_at"] is None
+        one = work.emb("run", "--status", document["id"], "--json")
+        assert one.returncode == 0 and json.loads(one.stdout) == document
+
+
+def test_denied_path_case_keeps_every_attempt_and_owner_action(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    work = case("sandbox-denied-paths", tmp_path, env)
+    result = work.emb(
+        "run",
+        "--engine",
+        "codex",
+        "--read-only",
+        "--dir",
+        ".",
+        "--task-file",
+        work.brief("Inspect the report"),
+    )
+    assert result.returncode == 0
+    run_id = result.stdout.splitlines()[0].removeprefix("run ")
+    status = work.emb("run", "--status", run_id, "--json")
+    assert status.returncode == 0 and status.stderr == ""
+    [turn] = json.loads(status.stdout)["turns"]
+    assert turn["exit"] == 0 and turn["state"] == "done"
+    denials = {item["path"]: item for item in turn["denied_paths"]}
+    expected = {
+        "/eval/home/.toolchain": ("hidden", "/eval/home/.toolchain/versions/3.14"),
+        "/eval/home/.ssh": ("secret location", None),
+        "/eval/home/.config/tool": ("hidden", None),
+        "/eval/home/.config/ember": ("secret location", None),
+        "/eval/state/ember": ("secret location", None),
+        "/eval/home/.local/share/ember/worktrees/other-worker": ("protected", None),
+        "/eval/runtime": ("protected", None),
+    }
+    assert set(denials) == set(expected)
+    for path, (reason, allow) in expected.items():
+        assert denials[path] == {"path": path, "reason": reason, "allow_path": allow}
+        warning = f"WARNING: {run_id} was denied {path}"
+        if reason != "hidden":
+            warning += f" ({reason})"
+        assert result.stderr.splitlines().count(warning) == 1
+    assert result.stderr.count("owner: Settings, Sandbox read paths;") == 3
+    assert (
+        result.stderr.count("it cannot be added to Settings, Sandbox read paths") == 2
+    )
+    additions = []
+    for line in result.stderr.splitlines():
+        if not line.startswith("owner: Settings, Sandbox read paths;"):
+            continue
+        command = shlex.split(line.split("; ", 1)[1])
+        assert command[:3] == ["emb", "choices", "--set"]
+        key, value = command[3].split("=", 1)
+        assert key == "sandbox.read"
+        preserved, added = json.loads(value)
+        assert preserved == "/eval/home/shared"
+        additions.append(added)
+    assert additions == [
+        "/eval/home/.toolchain/versions/3.14",
+        "/eval/home/.ssh",
+        "/eval/home/.config/tool",
+    ]
+    # The earlier attempt's path is available only through warnings and status.
+    assert "/eval/home/.toolchain" not in result.stdout.split("--- reply ---")[1]
+    text = work.emb("run", "--status", run_id)
+    assert text.returncode == 0 and "denied_paths" in text.stdout
+    assert work.emb("choices", "--set", "sandbox.read=/eval/home/.ssh").returncode == 77
+
+
+@pytest.mark.parametrize("variant", ["capacity", "usage_limit", "outage", "uncertain"])
+def test_provider_error_case_streams_and_status(
+    tmp_path: Path, env: dict[str, str], variant: str
+) -> None:
+    work = case(f"provider-{variant.replace('_', '-')}", tmp_path, env)
+    result = work.emb(
+        "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief()
+    )
+    assert result.returncode == 73
+    assert "was denied" not in result.stderr
+    run_id = result.stdout.splitlines()[0].removeprefix("run ")
+    next_line = exits.line(73, variant, run=run_id)
+    assert next_line is not None and next_line in result.stderr
+    assert result.stderr.count("at capacity; retry") == (
+        1 if variant == "uncertain" else 0
+    )
+    status = work.emb("run", "--status", run_id, "--json")
+    assert status.returncode == 0 and status.stderr == ""
+    document = json.loads(status.stdout)
+    assert document["last_exit"] == 73
+    [turn] = document["turns"]
+    assert turn["exit"] == 73 and turn["provider_error"] is True
+    assert turn["denied_paths"] == []
+    assert turn["provider_kind"] == ("capacity" if variant == "uncertain" else variant)
+    if variant == "capacity":
+        assert document["capacity_retries"] == 0
+        answers = json.loads(work.emb("choices", "--json").stdout)["answers"]
+        assert answers["provider.capacity_retries"]["value"] == "0"
+    attempts = turn["attempts"]
+    assert attempts[0]["sent"] and attempts[0]["result"] == "failed"
+    assert len(attempts) == (2 if variant == "uncertain" else 1)
+    if variant == "uncertain":
+        assert attempts[-1]["sending"] and not attempts[-1]["sent"]
+        assert attempts[-1]["result"] is None
+        assert "ask the lead before sending again" in result.stderr
+        assert "retry 1 of 2 in 30s" in result.stderr
+        assert turn["seconds"] == 40
+        assert sum(a["seconds"] for a in attempts) == 10
 
 
 # The runner, with bwrap and claude replaced by fakes
@@ -649,6 +1488,18 @@ def test_runner_reply_loop(tmp_path: Path, env: dict[str, str]) -> None:
     (home / ".claude.json").write_text("{}")
     logs = tmp_path / "logs"
     logs.mkdir()
+    owner_folders = [
+        Path(env[variable]) / "ember"
+        for variable in (
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_RUNTIME_DIR",
+        )
+    ]
+    for folder in owner_folders:
+        folder.mkdir(parents=True)
     out = tmp_path / "out"
     case_dir = EVALS / "merge-and-cleanup-keeps"
     result = subprocess.run(
@@ -694,6 +1545,51 @@ def test_runner_reply_loop(tmp_path: Path, env: dict[str, str]) -> None:
     assert f"--setenv EMBER_EVAL_DIR {eval_dir}" in bwrap
     assert f"--setenv PATH {eval_dir}/bin:" in bwrap
     assert not (home / ".claude" / "skills" / "ember").exists()
+    xdg = out / "xdg"
+    assert f"--bind {xdg} {xdg}" in bwrap
+    for variable, name in (
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_STATE_HOME", "state"),
+        ("XDG_DATA_HOME", "data"),
+        ("XDG_CACHE_HOME", "cache"),
+        ("XDG_RUNTIME_DIR", "runtime"),
+    ):
+        assert f"--setenv {variable} {xdg / name}" in bwrap
+        assert stat.S_IMODE((xdg / name).stat().st_mode) == 0o700
+    # The owner's Ember folder in each base the owner uses is blanked.
+    for folder in owner_folders:
+        assert f"--tmpfs {folder}" in bwrap
+        assert not any(folder.iterdir())
+    assert f"--tmpfs {home}/.local/share/ember" not in bwrap
+
+
+def test_runner_scaffold_uses_the_private_data_folder(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    home = Path(env["HOME"])
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    (fakes / "bwrap").write_text(FAKE_BWRAP)
+    (fakes / "bwrap").chmod(0o755)
+    (home / ".local" / "bin").mkdir(parents=True)
+    claude = home / ".local" / "bin" / "claude"
+    claude.write_text("#!/usr/bin/env bash\n")
+    claude.chmod(0o755)
+    (home / ".claude").mkdir()
+    (home / ".claude.json").write_text("{}")
+    out = tmp_path / "out"
+    case_dir = EVALS / "send-refused-foreign-messages"
+    result = subprocess.run(
+        ["bash", str(RUNNER), str(case_dir), str(SKILL), str(out)],
+        env={**env, "PATH": f"{fakes}:{env['PATH']}", "FAKE_LOG": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    made = list((out / "xdg" / "data" / "ember" / "worktrees").iterdir())
+    assert len(made) == 1 and made[0].name.startswith("codex-")
+    assert not Path(env["XDG_DATA_HOME"]).exists()
 
 
 def test_runner_needs_its_arguments(tmp_path: Path) -> None:
@@ -818,7 +1714,14 @@ def flow_plan(work: Case, tasks: list[dict[str, str]] | None = None) -> Path:
         json.dumps(
             {
                 "dir": str(work.work),
-                "tasks": [{"id": "one", "subject": "feat: extend the report"}]
+                "tasks": [
+                    {
+                        "id": "one",
+                        "subject": "feat: extend the report",
+                        "task": "Extend the report",
+                        "files": ["tools/report.py"],
+                    }
+                ]
                 if tasks is None
                 else tasks,
                 "trailers": ["Co-Authored-By: Claude <noreply@anthropic.com>"],
@@ -829,7 +1732,42 @@ def flow_plan(work: Case, tasks: list[dict[str, str]] | None = None) -> Path:
     return plan
 
 
-@pytest.mark.parametrize("name", CASES[-4:-1])
+@pytest.mark.parametrize(
+    "location", ["unset", "relative", "data-link", "ember-link", "worktrees-link"]
+)
+def test_worktree_paths_and_templates_follow_data_environment(
+    tmp_path: Path, env: dict[str, str], location: str
+) -> None:
+    if location == "unset":
+        del env["XDG_DATA_HOME"]
+    elif location == "relative":
+        env["XDG_DATA_HOME"] = "relative-data"
+    else:
+        data = Path(env["XDG_DATA_HOME"])
+        link = {
+            "data-link": data,
+            "ember-link": data / "ember",
+            "worktrees-link": data / "ember" / "worktrees",
+        }[location]
+        target = tmp_path / "private-target"
+        target.mkdir(mode=0o700)
+        link.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        link.symlink_to(target, target_is_directory=True)
+    work = case("flow-lead-stop-waits", tmp_path, env)
+    result = work.emb("flow", "--plan", str(flow_plan(work)), "--start")
+    assert result.returncode == 0, result.stderr
+    flow_id = result.stdout.splitlines()[0].removeprefix("flow ")
+    tree = worktree_path(work, flow_id)
+    assert tree.is_dir()
+    assert f"worktree {tree}\n" in result.stdout
+    report = json.loads(work.emb("flow", "--watch", flow_id, "--json").stdout)
+    assert report["worktree"] == str(tree)
+    task = report["tasks"][1]
+    assert task["worktree"] == str(worktree_path(work, task["writer_run"]))
+    assert not (work.work / "relative-data").exists()
+
+
+@pytest.mark.parametrize("name", FLOW_CASES)
 def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) -> None:
     work = case(name, tmp_path, env)
     plan = flow_plan(work)
@@ -839,7 +1777,7 @@ def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) ->
     flow_id = result.stdout.splitlines()[0].removeprefix("flow ")
     assert re.fullmatch(r"flow-\d{8}-\d{6}-[0-9a-f]{6}", flow_id)
     branch = f"ember/flow/{flow_id}"
-    tree = work.work / ".ember/worktrees" / flow_id
+    tree = worktree_path(work, flow_id)
     assert result.stdout.splitlines() == [
         f"flow {flow_id}",
         f"branch {branch}",
@@ -857,6 +1795,7 @@ def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) ->
     state = json.loads((work.eval / "state.json").read_text())
     assert state["flows"][flow_id] == {
         "dir": str(work.work),
+        "main": str(work.work),
         "branch": branch,
         "worktree": str(tree),
     }
@@ -877,6 +1816,10 @@ def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) ->
     assert report["tip"] == work.git("rev-parse", branch)
     if name == "flow-lead-stop-waits":
         assert report["event"] == "lead_stop"
+        stopped_task = report["tasks"][1]
+        assert stopped_task["worktree"] == str(
+            worktree_path(work, stopped_task["writer_run"])
+        )
         assert report["tasks"][1]["findings"] == {"must": 0, "should": 0, "lead": 1}
         answer = work.emb("flow", "--lead", flow_id, "strict", "--send", work.brief())
         assert answer.stdout == f"queued answer 1: send for strict\nflow {flow_id}\n"
@@ -905,18 +1848,26 @@ def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) ->
     assert work.git("rev-parse", "HEAD^2") == tip
 
 
-@pytest.mark.parametrize("tasks", [[], [{"id": "first", "task": "x" * 100}]])
-def test_flow_empty_plan_and_subject_fallback(
-    tmp_path: Path, env: dict[str, str], tasks: list[dict[str, str]]
+@pytest.mark.parametrize(
+    "tasks",
+    [
+        [],
+        [{"id": "first", "task": "Extend report", "files": ["tools/report.py"]}],
+        [{"id": "first", "subject": " ", "task": "x", "files": ["tools/report.py"]}],
+    ],
+)
+def test_flow_refuses_empty_tasks_or_missing_subject(
+    tmp_path: Path, env: dict[str, str], tasks: list[dict[str, Any]]
 ) -> None:
     work = case("flow-gap-check-first", tmp_path, env)
-    plan = flow_plan(work, tasks)
+    plan = flow_plan(work)
+    document = json.loads(plan.read_text())
+    document["tasks"] = tasks
+    plan.write_text(json.dumps(document))
     result = work.emb("flow", "--plan", str(plan), "--start")
-    assert result.returncode == 0, result.stderr
-    flow_id = result.stdout.splitlines()[0].split()[1]
-    subject = work.git("log", "-1", "--format=%s", f"ember/flow/{flow_id}")
-    expected = ("first: " + "x" * 100)[:72] if tasks else f"{flow_id}: Flow changes"
-    assert subject == expected
+    assert result.returncode == 64, result.stderr
+    assert "next: emb flow --help" in result.stderr
+    assert work.git("branch", "--list", "ember/*") == ""
 
 
 @pytest.mark.parametrize("content", [None, "", "{bad", "[]"])
@@ -936,7 +1887,7 @@ def test_flow_unreadable_plan(
 def test_flow_without_files_keeps_head(tmp_path: Path, env: dict[str, str]) -> None:
     work = case("small-change-no-worker", tmp_path, env)
     (work.eval / "replies/flow-start.code").write_text("0\n")
-    plan = flow_plan(work, [])
+    plan = flow_plan(work)
     head = work.git("rev-parse", "HEAD")
     result = work.emb("flow", "--plan", str(plan), "--start")
     assert result.returncode == 0, result.stderr
@@ -966,7 +1917,7 @@ def test_flow_cleanup_keeps_dirty_worktree(tmp_path: Path, env: dict[str, str]) 
     result = work.emb("flow", "--plan", str(flow_plan(work)), "--start")
     flow_id = result.stdout.splitlines()[0].split()[1]
     branch = f"ember/flow/{flow_id}"
-    tree = work.work / ".ember/worktrees" / flow_id
+    tree = worktree_path(work, flow_id)
     extra = tree / "untracked.txt"
     extra.write_text("kept\n")
     merged = work.emb(
@@ -1005,18 +1956,98 @@ def test_panel_start_writes_summary(
     summary = work.eval / "runs" / panel_id / "summary.md"
     assert f"summary {summary}\n" in result.stdout
     assert str(summary) in result.stderr
+    assert "member " not in result.stdout
     assert summary.stat().st_mode & 0o777 == 0o600
     text = summary.read_text()
     assert text.startswith(f"# Panel {panel_id}\n\nCheckout: {work.work}\n")
     assert "compute_totals" in text
     assert "Reason: the turn ended with no reply\n\n(no answer)" in text
     state = json.loads((work.eval / "state.json").read_text())
-    assert state["panels"] == {panel_id: {"summary": str(summary)}}
+    assert state["panels"] == {
+        panel_id: {"summary": str(summary), "base": work.git("rev-parse", "HEAD")}
+    }
+    for number, engine, model, run_id in (
+        (1, "codex", "gpt-6-astra", "codex-20261102-120000-aaaaa1"),
+        (2, "claude", "opus", "claude-20261102-120000-aaaaa2"),
+        (
+            3,
+            "opencode",
+            "deepseek/deepseek-v4.1-flash-1017",
+            "opencode-20261102-120000-aaaaa3",
+        ),
+    ):
+        assert (f"member {number} {engine}:{model} · default · ") in result.stderr
+        assert (
+            f"WARNING: member {number} ({engine}:{model}): read-only run {run_id} "
+            "does not see uncommitted review-notes.md\n"
+        ) in result.stderr
+    assert (work.work / "review-notes.md").read_text() == "Owner review notes.\n"
     (work.eval / "replies/panel-status.out").write_text("{{PANEL}} {{SUMMARY}}")
     assert work.emb("panel", "--status").stdout == f"{panel_id} {summary}"
     assert work.emb("panel", "--status=another").stdout == (
         f"another {work.eval}/runs/another/summary.md"
     )
+
+
+def test_panel_json_keeps_completion_lines_on_stderr(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    work = case("panel-named-members-compared", tmp_path, env)
+    result = work.emb("panel", "--question-file", work.brief(), "--dir", ".", "--json")
+    assert result.returncode == 83
+    document = json.loads(result.stdout)
+    assert document["exit"] == 83
+    assert len(document["members"]) == 3
+    assert document["members"][0]["exit"] == 0
+    assert document["members"][2]["bytes"] == 0
+    assert " · answered · 31s · exit 0 · " in result.stderr
+    assert " · failed · 33s · exit 80 · 0 bytes · " in result.stderr
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_panel_progress_case(
+    tmp_path: Path, env: dict[str, str], as_json: bool
+) -> None:
+    work = case("panel-progress-reported", tmp_path, env)
+    options = ("--json",) if as_json else ()
+    listing = work.emb("panel", "--status", *options)
+    panel_id = "panel-20261102-120000-aaaaa0"
+    first = work.emb("panel", "--status", panel_id, *options)
+    second = work.emb("panel", "--status", panel_id, *options)
+    for result in (listing, first, second):
+        assert result.returncode == 0 and result.stderr == ""
+    if as_json:
+        item = json.loads(listing.stdout)[0]
+        assert item["live"] is True
+        assert item["denied_paths"] == []
+        assert item["member_count"] == 3 and "members" not in item
+        assert item["answered"] == 1
+        assert [member["n"] for member in item["running_members"]] == [2, 3]
+        assert item["running_members"][1] == {
+            "n": 3,
+            "seconds": 0.0,
+            "last_screen_change_at": None,
+        }
+        before, after = json.loads(first.stdout), json.loads(second.stdout)
+        assert before["status"] == after["status"] == "running"
+        assert before["denied_paths"] == after["denied_paths"] == []
+        assert all(member["denied_paths"] == [] for member in after["members"])
+        assert before["members"][0] == after["members"][0]
+        assert before["members"][0]["seconds"] == 31.0
+        assert [member["seconds"] for member in before["members"]] == [31, 120, 60]
+        assert [member["seconds"] for member in after["members"]] == [31, 180, 120]
+        assert (
+            before["members"][1]["last_screen_change_at"]
+            < after["members"][1]["last_screen_change_at"]
+        )
+        assert after["members"][2]["last_screen_change_at"] is None
+    else:
+        assert "1/3 answered" in listing.stdout
+        assert " · running · 0s · " in listing.stdout
+        assert "last screen change -" in listing.stdout
+        assert " · running · 120s · " in first.stdout
+        assert " · running · 180s · " in second.stdout
+        assert "last screen change 1793620970.0" in second.stdout
 
 
 def test_plan_and_directory_templates(tmp_path: Path, env: dict[str, str]) -> None:
@@ -1029,22 +2060,33 @@ def test_plan_and_directory_templates(tmp_path: Path, env: dict[str, str]) -> No
     assert data["plan"] == str(plan)
     assert data["dir"] == str(work.work)
     assert str(plan) in data["gapcheck"]
+    assert "--json" in data["gapcheck"]
     (work.eval / "replies/gapcheck-brief.out").write_text("{{PLAN}} {{DIR}}")
     plan.write_text("not JSON")
     result = work.emb("gapcheck", "--brief", "--plan", "../plan.json", "--dir", "..")
     assert result.stdout == f"{plan} {tmp_path}"
 
 
-@pytest.mark.parametrize("name", CASES[-4:-1])
+@pytest.mark.parametrize("name", FLOW_CASES)
 def test_flow_case_reports_have_reference_fields(
     tmp_path: Path, env: dict[str, str], name: str
 ) -> None:
     work = case(name, tmp_path, env)
-    gap = json.loads(work.emb("gapcheck", "--json").stdout)
+    gap = json.loads(
+        work.emb("gapcheck", "--plan", str(flow_plan(work)), "--json").stdout
+    )
     assert set(gap) == {
         "plan",
         "plan_steps",
         "failure_model",
+        "previous",
+        "previous_plan",
+        "next_id",
+        "settled",
+        "closed",
+        "dispositions",
+        "status",
+        "ask",
         "reviewer",
         "run",
         "steps",
@@ -1054,6 +2096,7 @@ def test_flow_case_reports_have_reference_fields(
         "unknown_steps",
         "parse_error",
     }
+    previous.validate(gap)
     assert set(gap["counts"]) == {"high", "medium", "low"}
     assert gap["uncovered_steps"] == gap["unknown_steps"] == []
     assert gap["parse_error"] is None
@@ -1082,6 +2125,7 @@ def test_flow_case_reports_have_reference_fields(
             "next",
         }
         for task in report["tasks"]:
+            assert task["denied_paths"] == []
             assert set(task) == {
                 "id",
                 "status",
@@ -1092,6 +2136,7 @@ def test_flow_case_reports_have_reference_fields(
                 "worktree",
                 "merge_commit",
                 "outside_files",
+                "denied_paths",
                 "cleanup",
                 "choices",
                 "findings",
@@ -1099,14 +2144,24 @@ def test_flow_case_reports_have_reference_fields(
             }
 
 
-def test_default_choices_include_multi_and_panel() -> None:
+def test_default_choices_include_multi_panel_and_provider(
+    generated_eval_fixtures: Path,
+) -> None:
     for name in (
         "choices-claim.out",
         "choices-read-id.out",
         "choices-read.out",
         "menu.json",
     ):
-        data = json.loads((STUBS / "replies" / name).read_text())
+        data = json.loads(
+            (generated_eval_fixtures / "_stubs/replies" / name).read_text()
+        )
+        if name != "menu.json":
+            for key, value in (
+                ("provider.capacity_retries", "2"),
+                ("provider.capacity_wait", "30"),
+            ):
+                assert data["answers"][key] == {"value": value, "layer": "default"}
         menu = data if name == "menu.json" else data["menu"]
         assert menu["multi.runs_as"] == {
             "value": "ask",
@@ -1114,3 +2169,197 @@ def test_default_choices_include_multi_and_panel() -> None:
             "reason": "asks at each run",
         }
         assert menu["panel.members"] == {"value": [], "state": "empty", "members": []}
+
+
+@pytest.mark.parametrize("name", FLOW_CASES)
+def test_gap_answers_and_repeats_carry_settled_history(
+    tmp_path: Path, env: dict[str, str], name: str
+) -> None:
+    work = case(name, tmp_path, env)
+    plan = flow_plan(
+        work,
+        [
+            {"id": "first", "task": "First step"},
+            {"id": "second", "task": "Second step"},
+        ],
+    )
+    saved = tmp_path / "gapcheck-plan-1.json"
+    first = work.emb("gapcheck", "--plan", str(plan), "--json")
+    saved.write_text(first.stdout)
+    made = json.loads(first.stdout)
+    answers = {}
+    for step in made["steps"]:
+        for gap in step["gaps"]:
+            answers[gap["id"]] = f"Chosen answer for {gap['id']}"
+            result = work.emb(
+                "gapcheck",
+                "--answer",
+                str(saved),
+                "--id",
+                gap["id"],
+                "--text",
+                answers[gap["id"]],
+                "--json",
+            )
+            assert result.returncode == 0, result.stderr
+            previous.validate(json.loads(result.stdout))
+    brief = work.emb(
+        "gapcheck", "--plan", str(plan), "--previous", str(saved), "--brief"
+    )
+    for identity, answer in answers.items():
+        assert identity in brief.stdout and answer in brief.stdout
+    for number in (2, 3):
+        dry = work.emb(
+            "flow", "--plan", str(plan), "--dry-run", "--previous", str(saved), "--json"
+        )
+        assert "--previous" in json.loads(dry.stdout)["gapcheck"]
+        checked = work.emb(
+            "gapcheck", "--plan", str(plan), "--previous", str(saved), "--json"
+        )
+        assert checked.returncode == 0, checked.stderr
+        made = previous.validate(json.loads(checked.stdout))
+        assert made["ranked"] == []
+        assert made["counts"] == dict(high=0, medium=0, low=0)
+        assert {gap["id"]: gap["answer"] for gap in made["settled"]} == answers
+        assert made["next_id"] == json.loads(first.stdout)["next_id"]
+        saved = tmp_path / f"gapcheck-plan-{number}.json"
+        saved.write_text(checked.stdout)
+
+
+def test_repeat_links_invalidated_answer_and_keeps_closed_history(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    work = case("flow-gap-check-first", tmp_path, env)
+    plan = flow_plan(
+        work,
+        [
+            {"id": "first", "task": "First step"},
+            {"id": "second", "task": "Second step"},
+        ],
+    )
+    saved = tmp_path / "gapcheck-plan-1.json"
+    saved.write_text(work.emb("gapcheck", "--plan", str(plan), "--json").stdout)
+    for identity in ("g1", "g2", "g3"):
+        answer = work.emb(
+            "gapcheck",
+            "--answer",
+            str(saved),
+            "--id",
+            identity,
+            "--text",
+            f"Answer {identity}",
+        )
+        assert answer.returncode == 0 and not answer.stdout
+    prior = json.loads(saved.read_text())
+    gap = {
+        key: prior["steps"][0]["gaps"][0][key]
+        for key in ("gap", "harm", "why", "default")
+    }
+    gap.update(
+        earlier="g1", gap="The changed plan contradicts the earlier matching answer."
+    )
+    changed = json.loads(plan.read_text())
+    changed["tasks"][0]["task"] = "Match item names ignoring case."
+    plan.write_text(json.dumps(changed))
+    review = {
+        "steps": [{"step": 1, "gaps": [gap]}, {"step": 2, "gaps": []}],
+        "dispositions": [
+            {"id": "g1", "status": "reopened", "reason": "Matching changed."},
+            {"id": "g2", "status": "closed", "reason": "The task was removed."},
+            {"id": "g3", "status": "settled", "reason": "Revenue is unchanged."},
+        ],
+    }
+    (work.eval / "replies/gapcheck-repeat.reply").write_text(json.dumps(review))
+    checked = work.emb(
+        "gapcheck", "--plan", str(plan), "--previous", str(saved), "--json"
+    )
+    assert checked.returncode == 0, checked.stderr
+    made = previous.validate(json.loads(checked.stdout))
+    [new] = made["steps"][0]["gaps"]
+    assert new["id"] == "g4" and new["earlier"] == "g1" and new["answer"] is None
+    assert made["next_id"] == 5
+    assert [gap["id"] for gap in made["settled"]] == ["g3"]
+    assert made["closed"][0]["reason"] == "The task was removed."
+    saved.write_text(checked.stdout)
+    (work.eval / "replies/gapcheck-repeat.reply").unlink()
+    assert (
+        work.emb(
+            "gapcheck",
+            "--answer",
+            str(saved),
+            "--id",
+            "g4",
+            "--text",
+            "Changed matching",
+        ).returncode
+        == 0
+    )
+    again = work.emb(
+        "gapcheck", "--plan", str(plan), "--previous", str(saved), "--json"
+    )
+    carried = previous.validate(json.loads(again.stdout))
+    assert carried["next_id"] == 5 and carried["closed"] == made["closed"]
+    assert {gap["id"] for gap in carried["settled"]} == {"g3", "g4"}
+
+
+@pytest.mark.parametrize("missing", ["answer", "id"])
+def test_repeat_accepts_legacy_unanswered_results(
+    tmp_path: Path, env: dict[str, str], missing: str
+) -> None:
+    work = case("owner-away-named-workers", tmp_path, env)
+    plan = flow_plan(
+        work,
+        [
+            {"id": "first", "task": "First step"},
+            {"id": "second", "task": "Second step"},
+        ],
+    )
+    made = json.loads(work.emb("gapcheck", "--plan", str(plan), "--json").stdout)
+    for step in made["steps"]:
+        for gap in step["gaps"]:
+            del gap["answer"]
+            if missing == "id":
+                del gap["id"], gap["earlier"]
+    if missing == "id":
+        made["ranked"] = [
+            {"step": step["step"], **gap}
+            for step in made["steps"]
+            for gap in step["gaps"]
+        ]
+        for key in (
+            "next_id",
+            "previous",
+            "previous_plan",
+            "settled",
+            "closed",
+            "dispositions",
+        ):
+            del made[key]
+    saved = tmp_path / "gapcheck-plan-1.json"
+    saved.write_text(json.dumps(made))
+    checked = work.emb(
+        "gapcheck", "--plan", str(plan), "--previous", str(saved), "--json"
+    )
+    assert checked.returncode == 0, checked.stderr
+    repeated = previous.validate(json.loads(checked.stdout))
+    assert repeated["settled"] == []
+    [gap] = repeated["steps"][1]["gaps"]
+    assert gap["id"] == "g2" and gap["earlier"] == "g1"
+    assert gap["answer"] is None
+
+
+@pytest.mark.parametrize(
+    ("identity", "text", "code"), [("g9", "Answer", 64), ("g1", " ", 64)]
+)
+def test_answer_refusals_leave_result_unchanged(
+    tmp_path: Path, env: dict[str, str], identity: str, text: str, code: int
+) -> None:
+    work = case("flow-gap-check-first", tmp_path, env)
+    saved = tmp_path / "gapcheck-plan-1.json"
+    original = work.emb("gapcheck", "--plan", str(flow_plan(work)), "--json").stdout
+    saved.write_text(original)
+    checked = work.emb(
+        "gapcheck", "--answer", str(saved), "--id", identity, "--text", text
+    )
+    assert checked.returncode == code and saved.read_text() == original
+    assert work.calls()[-1]["route"] == "gapcheck-answer"

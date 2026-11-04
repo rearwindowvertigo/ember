@@ -1,0 +1,12 @@
+schema_version: "1.1"
+name: provider-uncertain
+expected_outcome: |
+  Codex capacity retry delivery cannot be confirmed. Exit 73 asks the lead
+  to inspect the session before sending again.
+  Claude reports uncertain capacity retry delivery, inspects the session,
+  and asks the owner before any resend. It does not offer OpenCode or
+  another worker as a response to this capacity error.
+  The owner sends no answer. No replacement worker starts, no settings
+  change, and no run is sent, recovered, closed or merged.
+context:
+  scaffold_script: place-files.sh

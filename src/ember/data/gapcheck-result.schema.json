@@ -1,0 +1,526 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ember/gapcheck-result/2",
+  "title": "Gap check result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "plan",
+    "plan_steps",
+    "failure_model",
+    "previous",
+    "previous_plan",
+    "reviewer",
+    "run",
+    "steps",
+    "settled",
+    "closed",
+    "dispositions",
+    "next_id",
+    "ranked",
+    "counts",
+    "uncovered_steps",
+    "unknown_steps",
+    "parse_error",
+    "status",
+    "ask"
+  ],
+  "properties": {
+    "plan": {
+      "type": "string",
+      "minLength": 1
+    },
+    "plan_steps": {
+      "enum": [
+        "tasks",
+        "numbered",
+        "headings",
+        "whole"
+      ]
+    },
+    "failure_model": {
+      "type": "boolean"
+    },
+    "previous": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "previous_plan": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "reviewer": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "engine",
+        "model",
+        "effort",
+        "source"
+      ],
+      "properties": {
+        "engine": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "source": {
+          "enum": [
+            "option",
+            "menu"
+          ]
+        }
+      }
+    },
+    "run": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "reply",
+        "exit",
+        "closed",
+        "close_error"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reply": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "exit": {
+          "type": "integer"
+        },
+        "closed": {
+          "type": "boolean"
+        },
+        "close_error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/step"
+      }
+    },
+    "settled": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/settled"
+      }
+    },
+    "closed": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/closed"
+      }
+    },
+    "dispositions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/disposition"
+      }
+    },
+    "next_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "ranked": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ranked"
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "high",
+        "medium",
+        "low"
+      ],
+      "properties": {
+        "high": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "medium": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "low": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "uncovered_steps": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "unknown_steps": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "parse_error": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "status": {
+      "enum": [
+        "run"
+      ]
+    },
+    "ask": {
+      "enum": [
+        "high",
+        "medium",
+        "all"
+      ]
+    }
+  },
+  "$defs": {
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "step",
+        "title",
+        "gaps"
+      ],
+      "properties": {
+        "step": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "gaps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/gap"
+          }
+        }
+      }
+    },
+    "gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "gap",
+        "harm",
+        "why",
+        "default",
+        "earlier",
+        "ask_owner"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^g[1-9][0-9]*$"
+        },
+        "gap": {
+          "type": "string",
+          "minLength": 1
+        },
+        "harm": {
+          "type": "string",
+          "minLength": 1,
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "why": {
+          "type": "string",
+          "minLength": 1
+        },
+        "default": {
+          "type": "string",
+          "minLength": 1
+        },
+        "answer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "earlier": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "pattern": "^g[1-9][0-9]*$"
+        },
+        "ask_owner": {
+          "type": "boolean"
+        }
+      }
+    },
+    "settled": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "gap",
+        "harm",
+        "why",
+        "default",
+        "answer",
+        "step",
+        "title"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^g[1-9][0-9]*$"
+        },
+        "gap": {
+          "type": "string",
+          "minLength": 1
+        },
+        "harm": {
+          "type": "string",
+          "minLength": 1,
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "why": {
+          "type": "string",
+          "minLength": 1
+        },
+        "default": {
+          "type": "string",
+          "minLength": 1
+        },
+        "answer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "step": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "closed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "gap",
+        "harm",
+        "why",
+        "default",
+        "step",
+        "title",
+        "reason"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^g[1-9][0-9]*$"
+        },
+        "gap": {
+          "type": "string",
+          "minLength": 1
+        },
+        "harm": {
+          "type": "string",
+          "minLength": 1,
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "why": {
+          "type": "string",
+          "minLength": 1
+        },
+        "default": {
+          "type": "string",
+          "minLength": 1
+        },
+        "answer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "step": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "ranked": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "step",
+        "harm"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^g[1-9][0-9]*$"
+        },
+        "step": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "harm": {
+          "type": "string",
+          "minLength": 1,
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        }
+      }
+    },
+    "disposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status",
+        "reason"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^g[1-9][0-9]*$"
+        },
+        "status": {
+          "enum": [
+            "settled",
+            "reopened",
+            "closed"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "legacyRanked": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "step",
+        "gap",
+        "harm",
+        "why",
+        "default"
+      ],
+      "properties": {
+        "gap": {
+          "type": "string",
+          "minLength": 1
+        },
+        "harm": {
+          "type": "string",
+          "minLength": 1,
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "why": {
+          "type": "string",
+          "minLength": 1
+        },
+        "default": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ask_owner": {
+          "type": "boolean"
+        },
+        "step": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

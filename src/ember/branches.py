@@ -1,40 +1,50 @@
 """Merging reviewed run branches and cleaning up merged ones.
 
-A worker branch is a run branch, `ember/<engine>/<run id>`, whose worktree is
-`.ember/worktrees/<run id>` at the top of the repository's main checkout.
-Flow branches use `ember/flow/<flow id>` and the same worktree layout.
+A worker branch is a run branch, `ember/<engine>/<run id>`, or a flow
+branch, `ember/flow/<flow id>`. Its worktree is the path its run or flow
+record names: `worktrees/<id>` in Ember's data folder, or
+`.ember/worktrees/<id>` in the main checkout for a record made before that
+folder. A branch with no record has the worktree that `git worktree list`
+shows holding it in a folder named by its id, other than the main checkout.
 Cleanup keeps a flow branch while its runner holds the lifetime lock.
-Cleanup removes only worker branches, their worktrees and their sessions; a
-session is closed through the run core, never through tmux directly.
+Cleanup removes worker branches, their worktrees and their sessions, and
+clean detached worktrees of closed read-only runs. A session is closed
+through the run core, never through tmux directly.
 
 A branch is contained in a target when it is an ancestor of the target, or
-when merging it into the target cleanly gives the target's own tree. The
+when a reachable commit names it in an Ember-Task-Tip trailer, or when
+merging it into the target cleanly gives the target's own tree. The
 check changes no index, worktree or ref.
 
 Each non-zero exit prints its message on standard error, then one `next:` or
 `owner:` line, as `emb run` does.
 """
 
+import contextlib
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
 
+from ember import paths
 from ember.flows import lock as flow_lock
-from ember.runs import exits, record
-from ember.runs.core import Core, RunError
+from ember.flows import record as flow_record
+from ember.runs import exits, record, worktrees
+from ember.runs.core import Core, RunError, worktree_removal_reason
 from ember.runs.record import Run
 
 GIT_TIMEOUT = 120
-"""Seconds each git command may take, except one that changes the repository
-(a merge, its abort, a worktree removal, a prune or a branch deletion), which
-runs without a time limit."""
+"""Seconds each git command may take, except repository changes and hooks.
+
+Writing or signing a commit, running a hook, merging, aborting, removing a
+worktree, pruning and deleting a branch run without a time limit.
+"""
 
 IN_PROGRESS = (
     ("MERGE_HEAD", "merge"),
@@ -64,7 +74,10 @@ NOT_WORKER = "not an Ember run branch"
 """The reason a branch that is not a worker branch is kept."""
 
 VERDICT_TRAILER = "Ember-Verdict"
-"""The merge commit trailer that holds the lead's verdict line."""
+"""The commit trailer that holds the lead's verdict line."""
+
+TASK_TIP_TRAILER = "Ember-Task-Tip"
+"""The squash commit trailer that identifies the worker tip."""
 
 
 class BranchError(Exception):
@@ -99,8 +112,8 @@ class _KeepError(Exception):
 class Result:
     """One act or keep of a cleanup."""
 
-    branch: str
-    """The branch."""
+    branch: str | None
+    """The branch, or `None` for a detached read-only run."""
 
     run: str | None
     """The run id the branch name holds, or `None`."""
@@ -135,7 +148,7 @@ class Result:
         Returns:
             `<action> <branch>: <reason>`, and for a keep `; ` and its `next`.
         """
-        line = f"{self.action} {self.branch}: {self.reason}"
+        line = f"{self.action} {self.branch or self.run}: {self.reason}"
         return line if self.next is None else f"{line}; {self.next}"
 
 
@@ -177,6 +190,76 @@ def _git_message(result: subprocess.CompletedProcess[str]) -> str:
     return _one_line(result.stderr or result.stdout) or f"exit {result.returncode}"
 
 
+def _breaking_subject(subject: str) -> bool:
+    """Return whether the subject has a breaking marker before its colon."""
+    prefix, colon, _ = subject.partition(":")
+    return bool(colon) and prefix.endswith("!")
+
+
+def _breaking_change(message: str) -> bool:
+    """Detect a breaking subject or Conventional Commits breaking footer."""
+    subject, _, body = message.strip("\r\n").partition("\n")
+    return _breaking_subject(subject) or bool(
+        re.search(r"(?m)^BREAKING(?: CHANGE|-CHANGE):", body)
+    )
+
+
+def _trailer_separators(directory: str | Path, env: Mapping[str, str]) -> str:
+    """Read Git's configured trailer separators, defaulting to a colon."""
+    result = _git(directory, "config", "--null", "--get", "trailer.separators", env=env)
+    if result.returncode == 1:
+        return ":"
+    if result.returncode:
+        raise GitFailedError(
+            exits.WORKTREE_FAILED,
+            f"reading trailer.separators failed: {_git_message(result)}",
+            f"next: git -C {directory} config --get trailer.separators",
+        )
+    return result.stdout.removesuffix("\0")
+
+
+def landed_commit(
+    directory: str | Path, tip: str, target: str, env: Mapping[str, str]
+) -> str | None:
+    """Find a reachable squash commit whose task-tip trailer equals `tip`."""
+    resolved = _git(
+        directory,
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        f"{tip}^{{commit}}",
+        env=env,
+    )
+    if resolved.returncode:
+        return None
+    tip = resolved.stdout.strip()
+    try:
+        separators = _trailer_separators(directory, env)
+    except GitFailedError:
+        return None
+    # Ember writes colon-separated metadata even when worker trailers use
+    # another separator. Keep Git's worker grammar and add Ember's separator.
+    if ":" not in separators:
+        separators += ":"
+    result = _git(
+        directory,
+        "-c",
+        f"trailer.separators={separators}",
+        "log",
+        "--format=%H%x00%(trailers:key=Ember-Task-Tip,valueonly,unfold)%x00",
+        target,
+        "--",
+        env=env,
+    )
+    if result.returncode:
+        return None
+    fields = result.stdout.split("\0")
+    for index in range(0, len(fields) - 1, 2):
+        if tip in (line.strip() for line in fields[index + 1].splitlines()):
+            return fields[index].strip()
+    return None
+
+
 def is_contained(
     directory: str | Path,
     tip: str,
@@ -196,8 +279,9 @@ def is_contained(
             so the repository's object store is left as it was.
 
     Returns:
-        `True` when `tip` is an ancestor of `target`, or when merging `tip`
-        into `target` gives no conflict and `target`'s own tree. A conflict,
+        `True` when `tip` is an ancestor or a recorded landed task of `target`,
+        or when merging `tip` into `target` gives no conflict and `target`'s
+        own tree. A conflict,
         a missing commit or a failed git command gives `False`.
     """
     ancestor = _git(directory, "merge-base", "--is-ancestor", tip, target, env=env)
@@ -205,6 +289,8 @@ def is_contained(
         return True
     if ancestor.returncode != 1:
         return False
+    if landed_commit(directory, tip, target, env) is not None:
+        return True
     tree = _git(directory, "rev-parse", "--verify", f"{target}^{{tree}}", env=env)
     if tree.returncode or not tree.stdout.strip():
         return False
@@ -270,7 +356,7 @@ class Repository:
     """The repository's common git folder."""
 
     main: Path
-    """The main checkout, which holds `.ember/worktrees/`."""
+    """The main checkout, the first entry of `git worktree list`."""
 
     env: Mapping[str, str]
     """The environment of the git commands."""
@@ -295,7 +381,22 @@ class Repository:
             The finished command.
         """
         timeout = None if changes else GIT_TIMEOUT
-        return _git(cwd or self.top, *args, env=self.env, timeout=timeout, stdin=stdin)
+        lock = (
+            paths.worktree_lock(self.common, self.env)
+            if args[:1] == ("worktree",)
+            else contextlib.nullcontext()
+        )
+        try:
+            with lock:
+                return _git(
+                    cwd or self.top, *args, env=self.env, timeout=timeout, stdin=stdin
+                )
+        except (OSError, paths.RuntimeDirError) as error:
+            raise GitFailedError(
+                exits.UNAVAILABLE,
+                f"cannot use the worktree lock of {self.common}: {error}",
+                exits.line(exits.UNAVAILABLE, "runtime") or "",
+            ) from error
 
     def tip(self, branch: str) -> str | None:
         """Return a local branch's commit.
@@ -363,16 +464,30 @@ class Repository:
             )
         return found
 
-    def run_worktree(self, run_id: str) -> Path:
-        """Return the folder of a run's worktree.
+    def unrecorded_worktree(self, branch: str, worktree_id: str) -> Path | None:
+        """Return the worktree of a worker branch that has no record.
 
         Args:
-            run_id: The run id.
+            branch: The worker branch.
+            worktree_id: The run id or flow id in the branch's name.
 
         Returns:
-            `.ember/worktrees/<run id>` in the main checkout.
+            The worktree `git worktree list` shows with `branch` checked out
+            in a folder named `worktree_id`, other than the main checkout, or
+            `None` when there is none.
+
+        Raises:
+            GitFailedError: `git worktree list` failed.
         """
-        return self.main / ".ember" / "worktrees" / run_id
+        main = _resolved(self.main)
+        for item in self.worktrees():
+            if (
+                item.branch == branch
+                and item.path.name == worktree_id
+                and _resolved(item.path) != main
+            ):
+                return item.path
+        return None
 
     def changes(self, worktree: Path, *, skip_nested: bool = False) -> list[str]:
         """Return the changed paths of a worktree.
@@ -517,12 +632,29 @@ def resolve_base(
 
 
 def create_flow_branch(
-    directory: str | Path, flow_id: str, base: str, env: Mapping[str, str]
+    directory: str | Path,
+    flow_id: str,
+    base: str,
+    env: Mapping[str, str],
+    *,
+    worktree: Path | None = None,
 ) -> FlowBranch:
-    """Create a flow branch at its base in the main checkout's worktree folder.
+    """Create a flow branch at its base, in a worktree outside the repository.
+
+    Args:
+        directory: A folder in the git checkout.
+        flow_id: The flow id.
+        base: The commit or branch the flow branch starts from.
+        env: The environment of the git commands.
+        worktree: The worktree path the flow record names; `None` for
+            `ember.paths.worktree_path(flow_id, env)`.
+
+    Returns:
+        The branch, its worktree, base commit and checkout locations.
 
     Raises:
-        BranchError: An invalid flow id (64), an unresolved base or checkout,
+        BranchError: An invalid flow id (64), a worktree folder inside a
+            folder of the repository (69), an unresolved base or checkout,
             or a failure to create the branch or worktree (70).
     """
     branch = f"ember/flow/{flow_id}"
@@ -531,33 +663,29 @@ def create_flow_branch(
             exits.USAGE, f"invalid flow id: {flow_id!r}", "next: emb flow --help"
         )
     top, main, commit = resolve_base(directory, base, env)
-    worktree = main / ".ember" / "worktrees" / flow_id
+    if worktree is None:
+        worktree = paths.worktree_path(flow_id, env)
     line = f"next: git -C {main} worktree prune, then emb flow --plan <plan> --start"
-    common = _common(top, env)
-    if common is None:
-        raise BranchError(
-            exits.WORKTREE_FAILED, "cannot find the common git folder", line
-        )
-    exclude = common / "info" / "exclude"
+    repo = open_repository(top, env, "flow")
+    folders = [item.path for item in repo.worktrees()]
     try:
-        try:
-            text = exclude.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            text = ""
-        if not any(
-            item.strip() in (".ember/", "/.ember/", ".ember", "/.ember")
-            for item in text.splitlines()
-        ):
-            exclude.parent.mkdir(parents=True, exist_ok=True)
-            if text and not text.endswith("\n"):
-                text += "\n"
-            exclude.write_text(text + ".ember/\n", encoding="utf-8")
-    except (OSError, UnicodeError) as error:
+        paths.check_worktree_path(worktree, [*folders, repo.common], env)
+    except paths.WorktreeDirError as error:
         raise BranchError(
-            exits.WORKTREE_FAILED, f"cannot add .ember/ to {exclude}: {error}", line
+            exits.UNAVAILABLE,
+            str(error),
+            f"owner: set {paths.worktree_setting(env)} so that "
+            f"{paths.worktrees_dir(env)} is outside every git checkout",
         ) from error
-    result = _git(
-        main,
+    try:
+        paths.ensure_worktrees_dir(env)
+    except (OSError, ValueError) as error:
+        raise BranchError(
+            exits.WORKTREE_FAILED,
+            f"cannot create the worktree folder {paths.worktrees_dir(env)}: {error}",
+            line,
+        ) from error
+    result = repo.git(
         "worktree",
         "add",
         "-q",
@@ -565,8 +693,8 @@ def create_flow_branch(
         branch,
         str(worktree),
         commit,
-        env=env,
-        timeout=None,
+        cwd=main,
+        changes=True,
     )
     if result.returncode:
         raise BranchError(
@@ -663,6 +791,41 @@ class Cleanup:
         if self.out is not None:
             print(result.text(), file=self.out, flush=True)
 
+    def detached(self) -> None:
+        """Remove safe detached worktrees of this repository's ended runs."""
+        runs, errors = record.list_runs(self.repo.env)
+        for error in errors:
+            print(f"emb cleanup: skipped {error}", file=self.err)
+        for run in runs:
+            if (
+                not run.read_only
+                or not run.detached
+                or run.status not in (record.CLOSED, record.FAILED)
+                or not run.common
+                or _resolved(Path(run.common)) != _resolved(self.repo.common)
+            ):
+                continue
+            try:
+                with self._removal_lock(run):
+                    run = record.load(run.id, self.repo.env)
+                    with paths.worktree_lock(self.repo.common, self.repo.env):
+                        present = worktrees.remove_detached(run, dry_run=self.dry_run)
+                if present:
+                    self._report(
+                        Result(
+                            None,
+                            run.id,
+                            WOULD_REMOVE if self.dry_run else REMOVED,
+                            f"{'removes' if self.dry_run else 'removed'} "
+                            f"worktree {run.worktree}",
+                            None,
+                        )
+                    )
+            except (OSError, record.RecordError, _KeepError) as error:
+                self._report(
+                    Result(None, run.id, KEPT, str(error), f"next: {self.again}")
+                )
+
     def _one(self, branch: str) -> Result:
         """Clean up one branch.
 
@@ -698,7 +861,8 @@ class Cleanup:
             raise _KeepError(
                 f"not contained in {self.target}",
                 f"next: emb merge {branch} --into {self.target} --verdict keep "
-                "--note '<verdict line>' (after a Keep verdict)",
+                "--note '<verdict line>' --subject '<commit subject>' "
+                "(after a Keep verdict)",
             )
         return tip, target_tip
 
@@ -723,11 +887,20 @@ class Cleanup:
             if live:
                 raise _KeepError(f"the flow {run_id} is running", line)
         tip, target_tip = self._tips(branch)
-        run = self._record(run_id, engine, branch)
-        folder = self.repo.run_worktree(run_id)
+        run: Run | None = None
+        if FLOW_BRANCH.fullmatch(branch):
+            folder = self._flow_worktree(run_id, branch)
+        else:
+            run = self._record(run_id, engine, branch)
+            folder = Path(run.worktree) if run is not None else None
+        if folder is None:
+            folder = self.repo.unrecorded_worktree(branch, run_id)
         present = self._check_worktree(branch, folder)
         parts.append(f"contained in {self.target}")
         if self.dry_run:
+            if run is not None and run.status == record.CLOSED:
+                with self._removal_lock(run):
+                    pass
             if run is not None and run.status != record.CLOSED:
                 _check_closable(run)
                 parts.append(f"closes {run_id}")
@@ -738,11 +911,46 @@ class Cleanup:
         if run is not None and run.status != record.CLOSED:
             self._close(run)
             parts.append(f"closed {run_id}")
+        with self._removal_lock(run):
+            return self._remove_branch(
+                branch, run_id, folder, present, tip, target_tip, parts
+            )
+
+    @contextlib.contextmanager
+    def _removal_lock(self, run: Run | None) -> Iterator[None]:
+        """Hold run locks through the removal check and worktree removal."""
+        if run is None:
+            yield
+            return
+        try:
+            with (
+                Core(self.repo.env)._turn_lock(run.id, "close"),
+                record.record_lock(run),
+            ):
+                current = record.load(run.id, self.repo.env)
+                reason = worktree_removal_reason(current)
+                if reason:
+                    raise _KeepError(reason, f"next: emb run --close {run.id}")
+                yield
+        except (RunError, OSError, record.RecordError) as error:
+            raise _KeepError(str(error), f"next: emb run --close {run.id}") from error
+
+    def _remove_branch(
+        self,
+        branch: str,
+        run_id: str,
+        folder: Path | None,
+        present: bool,
+        tip: str,
+        target_tip: str,
+        parts: list[str],
+    ) -> Result:
+        """Remove a branch and its worktree while any run locks are held."""
         if (self.repo.tip(branch), self.repo.tip(self.target)) != (tip, target_tip):
             moved = branch if self.repo.tip(branch) != tip else self.target
             raise _KeepError(f"{moved} moved", f"next: {self.again}")
         tip, _ = self._tips(branch)
-        if present:
+        if present and folder is not None:
             self._check_worktree(branch, folder)
             self._git_step(
                 ["worktree", "remove", "--", str(folder)],
@@ -797,14 +1005,10 @@ class Cleanup:
             mismatch = f"its engine is {run.engine}"
         elif run.branch != branch:
             mismatch = f"its branch is {run.branch}"
-        elif _resolved(Path(run.worktree)) != _resolved(self.repo.run_worktree(run_id)):
-            mismatch = f"its worktree {run.worktree} is not this repository's"
         else:
-            common = _common(run.repo, self.repo.env) or _common(
-                run.worktree, self.repo.env
+            mismatch = self._mismatch(
+                run_id, run.worktree, run.main or run.repo, run.common
             )
-            if common is not None and common != self.repo.common:
-                mismatch = f"its checkout {run.repo} is in another repository"
         if mismatch:
             raise _KeepError(
                 f"the run record {run_id} is not this branch's: {mismatch}",
@@ -812,13 +1016,69 @@ class Cleanup:
             )
         return run
 
-    def _check_worktree(self, branch: str, folder: Path) -> bool:
-        """Check where the branch is checked out and the run's worktree.
+    def _flow_worktree(self, flow_id: str, branch: str) -> Path | None:
+        """Read the flow branch's record and return the worktree it names.
 
         Returns:
-            Whether the run's worktree is there to remove.
+            The worktree, or `None` when there is no record.
         """
-        expected = _resolved(folder)
+        try:
+            flow = flow_record.load(flow_id, self.repo.env)
+        except flow_record.FlowMissingError:
+            return None
+        except (flow_record.FlowError, OSError, ValueError) as error:
+            folder = flow_record.folder(flow_id, self.repo.env)
+            raise _KeepError(
+                f"cannot read the flow record: {error}",
+                f"owner: repair or remove {folder / flow_record.FLOW_NAME}",
+            ) from error
+        mismatch = None
+        if flow["branch"] != branch:
+            mismatch = f"its branch is {flow['branch']}"
+        else:
+            mismatch = self._mismatch(
+                flow_id, flow["worktree"], flow["main"], flow.get("common")
+            )
+        if mismatch:
+            raise _KeepError(
+                f"the flow record {flow_id} is not this branch's: {mismatch}",
+                f"next: emb flow --status {flow_id}",
+            )
+        return Path(flow["worktree"])
+
+    def _mismatch(
+        self, worktree_id: str, worktree: str, checkout: str, common: str | None
+    ) -> str | None:
+        """Return why a record's worktree and checkout are not this branch's.
+
+        A record's worktree is a folder named by its id, other than the main
+        checkout, in this repository. The recorded common git folder
+        identifies the repository; older records query their checkout.
+        """
+        folder = Path(worktree)
+        if folder.name != worktree_id or _resolved(folder) == _resolved(self.repo.main):
+            return f"its worktree {worktree} is not a worktree of {worktree_id}"
+        recorded_common = (
+            _resolved(Path(common))
+            if common is not None
+            else _common(checkout, self.repo.env) or _common(worktree, self.repo.env)
+        )
+        if recorded_common is not None and recorded_common != self.repo.common:
+            return f"its checkout {checkout} is in another repository"
+        return None
+
+    def _check_worktree(self, branch: str, folder: Path | None) -> bool:
+        """Check where the branch is checked out and the branch's worktree.
+
+        Args:
+            branch: The worker branch.
+            folder: The branch's worktree, from its record or `git worktree
+                list`; `None` when it has none.
+
+        Returns:
+            Whether the branch's worktree is there to remove.
+        """
+        expected = _resolved(folder) if folder is not None else None
         own = None
         for item in self.repo.worktrees():
             path = _resolved(item.path)
@@ -829,7 +1089,7 @@ class Cleanup:
                     f"checked out in {item.path}",
                     f"next: git -C {item.path} switch --detach, then {self.again}",
                 )
-        if own is None or own.prunable or not folder.is_dir():
+        if folder is None or own is None or own.prunable or not folder.is_dir():
             return False
         if own.branch != branch:
             held = own.branch or "a detached HEAD"
@@ -959,6 +1219,8 @@ def cleanup(
     failure: GitFailedError | None = None
     try:
         job.run([branch] if branch else job.worker_branches())
+        if branch is None:
+            job.detached()
     except GitFailedError as error:
         failure = error
     if as_json:
@@ -1038,15 +1300,200 @@ def _merge_title(
     return title
 
 
+def _squash_message(
+    repo: Repository,
+    head: str,
+    tip: str,
+    subject: str,
+    note: str | None,
+    worktree: Path,
+) -> tuple[str, bool]:
+    """Collect Git trailers and report breaking signals in the worker history."""
+    separators = _trailer_separators(worktree, repo.env)
+    separator = separators[0] if separators else ":"
+    base = repo.git("merge-base", head, tip, cwd=worktree)
+    if base.returncode:
+        raise GitFailedError(
+            exits.WORKTREE_FAILED,
+            f"git merge-base failed: {_git_message(base)}",
+            "next: emb merge --help",
+        )
+    result = repo.git(
+        "log",
+        "--reverse",
+        "--format=%H%x00%B%x00",
+        f"{base.stdout.strip()}..{tip}",
+        "--",
+        cwd=worktree,
+    )
+    if result.returncode:
+        raise GitFailedError(
+            exits.WORKTREE_FAILED,
+            f"reading worker trailers failed: {_git_message(result)}",
+            "next: emb merge --help",
+        )
+    trailers: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    fields = result.stdout.split("\0")
+    breaking = False
+    for index in range(0, len(fields) - 1, 2):
+        breaking = breaking or _breaking_change(fields[index + 1])
+        parsed = repo.git(
+            "show",
+            "-s",
+            "--format=%(trailers:unfold,only,key_value_separator=%x00,separator=%x00)",
+            fields[index].strip(),
+            "--",
+            cwd=worktree,
+        )
+        if parsed.returncode:
+            raise GitFailedError(
+                exits.WORKTREE_FAILED,
+                f"reading worker trailers failed: {_git_message(parsed)}",
+                "next: emb merge --help",
+            )
+        pairs = parsed.stdout.rstrip("\n").split("\0")
+        for offset in range(0, len(pairs) - 1, 2):
+            key, value = pairs[offset].strip(), pairs[offset + 1].strip()
+            pair = (key.lower(), value)
+            if pair[0].startswith("ember-") or pair in seen:
+                continue
+            seen.add(pair)
+            trailers.append(f"{key}{separator} {value}")
+    if note is not None:
+        trailers.append(f"{VERDICT_TRAILER}: {note}")
+    trailers.append(f"{TASK_TIP_TRAILER}: {tip}")
+    return subject + "\n\n" + "\n".join(trailers) + "\n", breaking
+
+
+def _squash(
+    repo: Repository,
+    branch: str,
+    target: str,
+    worktree: Path,
+    head: str,
+    tip: str,
+    subject: str,
+    note: str | None,
+    warnings: list[str] | None = None,
+) -> tuple[str, str]:
+    """Build a reviewed commit before fast-forwarding the target worktree."""
+    tree = repo.git("merge-tree", "--write-tree", "--name-only", "-z", head, tip)
+    if tree.returncode:
+        if tree.returncode == 1:
+            conflicts: list[str] = []
+            for path in tree.stdout.split("\0")[1:]:
+                if not path:
+                    break
+                conflicts.append(path)
+            raise BranchError(
+                exits.REFUSED,
+                f"conflict in {', '.join(conflicts) or _git_message(tree)}; "
+                f"{target} unchanged at {head}",
+                f"next: resolve the conflicts on {branch}, review, then repeat "
+                "emb merge with --subject",
+            )
+        raise GitFailedError(
+            exits.WORKTREE_FAILED,
+            f"git merge-tree failed: {_git_message(tree)}",
+            f"next: git -C {worktree} status",
+        )
+    message, breaking = _squash_message(repo, head, tip, subject, note, worktree)
+    with tempfile.TemporaryDirectory(prefix="ember-squash-") as folder:
+        message_file = Path(folder) / "COMMIT_EDITMSG"
+        message_file.write_text(message, encoding="utf-8")
+        hook = repo.git(
+            "hook",
+            "run",
+            "--ignore-missing",
+            "commit-msg",
+            "--",
+            str(message_file),
+            cwd=worktree,
+            changes=True,
+        )
+        if hook.returncode:
+            raise BranchError(
+                exits.HOOK_REFUSED,
+                f"commit-msg hook refused the squash: {_git_message(hook)}",
+                "next: fix the commit message or hook, then repeat emb merge",
+            )
+        message = message_file.read_text(encoding="utf-8")
+    signing = repo.git("config", "--type=bool", "--get", "commit.gpgsign", cwd=worktree)
+    if signing.returncode not in (0, 1):
+        raise BranchError(
+            exits.HOOK_REFUSED,
+            f"cannot read commit.gpgsign: {_git_message(signing)}",
+            "next: fix commit.gpgsign, then repeat emb merge",
+        )
+    commit = repo.git(
+        "commit-tree",
+        *(("-S",) if signing.stdout.strip() == "true" else ()),
+        tree.stdout.split("\0", 1)[0],
+        "-p",
+        head,
+        cwd=worktree,
+        stdin=message,
+        changes=True,
+    )
+    if commit.returncode:
+        raise BranchError(
+            exits.HOOK_REFUSED,
+            f"git commit-tree refused the squash: {_git_message(commit)}",
+            "next: fix the commit identity or signing configuration, "
+            "then repeat emb merge",
+        )
+    made = commit.stdout.strip()
+    checked_out = repo.git("symbolic-ref", "-q", "HEAD", cwd=worktree)
+    if (
+        repo.tip(target) != head
+        or repo.tip(branch) != tip
+        or checked_out.stdout.strip() != f"refs/heads/{target}"
+    ):
+        raise BranchError(
+            exits.MOVED,
+            "the target or worker branch moved while building the squash",
+            "next: review the branch tips, then repeat emb merge",
+        )
+    advanced = repo.git(
+        "merge",
+        "--ff-only",
+        "--no-edit",
+        "--no-verify",
+        made,
+        cwd=worktree,
+        changes=True,
+    )
+    if advanced.returncode:
+        raise GitFailedError(
+            exits.WORKTREE_FAILED,
+            f"fast-forward of {target} failed: {_git_message(advanced)}",
+            f"next: git -C {worktree} status, then repeat emb merge",
+        )
+    if breaking and not _breaking_subject(subject) and warnings is not None:
+        warnings.append(
+            f"WARNING: {branch} holds a breaking change; the subject has no !"
+        )
+    return made, f"merged {branch} at {tip} into {target}: {made}"
+
+
 def _merge(
-    repo: Repository, branch: str, target: str, worktree: Path, note: str | None
+    repo: Repository,
+    branch: str,
+    target: str,
+    worktree: Path,
+    note: str | None,
+    subject: str | None = None,
+    *,
+    warnings: list[str] | None = None,
 ) -> tuple[str | None, str]:
     """Merge `branch` into `target` in `worktree` unless it is contained.
 
-    A `note` is added to the merge commit as an `Ember-Verdict:` trailer.
+    A `note` is added as an `Ember-Verdict:` trailer. A `subject` selects
+    a squash commit; otherwise git creates a merge commit.
 
     Returns:
-        The merge commit, or `None` when the branch was contained, and the
+        The landed commit, or `None` when the branch was contained, and the
         line printed.
     """
     head = repo.tip(target)
@@ -1071,6 +1518,10 @@ def _merge(
             f"next: git -C {worktree} status --short; commit or set aside those "
             f"changes, then emb merge {branch} --into {target} --verdict keep "
             "--note '<verdict line>'",
+        )
+    if subject is not None:
+        return _squash(
+            repo, branch, target, worktree, head, branch_tip, subject, note, warnings
         )
     merged = repo.git(
         "merge",
@@ -1120,6 +1571,7 @@ def merge(
     verdict: str | None,
     *,
     note: str | None = None,
+    subject: str | None = None,
     directory: str | Path = ".",
     as_json: bool = False,
     env: Mapping[str, str] | None = None,
@@ -1134,7 +1586,8 @@ def merge(
         target: The branch to merge into.
         verdict: The lead's verdict; only `keep` merges.
         note: The lead's verdict line, printed first and kept as a trailer
-            on the merge commit; `None` prints and records none.
+            on the landed commit; `None` prints and records none.
+        subject: The squash subject, required for an Ember run branch.
         directory: A folder in the git checkout.
         as_json: Print one JSON object.
         env: The environment; `None` reads `os.environ`.
@@ -1179,10 +1632,33 @@ def merge(
                     f"no local branch {name}",
                     f"next: git -C {repo.top} branch --list",
                 )
+        squash = WORKER_BRANCH.fullmatch(branch) and not FLOW_BRANCH.fullmatch(branch)
+        if squash and (
+            subject is None
+            or not subject.strip()
+            or any(c in subject for c in "\r\n\0")
+        ):
+            raise BranchError(
+                exits.USAGE,
+                "an Ember run branch requires --subject with one nonblank line",
+                f"next: emb merge {branch} --into {target} --verdict keep "
+                "--note '<verdict line>' --subject '<commit subject>'",
+            )
         worktree = _target_worktree(repo, target)
-        commit, line = _merge(repo, branch, target, worktree, note)
+        warnings: list[str] = []
+        commit, line = _merge(
+            repo,
+            branch,
+            target,
+            worktree,
+            note,
+            subject.strip() if squash and subject is not None else None,
+            warnings=warnings,
+        )
     except BranchError as error:
         return _print_failure("merge", error, err)
+    for warning in warnings:
+        print(warning, file=err)
     contained_before = commit is None
     if not as_json:
         if note is not None:
@@ -1206,6 +1682,7 @@ def merge(
             "branch": branch,
             "target": target,
             "note": note,
+            "warnings": warnings,
             "merge_commit": commit,
             "contained_before": contained_before,
             "cleanup": [item.to_json() for item in job.results],

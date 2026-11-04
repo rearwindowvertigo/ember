@@ -1,12 +1,13 @@
 import http.client
 import json
 import stat
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from ember.engines import models
+from ember.engines import models, status
 from ember.engines.models import Model
 
 T0 = 1_800_000_000.0
@@ -119,6 +120,74 @@ def test_claude_models_are_the_cli_aliases(env: dict[str, str]) -> None:
 def test_unknown_engine_raises(env: dict[str, str]) -> None:
     with pytest.raises(ValueError, match="unknown engine"):
         models.list_models("gpt", env)
+
+
+@pytest.mark.parametrize("engine", ["codex", "opencode"])
+@pytest.mark.parametrize("cache_state", ["missing", "current", "expired"])
+def test_without_cache_writes_preserves_discovery_and_existing_caches(
+    env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    engine: str,
+    cache_state: str,
+) -> None:
+    calls = _codex(env, tmp_path)
+    fetch = Fetcher()
+    path = models.cache_path(engine, env)
+    if cache_state != "missing":
+        models.list_models(engine, env, fetch=fetch, now=T0)
+    before = (path.read_bytes(), path.stat().st_mtime_ns) if path.exists() else None
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("read-only lookup attempted a cache write")
+
+    monkeypatch.setattr(status, "save_cache_file", forbidden)
+    at = T0 + 1 if cache_state == "current" else T0 + models.MAX_AGE
+    with models.without_cache_writes():
+        result = models.list_models(engine, env, fetch=fetch, now=at)
+    assert result.reason is None
+    assert result.models
+    assert result.source == (
+        "cache"
+        if cache_state == "current"
+        else "cli"
+        if engine == "codex"
+        else "openrouter"
+    )
+    probes = _calls(calls) if engine == "codex" else len(fetch.calls)
+    assert probes == (2 if cache_state == "expired" else 1)
+    if before is None:
+        assert not path.parent.exists()
+    else:
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+
+
+def test_without_cache_writes_restores_policy_after_nested_failure(
+    env: dict[str, str],
+) -> None:
+    fetch = Fetcher()
+    with pytest.raises(RuntimeError, match="stop"), models.without_cache_writes():
+        with models.without_cache_writes():
+            models.list_models("opencode", env, fetch=fetch, now=T0)
+        models.list_models("opencode", env, fetch=fetch, now=T0)
+        assert not models.cache_path("opencode", env).parent.exists()
+        raise RuntimeError("stop")
+    models.list_models("opencode", env, fetch=fetch, now=T0)
+    assert models.cache_path("opencode", env).exists()
+    assert len(fetch.calls) == 3
+
+
+def test_without_cache_writes_leaves_other_threads_policy_unchanged(
+    env: dict[str, str],
+) -> None:
+    path = models.cache_path("opencode", env)
+    with models.without_cache_writes(), ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(
+            models.list_models, "opencode", env, fetch=Fetcher(), now=T0
+        ).result()
+        before = (path.read_bytes(), path.stat().st_mtime_ns)
+        models.list_models("opencode", env, fetch=Fetcher(), refresh=True, now=T0 + 1)
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == before
 
 
 # codex

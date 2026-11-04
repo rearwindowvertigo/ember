@@ -1,0 +1,9 @@
+schema_version: "1.1"
+name: claim-stale-skill
+expected_outcome: |
+  The claim succeeds with a one-time Codex gpt-6.1-sol-mini choice and
+  skill stale. Claude reloads the ember skill before the next step, keeps
+  the claim id and its one-time answer, and recommends that worker without
+  starting it.
+context:
+  scaffold_script: place-files.sh

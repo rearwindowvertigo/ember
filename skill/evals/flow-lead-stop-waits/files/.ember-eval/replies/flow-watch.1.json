@@ -20,13 +20,14 @@
       "merge_commit": "{{TIP}}",
       "outside_files": [],
       "cleanup": [],
-      "choices": [],
       "findings": {
         "must": 0,
         "should": 0,
         "lead": 0
       },
-      "finding_details": []
+      "denied_paths": [],
+      "finding_details": [],
+      "choices": []
     },
     {
       "id": "strict",
@@ -35,22 +36,16 @@
       "round": 0,
       "writer_run": "codex-20261102-120100-bbbbbb",
       "branch": "ember/codex/codex-20261102-120100-bbbbbb",
-      "worktree": "{{DIR}}/.ember/worktrees/codex-20261102-120100-bbbbbb",
+      "worktree": "{{WORKTREES}}/codex-20261102-120100-bbbbbb",
       "merge_commit": null,
       "outside_files": [],
       "cleanup": [],
-      "choices": [
-        "emb flow --lead {{FLOW}} strict --send <file>",
-        "emb flow --lead {{FLOW}} strict --accept [--commit <commit>]",
-        "emb flow --lead {{FLOW}} strict --review",
-        "emb flow --lead {{FLOW}} strict --worker <engine>:<model>[@<effort>]",
-        "emb flow --lead {{FLOW}} strict --drop"
-      ],
       "findings": {
         "must": 0,
         "should": 0,
         "lead": 1
       },
+      "denied_paths": [],
       "finding_details": [
         {
           "severity": "lead",
@@ -62,6 +57,13 @@
           "earlier": null,
           "note": ""
         }
+      ],
+      "choices": [
+        "emb flow --lead {{FLOW}} strict --send <file>",
+        "emb flow --lead {{FLOW}} strict --accept [--commit <sha>]",
+        "emb flow --lead {{FLOW}} strict --review [--reviewer <worker>]",
+        "emb flow --lead {{FLOW}} strict --worker <worker>",
+        "emb flow --lead {{FLOW}} strict --drop"
       ]
     }
   ],
@@ -75,9 +77,9 @@
       "reason": "needs the lead",
       "choices": [
         "emb flow --lead {{FLOW}} strict --send <file>",
-        "emb flow --lead {{FLOW}} strict --accept [--commit <commit>]",
-        "emb flow --lead {{FLOW}} strict --review",
-        "emb flow --lead {{FLOW}} strict --worker <engine>:<model>[@<effort>]",
+        "emb flow --lead {{FLOW}} strict --accept [--commit <sha>]",
+        "emb flow --lead {{FLOW}} strict --review [--reviewer <worker>]",
+        "emb flow --lead {{FLOW}} strict --worker <worker>",
         "emb flow --lead {{FLOW}} strict --drop"
       ]
     }

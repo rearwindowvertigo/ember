@@ -28,6 +28,8 @@ def _run(env: dict[str, str], run_id: str = "codex-20260101-120000-abcdef") -> R
         effort="high",
         read_only=False,
         repo="/repo",
+        main="/main",
+        common="/main/.git",
         worktree=f"/repo/.ember/worktrees/{run_id}",
         branch=f"ember/codex/{run_id}",
         base="a" * 40,
@@ -86,7 +88,8 @@ def test_save_and_load_round_trip(env: dict[str, str]) -> None:
         "trailers", "claim", "status",
         "turn", "turn_state", "reply", "expected_head", "started_at",
         "updated_at", "ended_at", "last_exit", "last_reason", "commits",
-        "subject",
+        "subject", "main", "common", "detached", "last_screen_change_at",
+        "capacity_retries", "capacity_wait", "sandbox_paths", "parent",
     }  # fmt: skip
     assert [entry.name for entry in folder.iterdir()] == ["run.json"]
 
@@ -100,14 +103,19 @@ def test_missing_run(env: dict[str, str]) -> None:
     ("change", "message"),
     [
         ({"status": "lost"}, "invalid status"),
+        ({"last_screen_change_at": True}, "invalid last_screen_change_at"),
+        ({"last_screen_change_at": "now"}, "invalid last_screen_change_at"),
         ({"turn_state": "odd"}, "invalid turn_state"),
         ({"turn": True}, "invalid turn"),
         ({"turn": "1"}, "invalid turn"),
         ({"read": ["/a", 1]}, "invalid read"),
         ({"model": None}, "invalid model"),
+        ({"main": 3}, "invalid main"),
+        ({"common": []}, "invalid common"),
         ({"sandbox": None}, "invalid sandbox"),
         ({"sandbox": "codex-bundled"}, "invalid sandbox"),
         ({"network": "on"}, "invalid network"),
+        ({"detached": 1}, "invalid detached"),
         ({"read_effective": ["/a", 2]}, "invalid read_effective"),
         ({"id": "codex-20260101-120000-ffffff"}, "names another run"),
     ],
@@ -198,3 +206,279 @@ def test_record_without_base_branch_loads(env: dict[str, str]) -> None:
     del document["base_branch"]
     (run.folder / "run.json").write_text(json.dumps(document))
     assert record.load(run.id, env).base_branch is None
+
+
+def test_record_without_checkout_fields_loads(env: dict[str, str]) -> None:
+    run = _run(env)
+    document = run.to_json()
+    del document["main"]
+    del document["common"]
+    (run.folder / "run.json").write_text(json.dumps(document))
+    loaded = record.load(run.id, env)
+    assert loaded.main is None and loaded.common is None
+
+
+def test_legacy_read_only_record_has_no_owned_detached_worktree(
+    env: dict[str, str],
+) -> None:
+    run = replace(_run(env), read_only=True, branch=None, worktree="/repo")
+    document = run.to_json()
+    del document["detached"]
+    (run.folder / "run.json").write_text(json.dumps(document))
+    assert not record.load(run.id, env).detached
+    record.save(replace(run, detached=True, worktree="/detached"))
+    assert record.load(run.id, env).detached
+
+
+def _outcome() -> dict[str, Any]:
+    return {
+        "state": "done",
+        "reason": None,
+        "provider_error": False,
+        "signed_out": False,
+        "incomplete": None,
+    }
+
+
+def test_turn_results_empty(env: dict[str, str]) -> None:
+    assert record.turn_results(_run(env)) == ([], [])
+
+
+def test_turn_results_legacy_and_number_order(env: dict[str, str]) -> None:
+    run = replace(_run(env), turn=12)
+    for turn in range(1, 13):
+        record.outcome_path(run, turn).write_text(json.dumps(_outcome()))
+    turns, errors = record.turn_results(run)
+    assert not errors
+    assert turns == [
+        {"turn": turn, "exit": None, **_outcome(), "seconds": None, "denied_paths": []}
+        for turn in range(1, 13)
+    ]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,
+        b"\xff",
+        b"{",
+        b"[]",
+        b"{}",
+        b"[" * 2000,
+        json.dumps({**_outcome(), "state": "unknown"}).encode(),
+        json.dumps({**_outcome(), "state": None, "exit": 0}).encode(),
+        json.dumps({**_outcome(), "reason": 1}).encode(),
+        json.dumps({**_outcome(), "provider_error": 1}).encode(),
+        json.dumps({**_outcome(), "provider_error": None}).encode(),
+        json.dumps({**_outcome(), "signed_out": "false"}).encode(),
+        json.dumps({**_outcome(), "signed_out": None}).encode(),
+        json.dumps({**_outcome(), "incomplete": []}).encode(),
+        json.dumps({**_outcome(), "exit": True}).encode(),
+        json.dumps({**_outcome(), "exit": "0"}).encode(),
+        json.dumps({**_outcome(), "seconds": True}).encode(),
+        json.dumps({**_outcome(), "seconds": -1}).encode(),
+        json.dumps({**_outcome(), "seconds": float("nan")}).encode(),
+        json.dumps({**_outcome(), "seconds": float("inf")}).encode(),
+        json.dumps({**_outcome(), "seconds": 10**500}).encode(),
+    ],
+)
+def test_broken_outcome_preserves_other_turns(
+    env: dict[str, str], content: bytes | None
+) -> None:
+    run = replace(_run(env), turn=3)
+    good = {**_outcome(), "exit": 0, "seconds": 0.0, "denied_paths": []}
+    for turn in (1, 3):
+        record.outcome_path(run, turn).write_text(json.dumps(good))
+    broken = record.outcome_path(run, 2)
+    if content is not None:
+        broken.write_bytes(content)
+    turns, errors = record.turn_results(run)
+    assert turns == [
+        {"turn": 1, **good},
+        {"turn": 2, **dict.fromkeys(good)},
+        {"turn": 3, **good},
+    ]
+    assert len(errors) == 1
+    assert str(broken) in str(errors[0])
+
+
+def test_unreadable_outcome(env: dict[str, str]) -> None:
+    run = replace(_run(env), turn=1)
+    record.outcome_path(run, 1).mkdir()
+    turns, errors = record.turn_results(run)
+    assert all(value is None for key, value in turns[0].items() if key != "turn")
+    assert len(errors) == 1
+    assert str(record.outcome_path(run, 1)) in str(errors[0])
+
+
+@pytest.mark.parametrize("activity", [None, 0, 1234.5])
+def test_screen_activity_round_trip(
+    env: dict[str, str], activity: float | None
+) -> None:
+    run = replace(_run(env), last_screen_change_at=activity)
+    record.save(run)
+    saved = record.load(run.id, env)
+    assert saved.last_screen_change_at == activity
+    if activity is not None:
+        assert isinstance(saved.last_screen_change_at, float)
+
+
+def test_older_record_has_no_screen_activity(env: dict[str, str]) -> None:
+    run = _run(env)
+    document = run.to_json()
+    del document["last_screen_change_at"]
+    (run.folder / "run.json").write_text(json.dumps(document))
+    assert record.load(run.id, env).last_screen_change_at is None
+
+
+def test_older_records_without_capacity_settings_load(env: dict[str, str]) -> None:
+    run = _run(env)
+    data = run.to_json()
+    data.pop("capacity_retries")
+    data.pop("capacity_wait")
+    loaded = record.from_json(data, run.folder, env)
+    assert (loaded.capacity_retries, loaded.capacity_wait) == (2, 30)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("capacity_retries", -1),
+        ("capacity_retries", 11),
+        ("capacity_retries", True),
+        ("capacity_wait", 4),
+        ("capacity_wait", 601),
+        ("capacity_wait", "30"),
+    ],
+)
+def test_invalid_capacity_settings_in_record(
+    env: dict[str, str], name: str, value: object
+) -> None:
+    run = _run(env)
+    with pytest.raises(record.RecordError, match=name):
+        record.from_json({**run.to_json(), name: value}, run.folder, env)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("provider_kind", "unknown"),
+        ("attempts", {}),
+        ("attempts", [{"id": "attempt-1", "sent": False}]),
+        ("retry_at", True),
+        ("retry_at", 10**500),
+        ("retry_clock", float("nan")),
+    ],
+)
+def test_invalid_retry_journal_is_rejected(
+    env: dict[str, str], name: str, value: object
+) -> None:
+    run = _run(env)
+    record.outcome_path(run, 1).write_text(json.dumps({**_outcome(), name: value}))
+    with pytest.raises(record.RecordError, match=name):
+        record.load_outcome(run, 1)
+
+
+@pytest.mark.parametrize(
+    "denials",
+    [
+        None,
+        {},
+        ["/home/a"],
+        [{"path": "relative", "reason": "hidden"}],
+        [{"path": "/a", "reason": "other"}],
+        [{"path": "/a", "reason": "secret location", "allow_path": "/a"}],
+    ],
+)
+def test_invalid_denials_are_record_errors(
+    env: dict[str, str], denials: object
+) -> None:
+    run = replace(_run(env), turn=1)
+    record.outcome_path(run, 1).write_text(
+        json.dumps({**_outcome(), "denied_paths": denials})
+    )
+    with pytest.raises(record.RecordError, match="denied_paths"):
+        record.load_outcome(run, 1)
+
+
+def test_run_denials_keep_run_and_turn_and_legacy_default(env: dict[str, str]) -> None:
+    run = replace(_run(env), turn=2)
+    record.save(run)
+    item = {
+        "path": "/home/a/tools",
+        "reason": "hidden",
+        "allow_path": "/home/a/tools/bin",
+    }
+    record.outcome_path(run, 1).write_text(
+        json.dumps({**_outcome(), "denied_paths": [item]})
+    )
+    record.outcome_path(run, 2).write_text(json.dumps(_outcome()))
+    assert record.load_outcome(run, 2)["denied_paths"] == []
+    assert record.referenced_denials([run.id, run.id, None, "missing-id"], env) == [
+        {**item, "run": run.id, "turn": 1}
+    ]
+
+
+def _dead_parent() -> dict[str, Any]:
+    parent = record.parent("gapcheck")
+    assert parent is not None
+    return {**parent, "start": parent["start"] + 1}
+
+
+def test_record_without_parent_loads(env: dict[str, str]) -> None:
+    run = _run(env)
+    document = run.to_json()
+    del document["parent"]
+    (run.folder / "run.json").write_text(json.dumps(document))
+    loaded = record.load(run.id, env)
+    assert loaded.parent is None and not record.orphaned(loaded)
+
+
+def test_parent_round_trip(env: dict[str, str]) -> None:
+    parent = record.parent("panel", "panel-20260101-120000-abcdef")
+    assert parent is not None and parent["command"] == "panel"
+    run = replace(_run(env), parent=parent)
+    record.save(run)
+    assert record.load(run.id, env).parent == parent
+
+
+@pytest.mark.parametrize(
+    "parent",
+    [
+        {"command": "run", "id": None, "pid": 1, "start": 1},
+        {"command": "flow", "id": 7, "pid": 1, "start": 1},
+        {"command": "flow", "id": None, "pid": True, "start": 1},
+        {"command": "flow", "id": None, "pid": 1},
+        {"command": "flow", "id": None, "pid": 1, "start": 1, "extra": 1},
+    ],
+)
+def test_invalid_parent_is_refused(env: dict[str, str], parent: dict[str, Any]) -> None:
+    run = _run(env)
+    document = {**run.to_json(), "parent": parent}
+    (run.folder / "run.json").write_text(json.dumps(document))
+    with pytest.raises(record.RecordError, match="invalid parent"):
+        record.load(run.id, env)
+
+
+@pytest.mark.parametrize(
+    ("status", "alive", "expected"),
+    [
+        (record.RUNNING, True, False),
+        (record.RUNNING, False, True),
+        (record.WAITING, False, True),
+        (record.STARTING, False, True),
+        (record.CLOSED, False, False),
+        (record.FAILED, False, False),
+    ],
+)
+def test_orphaned(
+    env: dict[str, str], status: str, alive: bool, expected: bool
+) -> None:
+    parent = record.parent("flow", "flow-20260101-120000-abcdef") if alive else None
+    run = replace(_run(env), status=status, parent=parent or _dead_parent())
+    assert record.orphaned(run) is expected
+
+
+def test_run_without_parent_is_never_orphaned(env: dict[str, str]) -> None:
+    run = replace(_run(env), status=record.RUNNING, parent=None)
+    assert not record.orphaned(run)

@@ -71,11 +71,20 @@ LINES: dict[int, str | Mapping[str, str]] = {
         "*": "next: emb run --status {run}",
         "send": "next: " + START + " (a new run; this run's session is gone)",
     },
-    PROVIDER_ERROR: "next: " + SEND + " (after the provider's limit or outage clears)",
+    PROVIDER_ERROR: {
+        "*": "next: " + SEND + " (after the provider's outage clears)",
+        "capacity": "next: " + SEND + " (after provider capacity is available)",
+        "usage_limit": "next: " + SEND + " (after the provider usage_limit resets)",
+        "uncertain": "next: inspect the session of {run}; retry delivery is uncertain; "
+        "ask the lead before sending again (capacity)",
+    },
     INTERRUPTED: {
         "*": RECOVER + " (the turn keeps running in its session)",
         "starting": "next: emb run --close {run}, then " + START,
         "send": "next: " + SEND + " (the message was not sent)",
+        "uncertain": "next: inspect the session of {run}; retry delivery is uncertain; "
+        "ask the lead before sending again (capacity)",
+        "retry": RECOVER + " (capacity resend cancelled; collects the saved turn)",
         "complete": RECOVER + " (finishes the saved turn)",
     },
     REFUSED: {

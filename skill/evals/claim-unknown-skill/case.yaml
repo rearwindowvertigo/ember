@@ -1,0 +1,9 @@
+schema_version: "1.1"
+name: claim-unknown-skill
+expected_outcome: |
+  The claim succeeds with a one-time choice and skill unknown because the
+  installed skill is missing. Claude keeps the claim, reports the warning
+  and owner repair or reinstall action, and starts no worker of any kind
+  until a valid installed skill is loaded.
+context:
+  scaffold_script: place-files.sh

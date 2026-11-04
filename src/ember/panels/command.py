@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from types import FrameType
@@ -23,6 +24,7 @@ from ember import choices, db, paths
 from ember.gapcheck.command import GIT_LOCATION
 from ember.panels import brief, members, record, run
 from ember.runs import exits
+from ember.runs import record as runs
 from ember.runs.core import STALL_MINUTES, Core
 
 SOME_FAILED = 83
@@ -189,17 +191,6 @@ def _dry_run(
     _left_out(selection.left_out, out)
 
 
-def _member_line(member: Mapping[str, Any]) -> str:
-    """Format one member, preserving zero exits and unknown elapsed time."""
-    seconds = "-" if member["seconds"] is None else f"{member['seconds']:.0f}s"
-    code = "-" if member["exit"] is None else str(member["exit"])
-    return (
-        f"member {member['n']} {member['engine']}:{member['model']} · "
-        f"{member['effort'] or 'default'} · {member['status']} · {seconds} · "
-        f"exit {code} · {member['bytes']} bytes · run {member['run'] or '-'}"
-    )
-
-
 def _next(panel: Mapping[str, Any], summary: Path) -> str:
     """Choose one action for complete answers, failures or unfinished members."""
     if panel["exit"] == 0:
@@ -248,8 +239,6 @@ def _result(
         )
         print(json.dumps(result, indent=2), file=out)
     else:
-        for member in panel["members"]:
-            print(_member_line(member), file=out)
         _left_out(panel["left_out"], out)
         print(f"summary {summary}", file=out)
     print(line, file=err)
@@ -298,12 +287,66 @@ def _close_result(
     return code
 
 
+def _progress(panel: dict[str, Any], env: Mapping[str, str]) -> None:
+    """Add run activity and current collection time to a status snapshot."""
+    now = time.time()
+    for member in panel["members"]:
+        ids = [member.get("run"), *(a.get("run") for a in member["attempts"])]
+        denials = list(member.get("denied_paths", []))
+        for item in runs.referenced_denials(ids, env):
+            if item not in denials:
+                denials.append(item)
+        member["denied_paths"] = denials
+        member["last_screen_change_at"] = None
+        if member["run"]:
+            with contextlib.suppress(runs.RecordError):
+                member["last_screen_change_at"] = runs.load(
+                    member["run"], env
+                ).last_screen_change_at
+        if panel["status"] != "running" or member["status"] not in (
+            "starting",
+            "running",
+        ):
+            continue
+        # A stall retry belongs to the same collection interval. Recovery and
+        # replacement runs begin a new interval after the stored seconds.
+        began = next(
+            (
+                attempt["at"]
+                for attempt in reversed(member["attempts"])
+                if attempt["kind"] in ("start", "recover", "retry")
+            ),
+            None,
+        )
+        if began is not None:
+            member["seconds"] = (member["seconds"] or 0.0) + max(0.0, now - began)
+    panel["denied_paths"] = [
+        {**item, "member": member["n"]}
+        for member in panel["members"]
+        for item in member["denied_paths"]
+    ]
+
+
+def _status_member_line(member: Mapping[str, Any]) -> str:
+    """Format member status with its last observed screen change."""
+    activity = member["last_screen_change_at"]
+    shown = "-" if activity is None else str(activity)
+    line = f"{run.member_line(member)} · last screen change {shown}"
+    for item in member.get("denied_paths", []):
+        line += (
+            f"\n  denied {item['path']} ({item['reason']}) "
+            f"run {item['run']} turn {item['turn']}"
+        )
+    return line
+
+
 def _status(
     panel_id: str, as_json: bool, env: Mapping[str, str], out: TextIO, err: TextIO
 ) -> None:
     """Print a complete record or summaries of readable panels oldest first."""
     if panel_id:
         panel = _load(panel_id, env)
+        _progress(panel, env)
         panel["live"] = record.live(panel_id, env)
         if as_json:
             print(json.dumps(panel, indent=2), file=out)
@@ -313,20 +356,27 @@ def _status(
                     shown = str(value).lower() if isinstance(value, bool) else value
                     print(f"{key}: {shown}", file=out)
             for member in panel["members"]:
-                print(_member_line(member), file=out)
+                print(_status_member_line(member), file=out)
         return
     panels, errors = record.list_panels(env)
     for error in errors:
         print(f"emb panel: skipped {error}", file=err)
     items = []
     for panel in panels:
+        _progress(panel, env)
         item = {
             key: panel[key] for key in ("id", "status", "dir", "exit", "started_at")
         }
         item.update(
             live=record.live(panel["id"], env),
+            denied_paths=panel["denied_paths"],
             answered=sum(m["status"] == "answered" for m in panel["members"]),
-            members=len(panel["members"]),
+            member_count=len(panel["members"]),
+            running_members=[
+                {key: m[key] for key in ("n", "seconds", "last_screen_change_at")}
+                for m in panel["members"]
+                if m["status"] in ("starting", "running")
+            ],
         )
         items.append(item)
         if not as_json:
@@ -339,10 +389,16 @@ def _status(
             subject = brief.subject(panel["id"], question)[:60]
             print(
                 f"{item['id']}  {item['status']}  "
-                f"{item['answered']}/{item['members']} answered  "
+                f"{item['answered']}/{item['member_count']} answered  "
                 f"{item['dir']}  {subject}",
                 file=out,
             )
+            for member in panel["members"]:
+                if (
+                    member["status"] in ("starting", "running")
+                    or member["denied_paths"]
+                ):
+                    print(_status_member_line(member), file=out)
     if as_json:
         print(json.dumps(items, indent=2), file=out)
 
@@ -438,7 +494,9 @@ def main(
             if mode == "close":
                 return _close_result(
                     panel_id,
-                    run.close(panel_id, environment, core_factory=core_factory),
+                    run.close(
+                        panel_id, environment, core_factory=core_factory, err=err
+                    ),
                     args.json,
                     out,
                     err,

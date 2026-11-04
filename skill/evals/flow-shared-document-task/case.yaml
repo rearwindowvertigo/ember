@@ -1,0 +1,13 @@
+schema_version: "1.1"
+name: flow-shared-document-task
+expected_outcome: |
+  Claude claims and writes three implementation tasks with disjoint module
+  and test files, plus one task for docs/reference.md with after on all
+  three implementation tasks. Their briefs assign the reference edits to
+  that task. The dry run uses ember.flows.plan on Claude's saved plan:
+  wave one contains totals, items and summary; wave two contains only the
+  document task. The case's check-plan.py asserts those memberships using
+  the production planner. Claude reports the waves and warnings and starts
+  no workers or gap check.
+context:
+  scaffold_script: place-files.sh

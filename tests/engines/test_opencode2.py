@@ -561,6 +561,7 @@ def test_wait_failed(
     assert outcome.reason == error["message"]
     assert outcome.signed_out == signed_out
     assert outcome.provider_error == provider_error
+    assert outcome.provider_kind == ("outage" if provider_error else None)
 
 
 def test_wait_interrupted(driver: OpenCode2Driver, run: Run, server: Server) -> None:
@@ -705,3 +706,21 @@ def test_version_unavailable(
 
         monkeypatch.setattr(subprocess, "run", fail)
     assert type(opencode.driver(env)) is opencode.OpenCodeDriver
+
+
+def test_turn_output_stops_at_current_prompt(
+    driver: OpenCode2Driver, run: Run, server: Server
+) -> None:
+    run = started(driver, run, server)
+    server.write(
+        "messages.json",
+        [
+            idle(),
+            assistant("Permission denied: /home/owner/tools/python"),
+            prompt(server),
+            assistant("old denial"),
+        ],
+    )
+    output = driver.turn_output(run)
+    assert "Permission denied: /home/owner/tools/python" in output
+    assert "old denial" not in output

@@ -19,7 +19,7 @@ from ember import branches, paths, tmux
 from ember.engines import Driver
 from ember.flows import briefs, lock, plan, record, verdict
 from ember.runs import record as runs
-from ember.runs.core import HOOK_REFUSAL_NAME, Core, StartOptions
+from ember.runs.core import HOOK_REFUSAL_NAME, Core, StartOptions, WorkerSelection
 
 POLL_SECONDS = 1.0
 OUTPUT_LIMIT = 4000
@@ -112,6 +112,7 @@ class _Runner:
         self.plan = plan.from_json(
             json.loads((self.folder / record.PLAN_NAME).read_text(encoding="utf-8")),
             Path(self.flow["plan"]),
+            subjects={task["id"]: task["subject"] for task in self.flow["tasks"]},
         )
         self.factory = core_factory
         self.poll = poll_seconds
@@ -239,7 +240,7 @@ class _Runner:
         def frozen_select(
             options: StartOptions,
             settings: Mapping[str, Any],
-        ) -> tuple[Driver, str, str | None]:
+        ) -> tuple[Driver, WorkerSelection]:
             """Keep engine gates while using the flow's explicit worker options."""
             return select(options, {**settings, "menu": None})
 
@@ -309,6 +310,17 @@ class _Runner:
         out, err = _RunIdStream(capture), io.StringIO()
         core = self.core(out, err)
         code = core.execute(lambda: action(core))
+        run_id = task[f"{role}_run"]
+        denials = runs.referenced_denials([run_id], self.env)
+        with self.mutex:
+            old = task.get("denied_paths", [])
+            fresh = [item for item in denials if item not in old]
+            if fresh:
+                task["denied_paths"] = [*old, *fresh]
+                self._event(
+                    "denied_paths", task=task["id"], role=role, denied_paths=fresh
+                )
+                self._save()
         if code == 0:
             return not self.shutdown.is_set()
         run_id = task[f"{role}_run"]
@@ -323,7 +335,12 @@ class _Runner:
         )
         if code == 124:
             reason = f"stalled; the turn keeps running in {run_id}"
-        if code == 73:
+        provider_kind = None
+        if code == 73 and run_id:
+            with contextlib.suppress(runs.RecordError):
+                run = runs.load(run_id, self.env)
+                provider_kind = runs.load_outcome(run, run.turn).get("provider_kind")
+        if code == 73 and provider_kind != "capacity":
             with self.mutex:
                 engine = self.worker(task, role)["engine"]
                 self.flow["halted"] = f"provider error on {engine}; new runs halted"
@@ -417,6 +434,7 @@ class _Runner:
             trailers=self.plan.trailers if role == "writer" else (),
             claim=None,
             window=False,
+            parent=runs.parent("flow", self.flow["id"]),
         )
         return self.call(task, role, lambda core: core.start(options))
 
@@ -706,18 +724,47 @@ class _Runner:
         self.git("clean", "-q", "-f", "-d")
 
     def merge_commit(self, tip: str) -> str | None:
-        """Find the first-parent merge that names the task tip as a second parent."""
-        lines = self.git(
-            "rev-list", "--first-parent", "--parents", self.flow["branch"]
-        ).stdout.splitlines()
-        return next(
-            (
-                parts[0]
-                for line in reversed(lines)
-                if len(parts := line.split()) > 2 and tip in parts[2:]
-            ),
-            None,
+        """Find the squash commit recording the approved worker tip."""
+        return branches.landed_commit(
+            self.flow["worktree"], tip, self.flow["branch"], self.env
         )
+
+    def holds(self, tip: str) -> bool:
+        """Return whether the flow branch already holds an approved worker tip."""
+        return branches.is_contained(
+            self.flow["worktree"], tip, self.flow["branch"], self.env
+        )
+
+    def reconcile(self) -> None:
+        """Record as merged each conflicted task whose tip the lead merged by hand.
+
+        A merge conflict leaves the task `conflict`, and its `next:` line has
+        the lead merge the approved tip into the flow branch. Once the flow
+        branch holds that tip, the task is merged: its commit is the squash
+        commit that records the tip, else the first flow commit that holds it.
+        """
+        for task in self.flow["tasks"]:
+            tip = task.get("merge_tip")
+            if task["status"] != "conflict" or not tip or not self.holds(tip):
+                continue
+            commit = self.merge_commit(tip) or self.holding_commit(tip)
+            self.merged(task, {"merge_commit": commit, "cleanup": []})
+
+    def holding_commit(self, tip: str) -> str:
+        """Return the oldest flow branch commit that holds `tip`.
+
+        Every commit tested is on the flow branch, so the result is reachable
+        whether the hand merge kept `tip` as an ancestor or squashed it.
+        """
+        branch = self.flow["branch"]
+        base = self.git("merge-base", tip, branch).stdout.strip()
+        commits = self.git(
+            "rev-list", "--reverse", f"{base}..{branch}" if base else branch
+        ).stdout.split()
+        for commit in commits:
+            if branches.is_contained(self.flow["worktree"], tip, commit, self.env):
+                return commit
+        return self.tip(branch)
 
     def merged(self, task: dict[str, Any], result: Mapping[str, Any]) -> None:
         """Record containment and a pending check even after cleanup fails."""
@@ -735,6 +782,8 @@ class _Runner:
                 r["action"] == "removed" for r in task["cleanup"]
             ):
                 task.update(branch=None, worktree=None)
+            if result.get("warnings"):
+                task.setdefault("warnings", []).extend(result["warnings"])
             self.flow.update(tip=tip, check_pending=True)
             self._save()
             self._event(
@@ -743,6 +792,7 @@ class _Runner:
                 status="merged",
                 reason=None,
                 cleanup=task["cleanup"],
+                warnings=task.get("warnings", []),
             )
 
     def merge(self, task: dict[str, Any]) -> bool:
@@ -762,6 +812,8 @@ class _Runner:
             task["branch"],
             self.flow["branch"],
             "keep",
+            subject=task["subject"],
+            note=task["reviews"][-1]["verdict"] if task["reviews"] else "keep",
             directory=self.flow["worktree"],
             as_json=True,
             env=self.env,
@@ -781,6 +833,12 @@ class _Runner:
             self.merged(task, result)
             return True
         reason = err.getvalue().strip() or f"merge exited {code}"
+        if code == 75:
+            reason += (
+                f"; once {approved} is in {self.flow['branch']}, the flow records "
+                f"{task['id']} as merged: emb flow --resume {self.id}, or "
+                f"emb flow --lead {self.id} {task['id']} --accept"
+            )
         self.change(task, status="conflict" if code == 75 else "stopped", reason=reason)
         if code == 75:
             return True
@@ -970,6 +1028,16 @@ class _Runner:
                     raise RunnerError(f"unreadable answer line {index + 1}")
                 task = record.task_entry(self.flow, answer["task"])
                 kind = answer["kind"]
+                if (
+                    kind == "accept"
+                    and task["status"] == "merged"
+                    and answer.get("commit") == task.get("merge_tip")
+                ):
+                    # Reconciliation already recorded this hand-merged tip.
+                    with self.mutex:
+                        self.flow["answers_seen"] = index + 1
+                        self._save()
+                    continue
                 if kind not in record.allowed_answers(task):
                     raise RunnerError(f"task {task['id']} is {task['status']}")
                 fields = {
@@ -978,7 +1046,18 @@ class _Runner:
                     "entry": None,
                     "explicit_review": kind == "review",
                 }
-                if kind == "accept":
+                if kind == "accept" and task["status"] == "conflict":
+                    if answer["commit"] != task.get("merge_tip"):
+                        raise RunnerError(
+                            f"{answer['commit']} is not the approved tip "
+                            f"{task.get('merge_tip')}"
+                        )
+                    if not self.holds(answer["commit"]):
+                        raise RunnerError(
+                            f"{answer['commit']} is not in {self.flow['branch']}"
+                        )
+                    fields.update(status="conflict")
+                elif kind == "accept":
                     tip = self.tip(task["branch"])
                     if tip != answer["commit"]:
                         raise RunnerError(
@@ -1173,10 +1252,12 @@ class _Runner:
         if self.shutdown.is_set():
             return "failed", None
         self.recover()
+        self.reconcile()
         if self.flow["check_pending"] and not self.check():
             return "failed", self.failure
         while not self.shutdown.is_set():
             self.answers()
+            self.reconcile()
             self.dependencies()
             for task in self.flow["tasks"]:
                 if task["status"] == "accepted" and not self.merge(task):

@@ -1,0 +1,435 @@
+"""Validate saved results and carry active, settled and closed gaps forward."""
+
+import copy
+import fcntl
+import json
+import math
+import os
+import re
+import tempfile
+from collections import Counter
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from importlib import resources
+from pathlib import Path
+from typing import Any
+
+from ember import paths
+from ember.gapcheck import reply
+
+SCHEMA_NAME = "gapcheck-result.schema.json"
+
+
+class PreviousError(Exception):
+    """An earlier result that cannot be read or is not a valid result."""
+
+    def __init__(self, message: str, *, unreadable: bool) -> None:
+        """Store the problem and whether the file could not be read."""
+        super().__init__(message)
+        self.unreadable = unreadable
+
+
+@dataclass(frozen=True)
+class EarlierGap:
+    """One earlier gap, with its original step and answer."""
+
+    id: str
+    step: int
+    title: str
+    gap: str
+    harm: str
+    why: str
+    default: str
+    answer: str | None
+
+    def settled(self) -> dict[str, Any]:
+        """Return the gap as a history entry of a new result."""
+        return {
+            "id": self.id,
+            "step": self.step,
+            "title": self.title,
+            "gap": self.gap,
+            "harm": self.harm,
+            "why": self.why,
+            "default": self.default,
+            "answer": self.answer,
+        }
+
+
+@dataclass(frozen=True)
+class Previous:
+    """An earlier result, including gaps needing review and closed history."""
+
+    path: Path
+    gaps: tuple[EarlierGap, ...]
+    next_id: int = 1
+    plan: str = ""
+    closed: tuple[dict[str, Any], ...] = ()
+    document: dict[str, Any] = field(default_factory=dict)
+
+    def ids(self) -> frozenset[str]:
+        """Return the ids of active and settled earlier gaps."""
+        return frozenset(gap.id for gap in self.gaps)
+
+
+def schema_text() -> str:
+    """Read the packaged result schema as UTF-8 text."""
+    return resources.files("ember").joinpath("data", SCHEMA_NAME).read_text("utf-8")
+
+
+def _schema_error(
+    value: object, schema: Mapping[str, Any], root: Mapping[str, Any], path: str
+) -> str | None:
+    """Apply the JSON Schema keywords used by the packaged result schema."""
+    if "$ref" in schema:
+        return _schema_error(
+            value, root["$defs"][schema["$ref"].split("/")[-1]], root, path
+        )
+    kinds = schema.get("type", [])
+    kinds = [kinds] if isinstance(kinds, str) else kinds
+    integer = type(value) is int or (
+        type(value) is float and math.isfinite(value) and value.is_integer()
+    )
+    matches = {
+        "object": isinstance(value, dict),
+        "array": isinstance(value, list),
+        "string": isinstance(value, str),
+        "integer": integer,
+        "boolean": type(value) is bool,
+        "null": value is None,
+    }
+    if kinds and not any(matches[kind] for kind in kinds):
+        return f"{path}: expected {' or '.join(kinds)}"
+    if "enum" in schema and value not in schema["enum"]:
+        return f"{path}: expected one of {', '.join(schema['enum'])}"
+    if isinstance(value, dict):
+        properties = schema.get("properties", {})
+        for key in schema.get("required", []):
+            if key not in value:
+                return f"{path}: missing required key {key!r}"
+        if schema.get("additionalProperties") is False:
+            for key in sorted(value.keys() - properties.keys()):
+                return f"{path}: unexpected key {key!r}"
+        for key, child in properties.items():
+            if key in value:
+                error = _schema_error(value[key], child, root, f"{path}.{key}")
+                if error:
+                    return error
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            error = _schema_error(
+                item, schema.get("items", {}), root, f"{path}[{index}]"
+            )
+            if error:
+                return error
+    elif isinstance(value, str):
+        if len(value) < schema.get("minLength", 0):
+            return f"{path}: expected a non-empty string"
+        if "pattern" in schema and re.search(schema["pattern"], value) is None:
+            return f"{path}: expected a gap id g<n>"
+    elif integer and "minimum" in schema and value < schema["minimum"]:
+        return f"{path}: expected an integer at least {schema['minimum']}"
+    return None
+
+
+def _legacy(document: dict[str, Any]) -> dict[str, Any]:
+    """Normalize results without gap ids before applying the result schema.
+
+    Legacy results must still hold the result metadata. Reviewer replies and
+    partial objects are not results. A document with any id uses the current
+    schema, including its required next_id.
+    """
+    steps = document.get("steps")
+    if not isinstance(steps, list) or any(
+        key in document
+        for key in ("next_id", "previous_plan", "settled", "closed", "dispositions")
+    ):
+        return document
+    if any(
+        "id" in gap
+        for step in steps
+        if isinstance(step, dict) and isinstance(step.get("gaps"), list)
+        for gap in step["gaps"]
+        if isinstance(gap, dict)
+    ):
+        return document
+    if document.get("previous") is not None:
+        raise PreviousError(
+            "$.previous: legacy results have no previous result", unreadable=False
+        )
+    made = copy.deepcopy(document)
+    number = 1
+    for step in made["steps"]:
+        if not isinstance(step, dict) or not isinstance(step.get("gaps"), list):
+            return document
+        for gap in step["gaps"]:
+            if not isinstance(gap, dict):
+                return document
+            gap["id"] = f"g{number}"
+            gap.setdefault("earlier", None)
+            gap.setdefault("answer", None)
+            gap.setdefault("ask_owner", True)
+            number += 1
+    # Check the old ranked copies before replacing them with id references.
+    old = made.get("ranked")
+    schema = json.loads(schema_text())
+    error = _schema_error(
+        old,
+        {"type": "array", "items": {"$ref": "#/$defs/legacyRanked"}},
+        schema,
+        "$.ranked",
+    )
+    if error:
+        raise PreviousError(error, unreadable=False)
+    assert isinstance(old, list)
+    for index, step in enumerate(document["steps"]):
+        for position, gap in enumerate(step["gaps"]):
+            error = _schema_error(
+                {**gap, "step": step.get("step")},
+                {
+                    **schema["$defs"]["legacyRanked"],
+                    "properties": {
+                        **schema["$defs"]["legacyRanked"]["properties"],
+                        "answer": schema["$defs"]["gap"]["properties"]["answer"],
+                        "earlier": schema["$defs"]["gap"]["properties"]["earlier"],
+                    },
+                },
+                schema,
+                f"$.steps[{index}].gaps[{position}]",
+            )
+            if error:
+                raise PreviousError(error, unreadable=False)
+    keys = ("step", *reply.GAP_KEYS)
+    expected = [
+        {**gap, "step": step.get("step")}
+        for step in made["steps"]
+        for gap in step["gaps"]
+    ]
+    if Counter(tuple(entry.get(key) for key in keys) for entry in old) != Counter(
+        tuple(entry.get(key) for key in keys) for entry in expected
+    ):
+        raise PreviousError("$.ranked: must match the gaps in steps", unreadable=False)
+    ranked = [
+        {"id": gap["id"], "step": step["step"], "harm": gap.get("harm")}
+        for step in made["steps"]
+        if "step" in step
+        for gap in step["gaps"]
+    ]
+    made["ranked"] = sorted(
+        ranked,
+        key=lambda entry: (
+            reply.HARMS.index(entry["harm"])
+            if entry["harm"] in reply.HARMS
+            else len(reply.HARMS)
+        ),
+    )
+    made.setdefault("status", "run")
+    made.setdefault("ask", "all")
+    made.update(
+        next_id=number,
+        previous=None,
+        previous_plan=None,
+        settled=[],
+        closed=[],
+        dispositions=[],
+    )
+    return made
+
+
+def _integrity(document: dict[str, Any]) -> str | None:
+    """Check identities and derived result fields across schema-valid entries."""
+    active = [
+        {**gap, "step": step["step"]}
+        for step in document["steps"]
+        for gap in step["gaps"]
+    ]
+    all_gaps = [*active, *document["settled"], *document["closed"]]
+    ids = [gap["id"] for gap in all_gaps]
+    if len(set(ids)) != len(ids):
+        return "$: gap ids must be unique across steps, settled and closed"
+    referenced = [entry["id"] for entry in document["dispositions"]]
+    referenced += [gap["earlier"] for gap in active if gap["earlier"]]
+    if any(
+        int(identity[1:]) >= document["next_id"] for identity in [*ids, *referenced]
+    ):
+        return "$.next_id: must exceed every gap id"
+    numbers = [step["step"] for step in document["steps"]]
+    if len(set(numbers)) != len(numbers):
+        return "$.steps: duplicate step number"
+    expected = {gap["id"]: (gap["step"], gap["harm"]) for gap in active}
+    seen = set()
+    for entry in document["ranked"]:
+        identity = entry["id"]
+        if identity in seen or expected.get(identity) != (entry["step"], entry["harm"]):
+            return "$.ranked: must refer to each active gap once with its step and harm"
+        seen.add(identity)
+    if seen != expected.keys():
+        return "$.ranked: must refer to each active gap once with its step and harm"
+    if document["counts"] != {
+        harm: sum(gap["harm"] == harm for gap in active) for harm in reply.HARMS
+    }:
+        return "$.counts: must count active gaps by harm"
+    return None
+
+
+def validate(document: object) -> dict[str, Any]:
+    """Validate a saved result, normalizing results without ids or answers.
+
+    Raises:
+        PreviousError: The document is not a result or has inconsistent ids.
+
+    Returns:
+        The validated result, with legacy fields normalized.
+    """
+    schema = json.loads(schema_text())
+    made = _legacy(document) if isinstance(document, dict) else document
+    error = _schema_error(made, schema, schema, "$")
+    if not error:
+        assert isinstance(made, dict)
+        error = _integrity(made)
+    if error:
+        raise PreviousError(error, unreadable=False)
+    assert isinstance(made, dict)
+    return made
+
+
+def parse(document: object) -> list[EarlierGap]:
+    """Validate a result and return its active and settled gaps in file order."""
+    made = validate(document)
+    gaps = [
+        {**gap, "step": step["step"], "title": step["title"]}
+        for step in made["steps"]
+        for gap in step["gaps"]
+    ]
+    return [
+        EarlierGap(
+            gap["id"],
+            int(gap["step"]),
+            gap["title"],
+            gap["gap"],
+            gap["harm"],
+            gap["why"],
+            gap["default"],
+            gap.get("answer"),
+        )
+        for gap in [*gaps, *made["settled"]]
+    ]
+
+
+def load(path: str) -> Previous:
+    """Read and validate an earlier, complete result file.
+
+    Raises:
+        PreviousError: The file cannot be read, or is not a valid result.
+    """
+    location = Path(path).expanduser().absolute()
+    try:
+        location = location.resolve()
+        text = location.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise PreviousError(
+            f"cannot read the previous result {location}: {error}", unreadable=True
+        ) from error
+    try:
+        document = json.loads(text)
+    except ValueError as error:
+        raise PreviousError(
+            f"the previous result {location} is not JSON: {error}", unreadable=False
+        ) from error
+    try:
+        made = validate(document)
+        if made["parse_error"] or made["uncovered_steps"] or made["unknown_steps"]:
+            raise PreviousError(
+                "$: the check is incomplete; finish that check before using its result",
+                unreadable=False,
+            )
+        gaps = parse(made)
+    except PreviousError as error:
+        raise PreviousError(
+            f"the previous result {location} is not a gap check result at {error}",
+            unreadable=False,
+        ) from error
+    return Previous(
+        location,
+        tuple(gaps),
+        int(made["next_id"]),
+        made["plan"],
+        tuple(made["closed"]),
+        made,
+    )
+
+
+def history(
+    previous: Previous, dispositions: Sequence[Mapping[str, str]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Carry settled answers and closed gaps according to explicit dispositions."""
+    by_id = {entry["id"]: entry for entry in dispositions}
+    settled = []
+    closed = list(previous.closed)
+    for gap in previous.gaps:
+        entry = by_id.get(gap.id)
+        if entry is None:
+            continue
+        if entry["status"] == "settled" and gap.answer is not None:
+            settled.append(gap.settled())
+        elif entry["status"] == "closed":
+            closed.append({**gap.settled(), "reason": entry["reason"]})
+    return settled, closed
+
+
+def answer(result: Previous, identity: str, text: str) -> dict[str, Any]:
+    """Reload and write an answer while holding a stable per-result lock.
+
+    The adjacent `<result>.lock` file remains in place across replacements
+    and calls. Only the path of the supplied result is used; its document
+    may be an older snapshot.
+
+    Raises:
+        ValueError: The answer is empty or the id is not active or settled.
+        PreviousError: The current result cannot be read or fails validation.
+        OSError: The lock cannot be used or the result cannot be written.
+
+    Returns:
+        The updated result document.
+    """
+    if not text.strip():
+        raise ValueError("--text must contain an answer")
+    lock = result.path.with_name(f"{result.path.name}.lock")
+    fd = paths.open_private_file(lock)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        current = load(str(result.path))
+        return _write_answer(current, identity, text)
+    finally:
+        os.close(fd)
+
+
+def _write_answer(result: Previous, identity: str, text: str) -> dict[str, Any]:
+    """Validate and replace a result while its caller holds the result lock."""
+    made = copy.deepcopy(result.document)
+    gaps = [gap for step in made["steps"] for gap in step["gaps"]]
+    gaps.extend(made["settled"])
+    found = next((gap for gap in gaps if gap["id"] == identity), None)
+    if found is None:
+        raise ValueError(f"no active or settled gap with id {identity!r}")
+    found["answer"] = text
+    validate(made)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=result.path.parent,
+            prefix=f".{result.path.name}.",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            json.dump(made, stream, indent=2, ensure_ascii=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, result.path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return made

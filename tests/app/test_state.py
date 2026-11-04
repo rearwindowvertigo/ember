@@ -21,6 +21,7 @@ def test_round_trip_is_private(env: dict[str, str]) -> None:
         "height": 800,
         "screen": "engines",
         "finished_open": False,
+        "denied_dismissals": {},
     }
 
 
@@ -56,3 +57,17 @@ def test_write_errors_are_ignored(tmp_path: Path) -> None:
     env = {"HOME": str(tmp_path), "XDG_STATE_HOME": str(blocker)}
     state.save(state.AppState(1200, 700, "menu"), env)
     assert state.load(env) == state.AppState()
+
+
+def test_denial_dismissals_survive_restart_and_reject_malformed_values(
+    env: dict[str, str],
+) -> None:
+    dismissed = {"/home/owner/tools": ["run-abcdef:1"]}
+    state.save(state.AppState(denied_dismissals=dismissed), env)
+    assert state.load(env).denied_dismissals == dismissed
+    state.state_path(env).write_text(
+        json.dumps(
+            {"denied_dismissals": {"ok": ["run:1"], "bad": [1], "also bad": None}}
+        )
+    )
+    assert state.load(env).denied_dismissals == {"ok": ["run:1"]}

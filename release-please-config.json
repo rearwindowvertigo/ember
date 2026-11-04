@@ -8,6 +8,10 @@
       "include-component-in-tag": false,
       "extra-files": [
         {
+          "type": "generic",
+          "path": "skill/SKILL.md"
+        },
+        {
           "type": "toml",
           "path": "uv.lock",
           "jsonpath": "$.package[?(@.name.value=='ember-app')].version"

@@ -1,4 +1,4 @@
-"""Select and remove ended records while retaining their branches and worktrees."""
+"""Remove ended records and orphaned worktrees, retaining surviving branches."""
 
 import contextlib
 import fcntl
@@ -21,15 +21,18 @@ from ember.flows import lock as flow_lock
 from ember.flows import record as flows
 from ember.panels import record as panels
 from ember.runs import record as runs
+from ember.runs import worktrees
+from ember.runs.core import worktree_removal_reason
 
 _RECORD_ERRORS = (
     runs.RecordError,
     flows.FlowError,
     panels.PanelError,
+    paths.RuntimeDirError,
     OSError,
     ValueError,
 )
-_LOCK_ERRORS = (flow_lock.LockError, panels.LockError)
+_LOCK_ERRORS = (flow_lock.LockError, panels.LockError, paths.RuntimeDirError)
 _BUSY = (BlockingIOError, flow_lock.Busy, panels.Busy)
 
 
@@ -51,6 +54,7 @@ class Selection:
     owners: dict[str, set[str]] = field(default_factory=dict)
     flow_bases: dict[str, str | None] = field(default_factory=dict)
     live_worktrees: set[str] = field(default_factory=set)
+    named_worktrees: set[str] = field(default_factory=set)
     skipped: list[dict[str, str]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -88,6 +92,21 @@ def _run_ids(value: object) -> set[str]:
         for item in value:
             result.update(_run_ids(item))
     return result
+
+
+def _worktree_paths(value: object) -> set[str]:
+    """Collect every worktree path named by a record, including flow tasks."""
+    found: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "worktree" and isinstance(item, str) and item:
+                found.add(str(Path(item).resolve()))
+            else:
+                found.update(_worktree_paths(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.update(_worktree_paths(item))
+    return found
 
 
 def _load(ident: str, env: Mapping[str, str]) -> Entry:
@@ -142,6 +161,10 @@ def _ended(entry: Entry, env: Mapping[str, str]) -> str | None:
     }
     if entry.data["status"] not in statuses[entry.kind]:
         return "not ended"
+    if entry.kind == "run":
+        return worktree_removal_reason(
+            runs.from_json(entry.data, runs.run_dir(entry.id, env), env)
+        )
     if entry.kind in ("flow", "panel"):
         role = "task" if entry.kind == "flow" else "member"
         for ident in sorted(entry.children):
@@ -153,8 +176,11 @@ def _ended(entry: Entry, env: Mapping[str, str]) -> str | None:
                 raise ValueError(
                     f"{entry.id}: {role} run {ident} is unreadable: {error}"
                 ) from error
-            if member.status not in (runs.CLOSED, runs.FAILED):
-                return f"{role} run {ident} is still open ({member.status})"
+            reason = worktree_removal_reason(member)
+            if reason:
+                if reason == "not ended":
+                    return f"{role} run {ident} is still open ({member.status})"
+                return f"{role} run {ident}: {reason}"
     return None
 
 
@@ -190,8 +216,21 @@ def select(
         names = sorted(
             item.name
             for item in root.iterdir()
-            if item.is_dir()
-            and re.fullmatch(r"[a-z0-9-]+-\d{8}-\d{6}-[0-9a-f]{6}", item.name)
+            if item.is_symlink()
+            or (
+                item.is_dir()
+                and (
+                    re.fullmatch(r"[a-z0-9-]+-\d{8}-\d{6}-[0-9a-f]{6}", item.name)
+                    or any(
+                        (item / name).exists()
+                        for name in (
+                            runs.RECORD_NAME,
+                            flows.FLOW_NAME,
+                            panels.PANEL_NAME,
+                        )
+                    )
+                )
+            )
         )
     except FileNotFoundError:
         names = []
@@ -203,17 +242,20 @@ def select(
     for ident in sorted(set(names) | (requested or set())):
         try:
             runs.check_id(ident)
-        except runs.RecordError:
+        except runs.RecordError as error:
             if requested is not None and ident in requested:
                 result.skipped.append(dict(id=ident, reason="not a valid record id"))
+            else:
+                result.errors.append(str(error))
             continue
         try:
             entry = _load(ident, env)
             loaded[ident] = entry
+            result.named_worktrees.update(_worktree_paths(entry.data))
             if entry.kind == "flow":
                 result.flow_bases[entry.data["branch"]] = entry.data.get("base_branch")
             if entry.kind == "run" and _ended(entry, env) is not None:
-                result.live_worktrees.add(entry.data["worktree"])
+                result.live_worktrees.update(_worktree_paths(entry.data))
             for child in entry.children:
                 result.owners.setdefault(child, set()).add(ident)
         except _RECORD_ERRORS as error:
@@ -231,9 +273,7 @@ def select(
                 reason = "younger than the requested age"
             if reason is None:
                 result.records[ident] = entry
-            elif requested is not None or reason.startswith(
-                ("task run ", "member run ")
-            ):
+            elif requested is not None or reason != "not ended":
                 result.skipped.append(dict(id=ident, reason=reason))
         except _RECORD_ERRORS as error:
             result.errors.append(str(error))
@@ -289,6 +329,9 @@ def _hold(entry: Entry, stack: contextlib.ExitStack, env: Mapping[str, str]) -> 
     elif entry.kind == "panel":
         stack.enter_context(panels.hold(entry.id, env))
     else:
+        root = paths.runtime_dir(env)
+        locks = paths.ensure_private_dir(root / "locks", root=root)
+        stack.enter_context(_file_lock(locks / f"{entry.id}.lock"))
         stack.enter_context(_file_lock(folder / runs.LOCK_NAME))
 
 
@@ -332,25 +375,159 @@ def _target_branch(
     return None
 
 
-def _checkout(data: Mapping[str, Any], kind: str) -> str:
+def _main_of(worktree: str, env: Mapping[str, str]) -> str | None:
+    """Return the main checkout of a worktree's repository, as git lists it."""
+    try:
+        common = _git(
+            worktree, "rev-parse", "--path-format=absolute", "--git-common-dir", env=env
+        )
+        if common.returncode or not common.stdout.strip():
+            return None
+        with paths.worktree_lock(Path(common.stdout.strip()), env):
+            result = _git(worktree, "worktree", "list", "--porcelain", "-z", env=env)
+    except OSError, subprocess.SubprocessError, paths.RuntimeDirError:
+        return None
+    first = result.stdout.split("\0", 1)[0] if result.returncode == 0 else ""
+    if not first.startswith("worktree "):
+        return None
+    main = first.removeprefix("worktree ")
+    return main if Path(main).is_dir() else None
+
+
+def _checkout(
+    data: Mapping[str, Any],
+    kind: str,
+    env: Mapping[str, str],
+    parents: Sequence[str] = (),
+) -> str:
     """Return the first folder of the record's repository that still exists.
 
-    A run's `repo` can be a flow worktree that cleanup has removed, so the
-    run's `main` and the main checkout above its `.ember/worktrees/<id>`
-    worktree are tried after it. When none exists, the recorded folder is
-    returned and the git commands report it.
+    New run and flow records use their main checkout, or their common git folder
+    when that checkout is gone. Older records try their source checkout,
+    their parents and the main checkout listed from their worktree.
+
+    Args:
+        data: The record.
+        kind: `run`, `flow` or `panel`.
+        env: The environment of the git commands.
+        parents: The checkouts the record's parent records name.
+
+    Returns:
+        A folder in the record's repository, or the recorded checkout.
     """
+    if data.get("common") is not None:
+        main = data.get("main")
+        return main if main and Path(main).is_dir() else data["common"]
     candidates = [data.get("repo") if kind == "run" else data.get("dir")]
-    candidates.append(data.get("main"))
-    worktree = data.get("worktree")
-    if worktree:
-        folder = Path(worktree)
-        if folder.parent.name == "worktrees" and folder.parent.parent.name == ".ember":
-            candidates.append(str(folder.parent.parent.parent))
+    candidates += [data.get("main"), *parents]
     for candidate in candidates:
         if candidate and Path(candidate).is_dir():
             return candidate
+    worktree = data.get("worktree")
+    if isinstance(worktree, str) and worktree and Path(worktree).is_dir():
+        main = _main_of(worktree, env)
+        if main is not None:
+            return main
     return str(candidates[0])
+
+
+def _parent_checkouts(
+    ident: str, owners: Mapping[str, set[str]], records: Mapping[str, Entry]
+) -> list[str]:
+    """Return the checkouts a record's parent records name, `main` first."""
+    found: list[str] = []
+    for parent in sorted(owners.get(ident, set())):
+        entry = records.get(parent)
+        if entry is None:
+            continue
+        for key in ("main", "dir"):
+            value = entry.data.get(key)
+            if isinstance(value, str) and value and value not in found:
+                found.append(value)
+    return found
+
+
+def _orphan_reason(worktree: Path, root: Path) -> str | None:
+    """Return why a folder cannot be removed as an orphan, or None if it can."""
+    resolved = worktree.resolve()
+    if resolved == root or not resolved.is_relative_to(root):
+        return "outside the Ember worktrees folder"
+    if worktree.is_symlink():
+        return "worktree folder is a symlink"
+    pointer = worktree / ".git"
+    if pointer.is_symlink() or not pointer.is_file():
+        return "no regular .git file"
+    # Git removes trailing CR and LF bytes, but preserves path whitespace.
+    text = pointer.read_bytes().rstrip(b"\r\n")
+    if (
+        not text.startswith(b"gitdir: ")
+        or not (name := text.removeprefix(b"gitdir: "))
+        or any(byte in name for byte in (b"\0", b"\r", b"\n"))
+    ):
+        return "invalid .git file"
+    git_folder = Path(os.fsdecode(name))
+    if not git_folder.is_absolute():
+        git_folder = worktree / git_folder
+    try:
+        git_folder.stat()
+    except FileNotFoundError:
+        return None
+    return f"git folder still exists: {git_folder}"
+
+
+def _remove_orphan(worktree: Path, result: Result, *, dry_run: bool) -> None:
+    """Remove a verified orphan and report the same candidate for a dry run."""
+    item = dict(id=str(worktree), kind="worktree")
+    if item in result.removed:
+        return
+    if not dry_run:
+        shutil.rmtree(worktree)
+    result.removed.append(item)
+
+
+def _sweep_orphans(
+    older_than: int,
+    at: float,
+    env: Mapping[str, str],
+    named: set[str],
+    result: Result,
+    *,
+    dry_run: bool,
+    readable: bool,
+) -> None:
+    """Inspect unrecorded folders only when every record could be read."""
+    root = paths.worktrees_dir(env).resolve()
+    try:
+        folders = sorted(root.iterdir())
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        result.errors.append(f"{root}: {error}")
+        return
+    for folder in folders:
+        try:
+            if str(folder.resolve()) in named:
+                continue
+            if not (folder.is_dir() or folder.is_symlink()):
+                continue
+            reason = (
+                _orphan_reason(folder, root)
+                if readable
+                else "cannot establish ownership: unreadable records"
+            )
+            if (
+                reason is None
+                and older_than
+                and at - folder.stat().st_mtime < (older_than * 86400)
+            ):
+                reason = "younger than the requested age"
+            if reason is None:
+                _remove_orphan(folder, result, dry_run=dry_run)
+            else:
+                result.skipped.append(dict(id=str(folder), reason=reason))
+        except (OSError, ValueError) as error:
+            result.errors.append(f"{folder}: {error}")
+            result.skipped.append(dict(id=str(folder), reason=str(error)))
 
 
 def _artifacts(
@@ -359,12 +536,33 @@ def _artifacts(
     result: Result,
     fallbacks: Mapping[str, str | None],
     live_worktrees: set[str],
+    parents: Sequence[str] = (),
+    *,
+    dry_run: bool = True,
 ) -> None:
-    """List branch and worktree removal commands without changing the repository."""
+    """Remove orphaned worktrees and list commands for surviving repositories.
+
+    Each worktree is the path its record names, wherever it is.
+    """
     data = entry.data
     if entry.kind == "panel":
         return
-    directory = _checkout(data, entry.kind)
+    directory = _checkout(data, entry.kind, env, parents)
+    if entry.kind == "run" and data.get("detached") and data.get("read_only"):
+        worktree = data["worktree"]
+        if str(Path(worktree).resolve()) in live_worktrees:
+            raise OSError(f"detached worktree {worktree} is in use")
+        if data.get("common") and Path(data["common"]).exists():
+            run = runs.from_json(data, runs.run_dir(entry.id, env), env)
+            with paths.worktree_lock(Path(run.common or run.repo), env):
+                if worktrees.remove_detached(run, dry_run=dry_run):
+                    result.removed.append(dict(id=worktree, kind="worktree"))
+        elif Path(worktree).exists():
+            reason = _orphan_reason(Path(worktree), paths.worktrees_dir(env).resolve())
+            if reason:
+                raise OSError(f"{worktree}: {reason}")
+            _remove_orphan(Path(worktree), result, dry_run=dry_run)
+        return
     candidates = [(data.get("branch"), data.get("worktree"), data.get("base_branch"))]
     if entry.kind == "flow":
         candidates += [
@@ -374,13 +572,27 @@ def _artifacts(
         if not branch:
             continue
         worktree_command = None
-        if worktree and worktree not in live_worktrees and Path(worktree).exists():
-            worktree_command = shlex.join(
-                ["git", "-C", directory, "worktree", "remove", worktree]
-            )
-            item = dict(branch=branch, worktree=worktree, command=worktree_command)
-            if item not in result.worktrees:
-                result.worktrees.append(item)
+        if (
+            worktree
+            and str(Path(worktree).resolve()) not in live_worktrees
+            and Path(worktree).exists()
+        ):
+            reason = _orphan_reason(Path(worktree), paths.worktrees_dir(env).resolve())
+            if reason is None:
+                _remove_orphan(Path(worktree), result, dry_run=dry_run)
+                if not Path(directory).is_dir():
+                    continue
+            elif data.get("common") and not Path(data["common"]).exists():
+                result.skipped.append(dict(id=worktree, reason=reason))
+            else:
+                worktree_command = shlex.join(
+                    ["git", "-C", directory, "worktree", "remove", worktree]
+                )
+                item = dict(branch=branch, worktree=worktree, command=worktree_command)
+                if item not in result.worktrees:
+                    result.worktrees.append(item)
+        if data.get("common") and not Path(data["common"]).exists():
+            continue
         contained = False
         try:
             if not _branch_exists(directory, branch, env):
@@ -478,19 +690,19 @@ def remove(
                 _hold(entry, locks, env)
                 entry = _load(ident, env)
                 if entry.kind == "run" and _ended(entry, env) is not None:
-                    current.live_worktrees.add(entry.data["worktree"])
+                    current.live_worktrees.update(_worktree_paths(entry.data))
             except runs.RecordMissingError:
                 continue
             except _BUSY:
                 unavailable.add(ident)
                 if entry.kind == "run":
-                    current.live_worktrees.add(entry.data["worktree"])
+                    current.live_worktrees.update(_worktree_paths(entry.data))
                 result.skipped.append(dict(id=ident, reason="busy"))
             except (*_RECORD_ERRORS, *_LOCK_ERRORS) as error:
                 unavailable.add(ident)
                 prior = current.records.get(ident)
                 if prior is not None and prior.kind == "run":
-                    current.live_worktrees.add(prior.data["worktree"])
+                    current.live_worktrees.update(_worktree_paths(prior.data))
                 result.errors.append(str(error))
                 result.skipped.append(dict(id=ident, reason=str(error)))
         removed: set[str] = set()
@@ -523,13 +735,23 @@ def remove(
                     continue
                 artifacts = Result()
                 _artifacts(
-                    entry, env, artifacts, current.flow_bases, current.live_worktrees
+                    entry,
+                    env,
+                    artifacts,
+                    current.flow_bases,
+                    current.live_worktrees,
+                    _parent_checkouts(ident, current.owners, current.records),
+                    dry_run=dry_run,
                 )
                 if not dry_run:
                     shutil.rmtree(runs.run_dir(ident, env))
                 result.removed.append(dict(id=ident, kind=entry.kind))
                 removed.add(ident)
                 result.errors.extend(artifacts.errors)
+                result.removed.extend(
+                    item for item in artifacts.removed if item not in result.removed
+                )
+                result.skipped.extend(artifacts.skipped)
                 for item in artifacts.branches:
                     if not any(
                         old["branch"] == item["branch"] for old in result.branches
@@ -545,6 +767,16 @@ def remove(
             except _RECORD_ERRORS as error:
                 result.errors.append(f"{ident}: {error}")
                 result.skipped.append(dict(id=ident, reason=str(error)))
+    if record_ids is None:
+        _sweep_orphans(
+            older_than,
+            at,
+            env,
+            selection.named_worktrees | current.named_worktrees,
+            result,
+            dry_run=dry_run,
+            readable=not result.errors,
+        )
     result.skipped = list({item["id"]: item for item in result.skipped}.values())
     return result
 

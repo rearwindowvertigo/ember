@@ -8,7 +8,7 @@ RULES = (
     "- Put your whole answer in your final message, in Markdown. "
     "Nothing you write to a file is read.\n"
     "- Create, edit or delete no file, and change nothing in git.\n"
-    "- You may read the files in this checkout. "
+    "- Read the repository in your own working folder. "
     "Use the web only if your tools offer it.\n"
     "- Name your sources: a file path, or a URL you opened.\n"
     "- Say plainly where you are unsure or where the evidence is thin.\n"

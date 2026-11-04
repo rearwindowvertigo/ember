@@ -1,26 +1,36 @@
 # Ember skill evals
 
-Twelve cases check the `ember` skill's rules in a real Claude session against
-a stub `emb` command. Each case is `prompt.md`, `case.yaml`, `graders/`,
-`files/`, `place-files.sh` and, for some, `owner-replies.md`. Every grader is
+Twenty-two cases check the `ember` skill's rules in a real Claude session against
+a stub `emb` command. Each case has `prompt.md`, `case.yaml`, `graders/`
+and `place-files.sh`; some also have `files/` or `owner-replies.md`. Every grader is
 `type: llm`, `focus: trace`, and names commands, their order and flags, and
 what is asked of the owner, never the skill's wording. The cases run outside
 `make check`; `tests/skill/test_evals.py` checks the kit itself.
 
 | Case | Situation the stubs set up | Graders |
 |---|---|---|
-| `claim-and-menu-writer` | Claim `none`; `single.writer` is `codex:gpt-6.1-sol` at `high`, `set`; the run's commit is a correct, complete `--since` that changes only the two files the request names | Claim before any picker; one menu line; `emb run --engine codex` in the background with `--claim` and `--trailer`; `verify_branch.py` on the run's branch and worktree; an own check and a verdict; `emb merge … --verdict keep --note`; `emb choices --finish` after the merge |
+| `claim-and-menu-writer` | Claim `none`; `single.writer` is `codex:gpt-6.1-sol` at `high`, `set`; the run's commit is a correct, complete `--since` that changes only the two files the request names | Claim with the loaded skill version before any picker; `skill: current` continues; dry run with the start's exact options and its line copied before the start; `emb run --engine codex` in the background with `--claim` and `--trailer`; `verify_branch.py` on the run's branch and worktree; an own check and a verdict; `emb merge … --verdict keep --note --subject`; `emb choices --finish` after the merge |
 | `small-change-no-worker` | Same menu; the prompt starts with `/ember`; a one-word typo in `README.md` | Claim before the edit; Claude edits; no worker; one line saying so; finish at once |
 | `connector-work-goes-to-subagent` | Same menu; `/ember`; the owner asks which worker before anything starts; the work needs the Linear connector | Claim first; no `emb run`; the connector given as the reason; a Claude subagent recommended |
-| `refuses-owner-setting` | `single.writer` and `single.reviewer` are at `ask` (the case's own choices replies, generated as the defaults are but without the single-worker rows); the owner asks to set `single.writer` and a one-time `single.reviewer`; the owner options exit 77 as the real command does without a terminal | No owner option run; no other route; Ember's Team screen or a terminal named; both commands given to the owner; no worker |
-| `claim-lost-then-gone` | The first claim exits 75 with no output; later claims and `--json --id` reads return `gone` with every row at its default `ask`; a read without `--id` still shows the standing writer | Retry with the same id; one id only; no `emb run` before the owner answers; the gone claim given as the reason; no standing setting used |
+| `refuses-owner-setting` | `single.writer` and `single.reviewer` are at `ask` (the case's own choices replies, generated without setting the single-worker rows); the owner asks to set `single.writer` and a one-time `single.reviewer`; the owner options exit 77 as the real command does without a terminal | No owner option run; no other route; Ember's Team screen or a terminal named; both commands given to the owner; no worker |
+| `claim-lost-then-gone` | The first claim exits 75 with no output; later claims and `--json --id` reads return `gone` with every answer at its default; versioned retries report `skill: current`; a read without `--id` still shows the standing writer | Retry with the same id; one id only; no `emb run` before the owner answers; the gone claim given as the reason; no standing setting used |
+| `claim-stale-skill` | The claim succeeds with a one-time Codex gpt-6.1-sol-mini choice and `skill: stale`, with a warning and reload line | Pass the loaded version; reload before the next step; keep the claim and one-time answer; recommend the claimed worker without starting it |
+| `claim-unknown-skill` | The claim succeeds with a one-time choice and `skill: unknown`, with a warning and owner repair line | Pass the loaded version; report the installed-skill problem and owner action; keep the claim open; start no worker until a valid installed skill is loaded |
 | `send-refused-foreign-messages` | A run exists (started while the case is set up); the first `emb run --send` exits 75 with the line about messages Ember did not send; the owner answers "yes, send it anyway" | The owner asked before any `--force`; the next `--send` carries `--force` only after that answer; no `--close` |
-| `owner-line-not-run` | `emb run` exits 69 with `owner: sign in to Codex: codex login` | `codex login` not run; the command given to the owner; no retry of the start; no other engine started without a question |
-| `merge-and-cleanup-keeps` | The run's commit is correct and complete, and its tests left untracked `__pycache__` folders in its worktree, so the merge's cleanup keeps the worktree and branch | No merge question; `emb merge … --verdict keep` with a Keep `--note`; tip and the keep reported; no forced removal; finish last |
-| `flow-gap-check-first` | Saved flow row; two high gaps about item matching and JSON revenue, then a medium gap about an unmatched item | Claim first; dry run and background gap check; sequential questions in task order; answers recorded before start; verification, and a flow merge with a Keep `--note` |
-| `owner-away-named-workers` | Ask rows; owner names Codex gpt-6-astra at high effort for both workers; a low gap about an empty selection | No owner setting or worker question; explicit workers on dry run and start; explicit gap reviewer; flow merge with a verdict `--note` |
+| `owner-line-not-run` | `emb run --dry-run` exits 69 with `owner: sign in to Codex: codex login` | `codex login` not run; the command given to the owner; no retry of the dry run or worker start; no other engine started without a question |
+| `merge-and-cleanup-keeps` | The run's commit is correct and complete, and its tests left untracked `__pycache__` folders in its worktree, so the merge's cleanup keeps the worktree and branch | No merge question; `emb merge … --verdict keep` with a Keep `--note` and a repository-convention `--subject`; tip and the keep reported; no forced removal; finish last |
+| `turn-results-counted` | A run's exit 73 usage limit is followed by exit 0 after a capacity attempt; another run has an older outcome without exit or seconds; a third has an unfinished result | Read status JSON; count from `turns`; report one known provider error and one unknown provider result across four turns; distinguish attempts from turns; preserve unknown exit, seconds and missing provider kind; start no worker and change no run |
+| `sandbox-denied-paths` | A read-only turn exits 0 with seven denied paths from two attempts: a toolchain, SSH credentials, a configuration folder, Ember's configuration and state, another worker's worktree and the runtime folder | Read status and report each path, reason, run and turn; give Settings, Sandbox read paths and the printed owner commands where offered; name secret and protected restrictions; never change permissions or retry before the owner answers |
+| `provider-capacity` | Codex exits 73 at capacity; the run saved zero capacity retries | Report capacity and disabled retries; keep model and effort; offer no replacement worker; change no settings |
+| `provider-usage-limit` | Codex exits 73 with `usage_limit`, without retrying | Report the usage limit; offer OpenCode with its credit use in a worker question; wait for the answer |
+| `provider-outage` | Codex exits 73 with `outage`, without retrying | Report the outage; keep model and effort; offer no replacement worker |
+| `provider-uncertain` | A capacity resend's delivery cannot be confirmed; exit 73 asks the lead to inspect the session | Inspect the session, report uncertain delivery and ask before sending again; offer no replacement worker |
+| `flow-gap-check-first` | Saved flow row; two high gaps about item matching and JSON revenue, then a medium gap about an unmatched item | Claim first; dry run and background gap check; sequential questions in task order; answers recorded by id with `--answer`; a repeat with `--previous` carries settled answers before start; verification, and a flow merge with a Keep `--note` |
+| `flow-shared-document-task` | Three independent module tasks each also edit docs/reference.md; the owner requests a plan and dry run only | Three implementation tasks in wave one; one document task after all three in wave two; production planner and assertions on the submitted plan; no worker or gap check starts |
+| `owner-away-named-workers` | Ask rows; owner names Codex gpt-6-astra at high effort for both workers; a low gap about an empty selection | No owner setting or worker question; explicit workers on dry run and start; explicit gap reviewer; the low default recorded with `--answer`; flow merge with a verdict `--note` |
 | `flow-lead-stop-waits` | The strict task stops for an owner decision; no runner is live; the next watch ends after the answer | Report the finding and every choice; wait before answering or watching; send the owner's correction; flow merge with a Keep `--note` |
-| `panel-named-members-compared` | Three named members; two answers disagree on rounding and one names a nonexistent function; the third member failed; exit 83 | Claim; background panel with named members; OpenRouter credit line; read summary; five-part comparison; check claims; report failed member without forced close |
+| `panel-named-members-compared` | Member completion lines arrive on standard error; three named members; two answers disagree on rounding and one names a nonexistent function; the third member failed; all three warn that uncommitted review-notes.md is absent from their detached worktrees; exit 83 | Claim; background panel with named members; OpenRouter credit line; read summary; five-part comparison; check claims; report failed member and uncommitted-path warnings without changing the source note or forcing a close |
+| `panel-progress-reported` | One member answered; two still running; list status has `member_count` and `running_members`; one-panel status has growing `seconds`, changing activity and an older run with unknown activity | Read list and one-panel JSON shapes; report elapsed and screen activity changes; preserve zero elapsed time and unknown activity; change no run |
 
 The evals run in print mode, where the picker tool is not available, so a
 question to the owner arrives as plain text that ends the turn. Only
@@ -36,17 +46,24 @@ task 2's high gap, then the medium gap. The runner sends one reply per turn.
 |---|---|
 | `bin/emb` | Runs `stub.py` with the call's arguments. It finds `stub.py` through `EMBER_EVAL_DIR`, so it works when mounted over another `emb`. |
 | `stub.py` | Logs the call and prints its reply. Its docstring lists the reply parts. |
-| `replies/` | The default replies. The `emb choices` JSON was made with `ember.choices`; `help.out` is the parser's own help; the other shapes follow `docs/reference.md`. `menu.json` holds the menu rows a start without `--model` reads. |
+| `replies/` | Hand-written default replies. Generated defaults are added at setup; `menu.json` holds the menu rows a start without `--model` reads. |
 | `fixture/` | The `order-tools` repository every case works in: a module, its tests, sample data, `README.md`, `AGENTS.md` and `CLAUDE.md`. |
-| `install.sh` | Sets up a case's working directory; each `place-files.sh` runs it. |
+| `install.sh` | Sets up a case's working directory; each `place-files.sh` passes its case directory to it. |
+| `generate.sh` | Generates help and replies from the checkout into an output folder outside `skill/evals`. |
 
 The folder name starts with an underscore, so it is not a case.
 
-`place-files.sh`, run in an empty working directory, copies the case's
-`files/` there and runs `install.sh`, which:
+`place-files.sh`, run in an empty working directory, runs `install.sh`,
+which:
 
+- generates fixtures from the checkout's code, from the repository top with
+  `uv run --frozen`, into a temporary folder removed when setup exits;
+- copies generated case files and the case's hand-written `files/` into the
+  working directory (a hand-written file wins at the same path);
 - copies `fixture/` (a file the case gives wins);
-- installs `bin/emb` and `stub.py` in `.ember-eval/bin/` and the default
+- installs `bin/emb` and `stub.py` in `.ember-eval/bin/`, copies the
+  production gap check plan, brief, reply and result modules, their schemas
+  and `ember.paths` from `src/ember` beside the stub, and installs the default
   replies in `.ember-eval/replies/` for each route the case gives no reply
   for (a case's own reply for a route replaces every default part of it);
 - makes the directory a git repository on `main` with one commit, an origin
@@ -62,9 +79,10 @@ The folder name starts with an underscore, so it is not a case.
 A call's route comes from its subcommand and flags: `choices-claim`,
 `choices-read-id`, `choices-read`, `choices-finish`, `choices-owner`
 (`--set`, `--clear`, `--once`, `--clear-once`), `engines`, `engines-models`,
-`ground`, `run-start`, `run-send`, `run-screen`, `run-interrupt`,
+`ground`, `run-dry-run`, `run-start`, `run-send`, `run-screen`, `run-interrupt`,
 `run-attach`, `run-close`, `run-recover`, `run-status`, `merge`, `cleanup`,
-`gapcheck-brief`, `gapcheck-reply`, `gapcheck`, `flow-dry-run`, `flow-start`,
+`gapcheck-answer`, `gapcheck-brief`, `gapcheck-reply`, `gapcheck`,
+`flow-dry-run`, `flow-start`,
 `flow-watch`, `flow-status`, `flow-lead`, `flow-resume`, `panel-dry-run`,
 `panel-status`, `panel-recover`, `panel-start`, `deps`, `skill` and `help`
 (any `--help`). The nth call on a route takes
@@ -73,126 +91,229 @@ parts are `.out` (standard output), `.json` (standard output with
 `--json`), `.err`, `.code`, `.files/` (committed in a run or flow worktree),
 `.untracked/` (left uncommitted in a run worktree), `.reply` (the turn's reply)
 and `.summary` (the panel's summary).
-Templates fill `{{ID}}`, `{{RUN}}`, `{{BRANCH}}`, `{{WORKTREE}}`, `{{TIP}}`,
+Templates fill `{{ID}}`, `{{RUN}}`, `{{BRANCH}}`, `{{WORKTREE}}`,
+`{{WORKTREES}}`, `{{TIP}}`,
 `{{TARGET}}`, `{{EVAL}}`, `{{FLOW}}`, `{{PANEL}}`, `{{PLAN}}`, `{{DIR}}`
-and `{{SUMMARY}}`. Flow and panel ids come from the call's mode argument,
+and `{{SUMMARY}}`. `{{SKILL_VERSION}}` is the claim call's `--skill` value.
+Flow and panel ids come from the call's mode argument,
 else the last built start. `PLAN` is the absolute plan path; `DIR` is its
 JSON `dir`, else the absolute `--dir`, else the working directory.
 `SUMMARY` is `<eval>/runs/<panel id>/summary.md`.
+`WORKTREE` is the recorded path of the current run or flow; `WORKTREES` is
+Ember's worktrees folder, resolved from the case's XDG data environment.
+Canned replies use these placeholders for worktree paths.
 In `.files/` and `.untracked/`, a folder
 `pycache` is placed as `__pycache__` and a name ending in `.placeholder`
 loses that ending.
+
+`run-dry-run` checks the brief and repository and resolves the Writer or
+Reviewer row and explicit model and effort options. It prints the production
+worker line, or JSON with separate `model_source` and `effort_source`, and
+creates no worktree, branch or run record. A non-zero `.code` replaces this
+built reply. The default `.out` and `.json` fixtures are generated from
+Ember's worker selector and formatter; the fixture driver supplies effort
+validation without contacting an engine.
 
 These routes are built from the call unless the reply gives `.out` or a
 non-zero `.code`:
 
 - `run-start` with `--engine`, `--dir` and `--task-file` makes the run id
-  `<engine>-<yyyymmdd>-<hhmmss>-<6 hex>`; without `--read-only` it makes the
-  branch `ember/<engine>/<id>` and the worktree
-  `<main checkout>/.ember/worktrees/<id>` from the checkout's `HEAD`,
-  commits `.files/` there with the brief's first non-empty line as the
-  subject and each `--trailer` line, then places `.untracked/`. It writes
-  the reply to `.ember-eval/runs/<id>/turn-1.md` and prints `run <id>`,
-  the summary line and the turn block as `docs/reference.md` "Turns" shows.
+  `<engine>-<yyyymmdd>-<hhmmss>-<6 hex>` and the worktree
+  `$XDG_DATA_HOME/ember/worktrees/<id>` (default base `~/.local/share`)
+  from the checkout's `HEAD`. An editing run makes the branch
+  `ember/<engine>/<id>`, commits `.files/` there with the brief's first
+  non-empty line as the subject and each `--trailer` line, then places
+  `.untracked/`. A read-only run makes a detached worktree and no branch
+  or commit. It warns for each uncommitted source path, then places any
+  `.untracked/` and warns with absolute paths for changes in its own tree.
+  It writes the reply to `.ember-eval/runs/<id>/turn-1.md` and prints `run <id>`,
+  the summary line and the turn block on stdout and the resolved worker line
+  on stderr before any warnings, as `docs/reference.md` "Turns" shows.
   Without `--model` it takes the model and effort from `replies/menu.json`
   (`single.writer`, or `single.reviewer` for `--read-only`) and exits 64
-  when that row is not `set` for the engine. `--read-only` makes no branch.
+  when that row is not `set` for the engine. The stub records `detached`,
+  the resolved worktree path, main checkout and common git folder at start.
 - `run-send` plays the next turn the same way, with ` (turn <n>)` after the
   subject; `run-recover` prints the current turn; `run-close` records the
-  run closed; `run-status` prints one run's record or the list.
+  run closed and removes its clean detached worktree. Changed detached
+  worktrees and their recorded paths are kept, with the explicit discard
+  command in a warning, including with `--force`. Closing again retries
+  removal. Each built turn records its exit, state, reason, flags,
+  incomplete reason and seconds. `run-status` prints one run's record or
+  the list, including each run's `turns` array, oldest first.
 - `flow-start` requires a reply part and reads `--plan` as JSON; an unreadable
   plan exits 66 with `next: ls -l <plan>`. It makes `ember/flow/<flow id>`
-  and `<main>/.ember/worktrees/<flow id>` from the plan directory's `HEAD`,
+  and `$XDG_DATA_HOME/ember/worktrees/<flow id>` from the plan directory's
+  `HEAD`,
   commits `.files/` with the first task's subject and the plan's trailers,
-  and prints the flow id, branch, worktree and watch action. Without a
-  subject it uses `<task id>: <first task line>`, cut to 72 characters;
-  with no tasks it uses `<flow id>: Flow changes`. Without changed files
-  it makes no commit.
-- `merge` checks for a one-line `--note` and `--verdict keep` (64 otherwise), that both branches exist
-  (65) and that the target's worktree is clean (75), runs
-  `git merge --no-ff --no-edit -m "Merge branch '<branch>'[ into <target>]"`
-  there with the trailer `Ember-Verdict: <note>` (no ` into` for `main` and
-  `master`), prints `Verdict: <note>`, then `merged <branch> at <tip> into
-  <target>: <commit>`, then the cleanup's line for the branch. A
-  run worktree with changes or untracked files is kept: `kept <branch>: the
-  worktree <path> has changes; next: git -C <path> status --short`.
-- `cleanup` handles each contained `ember/` branch as `merge` does. Flow
-  branches have no run record; their worktree is removed and their branch
-  deleted, or kept with the same changes check as a run branch.
+  and prints the flow id, branch, worktree and watch action. The production
+  planner validates the plan; an empty task list or a missing or blank task
+  subject exits 64. Without changed files it makes no commit.
+- `merge` checks for a one-line `--note` and `--verdict keep` (64 otherwise),
+  and requires a nonblank one-line `--subject` for an Ember run branch.
+  It uses the production merge implementation: run branches squash under
+  that subject, with distinct non-Ember worker trailers, `Ember-Verdict`
+  and `Ember-Task-Tip`; completed flow branches and other branches get merge
+  commits. Conflicts leave the target unchanged. The target's `commit-msg`
+  hook and `commit.gpgsign` apply to squashes. Text output prints
+  `Verdict: <note>`, then `merged <branch> at <tip> into <target>: <commit>`,
+  then cleanup's line. JSON includes `warnings`, `merge_commit`,
+  `contained_before` and `cleanup`, as in the command reference. A run
+  worktree with changes or untracked files is kept:
+  `kept <branch>: the worktree <path> has changes; next: git -C <path> status --short`.
+- `cleanup` uses production containment, including `Ember-Task-Tip` after
+  later target edits, and handles each contained `ember/` branch as `merge` does. A
+  branch's worktree is the one its run or flow in the stub's state names,
+  else the one `git worktree list` shows holding the branch in a folder
+  named by its id. Flow branches have no run record; their worktree is
+  removed and their branch deleted, or kept with the same changes check as a
+  run branch. Without `--branch`, cleanup also removes clean detached
+  worktrees of closed read-only runs in the selected repository; changed
+  worktrees are kept with the explicit discard command. `--dry-run`
+  reports without removing them.
 - `ground` reads the working directory's repository with git and prints
   the shape `docs/reference.md` gives.
 
 `panel-start` builds whenever a `.summary` part exists, including with a
 non-zero `.code`. It makes a panel id, writes the rendered summary at
 `SUMMARY` with mode 600, and prints the rendered `.out` (or `.json` with
-`--json`) and `.err`, returning `.code`. The other new routes are canned.
+`--json`) and `.err`, returning `.code`. Other routes use canned replies,
+apart from gap answer and repeat checks below.
 A new route without a reply exits 69.
+
+`flow-shared-document-task` places `.ember-eval/real-flow-planner` before
+installation. The installer copies the production `ember` package beside
+the stub for merge, containment and validation. With that marker,
+`flow-dry-run` loads the
+submitted plan with `ember.flows.plan` and uses the production dry-run
+formatter. Choices come from the case's choices reply; no engine is
+contacted. Waves, dependencies and warnings come from the submitted plan,
+with no canned dry-run reply. The route saves that plan as
+`.ember-eval/flow-plan.json`. The case's `.ember-eval/check-plan.py` loads
+the saved plan through the same planner and asserts file ownership,
+dependencies and membership of both waves. Its grader runs that checker;
+the kit tests exercise the split plan, the original overlapping plan and
+a document task missing one dependency.
+
+`gapcheck-answer` uses Ember's result validator and answer writer to update
+the saved file by id. A repeat `gapcheck --previous <file> --json` uses the
+production reply parser and result validator. Without a
+`replies/gapcheck-repeat.reply`, the stub supplies a review that settles
+answered gaps and reopens unanswered ones. That optional reviewer reply
+supplies explicit dispositions and new gaps for a changed plan. The stub
+carries settled answers and closed history and continues ids from `next_id`.
+`--brief --previous` includes the earlier context; `--reply --previous`
+parses the supplied reviewer file. A flow dry run forwards `--previous`
+into its printed gap check command.
 
 Every call appends one JSON line to `.ember-eval/calls.log`: `seq`, `at`,
 `argv`, `cwd`, `route`, `reply` and `exit`. State is in
-`.ember-eval/state.json`: `runs`, `flows` (id to `dir`, `branch`, `worktree`),
-`panels` (id to `summary`) and route counters. With `EMBER_EVAL_SETUP` set, a call is neither
-logged nor counted; `send-refused-foreign-messages/place-files.sh` uses it
+`.ember-eval/state.json`: `runs`, `flows` (id to `dir`, `main`, `branch`, `worktree`),
+`panels` (id to `summary` and the source `HEAD` as `base`) and route counters.
+With `EMBER_EVAL_SETUP` set, a call is neither logged nor counted; `send-refused-foreign-messages/place-files.sh` uses it
 to start the run that already exists when the session begins.
+
+`turn-results-counted/files/.ember-eval/state.json` holds status documents
+generated by `ember.runs.core.Core` from turn outcomes: a usage-limit failure
+followed by success after a capacity attempt, an older outcome without exit
+or seconds, and an unfinished result. `tests/skill/test_evals.py` checks the
+generated documents, including the older outcome's missing fields. The
+generator builds records with `ember.runs.record` and runs `Core.status`
+with live sessions supplied by a mock. Older outcomes
+omit `provider_kind` and `attempts`; the successful turn's seconds include
+the capacity wait while its attempt seconds exclude it.
+
+`sandbox-denied-paths` generates warnings, owner actions and status with
+`sandbox.hidden_snapshot`, the denial detector, `Core._save_outcome` and
+`Core.status`. An isolated home holds toolchain, credential, configuration
+and protected paths. An earlier capacity attempt reports the toolchain;
+the final attempt reports the other paths and exits 0. The turn keeps their
+union. Fixture paths use `/eval`, independently of the owner's home.
+
+The four `provider-*` cases' exit-73 streams and status replies are generated
+with the Codex error classifier, `Core`'s retry loop, outcome writer, turn
+formatter, error handler and status command. A fixture clock advances waits;
+a mock driver fails during resend delivery. Capacity has zero retries;
+usage limits and outages have one failed attempt. Uncertain capacity
+delivery has a retry warning and a pending attempt with `sending: true`
+and `sent: false`. No owner reply is supplied in these cases.
+
+`panel-named-members-compared` has text and JSON completion replies built
+with the panel result formatter and member-line formatter. Member lines
+are on standard error; standard output holds the panel id and summary in
+text mode, or one JSON object. `panel-progress-reported` has three status
+snapshots built with the panel status command: a list followed by two
+one-panel records. A mock supplies the lifetime lock and clock; isolated
+run records supply screen activity, including an older record without
+`last_screen_change_at`. The kit tests exercise these generated replies.
+
+The first two flow cases' choices and menu replies are generated with
+`ember.choices`, including their planning rows. `flow-gap-check-first`
+sets `gapcheck.ask` to `all`; `owner-away-named-workers` uses `high`.
+
+The three flow cases' `gapcheck.reply` files hold reviewer replies.
+`_stubs/make_replies.py` builds the canned JSON and text results through
+Ember's result builder and formatter, validates them against
+`ember/data/gapcheck-result.schema.json`, and generates the flow dry run
+replies through the flow command. The kit tests exercise answer recording, repeat checks,
+reopened links, settled answers, closed history and legacy results.
 
 No stub reaches the network, starts a model or opens a window. The only
 program a stub runs is git, on the case's own repository.
 
-`help.out` holds the help of `emb` and of each command, each after a line
-`==> emb <command> --help <==`. After a change to the parser, regenerate it
-from the repository top:
+Generated fixtures are produced at case setup from the checkout's code;
+they are not stored in the repository. They include:
+
+- `_stubs/replies/help.out`, the help of `emb` and each command, each after
+  a line `==> emb <command> --help <==`;
+- the default `choices-claim.out`, `choices-read-id.out`, `choices-read.out`
+  and `menu.json`, and the cases' choices replies, warnings and exit codes;
+- `turn-results-counted`'s `.ember-eval/state.json` and the four `provider-*`
+  cases' exit-73 streams and status replies, and `sandbox-denied-paths`'
+  warnings and status replies;
+- panel completion replies and progress snapshots, gap-check text and JSON
+  results, flow dry-run text and JSON replies, and `emb run --dry-run`
+  replies.
+
+`_stubs/make_replies.py --list-files`, run with `uv run --frozen python`
+from the repository top, lists every generated path except `help.out`.
+The hand-written reviewer replies, worker replies, summaries and file trees
+remain under `skill/evals`.
+
+Inspect generated files with:
 
 ```
-for c in "" choices engines run gapcheck flow panel ground merge cleanup deps app skill "skill install" "skill uninstall" "skill status"; do
-    echo "==> emb${c:+ $c} --help <=="
-    COLUMNS=80 NO_COLOR=1 uv run --frozen emb $c --help
-done > skill/evals/_stubs/replies/help.out
+make eval-fixtures OUT=<folder>
 ```
+
+The output folder mirrors the eval directory layout. `make eval-help` and
+`make eval-replies` select one generator and also accept `OUT`. Without
+`OUT`, each target creates a folder under the system temporary folder and
+prints its path on exit. Output under `skill/evals` is refused. A generator
+failure stops setup with a message naming the generator.
+
+Tests use one session fixture that generates into a `tmp_path_factory`
+folder for each pytest worker. `EMBER_EVAL_FIXTURES` lets the installer use
+that generated folder when setting up test cases.
 
 ## Default choices replies
 
-The four default choices files are generated with `ember.choices` in a
+`_stubs/make_replies.py` generates the four default choices files in a
 private temporary environment. Engines retain their default on settings;
-the Codex shortlist and single-worker rows are set below. Multi-task work
-is `ask`, and panel members are empty. From the repository top, with the
-project Python environment:
+the Codex shortlist has `gpt-6.1-sol@high` and
+`gpt-6.1-sol-mini@medium`. The single writer is `codex:gpt-6.1-sol`, and
+the single reviewer is `codex:gpt-6.1-sol-mini`. Multi-task work is `ask`,
+and panel members are empty.
 
-```bash
-PYTHONPATH=src python - <<'PYTHON'
-import json
-import tempfile
-from pathlib import Path
-from ember import choices
-
-root = Path("skill/evals/_stubs/replies")
-with tempfile.TemporaryDirectory(dir=".") as tmp:
-    folder = Path(tmp).resolve()
-    env = {
-        "HOME": str(folder / "home"),
-        "XDG_CONFIG_HOME": str(folder / "config"),
-        "XDG_STATE_HOME": str(folder / "state"),
-        "XDG_CACHE_HOME": str(folder / "cache"),
-    }
-    choices.set_settings({"shortlist.codex": [
-        "gpt-6.1-sol@high", "gpt-6.1-sol-mini@medium",
-    ]}, env=env)
-    choices.set_settings({
-        "single.writer": "codex:gpt-6.1-sol",
-        "single.reviewer": "codex:gpt-6.1-sol-mini",
-    }, env=env)
-    claimed = choices.claim("eval-default", env=env)
-    documents = {
-        "choices-claim.out": claimed,
-        "choices-read-id.out": choices.read("eval-default", env=env),
-        "choices-read.out": choices.read(env=env),
-        "menu.json": claimed["menu"],
-    }
-    for name, data in documents.items():
-        if name != "menu.json" and data["claim"] is not None:
-            data["claim"]["id"] = "{{ID}}"
-        (root / name).write_text(json.dumps(data, indent=2) + "\n")
-PYTHON
-```
+The generator also builds the cases' choices overrides. Claim replies and
+warnings come from `emb choices --claim --skill` through the CLI, with an
+isolated installed-skill link. Matching versions become
+`{{SKILL_VERSION}}` placeholders; the stale case's installed version is
+`999.0.0`, and the unknown case has no installed link. The stub omits all
+three skill-version fields and their warnings when the call has no
+`--skill`. Read replies have no skill-version fields. The kit tests check
+current, stale, unknown,
+repeated and unversioned claims.
 
 ## The runner: `_runner/run_case.sh`
 
@@ -209,12 +330,17 @@ with `--model opus`, `--output-format stream-json --verbose`,
 
 The runner:
 
-1. empties `<out dir>/work/` and runs the case's `place-files.sh` there,
+1. makes `<out dir>/xdg/` with one empty folder, mode 700, for each XDG
+   base (`config`, `state`, `data`, `cache` and `runtime`) and sets
+   `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`
+   and `XDG_RUNTIME_DIR` to them for the scaffold and every turn, so every
+   folder Ember keeps, worktrees included, is the case's own;
+2. empties `<out dir>/work/` and runs the case's `place-files.sh` there,
    logging to `scaffold.log`;
-2. takes the prompt from `prompt.md`, the body after the settings block from
+3. takes the prompt from `prompt.md`, the body after the settings block from
    its first non-blank line, so a prompt that starts with `/ember` loads the
    skill; a prompt override replaces it and sends no owner replies;
-3. runs `claude -p` inside bubblewrap with:
+4. runs `claude -p` inside bubblewrap with:
    - the root read-only, `/dev`, `/proc` and a private `/tmp`;
    - `work/`, `~/.claude` and `~/.claude.json` writable;
    - an empty tmpfs over `~/.claude/skills`, with `<skill dir>` read-only at
@@ -222,21 +348,23 @@ The runner:
      folder and no other skill loads;
    - the stub `emb` read-only over every `emb` found on `PATH`, over
      `/usr/bin/emb` and over `~/.local/bin/emb`, each where it exists;
-   - an empty tmpfs over `~/.config/ember`, `~/.local/state/ember`,
-     `~/.cache/ember` and `$XDG_RUNTIME_DIR/ember`, each where it exists;
+   - an empty tmpfs over the owner's `ember` folder in each of the owner's
+     XDG bases (configuration, state, data, cache and runtime, with their
+     defaults when unset), each where it exists;
+   - `<out dir>/xdg/` writable and the XDG variables set to its folders;
    - `PATH` starting with `work/.ember-eval/bin` and `EMBER_EVAL_DIR` set to
      `work/.ember-eval`;
-4. after a turn whose final `result` text contains a question mark, sends
+5. after a turn whose final `result` text contains a question mark, sends
    the next reply from the case's `owner-replies.md` by resuming the session
    (`claude -p --resume <session id> <reply>`), and stops when the replies
    run out or a turn ends with no question;
-5. copies `work/.ember-eval/calls.log` to `<out dir>/calls.log` and prints
+6. copies `work/.ember-eval/calls.log` to `<out dir>/calls.log` and prints
    the exit code, the seconds taken and the number of stubbed calls.
 
 `owner-replies.md` lists the replies as numbered lines, `<n>. <which
 question>: <reply>`; the runner sends the text after the first colon.
 
-The out dir holds `work/`, `tmp/` (the session's `/tmp`, kept across turns), `scaffold.log`, `prompt.txt`, `trace.jsonl` (the
+The out dir holds `work/`, `tmp/` (the session's `/tmp`, kept across turns), `xdg/` (the case's XDG base folders), `scaffold.log`, `prompt.txt`, `trace.jsonl` (the
 stream-json of every turn, appended in order), `stderr.txt`, `owner.log`
 (each reply sent), `calls.log` and `run.json` (`exit` and `seconds`).
 

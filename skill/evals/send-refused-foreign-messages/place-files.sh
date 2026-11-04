@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -eu
-cp -R "$(dirname "$0")/files/." .
-bash "$(dirname "$0")/../_stubs/install.sh"
+bash "$(dirname "$0")/../_stubs/install.sh" "$(dirname "$0")"
 # A run already exists: start it while setting up, unlogged and uncounted.
 EMBER_EVAL_SETUP=1 EMBER_EVAL_DIR="$PWD/.ember-eval" python3 -I .ember-eval/bin/stub.py run \
     --engine codex --dir . --task-file .ember-eval/seed-brief.md \

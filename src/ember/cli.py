@@ -61,6 +61,11 @@ def _add_choices(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--claim", action="store_true", help="claim the pending one-time choice"
     )
+    parser.add_argument(
+        "--skill",
+        metavar="X.Y.Z",
+        help="compare the loaded skill version with the installed skill, with --claim",
+    )
     parser.add_argument("--finish", metavar="ID", help="release the claim for ID")
     parser.add_argument(
         "--request",
@@ -140,6 +145,9 @@ def _add_run(parser: argparse.ArgumentParser) -> None:
     )
     start.add_argument("--dir", metavar="DIR", help="a folder in the git checkout")
     start.add_argument("--task-file", metavar="FILE", help="the brief")
+    start.add_argument(
+        "--dry-run", action="store_true", help="check inputs and print the worker"
+    )
     start.add_argument("--model", metavar="MODEL", help="the model (default: menu)")
     start.add_argument(
         "--effort", metavar="EFFORT", help="the effort (default: menu or engine)"
@@ -198,10 +206,12 @@ def _add_run(parser: argparse.ArgumentParser) -> None:
         metavar="RUN",
         help="print a run's record, or every run's",
     )
-    existing.add_argument("--json", action="store_true", help="with --status: JSON")
     output = parser.add_argument_group("waiting and output")
     output.add_argument(
-        "--quiet", action="store_true", help="print only the first line and summary"
+        "--json", action="store_true", help="with --status or --dry-run: JSON"
+    )
+    output.add_argument(
+        "--quiet", action="store_true", help="print only the run id, worker and summary"
     )
     output.add_argument(
         "--stall",
@@ -213,8 +223,8 @@ def _add_run(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_gapcheck(parser: argparse.ArgumentParser) -> None:
-    """Add the plan review, brief and reply options."""
-    parser.add_argument("--plan", required=True, metavar="FILE", help="the plan")
+    """Add plan review, brief, reply and answer options."""
+    parser.add_argument("--plan", metavar="FILE", help="the plan")
     parser.add_argument("--dir", metavar="DIR", help="checkout folder (default: .)")
     parser.add_argument("--engine", choices=status.ENGINES, help="reviewer engine")
     parser.add_argument("--model", metavar="MODEL", help="reviewer model")
@@ -238,10 +248,18 @@ def _add_gapcheck(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--brief", action="store_true", help="print the brief only")
     parser.add_argument("--reply", metavar="FILE", help="read an existing reply")
     parser.add_argument(
+        "--previous",
+        metavar="FILE",
+        help="an earlier --json result whose active and settled gaps are reviewed",
+    )
+    parser.add_argument(
         "--confirmed",
         action="store_true",
         help="run the check although the gap check settings skip or ask",
     )
+    parser.add_argument("--answer", metavar="FILE", help="record an answer in a result")
+    parser.add_argument("--id", metavar="GAP", help="the gap id to answer")
+    parser.add_argument("--text", metavar="ANSWER", help="the answer to record")
 
 
 def _add_flow(parser: argparse.ArgumentParser) -> None:
@@ -249,6 +267,11 @@ def _add_flow(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--plan", metavar="FILE", help="the JSON task plan")
     parser.add_argument(
         "--dry-run", action="store_true", help="print workers and waves"
+    )
+    parser.add_argument(
+        "--previous",
+        metavar="FILE",
+        help="an earlier gap check result for the --dry-run gap check command",
     )
     parser.add_argument("--start", action="store_true", help="start the flow runner")
     parser.add_argument("--watch", metavar="FLOW", help="wait for a lead stop or end")
@@ -351,6 +374,12 @@ def _add_ground(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_merge(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--subject",
+        type=_one_line,
+        metavar="TEXT",
+        help="the squash commit subject; required for an Ember run branch",
+    )
     parser.add_argument("branch", metavar="BRANCH", help="the reviewed branch")
     parser.add_argument(
         "--into", required=True, metavar="TARGET", help="the branch to merge into"
@@ -363,7 +392,7 @@ def _add_merge(parser: argparse.ArgumentParser) -> None:
         required=True,
         type=_one_line,
         metavar="TEXT",
-        help="the verdict line, printed first and kept in the merge commit",
+        help="the verdict line, printed first and kept in the landed commit",
     )
     parser.add_argument(
         "--dir", default=".", metavar="DIR", help="a folder in the git checkout"
@@ -556,7 +585,8 @@ def build_parser() -> argparse.ArgumentParser:
             "merge",
             help="merge a reviewed worker branch, then clean it up",
             description=(
-                "Merge a reviewed branch into a local branch with a merge commit, "
+                "Squash a reviewed Ember run branch under --subject, or merge another "
+                "branch with a merge commit, "
                 "in the worktree that has the target checked out, then remove the "
                 "branch, its run's worktree and session as emb cleanup does. "
                 "Never pushes. Each non-zero exit prints a next: or owner: line."
@@ -657,6 +687,8 @@ def _choices_action(args: argparse.Namespace) -> str:
         raise UsageError(f"--id cannot be used with {action}")
     if action == "--claim" and args.id is None:
         raise UsageError("--claim needs --id")
+    if args.skill is not None and action != "--claim":
+        raise UsageError("--skill needs --claim")
     if args.request and action not in ("read", "--claim"):
         raise UsageError(f"--request cannot be used with {action}")
     owner = ("--set", "--clear", "--once", "--clear-once")
@@ -687,7 +719,10 @@ def _run_choices(args: argparse.Namespace, env: Mapping[str, str] | None) -> int
             args.id, _pairs(args.request, "--request"), env=env
         ),
         "--claim": lambda: choices.claim(
-            args.id, _pairs(args.request, "--request"), env=env
+            args.id,
+            _pairs(args.request, "--request"),
+            skill_version=args.skill,
+            env=env,
         ),
         "--finish": lambda: choices.finish(args.finish, env=env),
         "--set": lambda: choices.set_settings(
@@ -705,6 +740,24 @@ def _run_choices(args: argparse.Namespace, env: Mapping[str, str] | None) -> int
         return fail(EX_USAGE, str(error))
     except (choices.InvalidChoiceError, db.DatabaseError) as error:
         return fail(error.exit_code, str(error))
+    if reply.get("skill") == "stale":
+        print(
+            f"WARNING: the loaded ember skill is {reply['loaded_skill_version']}; "
+            f"the installed skill is {reply['installed_skill_version']}",
+            file=sys.stderr,
+        )
+        print("next: reload the ember skill before the next step", file=sys.stderr)
+    elif reply.get("skill") == "unknown":
+        print(
+            "WARNING: the installed ember skill version is missing, unreadable "
+            "or malformed",
+            file=sys.stderr,
+        )
+        print(
+            "owner: repair or reinstall the ember skill, then reload it before "
+            "starting a worker",
+            file=sys.stderr,
+        )
     print(json.dumps(reply, indent=2))
     return EX_OK
 
@@ -802,6 +855,7 @@ def _run_mode(args: argparse.Namespace) -> str:
         "--trailer": bool(args.trailer),
         "--claim": args.claim is not None,
         "--window": args.window,
+        "--dry-run": args.dry_run,
     }
     if mode == "start":
         missing = [
@@ -819,8 +873,8 @@ def _run_mode(args: argparse.Namespace) -> str:
         raise UsageError("--send and --message-file go together")
     if args.force and mode not in ("close", "send"):
         raise UsageError("--force needs --close or --send")
-    if args.json and mode != "status":
-        raise UsageError("--json needs --status")
+    if args.json and mode != "status" and not args.dry_run:
+        raise UsageError("--json needs --status or --dry-run")
     return mode
 
 
@@ -845,6 +899,8 @@ def _run_run(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
                 trailers=tuple(args.trailer),
                 claim=args.claim,
                 window=args.window,
+                dry_run=args.dry_run,
+                as_json=args.json,
             )
         ),
         "send": lambda: core.send(args.send, args.message_file, force=args.force),
@@ -988,6 +1044,7 @@ def main(
             args.into,
             args.verdict,
             note=args.note,
+            subject=args.subject,
             directory=args.dir,
             as_json=args.json,
             env=env,

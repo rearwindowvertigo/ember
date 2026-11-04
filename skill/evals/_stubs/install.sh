@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Set up a case's working directory (the current directory) for one eval run.
-# Each case's place-files.sh runs this after copying the case's files/ here.
+# Each case's place-files.sh passes its case directory to this script.
+# Generated files are made before the case files and defaults are placed.
 #
 # - copies the fixture repository (fixture/) where the case gave no file of
 #   the same path;
@@ -16,7 +17,22 @@
 set -eu
 
 kit="$(cd "$(dirname "$0")" && pwd)"
+case_dir=$(cd "$1" && pwd)
+case_name=$(basename "$case_dir")
 work="$(pwd)"
+generated=${EMBER_EVAL_FIXTURES:-}
+if [ -z "$generated" ]; then
+    generated=$(mktemp -d "${TMPDIR:-/tmp}/ember-eval-fixtures.XXXXXX")
+    trap 'rm -rf "$generated"' EXIT
+    bash "$kit/generate.sh" all "$generated" > /dev/null
+fi
+# Hand-written case files replace generated files with the same path.
+if [ -d "$generated/$case_name/files" ]; then
+    cp -R "$generated/$case_name/files/." "$work/"
+fi
+if [ -d "$case_dir/files" ]; then
+    cp -R "$case_dir/files/." "$work/"
+fi
 eval_dir="$work/.ember-eval"
 REMOTE_URL="git@github.com:example/order-tools.git"
 SESSION_BRANCH="claude/order-tools-work"
@@ -40,6 +56,12 @@ copy_missing "$kit/fixture" "$work"
 mkdir -p "$eval_dir/bin" "$eval_dir/replies"
 cp "$kit/bin/emb" "$kit/stub.py" "$eval_dir/bin/"
 chmod +x "$eval_dir/bin/emb"
+# Use production merge, containment, plan and gap-check code in the stub.
+source_root="$kit/../../../src/ember"
+cp -R "$source_root" "$eval_dir/bin/"
+# The isolated kit runs without installed ember-app distribution metadata.
+: > "$eval_dir/bin/ember/__init__.py"
+
 # A route the case gives any reply for takes none of the default's parts.
 case_routes=" "
 for entry in "$eval_dir"/replies/*; do
@@ -47,7 +69,12 @@ for entry in "$eval_dir"/replies/*; do
     name="$(basename "$entry")"
     case_routes="$case_routes${name%%.*} "
 done
-for file in "$kit"/replies/*; do
+# Generated defaults fill gaps in the hand-written defaults.
+defaults=$(mktemp -d "${TMPDIR:-/tmp}/ember-eval-defaults.XXXXXX")
+trap 'rm -rf "$defaults"; if [ -z "${EMBER_EVAL_FIXTURES:-}" ]; then rm -rf "$generated"; fi' EXIT
+cp -R "$kit/replies/." "$defaults/"
+copy_missing "$generated/_stubs/replies" "$defaults"
+for file in "$defaults"/*; do
     name="$(basename "$file")"
     case "$case_routes" in
         *" ${name%%.*} "*) ;;

@@ -123,3 +123,11 @@ def test_load_driver_that_is_not_a_driver(monkeypatch: pytest.MonkeyPatch) -> No
 def test_load_driver_unknown_engine() -> None:
     with pytest.raises(engines.DriverMissingError, match="unknown engine"):
         engines.load_driver("status")
+
+
+def test_provider_kind_is_optional_and_validated() -> None:
+    assert TurnOutcome(engines.FAILED, provider_error=True).provider_kind is None
+    for kind in engines.PROVIDER_KINDS:
+        assert TurnOutcome(engines.FAILED, provider_kind=kind).provider_kind == kind
+    with pytest.raises(ValueError, match="provider kind"):
+        TurnOutcome(engines.FAILED, provider_kind="unknown")

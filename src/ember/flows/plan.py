@@ -254,10 +254,7 @@ def parse(text: str, path: Path) -> Plan:
     tasks = tuple(
         Task(
             id=item["id"],
-            subject=item.get(
-                "subject",
-                f"{item['id']}: {item['task'].splitlines()[0]}"[:SUBJECT_LIMIT],
-            ),
+            subject=item["subject"],
             task=item["task"],
             files=tuple(item["files"]),
             after=tuple(item.get("after", [])),
@@ -286,9 +283,23 @@ def parse(text: str, path: Path) -> Plan:
     )
 
 
-def from_json(value: Mapping[str, Any], path: Path) -> Plan:
-    """Validate a saved plan object with the same rules as a source file."""
-    return parse(json.dumps(dict(value)), path)
+def from_json(
+    value: Mapping[str, Any], path: Path, *, subjects: Mapping[str, str] | None = None
+) -> Plan:
+    """Validate a plan, retaining resolved subjects when loading a saved flow."""
+    document = dict(value)
+    if subjects is not None and isinstance(document.get("tasks"), list):
+        document["tasks"] = [
+            {**item, "subject": subjects[item["id"]]}
+            if (
+                isinstance(item, dict)
+                and isinstance(item.get("id"), str)
+                and item["id"] in subjects
+            )
+            else item
+            for item in document["tasks"]
+        ]
+    return parse(json.dumps(document), path)
 
 
 def load(path: str | Path) -> Plan:

@@ -1,0 +1,12 @@
+schema_version: "1.1"
+name: panel-progress-reported
+expected_outcome: |
+  Claude lists panels using member_count and running_members, then reads the
+  members array from one-panel status twice. It reports one answered member
+  and two running members. Claude's elapsed seconds grow from 120 to 180
+  and its last screen-change time advances; OpenCode's seconds grow from
+  60 to 120 and its activity remains unknown. Zero elapsed seconds in the
+  list is zero, not missing activity. No worker starts and no run is sent,
+  recovered, interrupted or closed.
+context:
+  scaffold_script: place-files.sh

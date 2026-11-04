@@ -1,28 +1,39 @@
 """Review a plan through one read-only run, or read an existing reply.
 
-Exit 81 reports an invalid or incomplete reply; other exits use the run's
-codes. The command never creates or finishes a claim.
+With `--previous`, an earlier result's gaps and answers go to the reviewer,
+and the reviewer accounts for each active and settled gap. Settled answers
+and closed history are carried into the new result. Exit 81 reports an
+invalid or incomplete reply.
+Answer mode exits 64 for invalid options or an unknown id, 65 for an invalid
+result, 66 for an unreadable file and 74 for a write failure. Other exits
+use the run's codes. The command never creates or finishes a
+claim.
 """
 
 import argparse
+import contextlib
 import io
 import json
 import os
 import re
 import secrets
 import shlex
+import signal
 import subprocess
 import sys
-from collections.abc import Callable, Mapping
+import threading
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
+from types import FrameType
 from typing import Any, TextIO
 
 from ember import choices, db, paths
-from ember.gapcheck import brief, plan, policy, reply
+from ember.gapcheck import brief, plan, policy, previous, reply
 from ember.runs import exits, record
 from ember.runs.core import STALL_MINUTES, Core, StartOptions
 
 INVALID_REPLY = 81
+INVALID_PREVIOUS = 65
 GIT_LOCATION = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -54,7 +65,36 @@ class CommandError(Exception):
 def _usage(args: argparse.Namespace) -> None:
     """Reject incompatible modes before reading any input."""
     problem = None
-    if args.brief and args.reply is not None:
+    if args.answer is not None:
+        extra = [
+            f"--{name}"
+            for name in (
+                "plan",
+                "previous",
+                "dir",
+                "engine",
+                "model",
+                "effort",
+                "claim",
+                "stall",
+                "reply",
+            )
+            if getattr(args, name) is not None
+        ]
+        extra += [
+            f"--{name}"
+            for name in ("brief", "read", "window", "confirmed")
+            if getattr(args, name)
+        ]
+        if extra:
+            problem = f"{', '.join(extra)} cannot be used with --answer"
+        elif args.id is None or args.text is None:
+            problem = "--answer needs --id and --text"
+    elif args.id is not None or args.text is not None:
+        problem = "--id and --text need --answer"
+    elif args.plan is None:
+        problem = "--plan is required"
+    elif args.brief and args.reply is not None:
         problem = "--brief and --reply cannot be combined"
     elif args.brief or args.reply is not None:
         extra = [
@@ -180,21 +220,99 @@ def _read_file(path: Path) -> str:
         ) from error
 
 
-def _result(document: plan.Plan) -> dict[str, Any]:
-    """Build a result before a reply has been collected."""
+def _result(document: plan.Plan, earlier: previous.Previous | None) -> dict[str, Any]:
+    """Build an incomplete result before a reply has been collected."""
     return {
         "plan": str(document.path),
         "plan_steps": document.kind,
         "failure_model": document.failure_model,
+        "previous": None if earlier is None else str(earlier.path),
+        "previous_plan": None if earlier is None else earlier.plan,
+        "next_id": 1 if earlier is None else earlier.next_id,
+        "dispositions": [],
+        "closed": [] if earlier is None else list(earlier.closed),
         "reviewer": None,
         "run": None,
         "steps": [],
+        "settled": [],
         "ranked": [],
         "counts": dict.fromkeys(reply.HARMS, 0),
         "uncovered_steps": [step.number for step in document.steps],
         "unknown_steps": [],
         "parse_error": "the run produced no reply",
     }
+
+
+def _read_reply(
+    text: str, document: plan.Plan, earlier: previous.Previous | None
+) -> dict[str, Any]:
+    """Read a reply, numbering new gaps after the earlier ones.
+
+    Returns:
+        The reply's result fields, settled answers and closed history.
+    """
+    fields = reply.read(
+        text,
+        document.steps,
+        earlier_ids=None if earlier is None else earlier.ids(),
+        first_number=1 if earlier is None else earlier.next_id,
+        answered_ids=()
+        if earlier is None
+        else {gap.id for gap in earlier.gaps if gap.answer is not None},
+    )
+    fields["settled"], fields["closed"] = (
+        ([], [])
+        if earlier is None
+        else previous.history(earlier, fields["dispositions"])
+    )
+    return fields
+
+
+def _load_previous(path: str | None) -> previous.Previous | None:
+    """Read the `--previous` result, or return None without one."""
+    if path is None:
+        return None
+    try:
+        return previous.load(path)
+    except previous.PreviousError as error:
+        location = shlex.quote(str(Path(path).expanduser().absolute()))
+        if error.unreadable:
+            raise CommandError(66, str(error), f"next: ls -l {location}") from error
+        raise CommandError(
+            INVALID_PREVIOUS,
+            str(error),
+            f"next: correct {location} to the emb gapcheck result format, "
+            "with answers on their gaps in steps or settled",
+        ) from error
+
+
+def _answer(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    """Record an answer after loading and validating the result."""
+    saved = _load_previous(args.answer)
+    assert saved is not None
+    try:
+        made = previous.answer(saved, args.id, args.text)
+    except ValueError as error:
+        raise CommandError(64, str(error), "next: emb gapcheck --help") from error
+    except previous.PreviousError as error:
+        code = 66 if error.unreadable else INVALID_PREVIOUS
+        follow = (
+            f"next: ls -l {shlex.quote(str(saved.path))}"
+            if error.unreadable
+            else "next: emb gapcheck --help"
+        )
+        raise CommandError(code, str(error), follow) from error
+    except OSError as error:
+        raise CommandError(
+            74,
+            f"cannot write the result {saved.path}: {error}",
+            f"next: ls -l {shlex.quote(str(saved.path))}",
+        ) from error
+    if args.json:
+        print(json.dumps(made, indent=2, ensure_ascii=False), file=out)
+    else:
+        print(f"recorded answer for {args.id} in {saved.path}", file=err)
+    return 0
 
 
 def _print_decision(
@@ -249,24 +367,52 @@ def _mark_asks(result: dict[str, Any], settings: Mapping[str, Any] | None) -> No
             gap["ask_owner"] = answers is None or policy.asks_owner(
                 answers, gap["harm"]
             )
-    for gap in result["ranked"]:
-        gap["ask_owner"] = answers is None or policy.asks_owner(answers, gap["harm"])
 
 
-def _print_result(result: dict[str, Any], as_json: bool, out: TextIO) -> None:
-    """Print the result as JSON or one block per covered step."""
+def _print_result(
+    result: dict[str, Any],
+    as_json: bool,
+    out: TextIO,
+    earlier: previous.Previous | None = None,
+) -> None:
+    """Print the result as JSON or one block per covered step.
+
+    In text, a gap that names an earlier gap shows that gap's answer, and
+    a check with `--previous` lists the settled gaps after the steps.
+    """
     if as_json:
         print(json.dumps(result, indent=2, ensure_ascii=False), file=out)
         return
+    answers = {} if earlier is None else {gap.id: gap.answer for gap in earlier.gaps}
     for step in result["steps"]:
         print(f"step {step['step']}: {step['title']}", file=out)
         if not step["gaps"]:
             print("  no gaps", file=out)
         for gap in step["gaps"]:
             asked = "" if gap.get("ask_owner", True) else " (default taken)"
-            print(f"  {gap['harm']}{asked}: {gap['gap']}", file=out)
+            print(f"  {gap['id']} {gap['harm']}{asked}: {gap['gap']}", file=out)
             print(f"    why: {gap['why']}", file=out)
             print(f"    default: {gap['default']}", file=out)
+            if gap["earlier"]:
+                answer = answers.get(gap["earlier"])
+                was = "unanswered" if answer is None else f"answered: {answer}"
+                print(f"    earlier: {gap['earlier']}, {was}", file=out)
+    if result["previous"] is not None:
+        print(f"settled from {result['previous']}:", file=out)
+        if not result["settled"]:
+            print("  none", file=out)
+        for gap in result["settled"]:
+            print(
+                f"  {gap['id']} {gap['harm']}, earlier step {gap['step']}: "
+                f"{gap['gap']}",
+                file=out,
+            )
+            print(f"    answer: {gap['answer']}", file=out)
+    if result["closed"]:
+        print("closed gaps:", file=out)
+        for gap in result["closed"]:
+            print(f"  {gap['id']}: {gap['gap']}", file=out)
+            print(f"    reason: {gap['reason']}", file=out)
     print(
         "counts: "
         + ", ".join(f"{harm} {result['counts'][harm]}" for harm in reply.HARMS),
@@ -285,9 +431,36 @@ def _follow(command: str, reply_path: str | None, code: int) -> str:
     return f"next: {prefix}{command} --reply {shlex.quote(reply_path)}"
 
 
+@contextlib.contextmanager
+def _stop_signals_interrupt() -> Iterator[None]:
+    """Treat SIGTERM and SIGHUP as SIGINT while the reviewer run is started.
+
+    The run core already handles an interrupt: it stops waiting, keeps the
+    reviewer's turn and records the exit, and the gap check prints the
+    `next:` line. Without this, a terminated gap check ended at once and left
+    its run with no exit and no line.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def interrupt(signum: int, frame: FrameType | None) -> None:
+        raise KeyboardInterrupt
+
+    previous_handlers = {}
+    try:
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            previous_handlers[signum] = signal.signal(signum, interrupt)
+        yield
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+
+
 def _run(
     args: argparse.Namespace,
     document: plan.Plan,
+    earlier: previous.Previous | None,
     top: str,
     engine: str,
     env: Mapping[str, str],
@@ -306,7 +479,7 @@ def _run(
             fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             created = True
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                stream.write(brief.text(document, top))
+                stream.write(brief.text(document, top, earlier))
         except (OSError, paths.RuntimeDirError) as error:
             raise CommandError(
                 69, str(error), exits.line(69, "runtime") or ""
@@ -318,22 +491,21 @@ def _run(
             out=output,
             err=errors,
         )
-        code = core.execute(
-            lambda: core.start(
-                StartOptions(
-                    engine,
-                    dir=top,
-                    task_file=str(temporary),
-                    model=args.model,
-                    effort=args.effort,
-                    read_only=True,
-                    read=tuple(args.read),
-                    trailers=(),
-                    claim=args.claim,
-                    window=args.window,
-                )
-            )
+        options = StartOptions(
+            engine,
+            dir=top,
+            task_file=str(temporary),
+            model=args.model,
+            effort=args.effort,
+            read_only=True,
+            read=tuple(args.read),
+            trailers=(),
+            claim=args.claim,
+            window=args.window,
+            parent=record.parent("gapcheck"),
         )
+        with _stop_signals_interrupt():
+            code = core.execute(lambda: core.start(options))
     finally:
         try:
             if created and temporary is not None:
@@ -345,7 +517,7 @@ def _run(
     if match is None:
         return None, code, None
     run_id = match.group(1)
-    result = _result(document)
+    result = _result(document, earlier)
     details: dict[str, Any] = {
         "id": run_id,
         "reply": None,
@@ -377,7 +549,7 @@ def _run(
             ) from error
         else:
             details["reply"] = str(candidate)
-            result.update(reply.read(_read_file(candidate), document.steps))
+            result.update(_read_reply(_read_file(candidate), document, earlier))
     except CommandError as error:
         problem = error
         result["parse_error"] = str(error)
@@ -430,9 +602,14 @@ def main(
         if key not in GIT_LOCATION
     }
     document = None
-    command = f"emb gapcheck --plan {shlex.quote(args.plan)}"
+    command = "emb gapcheck"
+    if args.plan is not None:
+        command += f" --plan {shlex.quote(args.plan)}"
     try:
         _usage(args)
+        if args.answer is not None:
+            return _answer(args, out, err)
+        assert args.plan is not None
         try:
             document = plan.load(args.plan)
         except plan.PlanError as error:
@@ -444,6 +621,15 @@ def main(
             raise CommandError(
                 64, f"the plan {document.path} is empty", "next: emb gapcheck --help"
             )
+        earlier = _load_previous(args.previous)
+        if earlier is not None:
+            command += f" --previous {shlex.quote(str(earlier.path))}"
+            if earlier.plan != str(document.path):
+                print(
+                    f"WARNING: the previous result's plan {earlier.plan} differs "
+                    f"from --plan {document.path}",
+                    file=err,
+                )
         problem = None
         reply_path = None
         settings = _settings(args, environment) if args.reply is None else None
@@ -465,19 +651,20 @@ def main(
                 return 0
         if args.reply is not None:
             reply_path = str(Path(args.reply).expanduser().absolute())
-            result = _result(document)
-            result.update(reply.read(_read_file(Path(reply_path)), document.steps))
+            result = _result(document, earlier)
+            result.update(_read_reply(_read_file(Path(reply_path)), document, earlier))
             code = 0
         else:
             top = _checkout(args.dir, environment, command)
             if args.brief:
-                print(brief.text(document, top), end="", file=out)
+                print(brief.text(document, top, earlier), end="", file=out)
                 return 0
             assert settings is not None
             engine = _engine(args, settings, command)
             result, code, problem = _run(
                 args,
                 document,
+                earlier,
                 top,
                 engine,
                 environment,
@@ -491,7 +678,7 @@ def main(
             reply_path = result["run"]["reply"]
         code = code or (INVALID_REPLY if result["parse_error"] else 0)
         _mark_asks(result, settings or _settings_quietly(environment))
-        _print_result(result, args.json, out)
+        _print_result(result, args.json, out, earlier)
         if result["parse_error"]:
             print(f"emb gapcheck: {result['parse_error']}", file=err)
         if not document.failure_model:

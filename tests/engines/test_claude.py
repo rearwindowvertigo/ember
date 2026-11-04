@@ -303,16 +303,20 @@ def test_request_names_no_sandbox_without_bubblewrap(
     assert request["sandbox"] is None
 
 
+@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize("detached", [False, True])
 def test_request_names_the_sandbox_with_bubblewrap(
-    tmp_path: Path, env: dict[str, str]
+    tmp_path: Path, env: dict[str, str], read_only: bool, detached: bool
 ) -> None:
     run = make_run(
         tmp_path,
         env,
         sandbox="bubblewrap",
+        read_only=read_only,
         network=True,
         read_effective=("/opt/data",),
     )
+    run = dataclasses.replace(run, detached=detached)
     subprocess.run(
         ["git", "init", "-q"], cwd=run.worktree, check=True, capture_output=True
     )
@@ -322,7 +326,7 @@ def test_request_names_the_sandbox_with_bubblewrap(
         "worktree": run.worktree,
         "common": str(Path(run.worktree).resolve() / ".git"),
         "read": ["/opt/data"],
-        "read_only": False,
+        "read_only": read_only and not detached,
         "network": True,
     }
 
@@ -429,6 +433,7 @@ def test_provider_error(tmp_path: Path, env: dict[str, str]) -> None:
     outcome = claude.driver(env).wait(run)
     assert outcome.state == engines.FAILED
     assert outcome.provider_error
+    assert outcome.provider_kind == "outage"
     assert not outcome.signed_out
     assert outcome.reason == "the model server refused the turn: API Error: overloaded"
 
@@ -439,6 +444,7 @@ def test_usage_limit_on_stderr_is_a_provider_error(
     run = with_turn(make_run(tmp_path, env), 1)
     write_turn(run, 1, [], 1, stderr="Claude usage limit reached\n")
     assert claude.driver(env).wait(run).provider_error
+    assert claude.driver(env).wait(run).provider_kind == "outage"
 
 
 def test_sign_in_failure(tmp_path: Path, env: dict[str, str]) -> None:
@@ -873,3 +879,28 @@ def test_show() -> None:
         "· turn ended · success · 3s"
     )
     assert show({"type": "rate_limit_event"}) == ""
+
+
+def test_turn_output_reads_current_stream_and_stderr(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    run = make_run(tmp_path, env, turn=2)
+    write_turn(run, 1, [result("old denial")], 0)
+    write_turn(
+        run,
+        2,
+        [
+            user(
+                {
+                    "type": "tool_result",
+                    "content": "Permission denied: /home/owner/tools/python",
+                }
+            )
+        ],
+        1,
+        stderr="EACCES: /home/owner/other",
+    )
+    output = claude.ClaudeDriver(env).turn_output(run)
+    assert "Permission denied: /home/owner/tools/python" in output
+    assert "EACCES: /home/owner/other" in output
+    assert "old denial" not in output

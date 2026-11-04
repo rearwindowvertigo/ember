@@ -1,8 +1,14 @@
+import hashlib
 import json
+import os
+import shlex
 import stat
 import subprocess
+import threading
 import time
-from collections.abc import Iterator
+import tomllib
+from collections.abc import Callable, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -10,7 +16,10 @@ from typing import Any
 import pytest
 
 from ember import choices, engines, paths, processes, sandbox
-from ember.engines import Driver, LaunchSpec
+from ember.engines import Driver, LaunchSpec, models, status
+from ember.engines.codex import CodexDriver
+from ember.engines.opencode import OpenCodeDriver
+from ember.engines.opencode2 import OpenCode2Driver
 from ember.runs import core, exits, record
 from ember.runs.core import Core, RunError, StartOptions
 
@@ -104,6 +113,291 @@ def _events(tmp_path: Path, run_id: str) -> list[dict[str, str]]:
 # Starting an editing run
 
 
+@pytest.mark.parametrize("read_only", [False, True])
+def test_dry_run_resolves_team_without_creating_launch_artifacts(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    read_only: bool,
+) -> None:
+    choices.set_settings(
+        {
+            "shortlist.codex": ["gpt-6.1-sol@high"],
+            "single.writer": "codex:gpt-6.1-sol",
+            "single.reviewer": "codex:gpt-6.1-sol",
+            "sandbox.codex": "on",
+        },
+        env=env,
+    )
+    brief = _brief(tmp_path, "Task\n")
+    branches = git(repo, "branch", "--list", env=env)
+    worktrees = git(repo, "worktree", "list", "--porcelain", env=env)
+    before = set(tmp_path.rglob("*"))
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("dry run reached launch setup")
+
+    monkeypatch.setattr(sandbox, "require", forbidden)
+    monkeypatch.setattr(paths, "ensure_worker_cache_dir", forbidden)
+    monkeypatch.setattr(record, "new_id", forbidden)
+    driver = _driver(env, "codex")
+    assert (
+        _start(
+            _core(env, driver), repo, brief,
+            engine="codex", read_only=read_only, dry_run=True, window=True,
+        )
+        == 0
+    )  # fmt: skip
+    out, err = capsys.readouterr()
+    role = "Reviewer" if read_only else "Writer"
+    source = "single.reviewer" if read_only else "single.writer"
+    assert out == f"Team, Single tasks {role}: codex gpt-6.1-sol · high ({source})\n"
+    assert err == ""
+    assert driver.commands == []
+    # Queries may create SQLite sidecars and the repository worktree lock.
+    lock_root = paths.runtime_dir(env)
+    key = hashlib.sha256(os.fsencode((repo / ".git").resolve())).hexdigest()
+    created = set(tmp_path.rglob("*")) - before
+    assert created <= {
+        paths.settings_db_path(env).with_suffix(".db-wal"),
+        paths.settings_db_path(env).with_suffix(".db-shm"),
+        lock_root.parent,
+        lock_root,
+        lock_root / "locks",
+        lock_root / "locks" / f"worktrees-{key}.lock",
+    }
+    assert git(repo, "branch", "--list", env=env) == branches
+    assert git(repo, "worktree", "list", "--porcelain", env=env) == worktrees
+
+
+@pytest.mark.parametrize("connected", [False, True])
+def test_dry_run_checks_engine_without_writing_a_missing_cache(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    connected: bool,
+) -> None:
+    engine_cache(env, {"claude": connected})
+    held = status.cached(env)
+    assert held is not None
+    env["XDG_CACHE_HOME"] = str(tmp_path / "absent-cache")
+    checked = []
+
+    def check(engine: str, env: object) -> status.EngineStatus:
+        checked.append(engine)
+        return held[engine]
+
+    monkeypatch.setattr(status, "check", check)
+    assert _start(_core(env), repo, _brief(tmp_path, "Task\n"), dry_run=True) == (
+        0 if connected else 69
+    )
+    out, err = capsys.readouterr()
+    assert checked == ["claude"]
+    assert not Path(env["XDG_CACHE_HOME"]).exists()
+    assert not paths.runs_dir(env).exists()
+    if connected:
+        assert "claude opus · high" in out
+        assert err == ""
+    else:
+        assert out == ""
+        assert "claude is not connected" in err
+
+
+@pytest.mark.parametrize("driver_type", [CodexDriver, OpenCodeDriver, OpenCode2Driver])
+@pytest.mark.parametrize("expired_cache", [False, True])
+@pytest.mark.parametrize("selection", ["saved", "default", "invalid"])
+def test_dry_run_real_drivers_never_write_model_caches(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    driver_type: type[CodexDriver] | type[OpenCodeDriver],
+    expired_cache: bool,
+    selection: str,
+) -> None:
+    engine = driver_type.name
+    model = "gpt-6.1-sol" if engine == "codex" else "openai/gpt-6.1-sol"
+    choices.set_settings(
+        {
+            f"shortlist.{engine}": [f"{model}@high"],
+            "single.writer": f"{engine}:{model}" if selection == "saved" else "ask",
+        },
+        env=env,
+    )
+    held = status.cached(env)
+    assert held is not None
+    env["XDG_CACHE_HOME"] = str(tmp_path / "model-cache")
+    monkeypatch.setattr(status, "check", lambda engine, env: held[engine])
+    discovered = []
+
+    def codex_reply(argv: list[str], env: Mapping[str, str]) -> tuple[int, str, str]:
+        assert argv[1:] == ["debug", "models"]
+        discovered.append("codex")
+        return 0, json.dumps({"models": [{
+            "slug": model,
+            "visibility": "list",
+            "supported_reasoning_levels": [{"effort": "high"}, {"effort": "xhigh"}],
+            "default_reasoning_level": "high",
+        }]}), ""  # fmt: skip
+
+    def openrouter_reply(url: str, timeout: float) -> object:
+        discovered.append("opencode")
+        return {"data": [{"id": model, "reasoning": {"default_effort": "high"}}]}
+
+    monkeypatch.setattr(status, "locate", lambda engine, env: f"/mock/{engine}")
+    monkeypatch.setattr(models, "_run_codex", codex_reply)
+    monkeypatch.setattr(models, "fetch_json", openrouter_reply)
+    cache = models.cache_path(engine, env)
+    if expired_cache:
+        status.save_cache_file(
+            cache,
+            {
+                "fetched_at": 0,
+                "models": [models.Model(model, model, ("low",), "low").to_json()],
+            },
+            env,
+        )
+    before = (cache.read_bytes(), cache.stat().st_mtime_ns) if expired_cache else None
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("dry run attempted a cache write")
+
+    monkeypatch.setattr(status, "save_cache_file", forbidden)
+    options: dict[str, object] = {} if selection == "saved" else {"model": model}
+    if selection == "invalid":
+        options["effort"] = "low" if engine == "codex" else "High"
+    code = _start(
+        _core(env, driver_type(env)), repo, _brief(tmp_path, "Task\n"),
+        engine=engine, dry_run=True, **options,
+    )  # fmt: skip
+    out, err = capsys.readouterr()
+    if selection == "invalid":
+        assert code == 64
+        assert out == ""
+        assert "does not take the effort" in err
+    else:
+        assert code == 0, err
+        assert f"{engine} {model} · high" in out
+        assert err == ""
+    if engine == "codex" or selection == "default":
+        assert discovered
+    if before is None:
+        assert not Path(env["XDG_CACHE_HOME"]).exists()
+    else:
+        assert (cache.read_bytes(), cache.stat().st_mtime_ns) == before
+        assert set(cache.parent.iterdir()) == {cache}
+    assert not paths.runs_dir(env).exists()
+    assert not paths.worktrees_dir(env).exists()
+
+
+def test_start_announces_resolved_worker_before_driver_command(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    expected = (
+        "Team, Single tasks Writer: claude opus · low "
+        "(model: single.writer, effort: --effort)\n"
+    )
+    brief = _brief(tmp_path, "Task\n")
+    assert _start(_core(env), repo, brief, effort="low", dry_run=True) == 0
+    assert capsys.readouterr().out == expected
+    driver = _driver(env)
+    command = driver.command
+    observed = []
+
+    def observe(run: record.Run, message: str) -> LaunchSpec:
+        out, err = capsys.readouterr()
+        assert out == f"run {run.id}\n"
+        assert err.startswith(expected)
+        observed.append(run.id)
+        return command(run, message)
+
+    monkeypatch.setattr(driver, "command", observe)
+    assert _start(_core(env, driver, quiet=True), repo, brief, effort="low") == 0
+    assert len(observed) == 1
+
+
+@pytest.mark.parametrize("default", [None, "medium"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_dry_run_reports_driver_default_and_ignores_subagent_row(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    default: str | None,
+    explicit: bool,
+) -> None:
+    engine = "claude" if explicit else "opencode"
+    model = "opus" if explicit else "openrouter/model"
+    choices.set_settings(
+        {
+            "shortlist.opencode": ["openrouter/model"],
+            "single.writer": f"{engine}:{model}",
+            "single.writer_as": "subagent" if explicit else "cli",
+        },
+        env=env,
+    )
+    driver = _driver(env, engine)
+    monkeypatch.setattr(driver, "default_effort", lambda model: default)
+    brief = _brief(tmp_path, "Task\n")
+    options = {"model": model} if explicit else {}
+    assert (
+        _start(
+            _core(env, driver), repo, brief,
+            engine=engine, dry_run=True, as_json=True, **options,
+        )
+        == 0
+    )  # fmt: skip
+    out, err = capsys.readouterr()
+    source = "--model" if explicit else "single.writer"
+    data = json.loads(out)
+    assert (data["model_source"], data["effort_source"]) == (source, source)
+    assert data["effort"] == default
+    assert err == ""
+    assert (
+        _start(_core(env, driver), repo, brief, engine=engine, dry_run=True, **options)
+        == 0
+    )
+    assert capsys.readouterr().out == (
+        f"Team, Single tasks Writer: {engine} {model} · "
+        f"{default or 'default'} ({source})\n"
+    )
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_start_from_linked_checkout_records_main_and_common(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    read_only: bool,
+) -> None:
+    linked = tmp_path / "linked"
+    git(repo, "worktree", "add", "-q", "-b", "linked", str(linked), env=env)
+    assert (
+        _start(
+            _core(env),
+            linked,
+            _brief(tmp_path, "Review\n@reply fine\n"),
+            read_only=read_only,
+        )
+        == 0
+    )
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    assert run.repo == str(linked)
+    assert run.main == str(repo)
+    assert run.common == str(repo / ".git")
+
+
 def test_editing_run_commits_its_turn(
     tmp_path: Path,
     env: dict[str, str],
@@ -125,7 +419,7 @@ def test_editing_run_commits_its_turn(
     assert lines[1].startswith("claude opus · high · ")
     assert lines[1].endswith(" · exit 0 · 1 files · turn 1")
     run = record.load(run_id, env)
-    worktree = repo / ".ember" / "worktrees" / run_id
+    worktree = paths.worktree_path(run_id, env)
     fields = _fields(out)
     assert fields["run"] == run_id
     assert fields["worktree"] == str(worktree)
@@ -138,6 +432,8 @@ def test_editing_run_commits_its_turn(
     assert run.turn == 1
     assert run.turn_state == record.COMMITTED
     assert run.repo == str(repo)
+    assert run.main == str(repo)
+    assert run.common == str(repo / ".git")
     assert run.worktree == str(worktree)
     assert run.base == git(repo, "rev-parse", "HEAD", env=env)
     assert run.base_branch == git(repo, "branch", "--show-current", env=env)
@@ -151,9 +447,12 @@ def test_editing_run_commits_its_turn(
     message = git(worktree, "log", "-1", "--format=%B", env=env)
     assert message == "Add a greeting\n\nCo-Authored-By: X <x@y>"
     assert git(worktree, "rev-parse", "--abbrev-ref", "HEAD", env=env) == run.branch
-    exclude = Path(git(repo, "rev-parse", "--git-common-dir", env=env))
-    assert ".ember/" in (repo / exclude / "info" / "exclude").read_text().splitlines()
     assert git(repo, "status", "--porcelain", env=env) == ""
+    assert not (repo / ".ember").exists()
+    common = Path(git(repo, "rev-parse", "--git-common-dir", env=env))
+    exclude = repo / common / "info" / "exclude"
+    assert not exclude.exists() or ".ember/" not in exclude.read_text()
+    assert stat.S_IMODE(paths.worktrees_dir(env).stat().st_mode) == 0o700
     assert (run.folder / "brief.md").read_text() == Path(brief).read_text()
     assert (run.folder / "turn-1.md").read_text() == "all done"
     assert stat.S_IMODE(run.folder.stat().st_mode) == 0o700
@@ -299,7 +598,7 @@ def test_failed_window_warns_and_run_continues(
 # Read-only runs
 
 
-def test_read_only_run_works_in_the_checkout(
+def test_read_only_run_works_in_a_detached_worktree(
     tmp_path: Path,
     env: dict[str, str],
     repo: Path,
@@ -313,13 +612,21 @@ def test_read_only_run_works_in_the_checkout(
     assert code == 0, err
     run = record.load(_run_id(out), env)
     assert run.read_only
-    assert run.worktree == str(repo)
+    assert run.worktree == str(paths.worktree_path(run.id, env))
+    assert run.detached
+    assert not (Path(run.worktree) / "dirty.txt").exists()
+    assert (
+        git(Path(run.worktree), "rev-parse", "--abbrev-ref", "HEAD", env=env) == "HEAD"
+    )
     assert run.branch is None
     assert run.expected_head is None
     assert run.commits == ()
     assert run.turn_state == record.COLLECTED
     assert run.last_reason is None
-    assert "WARNING: read-only" not in err
+    assert (
+        f"WARNING: read-only run {run.id} does not see uncommitted dirty.txt\n" in err
+    )
+    assert f"read-only run {run.id} changed" not in err
     assert not (repo / ".ember").exists()
     assert _fields(out)["branch"] == "-"
 
@@ -331,14 +638,53 @@ def test_read_only_run_that_changes_files_is_reported(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     brief = _brief(tmp_path, "Review\n@write README.md changed\n@write new.txt n\n")
-    code = _start(_core(env), repo, brief, read_only=True)
+    core_ = _core(env)
+    code = _start(core_, repo, brief, read_only=True)
     out, err = capsys.readouterr()
     assert code == 0
     run = record.load(_run_id(out), env)
-    assert f"WARNING: read-only run {run.id} changed README.md\n" in err
-    assert f"WARNING: read-only run {run.id} changed new.txt\n" in err
-    assert run.last_reason == "changed README.md, new.txt"
+    assert f"WARNING: read-only run {run.id} changed {run.worktree}/README.md\n" in err
+    assert f"WARNING: read-only run {run.id} changed {run.worktree}/new.txt\n" in err
+    assert (
+        run.last_reason == f"changed {run.worktree}/README.md, {run.worktree}/new.txt"
+    )
+    assert (repo / "README.md").read_text() == "hello\n"
     assert git(repo, "log", "--format=%s", env=env) == "first"
+    assert run.branch is None and run.commits == ()
+    assert core_.close(run.id) == 0
+    assert Path(run.worktree, "README.md").read_text() == "changed\n"
+    assert Path(run.worktree, "new.txt").read_text() == "n\n"
+    assert f"git worktree remove --force {run.worktree}" in capsys.readouterr().err
+
+
+def test_read_only_run_can_build_ignored_files_without_changes_or_commits(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (repo / ".gitignore").write_text(".venv/\nbuild/\n")
+    git(repo, "add", ".gitignore", env=env)
+    git(repo, "commit", "-q", "-m", "build ignores", env=env)
+    base = git(repo, "rev-parse", "HEAD", env=env)
+    core_ = _core(env)
+    brief = _brief(
+        tmp_path, "Review\n@write .venv/pyvenv.cfg test\n@write build/result test\n"
+    )
+    assert _start(core_, repo, brief, read_only=True) == 0
+    out, err = capsys.readouterr()
+    saved = record.load(_run_id(out), env)
+    assert saved.read_only and saved.detached
+    assert saved.branch is None and saved.commits == ()
+    assert saved.turn_state == record.COLLECTED and saved.last_reason is None
+    assert git(Path(saved.worktree), "rev-parse", "HEAD", env=env) == base
+    assert git(repo, "rev-parse", "HEAD", env=env) == base
+    assert Path(saved.worktree, ".venv/pyvenv.cfg").read_text() == "test\n"
+    assert not (repo / ".venv").exists() and not (repo / "build").exists()
+    assert f"read-only run {saved.id} changed" not in err
+    assert core_.close(saved.id) == 0
+    assert not Path(saved.worktree).exists()
+    assert not capsys.readouterr().err
 
 
 # Turn failures
@@ -364,6 +710,10 @@ def test_stall_leaves_the_session_running_and_recover_collects(
     assert run.status == record.RUNNING
     assert run.turn_state == record.SENT
     assert run.last_exit == 124
+    unfinished = record.load_outcome(run, 1)
+    assert unfinished["exit"] is None
+    assert unfinished["state"] is None
+    assert unfinished["seconds"] > 0
     (run.folder / "stub" / "release").write_text("")
     code = _core(env).execute(lambda: _core(env).recover(run_id))
     out, err = capsys.readouterr()
@@ -373,6 +723,9 @@ def test_stall_leaves_the_session_running_and_recover_collects(
     assert run.status == record.WAITING
     assert run.turn_state == record.COMMITTED
     assert len(run.commits) == 1
+    completed = record.load_outcome(run, 1)
+    assert completed["exit"] == 0
+    assert completed["seconds"] >= unfinished["seconds"]
 
 
 def test_screen_changes_keep_a_turn_waiting(
@@ -412,6 +765,10 @@ def test_turn_outcomes(
     run = record.load(_run_id(out), env)
     assert run.status == state
     assert run.last_exit == code
+    outcome = record.load_outcome(run, 1)
+    assert outcome["exit"] == code
+    assert outcome["seconds"] >= 0
+    assert outcome["incomplete"] == reason
     assert f" · exit {code} · 1 files · turn 1" in out
     assert len(run.commits) == 1
     assert err.splitlines()[-1] == exits.line(code, run=run.id)
@@ -434,11 +791,13 @@ def test_incomplete_later_turn_and_long_subject(
     assert subject == "y" * 72 + " (turn 2, incomplete: engine failure)"
 
 
+@pytest.mark.parametrize("legacy", [False, True])
 def test_recover_commits_a_collected_failed_turn_with_its_reason(
     tmp_path: Path,
     env: dict[str, str],
     repo: Path,
     capsys: pytest.CaptureFixture[str],
+    legacy: bool,
 ) -> None:
     hook = repo / ".git" / "hooks" / "pre-commit"
     hook.write_text("#!/bin/sh\nexit 1\n")
@@ -452,6 +811,12 @@ def test_recover_commits_a_collected_failed_turn_with_its_reason(
     run = record.load(run_id, env)
     assert run.turn_state == record.COLLECTED
     assert run.commits == ()
+    saved = record.load_outcome(run, 1)
+    assert saved["exit"] == 73
+    if legacy:
+        del saved["exit"]
+        del saved["seconds"]
+        record.outcome_path(run, 1).write_text(json.dumps(saved))
     hook.unlink()
     core_ = _core(env)
     assert core_.execute(lambda: core_.recover(run_id)) == 73
@@ -459,6 +824,10 @@ def test_recover_commits_a_collected_failed_turn_with_its_reason(
     assert run.turn_state == record.COMMITTED
     subject = git(Path(run.worktree), "log", "-1", "--format=%s", env=env)
     assert subject == "Task (turn 1, incomplete: provider error)"
+    result = record.load_outcome(run, 1)
+    assert result["exit"] == 73
+    assert result["provider_error"] is True
+    assert result["seconds"] >= saved.get("seconds", 0)
 
 
 def test_signed_out_turn_refreshes_status_and_exits_69(
@@ -560,21 +929,27 @@ def test_hook_refusal_is_77(
 
 
 @pytest.mark.parametrize("retry_succeeds", [False, True])
+@pytest.mark.parametrize("provider_error", [False, True])
 def test_send_after_hook_refusal_commits_the_fixed_files(
     tmp_path: Path,
     env: dict[str, str],
     repo: Path,
     capsys: pytest.CaptureFixture[str],
     retry_succeeds: bool,
+    provider_error: bool,
 ) -> None:
     hook = repo / ".git" / "hooks" / "pre-commit"
     hook.write_text("#!/bin/sh\nprintf 'first stdout\\n'\nexit 1\n")
     hook.chmod(0o755)
     driver = _driver(env)
     core_ = _core(env, driver)
-    assert _start(core_, repo, _brief(tmp_path, "Task\n@write y.txt y\n")) == 77
+    failure = "@provider rate limited\n" if provider_error else ""
+    assert _start(
+        core_, repo, _brief(tmp_path, f"Task\n@write y.txt y\n{failure}")
+    ) == (73 if provider_error else 77)
     run_id = _run_id(capsys.readouterr().out)
     run = record.load(run_id, env)
+    previous_seconds = record.load_outcome(run, 1)["seconds"]
     refusal = run.folder / core.HOOK_REFUSAL_NAME
     assert refusal.read_text() == "first stdout\n"
     assert stat.S_IMODE(refusal.stat().st_mode) == 0o600
@@ -611,6 +986,10 @@ def test_send_after_hook_refusal_commits_the_fixed_files(
             "next.txt\ny.txt"
         )
     assert run.turn_state == record.COMMITTED
+    first = record.load_outcome(run, 1)
+    assert first["exit"] == (73 if provider_error else (0 if retry_succeeds else 77))
+    assert first["provider_error"] is provider_error
+    assert first["seconds"] >= previous_seconds
     assert not refusal.exists()
     assert (
         git(Path(run.worktree), "log", "-1", "--format=%s", env=env) == "Task (turn 2)"
@@ -704,6 +1083,203 @@ def test_ctrl_c_while_committing_is_74_and_recover_finishes(
     assert len(run.commits) == 1
 
 
+def test_recovery_accumulates_seconds_for_one_result(
+    tmp_path: Path,
+    env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _bare_run(env, tmp_path, "claude", "none")
+    run = replace(
+        run,
+        folder=record.make_run_dir(run.id, env),
+        turn=1,
+        turn_state=record.SENT,
+        status=record.RUNNING,
+    )
+    record.save(run)
+    clock = [10.0]
+    monkeypatch.setattr(core.time, "monotonic", lambda: clock[0])
+    core_ = _core(env)
+
+    def ended(run: record.Run, driver: Driver) -> engines.TurnOutcome:
+        clock[0] = 13.0
+        return engines.TurnOutcome(engines.DONE, reply="done")
+
+    def interrupted(run: record.Run) -> object:
+        saved = record.load_outcome(run, run.turn)
+        assert saved["exit"] is None
+        assert saved["seconds"] == 3.0
+        clock[0] = 15.0
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(core_, "_wait_turn", ended)
+    monkeypatch.setattr(core_, "_commit", interrupted)
+    assert core_.execute(lambda: core_._turn(run, _driver(env), 10.0, None)) == 74
+    saved = record.load_outcome(run, 1)
+    assert saved["exit"] is None
+    assert saved["seconds"] == 5.0
+    assert saved["state"] == engines.DONE
+
+    def committed(
+        run: record.Run,
+    ) -> tuple[record.Run, None, int, int, None, None]:
+        clock[0] = 24.0
+        run = record.update(run, {"turn_state": record.COMMITTED})
+        return run, None, 0, 0, None, None
+
+    clock[0] = 20.0
+    monkeypatch.setattr(core_, "_commit", committed)
+    assert core_.execute(lambda: core_.recover(run.id)) == 0
+    turns, errors = record.turn_results(run)
+    assert not errors
+    assert turns == [{"turn": 1, **saved, "exit": 0, "seconds": 9.0}]
+    assert " · 9s · exit 0" in capsys.readouterr().out
+    assert stat.S_IMODE(record.outcome_path(run, 1).stat().st_mode) == 0o600
+
+
+def test_turn_lock_releases_with_a_duplicate_descriptor(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = paths.open_private_file
+    duplicates: list[int] = []
+
+    def duplicate(path: Path, flags: int = os.O_RDWR) -> int:
+        fd = original(path, flags)
+        if not duplicates:
+            duplicates.append(os.dup(fd))
+        return fd
+
+    monkeypatch.setattr(paths, "open_private_file", duplicate)
+    core_ = _core(env)
+    try:
+        with (
+            core_._turn_lock("claude-test-000000"),
+            pytest.raises(RunError, match="another emb run command"),
+            core_._turn_lock("claude-test-000000"),
+        ):
+            pytest.fail("the turn lock was not held")
+        with core_._turn_lock("claude-test-000000"):
+            pass
+    finally:
+        for fd in duplicates:
+            os.close(fd)
+
+
+@pytest.mark.parametrize("operation", ["start", "add", "remove"])
+def test_worktree_operations_wait_for_other_registrations(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    core_ = _core(env)
+    common = repo / ".git"
+    saved = replace(
+        _bare_run(env, tmp_path, "claude", "none"),
+        common=str(common),
+        worktree=str(paths.worktree_path("worker", env)),
+        read_only=True,
+        detached=True,
+        base=git(repo, "rev-parse", "HEAD", env=env),
+        status=record.CLOSED,
+        folder=record.make_run_dir("claude-20260101-000000-abcdef", env),
+    )
+    record.save(saved)
+    waiting = threading.Event()
+    entered = threading.Event()
+    flock = core.fcntl.flock
+    run_git = core_._git
+
+    def observe_lock(fd: int, flags: int) -> None:
+        if flags == core.fcntl.LOCK_EX:
+            waiting.set()
+        flock(fd, flags)
+
+    def observe_git(
+        directory: str | Path, *args: str
+    ) -> subprocess.CompletedProcess[str]:
+        if args[0] == "worktree":
+            entered.set()
+        return run_git(directory, *args)
+
+    def remove(run: record.Run) -> bool:
+        entered.set()
+        return True
+
+    def work() -> None:
+        if operation == "start":
+            core_.start(
+                StartOptions("claude", dir=str(repo), task_file=brief, window=False)
+            )
+        elif operation == "add":
+            core_._create_worktree(saved, repo)
+        else:
+            core_._remove_detached(saved)
+
+    brief = _brief(tmp_path, "Task\n")
+    monkeypatch.setattr(core_, "_git", observe_git)
+    monkeypatch.setattr(core.worktrees, "remove_detached", remove)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with core_._worktree_lock(common):
+            monkeypatch.setattr(core.fcntl, "flock", observe_lock)
+            future = executor.submit(work)
+            assert waiting.wait(20), "the operation did not wait for registration"
+            assert not entered.is_set(), "the operation saw an unfinished registration"
+        future.result(20)
+    assert entered.is_set()
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize("completion", ["recover", "send"])
+def test_recovery_completes_result_after_commit_handling(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    read_only: bool,
+    completion: str,
+) -> None:
+    core_ = _core(env)
+    original = core_._record_exit
+    stopped = False
+
+    def stop_once(
+        run: record.Run, code: int, message: str | None, **changes: object
+    ) -> record.Run:
+        nonlocal stopped
+        if code == 0 and not stopped:
+            stopped = True
+            raise KeyboardInterrupt
+        return original(run, code, message, **changes)
+
+    monkeypatch.setattr(core_, "_record_exit", stop_once)
+    assert (
+        _start(
+            core_, repo, _brief(tmp_path, "Task\n@reply done\n"), read_only=read_only
+        )
+        == 74
+    )
+    run_id = _run_id(capsys.readouterr().out)
+    run = record.load(run_id, env)
+    assert run.turn_state == (record.COLLECTED if read_only else record.COMMITTED)
+    before = record.load_outcome(run, 1)
+    assert before["exit"] is None
+    if completion == "send":
+        message = _brief(tmp_path, "@reply next\n", "next.md")
+        assert core_.execute(lambda: core_.send(run_id, message)) == 0
+    else:
+        assert core_.execute(lambda: core_.recover(run_id)) == 0
+    after = record.load_outcome(run, 1)
+    assert after["exit"] == 0
+    assert after["seconds"] >= before["seconds"]
+    turns, errors = record.turn_results(record.load(run_id, env))
+    assert not errors
+    assert [turn["turn"] for turn in turns] == ([1, 2] if completion == "send" else [1])
+
+
 def test_driver_error_after_forced_close_is_72(
     tmp_path: Path,
     env: dict[str, str],
@@ -751,29 +1327,65 @@ def test_close_while_waiting_stops_the_waiting_command_with_72(
 # Start refusals
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
 def test_missing_files_are_66(
-    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    dry_run: bool,
 ) -> None:
-    assert _start(_core(env), repo, str(tmp_path / "none.md")) == 66
+    assert _start(_core(env), repo, str(tmp_path / "none.md"), dry_run=dry_run) == 66
     brief = _brief(tmp_path, "Task\n")
-    assert _start(_core(env), repo, brief, read=(str(tmp_path / "gone"),)) == 66
-    assert _start(_core(env), tmp_path / "nowhere", brief) == 66
+    assert (
+        _start(_core(env), repo, brief, read=(str(tmp_path / "gone"),), dry_run=dry_run)
+        == 66
+    )
+    assert _start(_core(env), tmp_path / "nowhere", brief, dry_run=dry_run) == 66
     err = capsys.readouterr().err
     assert "does not exist" in err
     assert not paths.runs_dir(env).exists()
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
 def test_not_a_checkout_is_65(
-    tmp_path: Path, env: dict[str, str], capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    dry_run: bool,
 ) -> None:
     folder = tmp_path / "plain"
     folder.mkdir()
-    assert _start(_core(env), folder, _brief(tmp_path, "Task\n")) == 65
+    assert _start(_core(env), folder, _brief(tmp_path, "Task\n"), dry_run=dry_run) == 65
     assert "not in a git checkout" in capsys.readouterr().err
 
 
-def test_empty_brief_is_64(tmp_path: Path, env: dict[str, str], repo: Path) -> None:
-    assert _start(_core(env), repo, _brief(tmp_path, "\n  \n")) == 64
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_empty_brief_is_64(
+    tmp_path: Path, env: dict[str, str], repo: Path, dry_run: bool
+) -> None:
+    assert _start(_core(env), repo, _brief(tmp_path, "\n  \n"), dry_run=dry_run) == 64
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("trailer", ["", "\n", "Co-Authored-By: X\nOther: Y"])
+def test_invalid_trailer_is_64(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    dry_run: bool,
+    trailer: str,
+) -> None:
+    assert (
+        _start(
+            _core(env), repo, _brief(tmp_path, "Task\n"),
+            trailers=(trailer,), dry_run=dry_run,
+        )
+        == 64
+    )  # fmt: skip
+    assert "is not one line" in capsys.readouterr().err
+    assert not paths.runs_dir(env).exists()
 
 
 @pytest.mark.parametrize(
@@ -788,6 +1400,7 @@ def test_empty_brief_is_64(tmp_path: Path, env: dict[str, str], repo: Path) -> N
         ({}, {"claim": "../bad"}, "is not a valid id"),
     ],
 )
+@pytest.mark.parametrize("dry_run", [False, True])
 def test_selection_refusals_are_64(
     tmp_path: Path,
     env: dict[str, str],
@@ -796,10 +1409,14 @@ def test_selection_refusals_are_64(
     settings: dict[str, object],
     options: dict[str, object],
     needle: str,
+    dry_run: bool,
 ) -> None:
     if settings:
         choices.set_settings(settings, env=env)
-    assert _start(_core(env), repo, _brief(tmp_path, "Task\n"), **options) == 64
+    assert (
+        _start(_core(env), repo, _brief(tmp_path, "Task\n"), dry_run=dry_run, **options)
+        == 64
+    )
     assert needle in capsys.readouterr().err
     assert not paths.runs_dir(env).exists()
 
@@ -822,6 +1439,18 @@ def test_claimed_choice_selects_the_model(
     choices.set_settings({"shortlist.claude": ["opus@high", "haiku@low"]}, env=env)
     choices.set_once({"single.writer": "claude:haiku"}, env=env)
     choices.claim("run-claim-1", env=env)
+    before = choices.read("run-claim-1", env=env)
+    assert (
+        _start(
+            _core(env), repo, _brief(tmp_path, "Task\n"),
+            claim="run-claim-1", dry_run=True,
+        )
+        == 0
+    )  # fmt: skip
+    assert capsys.readouterr().out == (
+        "Team, Single tasks Writer: claude haiku · low (single.writer)\n"
+    )
+    assert choices.read("run-claim-1", env=env) == before
     code = _start(_core(env), repo, _brief(tmp_path, "Task\n"), claim="run-claim-1")
     out, _ = capsys.readouterr()
     assert code == 0
@@ -954,16 +1583,49 @@ def test_settings_database_error_is_1(
     assert err.splitlines()[-1].startswith("owner: ")
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
 def test_repository_without_main_checkout_is_70(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    dry_run: bool,
+) -> None:
+    bare = tmp_path / "bare.git"
+    git(tmp_path, "clone", "-q", "--bare", str(repo), str(bare), env=env)
+    linked = tmp_path / "linked"
+    git(bare, "worktree", "add", "-q", str(linked), "main", env=env)
+    assert _start(_core(env), linked, _brief(tmp_path, "Task\n"), dry_run=dry_run) == 70
+    assert "has no main checkout" in capsys.readouterr().err
+    assert not paths.runs_dir(env).exists()
+
+
+def test_read_only_run_from_bare_backed_checkout(
     tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     bare = tmp_path / "bare.git"
     git(tmp_path, "clone", "-q", "--bare", str(repo), str(bare), env=env)
     linked = tmp_path / "linked"
     git(bare, "worktree", "add", "-q", str(linked), "main", env=env)
-    assert _start(_core(env), linked, _brief(tmp_path, "Task\n")) == 70
-    assert "has no main checkout" in capsys.readouterr().err
-    assert not paths.runs_dir(env).exists()
+    assert (
+        _start(
+            _core(env),
+            linked,
+            _brief(tmp_path, "Review\n@reply fine\n"),
+            read_only=True,
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    run = record.load(_run_id(captured.out), env)
+    assert run.status == record.WAITING
+    assert run.read_only and run.branch is None
+    assert run.repo == str(linked)
+    assert run.worktree == str(paths.worktree_path(run.id, env))
+    assert run.detached
+    assert run.main is None
+    assert run.common == str(bare)
+    assert (run.folder / "turn-1.md").read_text() == "fine"
 
 
 def test_run_from_linked_worktree_uses_main_checkout(
@@ -976,7 +1638,8 @@ def test_run_from_linked_worktree_uses_main_checkout(
     assert code == 0, err
     run = record.load(_run_id(out), env)
     assert run.repo == str(linked)
-    assert run.worktree == str(repo / ".ember" / "worktrees" / run.id)
+    assert run.worktree == str(paths.worktree_path(run.id, env))
+    assert not Path(run.worktree).is_relative_to(repo)
 
 
 def test_tmux_missing_is_69(
@@ -1105,6 +1768,73 @@ def test_claude_run_records_its_sandbox_network_and_read_paths(
     assert run.read_effective == (str(shared), str(extra))
 
 
+def test_session_runs_the_command_from_a_launch_script(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = _start(_core(env), repo, _brief(tmp_path, "Task\n"))
+    out, err = capsys.readouterr()
+    assert code == 0, err
+    run = record.load(_run_id(out), env)
+    launch = run.folder / core.LAUNCH_NAME
+    assert stat.S_IMODE(launch.stat().st_mode) == 0o600
+    text = launch.read_text()
+    assert text.startswith("exec ")
+    assert str(script_path(env)) in text
+
+
+def test_sandboxed_run_creates_the_workers_cache(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sandbox, "require", lambda engine, env=None: None)
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    code = _start(_core(env), repo, _brief(tmp_path, "Task\n"))
+    assert code == 0, capsys.readouterr().err
+    folder = paths.worker_cache_dir(env)
+    assert folder.is_dir()
+    assert stat.S_IMODE(folder.stat().st_mode) == 0o700
+
+
+def test_sandboxed_run_whose_workers_cache_cannot_be_made_is_69(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sandbox, "require", lambda engine, env=None: None)
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    folder = paths.worker_cache_dir(env)
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    folder.write_text("")
+    code = _start(_core(env), repo, _brief(tmp_path, "Task\n"))
+    assert code == 69
+    err = capsys.readouterr().err
+    assert f"cannot create the workers' cache folder {folder}" in err
+    assert err.splitlines()[-1] == (
+        f"owner: make {folder} a folder you can write, or set XDG_CACHE_HOME"
+    )
+    assert not paths.runs_dir(env).exists()
+
+
+def test_sandboxed_workers_cache_inside_embers_config_folder_is_69(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env["XDG_CACHE_HOME"] = env["XDG_CONFIG_HOME"]
+    engine_cache(env, {})
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    code = _start(_core(env), repo, _brief(tmp_path, "Task\n"))
+    assert code == 69
+    err = capsys.readouterr().err
+    assert err.splitlines()[-1] == (
+        f"owner: set XDG_CACHE_HOME so that {paths.worker_cache_dir(env)} is "
+        f"outside {paths.config_dir(env)}, or set sandbox.claude to off"
+    )
+
+
 def test_codex_sandbox_conflict_is_69(
     tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1120,6 +1850,79 @@ def test_codex_sandbox_conflict_is_69(
     assert str(repo / ".codex" / "config.toml") in err
     assert err.splitlines()[-1].startswith("owner: remove the sandbox_mode key from ")
     assert not paths.runs_dir(env).exists()
+
+
+@pytest.mark.parametrize("inside", ["checkout", "linked"])
+def test_worktree_folder_inside_the_repository_is_69(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    inside: str,
+) -> None:
+    linked = tmp_path / "linked"
+    git(repo, "worktree", "add", "-q", "-b", "side", str(linked), env=env)
+    folder = repo if inside == "checkout" else linked
+    env["XDG_DATA_HOME"] = str(folder / "data")
+    code = _start(_core(env), repo, _brief(tmp_path, "Task\n"))
+    assert code == 69
+    err = capsys.readouterr().err
+    worktrees = folder / "data" / "ember" / "worktrees"
+    assert (
+        f"the worktree folder {worktrees} is inside the repository folder {folder}; "
+        "XDG_DATA_HOME places it there"
+    ) in err
+    assert err.splitlines()[-1] == (
+        f"owner: set XDG_DATA_HOME so that {worktrees} is outside every git checkout"
+    )
+    assert not paths.runs_dir(env).exists()
+    assert not (folder / "data").exists()
+    assert git(repo, "branch", "--list", "ember/*", env=env) == ""
+
+
+def test_sandboxed_read_path_inside_embers_folder_is_69(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inside = paths.config_dir(env) / "notes"
+    inside.mkdir(parents=True)
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    code = _start(_core(env), repo, _brief(tmp_path, "Task\n"), read=(str(inside),))
+    assert code == 69
+    err = capsys.readouterr().err
+    assert (
+        f"the claude sandbox cannot start: the kept path {inside} is inside "
+        f"{paths.config_dir(env)}, which the sandbox hides from every worker"
+    ) in err
+    assert err.splitlines()[-1] == (
+        f"owner: leave {inside} out of sandbox.read and --read, "
+        "or set sandbox.claude to off"
+    )
+    assert not paths.runs_dir(env).exists()
+
+
+def test_sandboxed_worktree_inside_embers_state_folder_is_69(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env["XDG_DATA_HOME"] = env["XDG_STATE_HOME"]
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    code = _start(_core(env), repo, _brief(tmp_path, "Task\n"))
+    assert code == 69
+    err = capsys.readouterr().err
+    assert f"is inside {paths.state_dir(env)}, which the sandbox hides" in err
+    assert err.splitlines()[-1] == (
+        f"owner: set XDG_DATA_HOME so that {paths.worktrees_dir(env)} is outside "
+        f"{paths.state_dir(env)}, or set sandbox.claude to off"
+    )
+    assert not paths.runs_dir(env).exists()
+
+
+def test_unsandboxed_read_path_inside_embers_folder_starts(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    inside = paths.config_dir(env) / "notes"
+    inside.mkdir(parents=True)
+    code = _start(_core(env), repo, _brief(tmp_path, "Task\n"), read=(str(inside),))
+    assert code == 0, capsys.readouterr().err
 
 
 def test_codex_sandbox_conflict_in_the_new_worktree_is_69(
@@ -1203,6 +2006,56 @@ def test_codex_command_gets_the_permission_profile(
     assert any("default_permissions" in arg for arg in wrapped.argv)
     assert "permissions.ember.network.enabled=true" in wrapped.argv
     assert "PATH" not in wrapped.env
+
+
+@pytest.mark.parametrize("engine", ["codex", "opencode"])
+@pytest.mark.parametrize(
+    ("read_only", "detached"), [(False, False), (True, False), (True, True)]
+)
+def test_sandbox_permissions_allow_detached_review_builds(
+    tmp_path: Path,
+    env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    engine: str,
+    read_only: bool,
+    detached: bool,
+) -> None:
+    worktree = tmp_path / "wt"
+    env["TMPDIR"] = str(tmp_path / "owner-tmp")
+    worktree.mkdir()
+    common = tmp_path / ".git"
+    common.mkdir()
+    monkeypatch.setattr(sandbox, "codex_bwrap", lambda binary, env=None: ("b", None))
+    saved = replace(
+        _bare_run(
+            env, tmp_path, engine, "codex" if engine == "codex" else "bubblewrap"
+        ),
+        read_only=read_only,
+        detached=detached,
+    )
+    spec = LaunchSpec(argv=(engine,), cwd=worktree)
+    wrapped = _core(env)._sandboxed(spec, saved, common)
+    assert "TMPDIR" not in wrapped.env
+    writable = detached or not read_only
+    if engine == "codex":
+        config = tomllib.loads(
+            "\n".join(
+                wrapped.argv[i + 1] for i, arg in enumerate(wrapped.argv) if arg == "-c"
+            )
+        )
+        profile = config["permissions"]["ember"]
+        assert profile["extends"] == (":workspace" if writable else ":read-only")
+        assert profile["filesystem"][str(worktree)] == ("write" if writable else "read")
+        assert profile["filesystem"][str(common)] == "read"
+        assert profile["filesystem"]["/tmp"] == "write"
+        assert "TMPDIR" not in config["shell_environment_policy"]["set"]
+        assert profile["filesystem"][str(worktree / ".git")] == "read"
+    else:
+        mounts = list(
+            zip(wrapped.argv, wrapped.argv[1:], wrapped.argv[2:], strict=False)
+        )
+        assert (("--bind", str(worktree), str(worktree)) in mounts) is writable
+        assert ("--ro-bind", str(common), str(common)) in mounts
 
 
 def test_codex_without_a_system_bwrap_uses_the_bundled_one(
@@ -1689,6 +2542,9 @@ def test_status_one_and_all(
     assert one["id"] == run_id
     assert one["session_state"] == "live"
     assert one["status"] == "waiting"
+    assert len(one["turns"]) == 1
+    assert one["turns"][0]["turn"] == 1
+    assert one["turns"][0]["exit"] == 0
     broken = paths.runs_dir(env) / "claude-broken-000000"
     broken.mkdir()
     (broken / "run.json").write_text("{")
@@ -1697,10 +2553,120 @@ def test_status_one_and_all(
     out, err = capsys.readouterr()
     listing = json.loads(out)
     assert [item["id"] for item in listing] == [run_id]
+    assert listing[0]["turns"] == one["turns"]
     assert "skipped claude-broken-000000: run.json is not valid JSON" in err
     _core(env).close(run_id, force=True)
     capsys.readouterr()
     assert _status(env, run_id, capsys)["session_state"] == "missing"
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_status_keeps_failed_turn_before_success(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    read_only: bool,
+) -> None:
+    core_ = _core(env)
+    assert (
+        _start(
+            core_,
+            repo,
+            _brief(tmp_path, "Task\n@provider rate limited\n"),
+            read_only=read_only,
+        )
+        == 73
+    )
+    run_id = _run_id(capsys.readouterr().out)
+    message = _brief(tmp_path, "@reply done\n", "next.md")
+    assert core_.execute(lambda: core_.send(run_id, message)) == 0
+    capsys.readouterr()
+    result = _status(env, run_id, capsys)
+    assert result["last_exit"] == 0
+    first, second = result["turns"]
+    assert first == {
+        "turn": 1,
+        "exit": 73,
+        "state": "failed",
+        "reason": "rate limited",
+        "provider_kind": "outage",
+        "attempts": first["attempts"],
+        "provider_error": True,
+        "signed_out": False,
+        "incomplete": "provider error",
+        "seconds": first["seconds"],
+        "denied_paths": [],
+    }
+    assert second == {
+        "turn": 2,
+        "exit": 0,
+        "provider_kind": None,
+        "attempts": second["attempts"],
+        "state": "done",
+        "reason": None,
+        "provider_error": False,
+        "signed_out": False,
+        "incomplete": None,
+        "seconds": second["seconds"],
+        "denied_paths": [],
+    }
+    assert first["seconds"] > 0
+    assert second["seconds"] > 0
+    assert _status(env, None, capsys)[0]["turns"] == result["turns"]
+
+
+@pytest.mark.parametrize("all_runs", [False, True])
+@pytest.mark.parametrize("broken", [None, b"{", b"\xff", b"[]"])
+def test_status_warns_about_broken_outcome(
+    tmp_path: Path,
+    env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    all_runs: bool,
+    broken: bytes | None,
+) -> None:
+    run = _bare_run(env, tmp_path, "claude", "none")
+    run = replace(run, folder=record.make_run_dir(run.id, env), turn=3)
+    record.save(run)
+    good = {
+        "state": "done",
+        "reason": None,
+        "provider_error": False,
+        "signed_out": False,
+        "incomplete": None,
+    }
+    for turn in (1, 3):
+        record.outcome_path(run, turn).write_text(json.dumps(good))
+    path = record.outcome_path(run, 2)
+    if broken is not None:
+        path.write_bytes(broken)
+    core_ = _core(env)
+    assert (
+        core_.execute(lambda: core_.status(None if all_runs else run.id, as_json=True))
+        == 0
+    )
+    out, err = capsys.readouterr()
+    result = json.loads(out)
+    if all_runs:
+        result = result[0]
+    assert result["turns"] == [
+        {"turn": 1, "exit": None, **good, "seconds": None, "denied_paths": []},
+        {"turn": 2, **dict.fromkeys(("exit", "seconds", "denied_paths", *good))},
+        {"turn": 3, "exit": None, **good, "seconds": None, "denied_paths": []},
+    ]
+    assert len(err.splitlines()) == 1
+    assert err.startswith("WARNING: ")
+    assert str(path) in err
+
+
+def test_status_every_run_includes_empty_turns(
+    tmp_path: Path, env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _status(env, None, capsys) == []
+    for engine in ("claude", "codex"):
+        run = _bare_run(env, tmp_path, engine, "none")
+        record.save(replace(run, folder=record.make_run_dir(run.id, env)))
+    assert [run["turns"] for run in _status(env, None, capsys)] == [[], []]
 
 
 def test_status_text(
@@ -1742,3 +2708,979 @@ def test_subject_helpers() -> None:
     assert core.first_message("r", "brief") == (
         "Brief from Claude, the lead, for Ember run r.\n\nbrief"
     )
+
+
+def test_read_only_tree_ignores_source_edits_during_turn(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def edit_source(run: record.Run) -> None:
+        (repo / "README.md").write_text("lead edit\n")
+        (repo / "lead.txt").write_text("lead work\n")
+        assert Path(run.worktree, "README.md").read_text() == "hello\n"
+        assert not Path(run.worktree, "lead.txt").exists()
+
+    driver = _driver(env, on_wait=edit_source)
+    assert (
+        _start(
+            _core(env, driver),
+            repo,
+            _brief(tmp_path, "Review\n@reply fine\n"),
+            read_only=True,
+        )
+        == 0
+    )
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert run.last_reason is None
+    assert f"read-only run {run.id} changed" not in err
+    assert (repo / "README.md").read_text() == "lead edit\n"
+
+
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("dirty", [False, True])
+def test_close_detached_worktree(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    force: bool,
+    dirty: bool,
+) -> None:
+    core_ = _core(env)
+    assert _start(core_, repo, _brief(tmp_path, "Review\n"), read_only=True) == 0
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    worktree = Path(run.worktree)
+    if dirty:
+        (worktree / "keep.txt").write_text("worker evidence\n")
+    assert core_.execute(lambda: core_.close(run.id, force=force)) == 0
+    out, err = capsys.readouterr()
+    assert out == f"closed {run.id}\n"
+    assert record.load(run.id, env).status == record.CLOSED
+    assert record.load(run.id, env).worktree == str(worktree)
+    assert worktree.exists() == dirty
+    listing = git(repo, "worktree", "list", "--porcelain", env=env)
+    assert (str(worktree) in listing) == dirty
+    if dirty:
+        assert (worktree / "keep.txt").read_text() == "worker evidence\n"
+        assert f"git worktree remove --force {worktree}" in err
+    else:
+        assert not err
+    assert core_.execute(lambda: core_.close(run.id, force=True)) == 0
+    assert worktree.exists() == dirty
+
+
+def test_close_legacy_read_only_run_keeps_source_checkout(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    core_ = _core(env)
+    assert _start(core_, repo, _brief(tmp_path, "Review\n"), read_only=True) == 0
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    document = run.to_json()
+    document.pop("detached")
+    document["worktree"] = str(repo)
+    (run.folder / record.RECORD_NAME).write_text(json.dumps(document))
+    assert core_.execute(lambda: core_.close(run.id)) == 0
+    assert (repo / "README.md").read_text() == "hello\n"
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_read_only_start_without_commit_is_70(
+    tmp_path: Path,
+    env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    dry_run: bool,
+) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    git(empty, "init", "-q", env=env)
+    assert (
+        _start(
+            _core(env), empty, _brief(tmp_path, "Review\n"),
+            read_only=True, dry_run=dry_run,
+        )
+        == 70
+    )  # fmt: skip
+    assert "has no commit to start from" in capsys.readouterr().err
+    assert not paths.runs_dir(env).exists()
+
+
+def test_close_keeps_a_commit_made_in_a_detached_worktree(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    core_ = _core(env)
+    assert _start(core_, repo, _brief(tmp_path, "Review\n"), read_only=True) == 0
+    saved = record.load(_run_id(capsys.readouterr().out), env)
+    folder = Path(saved.worktree)
+    git(folder, "commit", "-q", "--allow-empty", "-m", "worker evidence", env=env)
+    assert core_.close(saved.id, force=True) == 0
+    assert folder.exists()
+    assert git(folder, "log", "-1", "--format=%s", env=env) == "worker evidence"
+    assert f"git worktree remove --force {folder}" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("waiting_ready", [False, True])
+def test_wait_loops_persist_screen_changes_only(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    waiting_ready: bool,
+) -> None:
+    core_ = _core(env)
+    assert _start(core_, repo, _brief(tmp_path, "Task\n@reply done\n")) == 0
+    run_id = _run_id(capsys.readouterr().out)
+    saved = record.update(record.load(run_id, env), {"last_screen_change_at": None})
+    screens = [None, "first screen", "first screen", "changed screen"]
+    expected = [None, None, 101.0, 101.0]
+    index = 0
+    now = 100.0
+
+    class ObservedDriver(StubDriver):
+        def ready(self, run: record.Run) -> bool:
+            return index == len(screens)
+
+        def wait(self, run: record.Run) -> engines.TurnOutcome:
+            return engines.TurnOutcome(
+                engines.DONE if index == len(screens) else engines.RUNNING
+            )
+
+    def capture(run_id: str, previous: str | None) -> str | None:
+        nonlocal index, now
+        assert record.load(run_id, env).last_screen_change_at == expected[index]
+        now = 100.0 + index
+        screen = screens[index]
+        index += 1
+        return screen
+
+    monkeypatch.setattr(core_, "_screen_text", capture)
+    monkeypatch.setattr(core_, "_session_state", lambda run_id: core.LIVE)
+    monkeypatch.setattr(core.time, "time", lambda: now)
+    monkeypatch.setattr(core.time, "sleep", lambda seconds: None)
+    driver = ObservedDriver("claude", script_path(env))
+    if waiting_ready:
+        core_._wait_ready(saved, driver)
+    else:
+        assert core_._wait_turn(saved, driver).state == engines.DONE
+    latest = record.load(run_id, env)
+    assert latest.last_screen_change_at == 103.0
+    assert latest.status == saved.status
+    assert latest.turn_state == saved.turn_state
+
+
+class _RetryClock:
+    def __init__(self, driver: _ProviderDriver) -> None:
+        self.driver = driver
+        self.elapsed = 0.0
+        self.on_sleep: Callable[[], None] | None = None
+
+    def time(self) -> float:
+        return time.time() + self.elapsed
+
+    def monotonic(self) -> float:
+        return time.monotonic() + self.elapsed
+
+    def sleep(self, seconds: float) -> None:
+        if not self.driver.messages:
+            time.sleep(seconds)
+            return
+        if self.on_sleep is not None:
+            self.on_sleep()
+        self.elapsed += seconds
+
+
+class _ProviderDriver(StubDriver):
+    def __init__(self, env: dict[str, str], kinds: list[str | None]) -> None:
+        super().__init__("codex", script_path(env))
+        self.kinds = kinds
+        self.messages: list[tuple[record.Run, str]] = []
+        self.on_send: Callable[[], None] | None = None
+        self.on_observe: Callable[[], None] | None = None
+
+    def send(self, run: record.Run, text: str) -> None:
+        if self.messages:
+            saved = record.load_outcome(run, run.turn)
+            assert len(saved["attempts"]) == len(self.messages) + 1
+            pending = saved["attempts"][-1]
+            assert pending["id"] and pending["sending"] and not pending["sent"]
+            if self.on_send is not None:
+                self.on_send()
+        self.messages.append((run, text))
+
+    def wait(self, run: record.Run) -> engines.TurnOutcome:
+        if self.on_observe is not None:
+            self.on_observe()
+        number = len(self.messages)
+        Path(run.worktree, f"part-{number}.txt").write_text(f"attempt {number}")
+        kind = self.kinds[min(number - 1, len(self.kinds) - 1)]
+        if kind == "done":
+            return engines.TurnOutcome(engines.DONE, reply="done")
+        return engines.TurnOutcome(
+            engines.FAILED,
+            reason="provider refused",
+            provider_error=True,
+            provider_kind=kind,
+        )
+
+
+class _RetryCrash(BaseException):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("kinds", "retries", "expected", "sends"),
+    [
+        (["capacity", "done"], "2", 0, 2),
+        (["capacity"], "0", 73, 1),
+        (["capacity"], "2", 73, 3),
+        (["usage_limit"], "2", 73, 1),
+        (["outage"], "2", 73, 1),
+        ([None], "2", 73, 1),
+    ],
+)
+def test_provider_retry_policy_commits_all_attempts_once(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    kinds: list[str | None],
+    retries: str,
+    expected: int,
+    sends: int,
+) -> None:
+    choices.set_settings(
+        {"provider.capacity_retries": retries, "provider.capacity_wait": "5"}, env=env
+    )
+    driver = _ProviderDriver(env, kinds)
+    clock = _RetryClock(driver)
+    monkeypatch.setattr(core, "time", clock)
+    core_ = _core(env, driver)
+    assert (
+        _start(core_, repo, _brief(tmp_path, "Task"), engine="codex", model="gpt-5")
+        == expected
+    )
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    saved = record.load_outcome(run, 1)
+    assert len(driver.messages) == sends
+    assert len({text for _, text in driver.messages}) == 1
+    assert {(r.model, r.effort, r.turn) for r, _ in driver.messages} == {
+        (run.model, run.effort, 1)
+    }
+    assert len(run.commits) == 1
+    assert {p.name for p in Path(run.worktree).glob("part-*.txt")} == {
+        f"part-{n}.txt" for n in range(1, sends + 1)
+    }
+    attempts = saved["attempts"]
+    assert len(attempts) == sends
+    assert len({attempt["id"] for attempt in attempts}) == sends
+    assert all(a["sent"] and not a["sending"] for a in attempts)
+    assert [a["result"] for a in attempts] == [
+        "done" if kind == "done" else "failed" for kind in (kinds * sends)[:sends]
+    ]
+    assert saved["seconds"] >= 5 * (sends - 1)
+    assert sum(a["seconds"] for a in attempts) < saved["seconds"]
+    assert err.count("at capacity; retry") == sends - 1
+    for number in range(1, sends):
+        assert (
+            f"WARNING: codex {run.model} at capacity; retry {number} of {retries} in 5s"
+        ) in err
+    if expected:
+        assert (kinds[-1] or "outage") in err.split("next:")[-1]
+
+
+def test_recovery_keeps_pending_retry_budget_settings_and_wait_seconds(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    choices.set_settings({"provider.capacity_wait": "5"}, env=env)
+    driver = _ProviderDriver(env, ["capacity"])
+    clock = _RetryClock(driver)
+    monkeypatch.setattr(core, "time", clock)
+    core_ = _core(env, driver)
+
+    def crash() -> None:
+        raise _RetryCrash
+
+    clock.on_sleep = crash
+    with pytest.raises(_RetryCrash):
+        _start(core_, repo, _brief(tmp_path, "Task"), engine="codex", model="gpt-5")
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    before = record.load_outcome(run, 1)
+    assert len(before["attempts"]) == 2
+    assert not before["attempts"][-1]["sent"]
+    assert not before["attempts"][-1]["sending"]
+    clock.elapsed += 40
+    clock.on_sleep = None
+    choices.set_settings(
+        {"provider.capacity_retries": "0", "provider.capacity_wait": "600"}, env=env
+    )
+    assert _core(env, driver).execute(lambda: _core(env, driver).recover(run.id)) == 73
+    saved = record.load_outcome(run, 1)
+    assert len(driver.messages) == 3
+    assert len(saved["attempts"]) == 3
+    assert saved["attempts"][1]["id"] == before["attempts"][1]["id"]
+    assert saved["seconds"] >= before["seconds"] + 45
+    assert saved["seconds"] > sum(a["seconds"] for a in saved["attempts"]) + 44
+    frozen = record.load(run.id, env)
+    assert (frozen.capacity_retries, frozen.capacity_wait) == (2, 5)
+    assert len(frozen.commits) == 1
+    assert "retry 2 of 2 in 5s" in capsys.readouterr().err
+    # Later turns keep this run's original settings too.
+    driver.messages.clear()
+    driver.kinds = ["capacity", "done"]
+    driver.idle = engines.IDLE
+    message = _brief(tmp_path, "Follow up", "follow-up.md")
+    assert core_.execute(lambda: core_.send(run.id, message)) == 0
+    assert len(driver.messages) == 2
+    assert all(r.turn == 2 for r, _ in driver.messages)
+    assert [text for _, text in driver.messages] == ["Follow up", "Follow up"]
+    assert record.load_outcome(run, 2)["seconds"] >= 5
+    assert "retry 1 of 2 in 5s" in capsys.readouterr().err
+    # The next new run reads the changed Team values.
+    next_driver = _ProviderDriver(env, ["capacity"])
+    monkeypatch.setattr(core, "time", _RetryClock(next_driver))
+    assert (
+        _start(
+            _core(env, next_driver),
+            repo,
+            _brief(tmp_path, "Next", "next.md"),
+            engine="codex",
+            model="gpt-5",
+        )
+        == 73
+    )
+    next_run = record.load(_run_id(capsys.readouterr().out), env)
+    assert (next_run.capacity_retries, next_run.capacity_wait) == (0, 600)
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_interrupt_cancels_a_pending_capacity_resend(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    external: bool,
+) -> None:
+    driver = _ProviderDriver(env, ["capacity", "done"])
+    clock = _RetryClock(driver)
+    monkeypatch.setattr(core, "time", clock)
+    core_ = _core(env, driver)
+
+    def interrupt() -> None:
+        if external:
+            clock.on_sleep = None
+            assert _core(env).interrupt(driver.messages[0][0].id) == 0
+        else:
+            raise KeyboardInterrupt
+
+    clock.on_sleep = interrupt
+    assert _start(
+        core_, repo, _brief(tmp_path, "Task"), engine="codex", model="gpt-5"
+    ) == (73 if external else 74)
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    clock.on_sleep = None
+    assert core_.execute(lambda: core_.recover(run.id)) == (0 if external else 73)
+    assert len(driver.messages) == 1
+    assert not record.load_outcome(run, 1)["attempts"][-1]["sent"]
+
+
+@pytest.mark.parametrize("failure", ["driver", "crash", "interrupt"])
+def test_uncertain_capacity_delivery_is_never_resent_on_recovery(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+) -> None:
+    driver = _ProviderDriver(env, ["capacity", "done"])
+    clock = _RetryClock(driver)
+    monkeypatch.setattr(core, "time", clock)
+    core_ = _core(env, driver)
+
+    def fail() -> None:
+        if failure == "crash":
+            raise _RetryCrash
+        if failure == "interrupt":
+            raise KeyboardInterrupt
+        raise engines.DriverError("transport disconnected")
+
+    driver.on_send = fail
+    if failure == "crash":
+        with pytest.raises(_RetryCrash):
+            _start(core_, repo, _brief(tmp_path, "Task"), engine="codex", model="gpt-5")
+    else:
+        assert _start(
+            core_, repo, _brief(tmp_path, "Task"), engine="codex", model="gpt-5"
+        ) == (74 if failure == "interrupt" else 73)
+    output = capsys.readouterr()
+    run = record.load(_run_id(output.out), env)
+    driver.on_send = None
+    assert core_.execute(lambda: core_.recover(run.id)) == 73
+    error = output.err + capsys.readouterr().err
+    assert "next: inspect the session" in error
+    assert "delivery is uncertain" in error
+    assert record.load(run.id, env).commits == ()
+    assert Path(run.worktree, "part-1.txt").read_text() == "attempt 1"
+    assert len(driver.messages) == 1
+    saved = record.load_outcome(run, 1)
+    assert saved["attempts"][-1]["sending"]
+    assert not saved["attempts"][-1]["sent"]
+
+
+def test_recovery_observes_a_confirmed_retry_without_sending_again(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    driver = _ProviderDriver(env, ["capacity", "done"])
+    clock = _RetryClock(driver)
+    monkeypatch.setattr(core, "time", clock)
+    core_ = _core(env, driver)
+
+    def crash() -> None:
+        if len(driver.messages) == 2:
+            raise _RetryCrash
+
+    driver.on_observe = crash
+    with pytest.raises(_RetryCrash):
+        _start(core_, repo, _brief(tmp_path, "Task"), engine="codex", model="gpt-5")
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    before = record.load_outcome(run, 1)
+    driver.on_observe = None
+    assert core_.execute(lambda: core_.recover(run.id)) == 0
+    after = record.load_outcome(run, 1)
+    assert after["attempts"][-1]["id"] == before["attempts"][-1]["id"]
+    assert len(driver.messages) == 2
+    assert after["seconds"] >= before["seconds"]
+    assert after["exit"] == 0
+
+
+def test_corrupt_retry_journal_does_not_reset_the_budget(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    driver = _ProviderDriver(env, ["capacity", "done"])
+    clock = _RetryClock(driver)
+    monkeypatch.setattr(core, "time", clock)
+    core_ = _core(env, driver)
+
+    def crash() -> None:
+        raise _RetryCrash
+
+    clock.on_sleep = crash
+    with pytest.raises(_RetryCrash):
+        _start(core_, repo, _brief(tmp_path, "Task"), engine="codex", model="gpt-5")
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    path = record.outcome_path(run, 1)
+    saved = json.loads(path.read_text())
+    saved["attempts"][-1]["sent"] = "unknown"
+    path.write_text(json.dumps(saved))
+    before = path.read_bytes()
+    clock.on_sleep = None
+    assert core_.execute(lambda: core_.recover(run.id)) == 71
+    assert path.read_bytes() == before
+    assert len(driver.messages) == 1
+
+
+@pytest.mark.parametrize("secret", [False, True])
+def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    secret: bool,
+) -> None:
+    folder = Path(env["HOME"]) / (".ssh" if secret else ".toolchain, version")
+    folder.mkdir()
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    text = f"Permission denied: '{folder}/python'"
+    brief = _brief(tmp_path, f"Task\n@reply {text}\n")
+    core_ = _core(env)
+    assert _start(core_, repo, brief) == 0
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    item = {
+        "path": str(folder),
+        "reason": "secret location" if secret else "hidden",
+        "allow_path": None if secret else str(folder),
+    }
+    assert record.load_outcome(run, 1)["denied_paths"] == [item]
+    assert err.count(f"WARNING: {run.id} was denied {folder}") == 1
+    assert "owner: Settings, Sandbox read paths; emb choices --set " in err
+    owner = next(
+        line for line in err.splitlines() if line.startswith("owner: Settings")
+    )
+    command = shlex.split(owner.split("; ", 1)[1])
+    key, value = command[-1].split("=", 1)
+    assert key == "sandbox.read"
+    assert choices.parse_value(key, value) == [str(folder)]
+    assert ("(secret location)" in err) is secret
+    assert _status(env, run.id, capsys)["turns"][0]["denied_paths"] == [item]
+    # A permission change applies to the next launch, never the saved snapshot.
+    choices.set_settings({"sandbox.read": [str(folder)]}, env=env)
+    assert sandbox.denied_paths(text, run.sandbox_paths) == [item]
+    assert _start(core_, repo, brief) == 0
+    out, err = capsys.readouterr()
+    next_run = record.load(_run_id(out), env)
+    assert record.load_outcome(next_run, 1)["denied_paths"] == []
+    assert "was denied" not in err
+    assert sandbox.denied_paths(text, next_run.sandbox_paths) == []
+
+
+def test_denials_union_all_capacity_attempts_with_one_warning_each(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    folders = [Path(env["HOME"]) / name for name in (".rustup", ".pyenv")]
+    for folder in folders:
+        folder.mkdir()
+    choices.set_settings(
+        {"sandbox.codex": "on", "provider.capacity_wait": "5"}, env=env
+    )
+    driver = _ProviderDriver(env, ["capacity", "done"])
+    monkeypatch.setattr(
+        driver,
+        "turn_output",
+        lambda run: "\n".join(
+            f"{folder}/bin: EACCES" for folder in folders[: len(driver.messages)]
+        ),
+    )
+    monkeypatch.setattr(core, "time", _RetryClock(driver))
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    core_ = _core(env, driver)
+    monkeypatch.setattr(core_, "_sandboxed", lambda spec, run, common: spec)
+    assert (
+        _start(core_, repo, _brief(tmp_path, "Task"), engine="codex", model="gpt-5")
+        == 0
+    )
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    denials = record.load_outcome(run, 1)["denied_paths"]
+    assert {item["path"] for item in denials} == {str(folder) for folder in folders}
+    for folder in folders:
+        assert err.count(f"WARNING: {run.id} was denied {folder}") == 1
+
+
+def test_protected_runtime_denial_has_no_settings_suggestion(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    path = Path(env["XDG_RUNTIME_DIR"]) / "socket"
+    assert (
+        _start(_core(env), repo, _brief(tmp_path, f"Task\n@reply {path}: EACCES")) == 0
+    )
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert record.load_outcome(run, 1)["denied_paths"] == [
+        {"path": str(path.parent), "reason": "protected", "allow_path": None}
+    ]
+    assert "was denied" in err and "(protected)" in err
+    assert "sandbox.read=" not in err
+
+
+@pytest.mark.parametrize("engine", ["codex", "claude", "opencode"])
+def test_clean_followup_does_not_reuse_denial_left_in_pane(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    engine: str,
+) -> None:
+    folder = Path(env["HOME"]) / ".toolchain"
+    folder.mkdir()
+    pane = [""]
+    error = f"cat: {folder}/python: Permission denied"
+
+    def observed(run: record.Run) -> None:
+        pane[0] = (
+            f"old heading\n{error}\ndone"
+            if run.turn == 1
+            else f"{error}\ndone\nfollow-up succeeded"
+        )
+
+    driver = _driver(env, engine, on_wait=observed)
+    monkeypatch.setattr(driver, "screen", lambda run: pane[0])
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    choices.set_settings({f"sandbox.{engine}": "on"}, env=env)
+    core_ = _core(env, driver)
+    monkeypatch.setattr(core_, "_sandboxed", lambda spec, run, common: spec)
+    assert (
+        _start(
+            core_,
+            repo,
+            _brief(tmp_path, "Task\n@reply done"),
+            engine=engine,
+            model="model",
+        )
+        == 0
+    )
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert len(record.load_outcome(run, 1)["denied_paths"]) == 1
+    assert f"was denied {folder}" in err
+    # A new Core simulates collection in a fresh command process. The persisted
+    # pre-delivery pane boundary excludes old diagnostics even after scrolling.
+    following = _core(env, driver)
+    message = _brief(tmp_path, "Follow up\n@reply success", "follow-up.md")
+    assert following.execute(lambda: following.send(run.id, message)) == 0
+    _, err = capsys.readouterr()
+    assert record.load_outcome(record.load(run.id, env), 2)["denied_paths"] == []
+    assert "was denied" not in err
+    assert "owner: Settings" not in err
+    # A repeated denial in the actual turn transcript is still a new occurrence.
+    monkeypatch.setattr(
+        driver, "turn_output", lambda run: error if run.turn == 3 else ""
+    )
+    assert following.execute(lambda: following.send(run.id, message)) == 0
+    _, err = capsys.readouterr()
+    assert len(record.load_outcome(record.load(run.id, env), 3)["denied_paths"]) == 1
+    assert err.count(f"was denied {folder}") == 1
+
+
+def test_pane_denial_union_across_retries_does_not_leak_to_next_attempt(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    folder = Path(env["HOME"]) / ".toolchain"
+    folder.mkdir()
+    driver = _ProviderDriver(env, ["capacity", "done"])
+    pane = [""]
+    driver.on_observe = lambda: pane.__setitem__(
+        0, f"{folder}/python: EACCES\nattempt {len(driver.messages)}"
+    )
+    monkeypatch.setattr(driver, "screen", lambda run: pane[0])
+    monkeypatch.setattr(core, "time", _RetryClock(driver))
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    choices.set_settings(
+        {"sandbox.codex": "on", "provider.capacity_wait": "5"}, env=env
+    )
+    core_ = _core(env, driver)
+    monkeypatch.setattr(core_, "_sandboxed", lambda spec, run, common: spec)
+    assert (
+        _start(core_, repo, _brief(tmp_path, "Task"), engine="codex", model="gpt-5")
+        == 0
+    )
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert len(record.load_outcome(run, 1)["denied_paths"]) == 1
+    assert err.count(f"was denied {folder}") == 1
+
+
+def test_recovery_keeps_pre_delivery_pane_boundary(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    folder = Path(env["HOME"]) / ".toolchain"
+    folder.mkdir()
+    pane = [""]
+    driver = _driver(
+        env, on_wait=lambda run: pane.__setitem__(0, f"{folder}/python: EACCES")
+    )
+    monkeypatch.setattr(driver, "screen", lambda run: pane[0])
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    core_ = _core(env, driver)
+    assert _start(core_, repo, _brief(tmp_path, "Task\n@reply done")) == 0
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    followup = _core(env, driver, stall=0.003)
+    assert (
+        followup.execute(
+            lambda: followup.send(
+                run.id, _brief(tmp_path, "@hang\n@reply clean", "followup.md")
+            )
+        )
+        == 124
+    )
+    capsys.readouterr()
+    driver.out(run).joinpath("release").touch()
+    recovered = _core(env, driver)
+    assert recovered.execute(lambda: recovered.recover(run.id)) == 0
+    _, err = capsys.readouterr()
+    assert "was denied" not in err
+    assert record.load_outcome(record.load(run.id, env), 2)["denied_paths"] == []
+
+
+@pytest.mark.parametrize("spelling", ["relative", "absolute", "home"])
+def test_run_reports_only_fully_stated_denial_paths(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    spelling: str,
+) -> None:
+    folder = Path(env["HOME"]) / ".toolchain"
+    folder.mkdir()
+    name = {
+        "relative": "../.toolchain/python",
+        "absolute": str(folder / "python"),
+        "home": "~/.toolchain/python",
+    }[spelling]
+    diagnostic = f"cat: {name}: Permission denied"
+    driver = _driver(env)
+    monkeypatch.setattr(driver, "turn_output", lambda run: diagnostic)
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    assert (
+        _start(_core(env, driver), repo, _brief(tmp_path, f"Task\n@reply {diagnostic}"))
+        == 0
+    )
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    denied = record.load_outcome(run, 1)["denied_paths"]
+    if spelling == "relative":
+        assert denied == []
+        assert "was denied" not in err
+        assert "owner: Settings" not in err
+    else:
+        assert denied == [
+            {"path": str(folder), "reason": "hidden", "allow_path": str(folder)}
+        ]
+        assert err.count(f"was denied {folder}") == 1
+
+
+def test_absolute_denial_in_reply_pane_and_structured_output_is_reported_once(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    folder = Path(env["HOME"]) / ".toolchain"
+    folder.mkdir()
+    alias = Path(env["HOME"]) / "toolchain-alias"
+    alias.symlink_to(folder, target_is_directory=True)
+    pane = [""]
+    diagnostic = f"cat: {folder}/python: Permission denied"
+    driver = _driver(env, on_wait=lambda run: pane.__setitem__(0, diagnostic))
+    monkeypatch.setattr(driver, "screen", lambda run: pane[0])
+    monkeypatch.setattr(
+        driver,
+        "turn_output",
+        lambda run: json.dumps({"output": f"{alias}/python: EACCES"}),
+    )
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    assert (
+        _start(_core(env, driver), repo, _brief(tmp_path, f"Task\n@reply {diagnostic}"))
+        == 0
+    )
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert record.load_outcome(run, 1)["denied_paths"] == [
+        {"path": str(folder), "reason": "hidden", "allow_path": str(folder)}
+    ]
+    assert err.count(f"WARNING: {run.id} was denied ") == 1
+
+
+@pytest.mark.parametrize("source", ["structured", "extracted"])
+def test_structured_path_first_diagnostic_is_recorded_and_warned(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    source: str,
+) -> None:
+    from ember.engines.diagnostics import output_text
+
+    folder = Path(env["HOME"]) / ".tools"
+    folder.mkdir()
+    structured = {"output": f"{folder}: Permission denied"}
+    text = json.dumps(structured) if source == "structured" else output_text(structured)
+    driver = _driver(env)
+    monkeypatch.setattr(driver, "turn_output", lambda run: text)
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    assert _start(_core(env, driver), repo, _brief(tmp_path, "Task\n@reply done")) == 0
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert record.load_outcome(run, 1)["denied_paths"] == [
+        {"path": str(folder), "reason": "hidden", "allow_path": str(folder)}
+    ]
+    assert err.count(f"WARNING: {run.id} was denied {folder}") == 1
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_denial_reason_is_merged_across_sources_before_warning(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    reverse: bool,
+) -> None:
+    folder = Path(env["HOME"]) / ".docker"
+    folder.mkdir()
+    secret = folder / "config.json"
+    secret.touch()
+    diagnostics = [f"{folder}: Permission denied", f"{secret}: Permission denied"]
+    if reverse:
+        diagnostics.reverse()
+    driver = _driver(env)
+    monkeypatch.setattr(driver, "turn_output", lambda run: diagnostics[1])
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    assert (
+        _start(
+            _core(env, driver), repo, _brief(tmp_path, f"Task\n@reply {diagnostics[0]}")
+        )
+        == 0
+    )
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert record.load_outcome(run, 1)["denied_paths"] == [
+        {"path": str(folder), "reason": "secret location", "allow_path": None}
+    ]
+    assert err.count(f"WARNING: {run.id} was denied {folder} (secret location)") == 1
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        ("hidden", "secret location", "secret location"),
+        ("secret location", "hidden", "secret location"),
+        ("hidden", "protected", "protected"),
+        ("protected", "hidden", "protected"),
+        ("secret location", "protected", "protected"),
+        ("protected", "secret location", "protected"),
+    ],
+)
+def test_denial_accumulation_keeps_strongest_reason_across_attempts(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    first: str,
+    second: str,
+    expected: str,
+) -> None:
+    folder = Path(env["HOME"]) / ".docker"
+    folder.mkdir()
+    secret = folder / "config.json"
+    secret.touch()
+    runtime = folder / "runtime"
+    runtime.mkdir(mode=0o700)
+    env["XDG_RUNTIME_DIR"] = str(runtime)
+    names = {
+        "hidden": folder,
+        "secret location": secret,
+        "protected": runtime / "socket",
+    }
+    driver = _ProviderDriver(env, ["capacity", "done"])
+    observed: list[str] = []
+
+    def transcript(run: record.Run) -> str:
+        kind = first if len(driver.messages) == 1 else second
+        observed.append(kind)
+        return f"{names[kind]}: Permission denied"
+
+    monkeypatch.setattr(driver, "turn_output", transcript)
+    monkeypatch.setattr(core, "time", _RetryClock(driver))
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    choices.set_settings(
+        {"sandbox.codex": "on", "provider.capacity_wait": "5"}, env=env
+    )
+    core_ = _core(env, driver)
+    monkeypatch.setattr(core_, "_sandboxed", lambda spec, run, common: spec)
+    assert (
+        _start(core_, repo, _brief(tmp_path, "Task"), engine="codex", model="gpt-5")
+        == 0
+    )
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert list(dict.fromkeys(observed)) == [first, second]
+    assert len(driver.messages) == 2
+    assert record.load_outcome(run, 1)["denied_paths"] == [
+        {"path": str(folder), "reason": expected, "allow_path": None}
+    ]
+    assert err.count(f"WARNING: {run.id} was denied {folder}") == 1
+
+
+def test_forced_close_keeps_detached_worktree_while_command_holds_lock(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    core_ = _core(env)
+    assert _start(core_, repo, _brief(tmp_path, "Review\n"), read_only=True) == 0
+    saved = record.load(_run_id(capsys.readouterr().out), env)
+    with core_._turn_lock(saved.id):
+        assert core_.close(saved.id, force=True) == 0
+    assert Path(saved.worktree).exists()
+    assert record.load(saved.id, env).status == record.CLOSED
+    assert "another emb run command" in capsys.readouterr().err
+    assert core_.close(saved.id) == 0
+    assert not Path(saved.worktree).exists()
+
+
+def test_start_records_the_parent_and_status_reports_an_orphan(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    parent = record.parent("gapcheck")
+    assert parent is not None
+    code = _start(_core(env), repo, _brief(tmp_path, "Task\n"), parent=parent)
+    assert code == 0
+    run_id = _run_id(capsys.readouterr().out)
+    one = _status(env, run_id, capsys)
+    assert one["parent"] == parent and one["orphaned"] is False
+    run = record.load(run_id, env)
+    record.save(replace(run, parent={**parent, "start": parent["start"] + 1}))
+    core_ = _core(env)
+    assert core_.execute(lambda: core_.status(run_id, as_json=True)) == 0
+    out, err = capsys.readouterr()
+    assert json.loads(out)["orphaned"] is True
+    assert f"WARNING: run {run_id} is orphaned: emb gapcheck ended" in err
+    assert err.splitlines()[-1] == (
+        f"next: emb run --recover {run_id}, then emb run --close {run_id}"
+    )
+    _core(env).close(run_id, force=True)
+
+
+def test_a_run_started_by_emb_run_has_no_parent(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_id = _started(tmp_path, env, repo, capsys)
+    one = _status(env, run_id, capsys)
+    assert one["parent"] is None and one["orphaned"] is False
+    _core(env).close(run_id, force=True)

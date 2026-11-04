@@ -54,7 +54,33 @@ question that replaces it.
 ## Claim outcomes
 
 Keep the id in the run's notes before calling
-`emb choices --claim --id <id>`.
+`emb choices --claim --id <id> --skill <version>`, with the version from
+the loaded skill's `Skill version:` line, including on retries.
+
+### Skill version
+
+The claim reply has `skill`, `loaded_skill_version` and
+`installed_skill_version`. Ember reads the installed skill link's target
+on each claim, including a repeated claim of the same id:
+
+- `current`: the versions match; continue.
+- `stale`: the versions differ, whether the installed version is newer or
+  older. Standard error has `WARNING: the loaded ember skill is <x>; the
+  installed skill is <y>` and `next: reload the ember skill before the next
+  step`. Reload before the next step and keep the same claim id.
+- `unknown`: the installed link or its Ember skill is missing or
+  unreadable, or its version line is missing, duplicated or malformed.
+  `installed_skill_version` is `null`. Keep the claim, report the warning
+  and the `owner:` repair or reinstall line to the owner, and start no
+  worker until a valid installed skill is loaded.
+
+All three outcomes exit 0; they do not change `claim.status`. A malformed
+`--skill` exits 64 before claiming and leaves a pending one-time choice
+unchanged. Use `x.y.z`, with non-negative integer parts and no leading
+zeros except `0` itself. Without `--skill` there are no skill-version
+fields. Edits between releases with the same version are not detected.
+
+### Claim status
 
 - `claimed`: this run's copy of the one-time choice. A repeated claim of
   the same id returns the same copy.
@@ -113,6 +139,13 @@ settings change in Ember's Team or Settings screen (`emb app`) or at the
 owner's terminal; one-time choices only at the terminal. Give the owner
 the exact command: `emb choices --set <key>=<value>` or
 `emb choices --once <key>=<value>`.
+
+For a denied worker path, report the Settings, Sandbox read paths row and
+the printed owner command; do not add it to `sandbox.read` yourself.
+Ember's configuration and state folders, their descendants and symlink
+aliases are refused by Settings and `emb choices`; report that reason.
+Other secret locations can be added by the owner by hand, even when
+Overview offers no Allow reading button.
 
 The terminal check prevents accidental use; it is not a security boundary
 against programs running as the owner, which can open the database.

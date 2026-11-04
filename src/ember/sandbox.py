@@ -1,11 +1,23 @@
 """Worker sandboxes: the provider per engine, the deny list and its checks.
 
-A sandboxed worker sees the machine read-only except its worktree, and does
-not see the home folder apart from the paths it needs: the worktree, the
-repository's common git folder, `~/.local/bin`, `~/.local/lib`, git's
-configuration, the engine's own folders and the run's read paths. The whole
-of `$XDG_RUNTIME_DIR` is hidden, and so are Ember's configuration and state
-folders wherever they are.
+A sandboxed worker sees the machine read-only except its worktree, `/tmp`
+and the workers' cache folder, and does not see the home folder apart from
+the paths it needs: the worktree, the repository's common git folder, `~/.local/bin`,
+`~/.local/lib`, git's configuration, the workers' cache folder, the engine's
+own folders and the run's read paths. The whole of `$XDG_RUNTIME_DIR` is
+hidden, and so are Ember's configuration and state folders wherever they are,
+even where a kept path holds them. The worktrees folder is walked and every
+entry except the worker's own worktree is denied by name, through symlink
+aliases too. No kept path is reopened inside a denied folder.
+The worktrees folder is created before the sandbox starts, including for a
+read-only worker.
+
+The workers' cache folder, `paths.worker_cache_dir()`, is writable outside
+the worktree. `worker_cache_env` gives the variables that point tools' caches
+into that folder: `XDG_CACHE_HOME`, and the
+variables in `WORKER_CACHE_VARIABLES` for tools that do not follow it.
+Ember does not set `TMPDIR`. Bubblewrap mounts a private empty `/tmp` for
+each worker; the Codex profile makes `/tmp` writable, including for read-only runs.
 
 Each engine has one switch, `sandbox.<engine>`, `on` or `off`. Codex's
 sandbox is its own: it receives the deny list as a permission profile named
@@ -24,6 +36,7 @@ import fcntl
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -69,11 +82,45 @@ DOCKER_SOCKETS = ("/run/docker.sock", "/var/run/docker.sock")
 
 _NPM_ARCH = {"x86_64": "x64", "aarch64": "arm64"}
 
+WORKER_CACHE_VARIABLES: tuple[tuple[str, str], ...] = (
+    ("UV_CACHE_DIR", "uv"),
+    ("UV_PYTHON_INSTALL_DIR", "uv-python"),
+    ("PIP_CACHE_DIR", "pip"),
+    ("npm_config_cache", "npm"),
+    ("GOMODCACHE", "go/mod"),
+)
+"""Cache variables a sandboxed worker gets, each with its folder in the cache.
+
+They cover tools that keep a cache in the home folder whatever
+`XDG_CACHE_HOME` says (npm, Go modules), tools whose own
+variable, when the owner sets it, overrides `XDG_CACHE_HOME` (uv, pip), and
+uv's folder of Python installations, which uv must be able to read and which
+the sandbox hides in `~/.local/share/uv`.
+"""
+
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 
 
 class SandboxError(RuntimeError):
     """A sandbox cannot be set up."""
+
+
+class KeptPathError(SandboxError):
+    """A kept path lies inside a folder the sandbox hides."""
+
+    def __init__(self, path: Path, folder: Path) -> None:
+        """Keep both paths.
+
+        Args:
+            path: The kept path.
+            folder: The hidden folder that holds it.
+        """
+        super().__init__(
+            f"the kept path {path} is inside {folder}, "
+            "which the sandbox hides from every worker"
+        )
+        self.path = path
+        self.folder = folder
 
 
 @dataclass(frozen=True)
@@ -172,6 +219,40 @@ def _git_config_dir(home: Path, env: Mapping[str, str]) -> Path:
     return base / "git"
 
 
+def worker_cache_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return the variables that point a sandboxed worker's caches to its folder.
+
+    They replace any value the owner set, because the sandbox hides the
+    folders those values name.
+
+    Args:
+        env: The environment; `None` reads `os.environ`.
+
+    Returns:
+        `XDG_CACHE_HOME` set to `paths.worker_cache_dir()`, and each variable
+        in `WORKER_CACHE_VARIABLES` set to its folder inside it.
+    """
+    root = paths.worker_cache_dir(_env(env))
+    result = {"XDG_CACHE_HOME": str(root)}
+    result.update(
+        (variable, str(root / folder)) for variable, folder in WORKER_CACHE_VARIABLES
+    )
+    return result
+
+
+def _worker_cache(env: Mapping[str, str]) -> Path:
+    """Return the workers' cache folder, created at mode 700 when possible.
+
+    A run creates the folder when it starts and refuses to start when it
+    cannot. Here a failure is left to the sandbox: the folder is then
+    neither bound nor writable.
+    """
+    try:
+        return paths.ensure_worker_cache_dir(env)
+    except OSError, ValueError:
+        return paths.worker_cache_dir(env)
+
+
 def kept_paths(
     home: Path,
     worktree: Path,
@@ -190,8 +271,8 @@ def kept_paths(
         worktree: The worker's worktree.
         common: The repository's common git folder.
         read: The run's read paths.
-        env: The environment, for `XDG_CONFIG_HOME`; `None` reads
-            `os.environ`.
+        env: The environment, for `XDG_CONFIG_HOME` and the workers' cache
+            folder; `None` reads `os.environ`.
 
     Returns:
         The kept paths, sorted.
@@ -202,6 +283,7 @@ def kept_paths(
         home / ".local" / "lib",
         home / ".gitconfig",
         _git_config_dir(home, env),
+        paths.worker_cache_dir(env),
         Path(worktree),
         Path(common),
         *(Path(path) for path in read),
@@ -224,6 +306,7 @@ def deny_list(
     runtime: Path,
     *,
     protected: Iterable[Path] = (),
+    walk: Mapping[Path, Sequence[Path]] | None = None,
 ) -> list[Path]:
     """Return the paths a sandboxed worker is denied.
 
@@ -231,9 +314,9 @@ def deny_list(
     entry is denied by its own name. A symlink whose target is kept, inside a
     kept path or an ancestor of one is not denied, because Codex's sandbox
     follows a denied symlink and hides its target; a target that is an
-    ancestor is walked like any other folder. No two entries resolve to the
-    same path or one inside another, because the sandbox cannot create a
-    mount point inside a path it has already hidden.
+    ancestor is walked like any other folder. Additional folders are walked
+    with their own kept paths, even when a broader read path contains them.
+    No two denials resolve to the same path or one inside another.
 
     Args:
         home: The home folder.
@@ -242,35 +325,45 @@ def deny_list(
         protected: Paths denied even when a kept path holds them, such as
             Ember's configuration and state folders. Missing ones are left
             out.
+        walk: Additional folders and the paths to keep in each one.
 
     Returns:
         The denied paths, sorted.
     """
     denied: list[Path] = []
-    pending = [Path(home)]
-    walked: set[Path] = set()
-    while pending:
-        folder = pending.pop()
-        if folder in walked or any(folder.is_relative_to(path) for path in kept):
-            continue
-        walked.add(folder)
-        try:
-            entries = sorted(folder.iterdir())
-        except OSError:
-            continue
-        for entry in entries:
-            if any(entry.is_relative_to(path) for path in kept):
+    for root, allowed in [(Path(home), kept), *(walk or {}).items()]:
+        allowed = [
+            *allowed,
+            *(
+                path
+                for path in walk or {}
+                if path != root and path.is_relative_to(root)
+            ),
+        ]
+        pending = [root]
+        walked: set[Path] = set()
+        while pending:
+            folder = pending.pop()
+            if folder in walked or any(folder.is_relative_to(path) for path in allowed):
                 continue
-            if entry.is_symlink():
-                target = entry.resolve()
-                if _related(target, kept):
-                    if not any(target.is_relative_to(path) for path in kept):
-                        pending.append(target)
+            walked.add(folder)
+            try:
+                entries = sorted(folder.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                if any(entry.is_relative_to(path) for path in allowed):
                     continue
-            if any(path.is_relative_to(entry) for path in kept):
-                pending.append(entry)
-            else:
-                denied.append(entry)
+                if entry.is_symlink():
+                    target = entry.resolve()
+                    if _related(target, allowed):
+                        if not any(target.is_relative_to(path) for path in allowed):
+                            pending.append(target)
+                        continue
+                if any(path.is_relative_to(entry) for path in allowed):
+                    pending.append(entry)
+                else:
+                    denied.append(entry)
     denied += [Path(path) for path in protected if os.path.lexists(path)]
     # A plain entry is kept over a symlink that resolves to the same path.
     entries = sorted(
@@ -292,8 +385,419 @@ def deny_list(
 
 
 def _protected(env: Mapping[str, str]) -> list[Path]:
-    """Return Ember's own folders, which no worker may read."""
+    """Return Ember's configuration and state folders, which no worker may read."""
     return [paths.config_dir(env), paths.state_dir(env)]
+
+
+# Browser profiles include credentials in native and packaged installations.
+SECRET_HOME_PATHS = (
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".azure",
+    ".config/gcloud",
+    ".config/gh",
+    ".docker/config.json",
+    ".netrc",
+    ".kube",
+    ".password-store",
+    ".local/share/keyrings",
+    ".mozilla",
+    ".config/mozilla",
+    ".config/google-chrome",
+    ".config/chromium",
+    ".config/BraveSoftware",
+    ".config/microsoft-edge",
+    ".config/vivaldi",
+    ".config/opera",
+    ".var/app/org.mozilla.firefox",
+    ".var/app/org.mozilla.Thunderbird",
+    ".var/app/com.google.Chrome",
+    ".var/app/org.chromium.Chromium",
+    ".var/app/com.brave.Browser",
+    ".var/app/com.microsoft.Edge",
+    ".var/app/com.vivaldi.Vivaldi",
+    ".var/app/com.opera.Opera",
+    "snap/firefox",
+    "snap/chromium",
+    "snap/brave",
+    "snap/thunderbird",
+    ".thunderbird",
+)
+"""Secret locations relative to the home folder, including browser profiles."""
+
+
+def _variants(entries: Iterable[Path]) -> list[str]:
+    return sorted({str(p) for entry in entries for p in (entry, entry.resolve())})
+
+
+def secret_paths(env: Mapping[str, str] | None = None) -> list[Path]:
+    """Return the explicit credential inventory and Ember's private folders."""
+    env = _env(env)
+    home = paths.home_dir(env)
+    config = _git_config_dir(home, env).parent
+    native = [
+        config / name
+        for name in (
+            "gcloud",
+            "gh",
+            "mozilla",
+            "google-chrome",
+            "chromium",
+            "BraveSoftware",
+            "microsoft-edge",
+            "vivaldi",
+            "opera",
+        )
+    ]
+    return [*(home / name for name in SECRET_HOME_PATHS), *native, *_protected(env)]
+
+
+def read_path_problem(
+    path: str | Path, env: Mapping[str, str] | None = None
+) -> str | None:
+    """Return why a read setting names Ember's configuration or state folder."""
+    env = _env(env)
+    for candidate in _variants([Path(path)]):
+        for folder in _variants(_protected(env)):
+            if Path(candidate).is_relative_to(folder):
+                return (
+                    f"{path} is inside {folder}, Ember's configuration or state folder"
+                )
+    return None
+
+
+def allow_reading_path(path: str | Path, env: Mapping[str, str] | None = None) -> bool:
+    """Return whether a folder can be offered for automatic read permission."""
+    env = _env(env)
+    home = paths.home_dir(env)
+    blocked = _variants(
+        [
+            *secret_paths(env),
+            _git_config_dir(home, env).parent,
+            _runtime_base(env),
+            paths.worktrees_dir(env),
+        ]
+    )
+    return not any(
+        Path(candidate).is_relative_to(folder) or Path(folder).is_relative_to(candidate)
+        for candidate in _variants([Path(path)])
+        for folder in blocked
+    )
+
+
+def valid_snapshot(value: object) -> bool:
+    """Check a stored launch snapshot, including the empty legacy default."""
+    if not isinstance(value, dict):
+        return False
+    if not value:
+        return True
+    if not isinstance(value.get("home"), str) or not Path(value["home"]).is_absolute():
+        return False
+    for key in ("secret", "protected", "config", "own"):
+        entries = value.get(key)
+        if not isinstance(entries, list) or not all(
+            isinstance(p, str) and Path(p).is_absolute() for p in entries
+        ):
+            return False
+    hidden = value.get("hidden")
+    return isinstance(hidden, list) and all(
+        isinstance(entry, dict)
+        and type(entry.get("directory")) is bool
+        and all(
+            isinstance(entry.get(key), str) and Path(entry[key]).is_absolute()
+            for key in ("path", "resolved")
+        )
+        for entry in hidden
+    )
+
+
+def hidden_snapshot(
+    worktree: Path,
+    common: Path,
+    read: Iterable[str | Path] = (),
+    *,
+    engine: str = "codex",
+    binary: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Record the hidden paths and their resolved names at launch."""
+    env = _env(env)
+    home = paths.home_dir(env)
+    worktrees = paths.ensure_worktrees_dir(env)
+    runtime = _runtime_base(env)
+    kept = kept_paths(home, worktree, common, read, env=env)
+    if engine != "codex":
+        folders = (
+            claude_folders(home, env)
+            if engine == "claude"
+            else [p for p, _ in _opencode_folders(home, env)]
+        )
+        if binary is not None and binary.resolve().parent.is_relative_to(home):
+            folders.append(binary.resolve().parent)
+        kept = sorted(
+            {*kept, *(Path(p) for p in _variants(folders) if Path(p).exists())}
+        )
+    denied = deny_list(
+        home,
+        kept,
+        runtime,
+        protected=_protected(env),
+        walk={worktrees: [worktree, worktree.resolve()]},
+    )
+    return {
+        "hidden": [
+            {
+                "path": str(p),
+                "resolved": str(p.resolve()),
+                "directory": p.is_dir() or p == runtime,
+            }
+            for p in denied
+        ],
+        "secret": _variants(secret_paths(env)),
+        "protected": _variants([runtime, worktrees]),
+        "config": _variants([_git_config_dir(home, env).parent]),
+        "own": _variants([worktree]),
+        "home": str(home),
+    }
+
+
+def _inside(candidate: Path, folders: Iterable[str]) -> bool:
+    return any(candidate.is_relative_to(folder) for folder in folders)
+
+
+def merge_denial(first: Mapping[str, Any], second: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge reports of one resolved hidden path without weakening restrictions.
+
+    Reasons rank protected, secret location, then hidden. A missing read
+    permission is retained, and paths use lexical order to break ties.
+    """
+    ranks = {"hidden": 0, "secret location": 1, "protected": 2}
+    reason = max((first["reason"], second["reason"]), key=ranks.__getitem__)
+    allowances = (first["allow_path"], second["allow_path"])
+    allow = (
+        min(allowances)
+        if reason == "hidden" and all(path is not None for path in allowances)
+        else None
+    )
+    return {
+        "path": min(first["path"], second["path"]),
+        "reason": reason,
+        "allow_path": allow,
+    }
+
+
+def denied_paths(text: str, snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Find fully stated denied paths using the sandbox's launch-time inventory.
+
+    Absolute and `~/` paths can occur on the error line or a neighboring
+    diagnostic line. `~/` uses the home folder recorded at launch. Both given
+    and resolved names are checked; relative paths are not resolved or reported.
+    """
+    found: dict[str, dict[str, Any]] = {}
+    error_pattern = r"permission denied|operation not permitted|\bEACCES\b"
+
+    def json_text(value: object, *, path_field: bool = False) -> str:
+        """Keep diagnostic strings from structured output without its field names."""
+        if isinstance(value, str):
+            if value.startswith(("/", "~/")) and (
+                path_field or not re.search(error_pattern, value, re.I)
+            ):
+                return json.dumps(value)
+            return value
+        if isinstance(value, dict):
+            return "\n".join(
+                json_text(item, path_field=key in ("path", "file_path", "filename"))
+                for key, item in value.items()
+                if key
+                not in (
+                    "cwd",
+                    "workdir",
+                    "working_directory",
+                    "directory",
+                    "input",
+                    "arguments",
+                    "args",
+                    "command",
+                    "cmd",
+                    "metadata",
+                    "context",
+                )
+            )
+        if isinstance(value, list):
+            return "\n".join(json_text(item, path_field=path_field) for item in value)
+        return ""
+
+    try:
+        decoded = json.loads(text)
+    except ValueError, RecursionError:
+        pass
+    else:
+        text = json_text(decoded)
+    text = text.replace("\\n", "\n").replace('\\"', '"')
+    lines = text.splitlines()
+    path_pattern = re.compile(
+        r"(?P<quote>[\"'`])(?P<quoted>[^\n]*?)(?P=quote)"
+        r"|(?<![\w./~])(?P<bare>(?:/|~/)[^\s\"'`<>]+)"
+    )
+
+    def relative_operand(line: str) -> bool:
+        """Recognize a relative error operand without resolving it."""
+        for match in path_pattern.finditer(line):
+            name = match["quoted"]
+            if (
+                name
+                and not name.startswith(("/", "~/"))
+                and not re.search(error_pattern, name, re.I)
+            ):
+                return True
+        return any(
+            re.search(pattern, line, re.I)
+            for pattern in (
+                r"(?<![\w/])(?:\.{1,2}/|[\w.@+-]+/)[^\s\"'`<>]+",
+                rf":\s*[^:\s]+\s*:\s*(?:{error_pattern})",
+                rf"(?:{error_pattern}):\s*[^/\s~:\"'`][^\s:]*",
+            )
+        )
+
+    def path_names(line: str) -> list[str]:
+        """Extract fully stated paths, excluding relative names and their suffixes."""
+        if not re.search(error_pattern, line, re.I) and re.match(
+            r"\s*(?:cwd|workdir|working_directory|working directory|directory|"
+            r"command|cmd)\s*[:=]",
+            line,
+            re.I,
+        ):
+            return []
+        names = [
+            m["quoted"] if m["quoted"] is not None else m["bare"].rstrip(":,;.)]")
+            for m in path_pattern.finditer(line)
+        ]
+        return [name for name in names if name.startswith(("/", "~/"))]
+
+    for index, line in enumerate(lines):
+        if not re.search(error_pattern, line, re.I):
+            continue
+        names = path_names(line)
+        if not names and relative_operand(line):
+            # A relative error operand is not completed using an adjacent cwd.
+            continue
+        if not names:
+            # A cause chain can name the path before the operating-system
+            # error, and a wrapped diagnostic can put it on the next line.
+            for neighbor in (index - 1, index + 1, index - 2):
+                if not 0 <= neighbor < len(lines):
+                    continue
+                start, end = sorted((index, neighbor))
+                if not all(part.strip() for part in lines[start : end + 1]):
+                    continue
+                names = path_names(lines[neighbor])
+                if names:
+                    break
+        for name in names:
+            if name.startswith("~/"):
+                name = snapshot["home"] + name[1:]
+            candidate = Path(os.path.normpath(name))
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                resolved = candidate
+            matches = [
+                entry
+                for entry in snapshot.get("hidden", [])
+                if _inside(candidate, (entry["path"], entry["resolved"]))
+                or _inside(resolved, (entry["path"], entry["resolved"]))
+            ]
+            if not matches:
+                continue
+            entry = max(matches, key=lambda item: len(Path(item["path"]).parts))
+            # Map a given hidden name through its launch-time resolution.
+            target = resolved
+            if candidate.is_relative_to(entry["path"]):
+                target = Path(entry["resolved"]) / candidate.relative_to(entry["path"])
+            views = (candidate, resolved, target)
+            if any(_inside(p, snapshot.get("own", [])) for p in views) and any(
+                Path(own).is_relative_to(hidden)
+                for own in snapshot.get("own", [])
+                for hidden in (entry["path"], entry["resolved"])
+            ):
+                continue
+            reason = "hidden"
+            if any(_inside(p, snapshot.get("protected", [])) for p in views):
+                reason = "protected"
+            elif any(_inside(p, snapshot.get("secret", [])) for p in views):
+                reason = "secret location"
+            folder = candidate if candidate.is_dir() else candidate.parent
+            if candidate == Path(entry["path"]) and entry["directory"]:
+                folder = candidate
+            forbidden = [*snapshot.get("secret", []), *snapshot.get("protected", [])]
+            allow = str(folder)
+            if reason != "hidden" or any(
+                _inside(p, [*forbidden, *snapshot.get("config", [])])
+                or any(Path(secret).is_relative_to(p) for secret in forbidden)
+                for p in (
+                    folder,
+                    folder.resolve(),
+                    target if folder == candidate else target.parent,
+                )
+            ):
+                allow = None
+            # One warning per resolved hidden path, even through an alias.
+            key = entry["resolved"]
+            previous = found.get(key)
+            item = {"path": entry["path"], "reason": reason, "allow_path": allow}
+            found[key] = item if previous is None else merge_denial(previous, item)
+    return list(found.values())
+
+
+def check_kept(
+    worktree: Path,
+    common: Path,
+    read: Iterable[str | Path] = (),
+    *,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    """Refuse a sandbox whose kept path lies inside one of Ember's own folders.
+
+    The sandbox hides Ember's configuration and state folders even where a
+    kept path holds them. Entries in the worktrees folder are denied by name
+    except the worker's own worktree.
+    Every kept path is checked, as given and with symlinks resolved: the
+    worktree, the common git folder, the read paths and the others
+    `kept_paths` lists, the workers' cache folder among them.
+
+    Args:
+        worktree: The worker's worktree.
+        common: The repository's common git folder.
+        read: The run's read paths.
+        env: The environment; `None` reads `os.environ`.
+
+    Raises:
+        KeptPathError: A kept path is one of Ember's folders or inside one;
+            the message names both.
+    """
+    env = _env(env)
+    home = paths.home_dir(env)
+    given = [Path(worktree), Path(common), *(Path(path) for path in read)]
+    entries = [
+        *given,
+        *(path.resolve() for path in given),
+        *kept_paths(home, worktree, common, read, env=env),
+    ]
+    protected = [
+        folder
+        for path in _protected(env)
+        for folder in dict.fromkeys((path, path.resolve()))
+    ]
+    worktrees = paths.worktrees_dir(env).resolve()
+    own = Path(worktree).resolve()
+    for entry in dict.fromkeys(entries):
+        for folder in protected:
+            if entry.is_relative_to(folder):
+                raise KeptPathError(entry, folder)
+        target = entry.resolve()
+        if target.is_relative_to(worktrees) and not target.is_relative_to(own):
+            raise KeptPathError(entry, worktrees)
 
 
 def _runtime_base(env: Mapping[str, str]) -> Path:
@@ -312,13 +816,18 @@ def codex_args(
     """Return the Codex `-c` options that define and select Ember's profile.
 
     The profile extends Codex's `:workspace` profile, or `:read-only` for a
-    read-only run, so Codex's own protection of git folders stays in place.
+    legacy read-only source checkout. Detached review worktrees use the
+    writable profile. Codex's own protection of git folders stays in place.
+    The workers' cache folder is writable, also in a read-only run, and the
+    commands Codex runs get the variables of `worker_cache_env` through
+    `shell_environment_policy.set`. `/tmp` is writable in every profile.
+    The cache folder is created when it is missing.
 
     Args:
         worktree: The worker's worktree, writable unless `read_only`.
         common: The repository's common git folder, read-only.
         read: The run's read paths.
-        read_only: The worktree is read-only.
+        read_only: Protect a legacy read-only run's source checkout.
         network: The worker has network.
         env: The environment; `None` reads `os.environ`.
 
@@ -330,10 +839,22 @@ def codex_args(
     """
     env = _env(env)
     home = paths.home_dir(env)
+    cache = _worker_cache(env)
+    worktrees = paths.ensure_worktrees_dir(env)
     kept = kept_paths(home, worktree, common, read, env=env)
-    denied = deny_list(home, kept, _runtime_base(env), protected=_protected(env))
+    denied = deny_list(
+        home,
+        kept,
+        _runtime_base(env),
+        protected=_protected(env),
+        walk={worktrees: [Path(worktree), Path(worktree).resolve()]},
+    )
     filesystem = {str(path): "deny" for path in denied}
-    filesystem[str(worktree)] = "read" if read_only else "write"
+    for path in dict.fromkeys((cache, cache.resolve())):
+        filesystem[str(path)] = "write"
+    filesystem["/tmp"] = "write"
+    for path in dict.fromkeys((Path(worktree), Path(worktree).resolve())):
+        filesystem[str(path)] = "read" if read_only else "write"
     filesystem[str(common)] = "read"
     filesystem[str(Path(worktree) / ".git")] = "read"
     # TOML takes Unicode scalar values, not JSON's surrogate pairs.
@@ -342,6 +863,15 @@ def codex_args(
         for path, access in filesystem.items()
     )
     extends = ":read-only" if read_only else ":workspace"
+    variables = [
+        option
+        for name, value in worker_cache_env(env).items()
+        for option in (
+            "-c",
+            f"shell_environment_policy.set.{name}="
+            f"{json.dumps(value, ensure_ascii=False)}",
+        )
+    ]
     return [
         "-c",
         f"default_permissions={json.dumps(PROFILE)}",
@@ -351,6 +881,7 @@ def codex_args(
         f"permissions.{PROFILE}.filesystem={{{entries}}}",
         "-c",
         f"permissions.{PROFILE}.network.enabled={str(network).lower()}",
+        *variables,
     ]
 
 
@@ -477,12 +1008,12 @@ def _xdg(home: Path, env: Mapping[str, str], variable: str, *default: str) -> Pa
 def _opencode_folders(home: Path, env: Mapping[str, str]) -> list[tuple[Path, bool]]:
     """Return OpenCode's folders, each with whether it is writable.
 
-    Its data, cache and state folders are writable and its configuration
-    folder is read-only.
+    Its data and state folders are writable and its configuration folder is
+    read-only. Its cache is in the workers' cache folder, because the sandbox
+    sets `XDG_CACHE_HOME`.
     """
     return [
         (_xdg(home, env, "XDG_DATA_HOME", ".local", "share") / "opencode", True),
-        (_xdg(home, env, "XDG_CACHE_HOME", ".cache") / "opencode", True),
         (_xdg(home, env, "XDG_STATE_HOME", ".local", "state") / "opencode", True),
         (_xdg(home, env, "XDG_CONFIG_HOME", ".config") / "opencode", False),
     ]
@@ -492,26 +1023,34 @@ def claude_folders(home: Path, env: Mapping[str, str]) -> list[Path]:
     """Return the folders and files Claude Code writes in the home folder.
 
     They are its configuration folder (`$CLAUDE_CONFIG_DIR`, or
-    `~/.claude`), `~/.claude.json` and its backup, and its cache folders
-    `claude` and `claude-cli-nodejs` in `$XDG_CACHE_HOME`.
+    `~/.claude`), `~/.claude.json` and its backup. Its cache is in the
+    workers' cache folder, because the sandbox sets `XDG_CACHE_HOME`.
 
     Args:
         home: The home folder.
-        env: The environment, for `CLAUDE_CONFIG_DIR` and `XDG_CACHE_HOME`.
+        env: The environment, for `CLAUDE_CONFIG_DIR`.
 
     Returns:
         The paths, whether or not they exist.
     """
     value = env.get("CLAUDE_CONFIG_DIR", "")
     config = Path(value) if value and Path(value).is_absolute() else home / ".claude"
-    cache = _xdg(home, env, "XDG_CACHE_HOME", ".cache")
-    return [
-        config,
-        home / ".claude.json",
-        home / ".claude.json.backup",
-        cache / "claude",
-        cache / "claude-cli-nodejs",
-    ]
+    return [config, home / ".claude.json", home / ".claude.json.backup"]
+
+
+def _mount_aliases(path: Path, mounts: Sequence[tuple[Path, Path]]) -> list[Path]:
+    """Return every mount destination that exposes `path`, including aliases.
+
+    A bind of a symlinked ancestor creates a separate view of its target.
+    Masking the canonical path does not hide that view's corresponding subtree.
+    """
+    resolved = path.resolve()
+    aliases = {path, resolved}
+    for source, destination in mounts:
+        root = source.resolve()
+        if resolved.is_relative_to(root):
+            aliases.add(destination / resolved.relative_to(root))
+    return sorted(aliases, key=lambda item: (len(item.parts), str(item)))
 
 
 def _wrap(
@@ -527,12 +1066,19 @@ def _wrap(
 ) -> list[str]:
     """Return a `bwrap` command line with Ember's deny list.
 
+    The workers' cache folder is writable, also in a read-only run, and the
+    command gets the variables of `worker_cache_env`. Each worker gets a
+    private empty `/tmp`.
+    The cache folder is created when it is missing. Each denied entry gets
+    a mask at every mount destination that exposes it, including symlink
+    aliases. The worktrees folder itself is never masked around a kept path.
+
     Args:
         argv: The command to run.
         worktree: The worker's worktree, also the working folder.
         common: The repository's common git folder, read-only.
         read: The run's read paths.
-        read_only: The worktree is read-only.
+        read_only: Protect a legacy read-only run's source checkout.
         binary: The engine's binary; its folder is kept read-only when it is
             in the home folder.
         folders: The engine's own folders and files, each with whether it is
@@ -543,42 +1089,73 @@ def _wrap(
         The command line.
     """
     home = paths.home_dir(env)
+    cache = _worker_cache(env)
+    worktrees = paths.ensure_worktrees_dir(env)
     args = [
         "bwrap",
         "--ro-bind", "/", "/",
         "--dev", "/dev",
         "--proc", "/proc",
         "--tmpfs", "/tmp",
-        "--tmpfs", str(home),
-        "--tmpfs", str(_runtime_base(env)),
     ]  # fmt: skip
+    mounts = [(Path("/"), Path("/"))]
+
+    def bind(
+        source: Path, *, target: Path | None = None, writable: bool = False
+    ) -> None:
+        """Append a bind and record its source and destination for later masks."""
+        destination = source if target is None else target
+        args.extend(
+            ["--bind" if writable else "--ro-bind", str(source), str(destination)]
+        )
+        mounts.append((source, destination))
+
     if binary is not None:
         folder = Path(binary).resolve().parent
         if folder.is_relative_to(home) and folder.exists():
-            args += ["--ro-bind", str(folder), str(folder)]
+            bind(folder)
     # A command that reaches the Docker daemon can mount the whole disk.
     for socket in dict.fromkeys(Path(path).resolve() for path in DOCKER_SOCKETS):
         if socket.is_socket():
-            args += ["--ro-bind", "/dev/null", str(socket)]
+            bind(Path("/dev/null"), target=socket)
     kept = kept_paths(home, worktree, common, read, env=env)
+    kept = sorted(
+        {
+            *kept,
+            *(variant for path, _ in folders for variant in (path, path.resolve())),
+            *([Path(binary).resolve().parent] if binary is not None else []),
+        }
+    )
     for path in sorted(kept, key=lambda path: (len(path.parts), str(path))):
         if path.exists():
-            args += ["--ro-bind", str(path), str(path)]
+            bind(path)
     for path, writable in folders:
         if path.exists():
-            args += ["--bind" if writable else "--ro-bind", str(path), str(path)]
-    args += [
-        "--ro-bind" if read_only else "--bind", str(worktree), str(worktree),
-        "--ro-bind", str(common), str(common),
-    ]  # fmt: skip
+            bind(path, writable=writable)
+    for path in dict.fromkeys((cache, cache.resolve())):
+        if path.is_dir():
+            bind(path, writable=True)
+    for name, value in worker_cache_env(env).items():
+        args += ["--setenv", name, value]
+    bind(Path(worktree), writable=not read_only)
+    bind(Path(common))
     dotgit = Path(worktree) / ".git"
     if dotgit.exists():
-        args += ["--ro-bind", str(dotgit), str(dotgit)]
-    for path in _protected(env):
-        if path.is_dir():
-            args += ["--tmpfs", str(path)]
+        bind(dotgit)
+    denied = deny_list(
+        home,
+        kept,
+        _runtime_base(env),
+        protected=_protected(env),
+        walk={worktrees: [Path(worktree), Path(worktree).resolve()]},
+    )
+    for path in denied:
+        if path.is_dir() or path == _runtime_base(env):
+            for alias in _mount_aliases(path, mounts):
+                args += ["--tmpfs", str(alias)]
         elif path.exists():
-            args += ["--ro-bind", "/dev/null", str(path)]
+            for alias in _mount_aliases(path, mounts):
+                bind(Path("/dev/null"), target=alias)
     return [
         *args,
         "--unshare-pid",
@@ -601,19 +1178,24 @@ def opencode_wrap(
 ) -> list[str]:
     """Return the `bwrap` command line that runs OpenCode in its sandbox.
 
-    The whole machine is mounted read-only. Empty folders are mounted over the
-    home folder, the runtime base folder and `/tmp`, then the kept paths are
-    mounted back read-only, OpenCode's data, cache and state folders
-    writable, its configuration folder read-only, and the worktree writable
-    unless `read_only`. Ember's own folders and the system Docker sockets are
-    hidden. The worker gets its own PID namespace and keeps network.
+    The whole machine is mounted read-only. Unkept entries of the home folder
+    and Ember's worktrees folder are masked by name. The runtime base
+    is masked whole. Each worker gets a private empty `/tmp`.
+    OpenCode's data and state folders and the workers' cache folder are
+    writable, its configuration folder
+    read-only, and detached review worktrees writable. `read_only` protects
+    legacy source checkouts. `XDG_CACHE_HOME`
+    and the variables of `WORKER_CACHE_VARIABLES` point into the workers'
+    cache folder, for OpenCode and every command it runs. Ember's own folders
+    and the system Docker sockets are hidden. The worker gets its own PID
+    namespace and keeps network.
 
     Args:
         argv: The command to run.
         worktree: The worker's worktree, also the working folder.
         common: The repository's common git folder, read-only.
         read: The run's read paths.
-        read_only: The worktree is read-only.
+        read_only: Protect a legacy read-only run's source checkout.
         binary: The `opencode` binary; its folder is kept when it is in the
             home folder.
         env: The environment; `None` reads `os.environ`.
@@ -650,7 +1232,8 @@ def claude_wrap(
     """Return the `bwrap` command line that runs one Claude Code turn.
 
     The sandbox is built as `opencode_wrap` builds OpenCode's, with Claude
-    Code's folders and files from `claude_folders` writable and the folder
+    Code's folders and files from `claude_folders` writable, the workers'
+    cache folder writable with `XDG_CACHE_HOME` pointing to it, and the folder
     of the installed `claude`, `argv[0]` after symlinks, read-only when it is
     in the home folder. The turn keeps network whatever `network` says,
     because Claude Code needs its API; `worker.network` controls only its web
@@ -662,7 +1245,7 @@ def claude_wrap(
         worktree: The worker's worktree, also the working folder.
         common: The repository's common git folder, read-only.
         read: The run's read paths.
-        read_only: The worktree is read-only.
+        read_only: Protect a legacy read-only run's source checkout.
         network: The run's `worker.network` value; the sandbox keeps network
             either way.
         env: The environment; `None` reads `os.environ`.

@@ -16,6 +16,7 @@ from ember.runs.core import Core, StartOptions
 from panels.test_record import member  # pyrefly: ignore[missing-import]
 from runs.stub_engine import (  # pyrefly: ignore[missing-import]
     StubDriver,
+    git,
     kill_sessions,
     make_env,
     make_repo,
@@ -64,7 +65,8 @@ class Harness:
                 :count
             ],
             left_out=[],
-            **{"stall_minutes": 10, "timeout_minutes": 1, **limits},
+            stall_minutes=limits.get("stall_minutes", 10),
+            timeout_minutes=limits.get("timeout_minutes", 1),
         )
         with record.hold(self.id, self.env):
             record.create(data, question, brief.text(self.id, question), self.env)
@@ -186,7 +188,9 @@ def test_parallel_members_and_run_options(h: Harness) -> None:
         assert saved.effort == item["effort"] == "low"
         assert saved.read_only and saved.claim is None
         assert saved.read == (str(h.tmp),) and saved.trailers == ()
-        assert saved.worktree == str(h.repo) and saved.branch is None
+        assert saved.worktree != str(h.repo) and saved.branch is None
+        assert saved.detached and not Path(saved.worktree).exists()
+        assert saved.base == outcome.panel["base"]
         assert saved.subject.startswith(f"Panel {h.id}: ")
         assert f"Answer from {item['engine']}: café" in summary
         assert item["bytes"] == len(Path(saved.reply or "").read_bytes())
@@ -230,9 +234,9 @@ def test_failure_keeps_other_answers(
     h.script(codex=script)
     outcome = h.start()
     first, *others = outcome.panel["members"]
-    assert first["status"] == "failed" and reason in first["reason"]
-    assert first["exit"] == code and first["closed"]
-    assert all(item["status"] == "answered" for item in others)
+    assert first["status"] == "failed" and reason in first["reason"], first
+    assert first["exit"] == code and first["closed"], first
+    assert all(item["status"] == "answered" for item in others), others
     assert outcome.panel["exit"] == 83 and outcome.panel["status"] == "done"
 
 
@@ -241,11 +245,14 @@ def test_changed_paths_and_warnings(h: Harness) -> None:
     h.script(codex="@write notes.txt x")
     outcome = h.start()
     item = outcome.panel["members"][0]
-    assert item["status"] == "answered" and item["changed"] == ["notes.txt"]
+    saved = runs.load(item["run"], h.env)
+    changed = str(Path(saved.worktree) / "notes.txt")
+    assert item["status"] == "answered" and item["changed"] == [changed]
+    assert Path(changed).exists() and item["closed"]
     assert outcome.panel["exit"] == 83
     assert (
         f"WARNING: member 1 (codex:model): read-only run {item['run']} "
-        "changed notes.txt"
+        f"changed {changed}"
     ) in h.err.getvalue()
 
 
@@ -297,6 +304,7 @@ def test_timeout_freezes_artifacts_and_recovery_collects(h: Harness) -> None:
     assert recovered.panel["exit"] == 0 and recovered.panel["status"] == "done"
     item = recovered.panel["members"][0]
     assert item["closed"] and item["attempts"][-1]["kind"] == "recover"
+    assert item["seconds"] > first["seconds"]
     with pytest.raises(run.NothingToRecover):
         h.recover()
 
@@ -382,7 +390,8 @@ def test_closed_recovery_keeps_outcome_and_changes(h: Harness, failed: bool) -> 
     if failed:
         assert item["reason"] == "original failure"
     else:
-        assert item["changed"] == ["notes.txt"]
+        saved = runs.load(item["run"], h.env)
+        assert item["changed"] == [str(Path(saved.worktree) / "notes.txt")]
 
 
 def test_pending_member_in_crashed_panel_is_never_started(h: Harness) -> None:
@@ -501,6 +510,9 @@ def test_active_recovery_gets_current_cutoff_status(h: Harness, stopping: bool) 
             wait_for(
                 lambda: h.panel()["members"][0]["attempts"][-1]["kind"] == "recover"
             )
+            active = h.panel()["members"][0]
+            assert active["status"] == "running"
+            assert active["seconds"] > 0
         finally:
             if stopping:
                 stop.set()
@@ -681,6 +693,8 @@ def test_retry_replaces_answer_and_keeps_old_run(h: Harness, status: str) -> Non
             panel = h.panel()
             assert panel["status"] == "running" and panel["ended_at"] is None
             assert panel["exit"] is None
+            assert panel["members"][0]["seconds"] is None
+            assert panel["members"][0]["status"] == "starting"
             assert options.read_only and options.dir == str(h.repo)
             assert options.engine == old["engine"] and options.model == old["model"]
             assert options.effort == old["effort"]
@@ -823,3 +837,197 @@ def test_close_current_and_retained_runs_continues_after_refusal(h: Harness) -> 
     assert h.panel()["members"][0]["close_error"] is None
     with record.hold(h.id, h.env):
         assert run.close(h.id, h.env, core_factory=h.factory) == []
+
+
+def test_members_use_one_commit_when_source_head_moves(h: Harness) -> None:
+    h.create(2)
+    original = git(h.repo, "rev-parse", "HEAD", env=h.env)
+
+    class MoveHead(Core):
+        def start(self, options: StartOptions) -> int:
+            if options.engine == "codex":
+                (h.repo / "README.md").write_text("lead committed edit\n")
+                git(h.repo, "commit", "-qam", "lead edit", env=h.env)
+            return super().start(options)
+
+    h.core_type = MoveHead
+    outcome = h.start(spacing=0.2)
+    assert outcome.panel["exit"] == 0
+    assert outcome.panel["base"] == original
+    assert git(h.repo, "rev-parse", "HEAD", env=h.env) != original
+    for item in outcome.panel["members"]:
+        saved = runs.load(item["run"], h.env)
+        assert saved.base == original and saved.detached
+
+
+def test_retry_reads_original_commit_after_source_head_moves(h: Harness) -> None:
+    h.create(1)
+    h.script(codex="@fail first attempt")
+    first = h.start().panel
+    original = first["base"]
+    (h.repo / "README.md").write_text("new version\n")
+    git(h.repo, "commit", "-qam", "next commit", env=h.env)
+    h.script(codex="@reply retry answer")
+    observed = []
+
+    def read_tree(saved: runs.Run) -> None:
+        observed.append(Path(saved.worktree, "README.md").read_text())
+
+    h.drivers["codex"].on_wait = read_tree
+    outcome = h.retry()
+    saved = runs.load(outcome.panel["members"][0]["run"], h.env)
+    assert outcome.panel["exit"] == 0
+    assert saved.base == outcome.panel["base"] == original
+    assert observed and set(observed) == {"hello\n"}
+
+
+def test_panel_close_removes_open_member_worktree(h: Harness) -> None:
+    h.create(1, stall_minutes=0.01)
+    h.script(codex="@hang")
+    item = h.start().panel["members"][0]
+    saved = runs.load(item["run"], h.env)
+    assert Path(saved.worktree).exists()
+    h.release()
+    h.recover()
+    assert not Path(saved.worktree).exists()
+    assert saved.worktree not in git(h.repo, "worktree", "list", env=h.env)
+
+
+def test_panel_close_removes_detached_worktree(h: Harness) -> None:
+    h.drivers["codex"].foreign = "owner message"
+    h.create(1)
+    item = h.start().panel["members"][0]
+    saved = runs.load(item["run"], h.env)
+    assert not item["closed"] and Path(saved.worktree).exists()
+    h.drivers["codex"].foreign = None
+    with record.hold(h.id, h.env):
+        results = run.close(h.id, h.env, core_factory=h.factory)
+    assert len(results) == 1 and results[0]["closed"]
+    assert not Path(saved.worktree).exists()
+    assert saved.worktree not in git(h.repo, "worktree", "list", env=h.env)
+
+
+@pytest.mark.parametrize("status", [runs.CLOSED, runs.FAILED])
+@pytest.mark.parametrize("retained", [False, True])
+def test_close_cleans_terminal_member_worktree_after_changes_are_removed(
+    h: Harness, status: str, retained: bool
+) -> None:
+    h.create(1)
+    h.script(codex="@write notes.txt evidence\n@fail first attempt")
+    item = h.start().panel["members"][0]
+    saved = runs.load(item["run"], h.env)
+    evidence = Path(saved.worktree) / "notes.txt"
+    assert saved.status == runs.CLOSED and evidence.exists()
+    if retained:
+        h.script(codex="@reply replacement")
+        replacement = h.retry().panel["members"][0]
+        assert replacement["run"] != saved.id
+        assert any(a.get("run") == saved.id for a in replacement["attempts"])
+    runs.update(saved, {"status": status}, allow_closed=True)
+
+    class NoSessionClose(Core):
+        def close(self, run_id: str, *, force: bool = False) -> int:
+            raise AssertionError("terminal run's session was closed again")
+
+    h.core_type = NoSessionClose
+    errors = io.StringIO()
+    with record.hold(h.id, h.env):
+        results = run.close(h.id, h.env, core_factory=h.factory, err=errors)
+    assert [r["run"] for r in results] == [saved.id]
+    assert results[0]["closed"]
+    assert evidence.read_text() == "evidence\n"
+    command = f"git worktree remove --force {saved.worktree}"
+    assert command in errors.getvalue()
+    log = record.folder(h.id, h.env) / "members" / "1.log"
+    assert command in log.read_text()
+    assert runs.load(saved.id, h.env).status == status
+    assert runs.load(saved.id, h.env).worktree == saved.worktree
+
+    evidence.unlink()
+    errors = io.StringIO()
+    with record.hold(h.id, h.env):
+        results = run.close(h.id, h.env, core_factory=h.factory, err=errors)
+    assert [r["run"] for r in results] == [saved.id]
+    assert results[0]["closed"] and not errors.getvalue()
+    assert not Path(saved.worktree).exists()
+    assert saved.worktree not in git(h.repo, "worktree", "list", env=h.env)
+    assert runs.load(saved.id, h.env).status == status
+    assert h.panel()["members"][0]["closed"]
+    with record.hold(h.id, h.env):
+        assert run.close(h.id, h.env, core_factory=h.factory) == []
+
+
+def test_member_denial_is_kept_in_diagnostics_and_record(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ember import sandbox
+
+    folder = Path(h.env["HOME"]) / ".toolchain"
+    folder.mkdir()
+    choices.set_settings({"sandbox.codex": "on"}, env=h.env)
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    monkeypatch.setattr(Core, "_sandboxed", lambda self, spec, run, common: spec)
+    h.create(count=1)
+    panel = h.panel()
+    panel["read"] = []
+    record.save(panel, h.env)
+    h.script(codex=f"@reply Permission denied: {folder}/python")
+    panel = h.start().panel
+    member = panel["members"][0]
+    assert member["denied_paths"] == [
+        {
+            "path": str(folder),
+            "reason": "hidden",
+            "allow_path": str(folder),
+            "run": member["run"],
+            "turn": 1,
+        }
+    ]
+    log = record.folder(h.id, h.env) / "members" / "1.log"
+    assert f"WARNING: {member['run']} was denied {folder}" in log.read_text()
+    assert "Settings, Sandbox read paths" in log.read_text()
+    assert f"was denied {folder}" in h.err.getvalue()
+
+
+@pytest.mark.parametrize("retained", [False, True])
+def test_close_keeps_member_with_uncertain_delivery(h: Harness, retained: bool) -> None:
+    h.create(1)
+    h.script(codex="@write evidence.txt keep\n@fail attempt")
+    item = h.start().panel["members"][0]
+    saved = runs.load(item["run"], h.env)
+    if retained:
+        h.script(codex="@reply replacement")
+        h.retry()
+    runs.update(
+        saved,
+        {
+            "status": runs.FAILED,
+            "turn_state": runs.SENT,
+            "last_reason": "capacity retry delivery is uncertain; ask the lead",
+        },
+        allow_closed=True,
+    )
+    (Path(saved.worktree) / "evidence.txt").unlink()
+    with record.hold(h.id, h.env):
+        results = run.close(h.id, h.env, core_factory=h.factory, err=h.err)
+    [result] = [r for r in results if r["run"] == saved.id]
+    assert not result["closed"]
+    assert "delivery is uncertain" in result["close_error"]
+    assert Path(saved.worktree).exists()
+    assert saved.worktree in git(h.repo, "worktree", "list", env=h.env)
+    assert runs.load(saved.id, h.env).status == runs.FAILED
+    assert not h.panel()["members"][0]["closed"]
+    assert "delivery is uncertain" in h.panel()["members"][0]["close_error"]
+
+
+def test_close_keeps_terminal_member_while_collection_lock_is_held(h: Harness) -> None:
+    h.create(1)
+    h.script(codex="@write evidence.txt keep\n@fail attempt")
+    item = h.start().panel["members"][0]
+    saved = runs.load(item["run"], h.env)
+    (Path(saved.worktree) / "evidence.txt").unlink()
+    with record.hold(h.id, h.env), Core(h.env)._turn_lock(saved.id):
+        [result] = run.close(h.id, h.env, core_factory=h.factory)
+    assert not result["closed"]
+    assert "another emb run command" in result["close_error"]
+    assert Path(saved.worktree).exists()

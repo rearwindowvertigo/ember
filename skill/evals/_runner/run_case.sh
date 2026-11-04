@@ -4,7 +4,8 @@
 # The root is read-only except the case's work folder, ~/.claude,
 # ~/.claude.json and a private /tmp. The skill is mounted read-only at
 # ~/.claude/skills/ember, the stub emb over every emb on PATH and first on
-# PATH, and Ember's config, state, cache and runtime folders are blanked.
+# PATH, every XDG base folder is a private empty folder of the case, and the
+# owner's Ember folder in each XDG base is blanked.
 # After a turn whose final result text contains a question mark, the next
 # reply in the case's owner-replies.md is sent by resuming the session, until
 # the replies run out or a turn ends with no question. A prompt override sends
@@ -18,6 +19,21 @@ command -v bwrap > /dev/null || { echo "run_case.sh: bwrap (bubblewrap) is not o
 claude_bin=$(readlink -f "$H/.local/bin/claude") || true
 [ -n "$claude_bin" ] && [ -x "$claude_bin" ] || { echo "run_case.sh: no claude at $H/.local/bin/claude" >&2; exit 69; }
 mkdir -p "$out"; out=$(readlink -f "$out")
+# The owner's XDG base folders, before the case's own replace them.
+owner_bases=("${XDG_CONFIG_HOME:-$H/.config}" "${XDG_STATE_HOME:-$H/.local/state}"
+    "${XDG_DATA_HOME:-$H/.local/share}" "${XDG_CACHE_HOME:-$H/.cache}"
+    "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}")
+# A private, empty folder for every XDG base, mode 700, used by the scaffold
+# and the session alike, so every folder Ember keeps is the case's own.
+xdg="$out/xdg"; rm -rf "$xdg"
+xdg_env=()
+for pair in CONFIG:config STATE:state DATA:data CACHE:cache RUNTIME:runtime; do
+    name=${pair%%:*}; folder="$xdg/${pair#*:}"
+    mkdir -p "$folder"; chmod 700 "$xdg" "$folder"
+    if [ "$name" = RUNTIME ]; then var=XDG_RUNTIME_DIR; else var="XDG_${name}_HOME"; fi
+    export "$var=$folder"
+    xdg_env+=(--setenv "$var" "$folder")
+done
 work="$out/work"; rm -rf "$work"; mkdir -p "$work"
 (cd "$work" && bash "$case_dir/place-files.sh") > "$out/scaffold.log" 2>&1
 eval_dir="$work/.ember-eval"
@@ -28,9 +44,9 @@ fi
 tools=$(sed -n 's/^allowed_tools: *\[\(.*\)\]/\1/p' "$case_dir/prompt.md" | tr -d ' ')
 [ -n "$tools" ] || tools="Read,Glob,Grep,Skill,Bash"
 extra=()
-# Ember's own folders, each where it exists, as empty folders.
-for d in "$H/.config/ember" "$H/.local/state/ember" "$H/.cache/ember" "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ember"; do
-    [ -d "$d" ] && extra+=(--tmpfs "$d")
+# The owner's Ember folder in each XDG base, where it exists, as an empty folder.
+for base in "${owner_bases[@]}"; do
+    [ -d "$base/ember" ] && extra+=(--tmpfs "$base/ember")
 done
 # The stub over every emb that exists, so a full path reaches it too.
 declare -A seen=()
@@ -61,6 +77,7 @@ run_claude() {  # run_claude <out file> <claude args...>
         "${hide_evals[@]}" \
         --unsetenv CLAUDE_CONFIG_DIR \
         "${extra[@]}" \
+        --bind "$xdg" "$xdg" "${xdg_env[@]}" \
         --setenv EMBER_EVAL_DIR "$eval_dir" \
         --setenv PATH "$eval_dir/bin:/usr/local/bin:/usr/bin:/bin" \
         --chdir "$work" --die-with-parent \

@@ -1,7 +1,10 @@
 import io
 import json
+import os
+import signal
 import stat
 import threading
+import time
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -11,7 +14,7 @@ import pytest
 
 from ember import choices, paths
 from ember.cli import build_parser
-from ember.gapcheck import command
+from ember.gapcheck import command, previous
 from ember.runs import record
 from ember.runs.core import Core, RunError, StartOptions
 from runs.stub_engine import (  # pyrefly: ignore[missing-import]
@@ -28,9 +31,15 @@ RESULT_KEYS = {
     "plan",
     "plan_steps",
     "failure_model",
+    "previous",
     "reviewer",
     "run",
     "steps",
+    "settled",
+    "closed",
+    "dispositions",
+    "next_id",
+    "previous_plan",
     "ranked",
     "counts",
     "uncovered_steps",
@@ -274,7 +283,9 @@ def test_brief_starts_nothing(
 ) -> None:
     code, out, err = invoke(env, plan_file, "--brief", "--dir", str(repo))
     assert code == 0 and not err
-    assert out.startswith("Gap check of the plan") and str(repo) in out
+    assert out.startswith("Gap check of the plan")
+    assert "repository in your own working folder" in out
+    assert str(repo) not in out
     assert not paths.runs_dir(env).exists()
 
 
@@ -811,3 +822,497 @@ def test_confirmed_subagent_route_keeps_confirmed(
     )
     assert code == 0, err
     assert out.startswith("Gap check of the plan")
+
+
+def dispositions(text: str, **statuses: str) -> str:
+    made = json.loads(text)
+    made["dispositions"] = [
+        {"id": identity, "status": status, "reason": "Plan reviewed"}
+        for identity, status in statuses.items()
+    ]
+    return json.dumps(made)
+
+
+def gap_reply(*gaps: dict[str, Any]) -> str:
+    return json.dumps(
+        {"steps": [{"step": 1, "gaps": list(gaps)}, {"step": 2, "gaps": []}]}
+    )
+
+
+def reply_gap(name: str, **extra: str) -> dict[str, str]:
+    return {"gap": name, "harm": "high", "why": "w", "default": "d", **extra}
+
+
+def save_answered(path: Path, data: dict[str, Any], answers: Mapping[str, str]) -> Path:
+    """Save a result with answers on its gaps, as the lead records them."""
+    for step in data["steps"]:
+        for item in step["gaps"]:
+            if item["id"] in answers:
+                item["answer"] = answers[item["id"]]
+    path.write_text(json.dumps(data))
+    return path
+
+
+def check_reply(
+    env: dict[str, str],
+    plan_file: Path,
+    reply_file: Path,
+    text: str,
+    *options: str,
+) -> tuple[int, dict[str, Any], str]:
+    reply_file.write_text(text)
+    code, out, err = invoke(
+        env, plan_file, "--reply", str(reply_file), "--json", *options
+    )
+    return code, json.loads(out) if out else {}, err
+
+
+def test_first_result_holds_ids_and_null_answers(
+    env: dict[str, str], plan_file: Path, reply_file: Path
+) -> None:
+    code, data, err = check_reply(
+        env, plan_file, reply_file, gap_reply(reply_gap("a"), reply_gap("b"))
+    )
+    assert code == 0, err
+    assert data["previous"] is None and data["settled"] == []
+    gaps = data["steps"][0]["gaps"]
+    assert [(item["id"], item["earlier"], item["answer"]) for item in gaps] == [
+        ("g1", None, None),
+        ("g2", None, None),
+    ]
+    assert data["ranked"] == [
+        {"id": "g1", "step": 1, "harm": "high"},
+        {"id": "g2", "step": 1, "harm": "high"},
+    ]
+
+
+def test_repeat_check_on_an_unchanged_answered_plan_settles_every_gap(
+    env: dict[str, str], tmp_path: Path, plan_file: Path, reply_file: Path
+) -> None:
+    _, first, _ = check_reply(
+        env, plan_file, reply_file, gap_reply(reply_gap("a"), reply_gap("b"))
+    )
+    saved = save_answered(
+        tmp_path / "check-1.json", first, {"g1": "Keep 30 days", "g2": "Stop"}
+    )
+    code, data, err = check_reply(
+        env,
+        plan_file,
+        reply_file,
+        dispositions(VALID, g1="settled", g2="settled"),
+        "--previous",
+        str(saved),
+    )
+    assert code == 0, err
+    assert data["previous"] == str(saved)
+    assert data["ranked"] == []
+    assert data["counts"] == {"high": 0, "medium": 0, "low": 0}
+    assert [(item["id"], item["answer"]) for item in data["settled"]] == [
+        ("g1", "Keep 30 days"),
+        ("g2", "Stop"),
+    ]
+    assert data["settled"][0]["title"] == "1. First"
+    # The settled answers reach a third check through the second result.
+    second = tmp_path / "check-2.json"
+    second.write_text(json.dumps(data))
+    code, third, _ = check_reply(
+        env,
+        plan_file,
+        reply_file,
+        dispositions(VALID, g1="settled", g2="settled"),
+        "--previous",
+        str(second),
+    )
+    assert code == 0
+    assert [item["id"] for item in third["settled"]] == ["g1", "g2"]
+
+
+def test_repeat_check_reports_an_invalidated_gap_with_its_earlier_id(
+    env: dict[str, str], tmp_path: Path, plan_file: Path, reply_file: Path
+) -> None:
+    _, first, _ = check_reply(
+        env, plan_file, reply_file, gap_reply(reply_gap("a"), reply_gap("b"))
+    )
+    saved = save_answered(
+        tmp_path / "check-1.json", first, {"g1": "Keep 30 days", "g2": "Stop"}
+    )
+    reopened = reply_gap("The log is now deleted at step 1", earlier="g1")
+    text = dispositions(
+        gap_reply(reopened, reply_gap("new")), g1="reopened", g2="settled"
+    )
+    code, data, err = check_reply(
+        env, plan_file, reply_file, text, "--previous", str(saved)
+    )
+    assert code == 0, err
+    gaps = data["steps"][0]["gaps"]
+    assert [(item["id"], item["earlier"], item["answer"]) for item in gaps] == [
+        ("g3", "g1", None),
+        ("g4", None, None),
+    ]
+    assert [item["id"] for item in data["settled"]] == ["g2"]
+    code, out, _ = invoke(
+        env, plan_file, "--reply", str(reply_file), "--previous", str(saved)
+    )
+    assert code == 0
+    assert "  g3 high: The log is now deleted at step 1" in out
+    assert "    earlier: g1, answered: Keep 30 days" in out
+    assert f"settled from {saved}:" in out
+    assert "  g2 high, earlier step 1: b" in out
+    assert "    answer: Stop" in out
+
+
+def test_previous_without_answers_counts_its_gaps_as_unanswered(
+    env: dict[str, str], tmp_path: Path, plan_file: Path, reply_file: Path
+) -> None:
+    saved = tmp_path / "old.json"
+    _, old, _ = check_reply(env, plan_file, reply_file, gap_reply(reply_gap("a")))
+    old_gap = old["steps"][0]["gaps"][0]
+    del old_gap["id"], old_gap["answer"], old_gap["earlier"]
+    old["ranked"] = [{"step": 1, **old_gap}]
+    for key in ("next_id", "previous_plan", "settled", "closed", "dispositions"):
+        del old[key]
+    saved.write_text(json.dumps(old))
+    text = dispositions(gap_reply(reply_gap("a", earlier="g1")), g1="reopened")
+    code, data, err = check_reply(
+        env, plan_file, reply_file, text, "--previous", str(saved)
+    )
+    assert code == 0, err
+    assert data["settled"] == []
+    assert data["steps"][0]["gaps"][0]["id"] == "g2"
+    code, out, _ = invoke(
+        env, plan_file, "--reply", str(reply_file), "--previous", str(saved)
+    )
+    assert code == 0
+    assert "    earlier: g1, unanswered" in out
+    assert f"settled from {saved}:\n  none\n" in out
+
+
+def test_unknown_or_unexpected_earlier_id_is_81(
+    env: dict[str, str], tmp_path: Path, plan_file: Path, reply_file: Path
+) -> None:
+    saved = tmp_path / "check-1.json"
+    _, empty, _ = check_reply(env, plan_file, reply_file, VALID)
+    saved.write_text(json.dumps(empty))
+    text = gap_reply(reply_gap("a", earlier="g5"))
+    code, data, err = check_reply(
+        env, plan_file, reply_file, text, "--previous", str(saved)
+    )
+    assert code == 81
+    message = (
+        "the reply names earlier gap g5, which the previous result does not have "
+        "as an active or settled gap"
+    )
+    assert message in err
+    assert data["parse_error"] == message
+    code, _, err = check_reply(env, plan_file, reply_file, text)
+    assert code == 81
+    assert "but the check has no previous result" in err
+
+
+def test_invalid_or_unreadable_previous_starts_nothing(
+    env: dict[str, str],
+    tmp_path: Path,
+    plan_file: Path,
+    reply_file: Path,
+    repo: Path,
+) -> None:
+    saved = tmp_path / "check-1.json"
+    _, malformed, _ = check_reply(env, plan_file, reply_file, gap_reply(reply_gap("a")))
+    malformed["ranked"][0]["answer"] = "x"
+    saved.write_text(json.dumps(malformed))
+    for options in (
+        ("--reply", str(reply_file)),
+        ("--brief", "--dir", str(repo)),
+        ("--dir", str(repo), "--engine", "codex", "--model", "m"),
+    ):
+        code, out, err = invoke(env, plan_file, *options, "--previous", str(saved))
+        assert code == command.INVALID_PREVIOUS == 65
+        assert out == ""
+        assert "unexpected key 'answer'" in err
+        assert err.splitlines()[-1].startswith("next: correct ")
+    assert not paths.runs_dir(env).exists()
+    missing = str(tmp_path / "missing.json")
+    code, _, err = invoke(
+        env, plan_file, "--reply", str(reply_file), "--previous", missing
+    )
+    assert code == 66
+    assert err.splitlines()[-1].startswith("next: ls -l ")
+
+
+def test_brief_and_run_pass_the_earlier_gaps(
+    env: dict[str, str],
+    tmp_path: Path,
+    repo: Path,
+    plan_file: Path,
+    driver: StubDriver,
+) -> None:
+    _, first, _ = check_reply(
+        env, plan_file, Path(driver.reply_file), gap_reply(reply_gap("Retention"))
+    )
+    saved = save_answered(tmp_path / "check-1.json", first, {"g1": "Keep"})
+    first["steps"][0]["step"] = 2
+    first["steps"][0]["title"] = "Second"
+    first["steps"][1]["step"] = 1
+    first["ranked"][0]["step"] = 2
+    saved.write_text(json.dumps(first))
+    Path(driver.reply_file).write_text(dispositions(VALID, g1="settled"))
+    listed = "- g1, earlier step 2 (Second): Retention Answer: Keep"
+    code, out, err = invoke(
+        env, plan_file, "--brief", "--dir", str(repo), "--previous", str(saved)
+    )
+    assert code == 0, err
+    assert listed in out.splitlines()
+    code, out, err = invoke(
+        env,
+        plan_file,
+        "--dir",
+        str(repo),
+        "--engine",
+        "codex",
+        "--model",
+        "m",
+        "--json",
+        "--previous",
+        str(saved),
+        driver=driver,
+    )
+    assert code == 0, err
+    data = json.loads(out)
+    assert set(data) == RESULT_KEYS
+    assert data["settled"][0]["id"] == "g1"
+    run = record.load(data["run"]["id"], env)
+    assert listed in (run.folder / "brief.md").read_text().splitlines()
+
+
+def answer_command(env: Mapping[str, str], *options: str) -> tuple[int, str, str]:
+    args = build_parser().parse_args(["gapcheck", *options])
+    out, err = io.StringIO(), io.StringIO()
+    code = command.main(args, env, out=out, err=err)
+    return code, out.getvalue(), err.getvalue()
+
+
+def test_answer_command_records_and_validates_without_a_plan(
+    env: dict[str, str], tmp_path: Path, plan_file: Path, reply_file: Path
+) -> None:
+    _, first, _ = check_reply(env, plan_file, reply_file, gap_reply(reply_gap("a")))
+    saved = tmp_path / "result.json"
+    saved.write_text(json.dumps(first))
+    plan_file.unlink()
+    code, out, err = answer_command(
+        env,
+        "--answer",
+        str(saved),
+        "--id",
+        "g1",
+        "--text",
+        "Keep 30 days\nThen delete",
+        "--json",
+    )
+    assert code == 0, err
+    made = json.loads(out)
+    assert made == json.loads(saved.read_text())
+    assert made["steps"][0]["gaps"][0]["answer"] == "Keep 30 days\nThen delete"
+    assert made["ranked"] == first["ranked"]
+    previous.load(str(saved))
+    assert not list(tmp_path.glob(".result.json.*"))
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        [],
+        ["--id", "g1"],
+        ["--text", "a"],
+        ["--id", "g1", "--text", ""],
+        ["--id", "g1", "--text", "   "],
+        ["--id", "unknown", "--text", "a"],
+        ["--id", "g1", "--text", "a", "--brief"],
+        ["--id", "g1", "--text", "a", "--plan", "missing"],
+        ["--id", "g1", "--text", "a", "--previous", "missing"],
+        ["--id", "g1", "--text", "a", "--reply", "missing"],
+    ],
+)
+def test_answer_errors_do_not_change_the_file(
+    env: dict[str, str],
+    tmp_path: Path,
+    plan_file: Path,
+    reply_file: Path,
+    options: list[str],
+) -> None:
+    _, first, _ = check_reply(env, plan_file, reply_file, gap_reply(reply_gap("a")))
+    saved = tmp_path / "result.json"
+    saved.write_text(json.dumps(first))
+    before = saved.read_bytes()
+    code, out, err = answer_command(env, "--answer", str(saved), *options)
+    assert code == 64, err
+    assert out == "" and "next:" in err
+    assert saved.read_bytes() == before
+
+
+def test_answer_input_and_write_errors(
+    env: dict[str, str],
+    tmp_path: Path,
+    plan_file: Path,
+    reply_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved = tmp_path / "result.json"
+    options = ["--answer", str(saved), "--id", "g1", "--text", "a"]
+    code, _, _ = answer_command(env, *options)
+    assert code == 66
+    saved.write_text("{}")
+    code, _, _ = answer_command(env, *options)
+    assert code == 65
+    _, first, _ = check_reply(env, plan_file, reply_file, gap_reply(reply_gap("a")))
+    saved.write_text(json.dumps(first))
+    before = saved.read_bytes()
+
+    def refuse(*args: object) -> None:
+        raise OSError("write refused")
+
+    monkeypatch.setattr(previous.os, "replace", refuse)
+    code, out, err = answer_command(env, *options)
+    assert code == 74 and not out
+    assert "write refused" in err and "next:" in err
+    assert saved.read_bytes() == before
+    assert not list(tmp_path.glob(".result.json.*"))
+
+
+def test_repeat_chain_carries_closed_history_and_never_reuses_an_id(
+    env: dict[str, str], tmp_path: Path, plan_file: Path, reply_file: Path
+) -> None:
+    _, first, _ = check_reply(
+        env, plan_file, reply_file, gap_reply(reply_gap("a"), reply_gap("b"))
+    )
+    saved = save_answered(tmp_path / "first.json", first, {"g1": "Keep"})
+    code, second, err = check_reply(
+        env,
+        plan_file,
+        reply_file,
+        dispositions(VALID, g1="settled", g2="closed"),
+        "--previous",
+        str(saved),
+    )
+    assert code == 0, err
+    assert second["next_id"] == 3
+    assert second["closed"][0]["id"] == "g2"
+    assert second["closed"][0]["reason"] == "Plan reviewed"
+    saved.write_text(json.dumps(second))
+    # A settled gap still needs a disposition. A closed one does not.
+    code, third, err = check_reply(
+        env,
+        plan_file,
+        reply_file,
+        dispositions(
+            gap_reply(reply_gap("Closed concern matters again")), g1="settled"
+        ),
+        "--previous",
+        str(saved),
+    )
+    assert code == 0, err
+    assert third["steps"][0]["gaps"][0]["id"] == "g3"
+    assert third["steps"][0]["gaps"][0]["earlier"] is None
+    assert third["next_id"] == 4 and third["closed"] == second["closed"]
+    previous.validate(third)
+    saved.write_text(json.dumps(third))
+    code, _, err = check_reply(
+        env,
+        plan_file,
+        reply_file,
+        dispositions(VALID, g3="closed"),
+        "--previous",
+        str(saved),
+    )
+    assert code == 81 and "misses earlier gap g1" in err
+    code, _, err = check_reply(
+        env,
+        plan_file,
+        reply_file,
+        dispositions(VALID, g1="settled", g2="closed", g3="closed"),
+        "--previous",
+        str(saved),
+    )
+    assert code == 81 and "unknown earlier id g2" in err
+
+
+@pytest.mark.parametrize("mode", ["reply", "brief", "run"])
+def test_different_plan_path_warns_and_records_both_paths(
+    env: dict[str, str],
+    tmp_path: Path,
+    plan_file: Path,
+    reply_file: Path,
+    repo: Path,
+    driver: StubDriver,
+    mode: str,
+) -> None:
+    _, first, _ = check_reply(env, plan_file, reply_file, VALID)
+    saved = tmp_path / "first.json"
+    saved.write_text(json.dumps(first))
+    changed = tmp_path / "changed.md"
+    changed.write_text(plan_file.read_text())
+    options = {
+        "reply": ["--reply", str(reply_file), "--json"],
+        "brief": ["--brief", "--dir", str(repo)],
+        "run": ["--dir", str(repo), "--engine", "codex", "--model", "m", "--json"],
+    }
+    code, out, err = invoke(
+        env, changed, *options[mode], "--previous", str(saved), driver=driver
+    )
+    assert code == 0, err
+    assert "WARNING: the previous result's plan" in err
+    assert str(changed) in err and str(plan_file) in err
+    if mode != "brief":
+        made = json.loads(out)
+        assert made["plan"] == str(changed) and made["previous_plan"] == str(plan_file)
+        previous.validate(made)
+
+
+@pytest.mark.parametrize("options", [[], ["--id", "g1"], ["--text", "a"]])
+def test_check_requires_plan_and_answer_options_require_answer(
+    env: dict[str, str], options: list[str]
+) -> None:
+    code, out, err = answer_command(env, *options)
+    assert code == 64 and not out and "next:" in err
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+def test_stop_signal_while_waiting_keeps_the_run_with_its_parent(
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    driver: StubDriver,
+    signum: int,
+) -> None:
+    class WaitSignalled(Core):
+        def _wait_turn(self, run: Any, driver: Any) -> Any:  # noqa: ANN401
+            os.kill(os.getpid(), signum)
+            time.sleep(5)
+            raise AssertionError("the signal did not interrupt the wait")
+
+    def make(environment: Mapping[str, str], **kwargs: Any) -> Core:  # noqa: ANN401
+        return WaitSignalled(
+            environment, load_driver=lambda name: driver, poll_seconds=0.05, **kwargs
+        )
+
+    before = signal.getsignal(signum)
+    code, out, err = invoke(
+        env,
+        plan_file,
+        "--dir",
+        str(repo),
+        "--engine",
+        "codex",
+        "--model",
+        "m",
+        "--json",
+        factory=make,
+    )
+    assert code == 74, err
+    assert signal.getsignal(signum) is before
+    data = json.loads(out)
+    assert "keeps running" in err
+    assert err.splitlines()[-1].startswith("next: ")
+    run = record.load(data["run"]["id"], env)
+    assert run.status != record.CLOSED
+    assert run.parent is not None and run.parent["command"] == "gapcheck"
+    assert run.parent["pid"] == os.getpid() and not record.orphaned(run)

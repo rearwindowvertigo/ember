@@ -18,11 +18,41 @@
   default subject and has an empty body (`gh pr merge <n> --merge --body
   ""`), so Release Please reads only the pull request's own commits. A body
   holding the pull request's title is read as one more change.
+- Worker branches land through `emb merge --subject '<line>'` as one squash
+  commit each, with the lead's subject in the repository's commit convention.
+  Completed flow branches merge with a merge commit and keep those task
+  squash commits.
+- A `BEGIN_COMMIT_OVERRIDE` / `END_COMMIT_OVERRIDE` block in a merged pull
+  request's body applies to every commit that pull request brings to `main`,
+  including its merge commit.
 - The release pull request is merged only when every issue in the
   release's milestone is closed. The milestone is then closed.
-- Release Please also sets the project's version in `uv.lock`
-  (`extra-files` in `release-please-config.json`), so `uv.lock` matches
-  `pyproject.toml` after each release.
+- Release Please also sets the project's version in `uv.lock` and the
+  `Skill version:` line in `skill/SKILL.md` (`extra-files` in
+  `release-please-config.json`). The skill line carries the generic
+  updater's `<!-- x-release-please-version -->` annotation. Both versions
+  match `pyproject.toml` after each release.
+
+## Skill eval fixtures
+
+`make eval-fixtures` regenerates the CLI help and canned results used by
+the skill evals. Claim replies and skill-version warnings are generated
+through the CLI with an isolated installed-skill link. Generated help and
+result fixtures are produced from the checkout at eval setup, outside
+`skill/evals`; they are not committed. A parser or result-shape
+change is checked by regenerating fixtures and running
+`tests/skill/test_evals.py`. Single-worker dry-run text and JSON are
+generated with the worker selector and formatter; the fixture driver
+supplies effort validation without contacting an engine. Gap check results
+are generated with the result builder and validated against the packaged
+`ember/data/gapcheck-result.schema.json`.
+Provider-error eval streams and status replies are generated with the
+Codex classifier and run formatters, including the exit-73 `next:` lines.
+The `sandbox-denied-paths` eval generates warnings, owner actions and
+status through the sandbox detector and run outcome and status writers in
+an isolated home folder, including secret and protected paths.
+The `flow-shared-document-task` eval computes waves from the submitted
+plan with `ember.flows.plan`; it has no canned dry-run fixture.
 
 ## The `.deb` package
 

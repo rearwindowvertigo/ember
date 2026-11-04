@@ -5,35 +5,108 @@
   "description": "A read-only review of a plan, with one entry per step and a list of undefined or contradictory behaviours. A step with no gaps has an empty gaps list.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["steps"],
+  "required": [
+    "steps"
+  ],
   "properties": {
     "steps": {
       "type": "array",
-      "items": {"$ref": "#/$defs/step"}
+      "items": {
+        "$ref": "#/$defs/step"
+      }
+    },
+    "dispositions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/disposition"
+      },
+      "description": "With --previous, one entry for every active and settled earlier gap; closed history needs no entry."
     }
   },
   "$defs": {
     "step": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["step", "gaps"],
+      "required": [
+        "step",
+        "gaps"
+      ],
       "properties": {
-        "step": {"type": "integer", "minimum": 1},
+        "step": {
+          "type": "integer",
+          "minimum": 1
+        },
         "gaps": {
           "type": "array",
-          "items": {"$ref": "#/$defs/gap"}
+          "items": {
+            "$ref": "#/$defs/gap"
+          }
         }
       }
     },
     "gap": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["gap", "harm", "why", "default"],
+      "required": [
+        "gap",
+        "harm",
+        "why",
+        "default"
+      ],
       "properties": {
-        "gap": {"type": "string", "minLength": 1},
-        "harm": {"type": "string", "minLength": 1, "enum": ["high", "medium", "low"]},
-        "why": {"type": "string", "minLength": 1},
-        "default": {"type": "string", "minLength": 1}
+        "gap": {
+          "type": "string",
+          "minLength": 1
+        },
+        "harm": {
+          "type": "string",
+          "minLength": 1,
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "why": {
+          "type": "string",
+          "minLength": 1
+        },
+        "default": {
+          "type": "string",
+          "minLength": 1
+        },
+        "earlier": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The id of the earlier gap this gap repeats or whose answer the plan change invalidates; left out for a new gap."
+        }
+      }
+    },
+    "disposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status",
+        "reason"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^g[1-9][0-9]*$"
+        },
+        "status": {
+          "enum": [
+            "settled",
+            "reopened",
+            "closed"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     }
   }

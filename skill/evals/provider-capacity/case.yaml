@@ -1,0 +1,12 @@
+schema_version: "1.1"
+name: provider-capacity
+expected_outcome: |
+  Capacity retries are off for this run. Codex reports capacity and exits
+  73.
+  Claude reports capacity with retries disabled, keeps the same model and
+  effort, and does not offer OpenCode or another worker as a response to
+  capacity.
+  The owner sends no answer. No replacement worker starts, no settings
+  change, and no run is sent, recovered, closed or merged.
+context:
+  scaffold_script: place-files.sh

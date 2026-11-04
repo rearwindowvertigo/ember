@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from ember import choices, sandbox
+from ember import choices, paths, sandbox
 
 
 def _tool(folder: Path, name: str, text: str = "#!/bin/sh\nexit 0\n") -> Path:
@@ -155,6 +155,67 @@ def test_kept_paths(home: Path, tmp_path: Path) -> None:
     assert kept == sorted(kept, key=str)
 
 
+def test_kept_paths_keeps_the_workers_cache(home: Path, tmp_path: Path) -> None:
+    kept = sandbox.kept_paths(
+        home, home / "wt", home / "wt/.git", env={"HOME": str(home)}
+    )
+    assert home / ".cache/ember/worker" in kept
+    cache_home = tmp_path / "cache"
+    kept = sandbox.kept_paths(
+        home, home / "wt", home / "wt/.git", env={"XDG_CACHE_HOME": str(cache_home)}
+    )
+    assert cache_home / "ember/worker" in kept
+
+
+def test_worker_cache_env(home: Path) -> None:
+    variables = sandbox.worker_cache_env({"HOME": str(home)})
+    root = home / ".cache/ember/worker"
+    assert variables == {
+        "XDG_CACHE_HOME": str(root),
+        "UV_CACHE_DIR": str(root / "uv"),
+        "UV_PYTHON_INSTALL_DIR": str(root / "uv-python"),
+        "PIP_CACHE_DIR": str(root / "pip"),
+        "npm_config_cache": str(root / "npm"),
+        "GOMODCACHE": str(root / "go/mod"),
+    }
+
+
+def test_worker_cache_env_replaces_the_owners_values(
+    home: Path, tmp_path: Path
+) -> None:
+    env = {
+        "HOME": str(home),
+        "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "UV_CACHE_DIR": str(home / ".cache/uv"),
+    }
+    variables = sandbox.worker_cache_env(env)
+    assert variables["XDG_CACHE_HOME"] == str(tmp_path / "cache/ember/worker")
+    assert variables["UV_CACHE_DIR"] == str(tmp_path / "cache/ember/worker/uv")
+
+
+def test_worker_cache_env_preserves_tool_homes(home: Path) -> None:
+    env = {
+        "HOME": str(home),
+        "CARGO_HOME": str(home / "cargo"),
+        "GRADLE_USER_HOME": str(home / "gradle"),
+    }
+    worker = {**env, **sandbox.worker_cache_env(env)}
+    assert worker["CARGO_HOME"] == env["CARGO_HOME"]
+    assert worker["GRADLE_USER_HOME"] == env["GRADLE_USER_HOME"]
+    assert "CARGO_HOME" not in sandbox.worker_cache_env(env)
+    assert "GRADLE_USER_HOME" not in sandbox.worker_cache_env(env)
+
+
+def test_check_kept_refuses_a_workers_cache_inside_embers_folders(
+    env: dict[str, str], home: Path
+) -> None:
+    env["XDG_CACHE_HOME"] = str(home / ".config")
+    with pytest.raises(sandbox.KeptPathError) as caught:
+        sandbox.check_kept(home / "wt", home / "wt/.git", [], env=env)
+    assert caught.value.path == home / ".config/ember/worker"
+    assert caught.value.folder == home / ".config/ember"
+
+
 def test_kept_paths_uses_xdg_config_home(home: Path, tmp_path: Path) -> None:
     config = tmp_path / "cfg"
     kept = sandbox.kept_paths(
@@ -251,6 +312,86 @@ def test_deny_list_protected_wins_over_kept(home: Path, tmp_path: Path) -> None:
     assert tmp_path / "missing" not in denied
 
 
+def test_check_kept_accepts_paths_outside_embers_folders(
+    env: dict[str, str], home: Path
+) -> None:
+    worktree = home / ".local/share/ember/worktrees/run-1"
+    sandbox.check_kept(worktree, home / "src/proj/.git", [], env=env)
+    sandbox.check_kept(worktree, home / "src/proj/.git", [home / ".config"], env=env)
+
+
+@pytest.mark.parametrize(
+    ("kept", "folder"),
+    [
+        ("worktree", ".local/state/ember"),
+        ("common", ".config/ember"),
+        ("read", ".config/ember"),
+        ("read", ".local/state/ember"),
+    ],
+)
+def test_check_kept_refuses_a_kept_path_inside_embers_folders(
+    env: dict[str, str], home: Path, kept: str, folder: str
+) -> None:
+    inside = home / folder / "inside"
+    worktree = inside if kept == "worktree" else home / "wt"
+    common = inside if kept == "common" else home / "src/proj/.git"
+    read = [inside] if kept == "read" else []
+    with pytest.raises(sandbox.KeptPathError) as caught:
+        sandbox.check_kept(worktree, common, read, env=env)
+    assert caught.value.path == inside
+    assert caught.value.folder == home / folder
+    assert str(caught.value) == (
+        f"the kept path {inside} is inside {home / folder}, "
+        "which the sandbox hides from every worker"
+    )
+
+
+def test_check_kept_follows_a_symlink_into_embers_folder(
+    env: dict[str, str], home: Path, tmp_path: Path
+) -> None:
+    _tree(home, ".config/ember/data/")
+    link = tmp_path / "link"
+    link.symlink_to(home / ".config/ember/data")
+    with pytest.raises(sandbox.KeptPathError) as caught:
+        sandbox.check_kept(home / "wt", home / "wt/.git", [link], env=env)
+    assert caught.value.path == home / ".config/ember/data"
+
+
+def test_check_kept_refuses_worktrees_in_a_shared_data_and_state_base(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    env.update(XDG_DATA_HOME=str(tmp_path / "x"), XDG_STATE_HOME=str(tmp_path / "x"))
+    worktree = paths.worktree_path("run-1", env)
+    with pytest.raises(sandbox.KeptPathError) as caught:
+        sandbox.check_kept(worktree, tmp_path / "repo/.git", [], env=env)
+    assert caught.value.folder == tmp_path / "x/ember"
+
+
+@pytest.mark.parametrize("kept", ["other", "root", "alias"])
+def test_check_kept_refuses_reading_other_workers(
+    env: dict[str, str], tmp_path: Path, kept: str
+) -> None:
+    env["XDG_DATA_HOME"] = str(tmp_path / "data")
+    root = paths.ensure_worktrees_dir(env)
+    other = root / "other"
+    other.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(other, target_is_directory=True)
+    read = {"other": other, "root": root, "alias": alias}[kept]
+    with pytest.raises(sandbox.KeptPathError) as caught:
+        sandbox.check_kept(root / "own", tmp_path / "repo/.git", [read], env=env)
+    assert caught.value.folder == root
+
+
+def test_check_kept_accepts_reads_inside_own_worktree(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    root = paths.worktrees_dir(env)
+    sandbox.check_kept(
+        root / "own", tmp_path / "repo/.git", [root / "own/data"], env=env
+    )
+
+
 def test_deny_list_drops_nested_entries(home: Path, tmp_path: Path) -> None:
     _tree(home, "secret/inner/")
     kept = sandbox.kept_paths(home, home / "wt", home / "wt/.git", env={})
@@ -295,7 +436,27 @@ def test_codex_args(env: dict[str, str], home: Path, tmp_path: Path) -> None:
     assert filesystem[env["XDG_RUNTIME_DIR"]] == "deny"
 
 
-def test_codex_args_read_only_and_network(env: dict[str, str], home: Path) -> None:
+@pytest.mark.parametrize("read_only", [False, True])
+def test_codex_args_keep_the_workers_cache_writable(
+    env: dict[str, str], home: Path, read_only: bool
+) -> None:
+    _tree(home, ".cache/uv/", ".cache/ember/sandbox.json")
+    args = sandbox.codex_args(
+        home / "wt", home / "wt/.git", read_only=read_only, env=env
+    )
+    config = _profile(args)
+    cache = home / ".cache/ember/worker"
+    assert stat.S_IMODE(cache.stat().st_mode) == 0o700
+    filesystem = config["permissions"]["ember"]["filesystem"]
+    assert filesystem[str(cache)] == "write"
+    assert filesystem[str(home / ".cache/uv")] == "deny"
+    assert filesystem[str(home / ".cache/ember/sandbox.json")] == "deny"
+    assert config["shell_environment_policy"]["set"] == sandbox.worker_cache_env(env)
+
+
+def test_codex_args_legacy_read_only_and_network(
+    env: dict[str, str], home: Path
+) -> None:
     config = _profile(
         sandbox.codex_args(
             home / "wt", home / "wt/.git", read_only=True, network=True, env=env
@@ -305,6 +466,49 @@ def test_codex_args_read_only_and_network(env: dict[str, str], home: Path) -> No
     assert profile["extends"] == ":read-only"
     assert profile["network"]["enabled"] is True
     assert profile["filesystem"][str(home / "wt")] == "read"
+    assert profile["filesystem"]["/tmp"] == "write"
+    assert "TMPDIR" not in config["shell_environment_policy"]["set"]
+
+
+@pytest.mark.parametrize("engine", ["codex", "opencode", "claude"])
+@pytest.mark.parametrize("read_only", [False, True])
+def test_sandbox_workers_use_default_tmp(
+    env: dict[str, str], home: Path, engine: str, read_only: bool
+) -> None:
+    worktree = home / "wt"
+    worktree.mkdir()
+    owner_tmp = Path(env["TMPDIR"])
+    assert owner_tmp not in sandbox.kept_paths(
+        home, worktree, worktree / ".git", env=env
+    )
+    if engine == "codex":
+        config = _profile(
+            sandbox.codex_args(
+                worktree, worktree / ".git", read_only=read_only, env=env
+            )
+        )
+        assert config["permissions"]["ember"]["filesystem"]["/tmp"] == "write"
+        assert "TMPDIR" not in config["shell_environment_policy"]["set"]
+    else:
+        wrap = sandbox.opencode_wrap if engine == "opencode" else sandbox.claude_wrap
+        args = wrap(
+            ["x"], worktree=worktree, common=worktree / ".git",
+            read_only=read_only, env=env,
+        )  # fmt: skip
+        assert "TMPDIR" not in dict(_pairs(args, "--setenv"))
+        tmp_mount = next(
+            i
+            for i, arg in enumerate(args)
+            if arg == "--tmpfs" and args[i + 1] == "/tmp"
+        )
+        assert tmp_mount < min(
+            i
+            for i, arg in enumerate(args)
+            if arg in ("--bind", "--ro-bind") and args[i + 1] != "/"
+        )
+        for flag in ("--bind", "--ro-bind"):
+            assert ("/tmp", "/tmp") not in _pairs(args, flag)
+            assert (str(owner_tmp), str(owner_tmp)) not in _pairs(args, flag)
 
 
 def test_codex_args_denies_ember_folders_outside_home(
@@ -324,6 +528,101 @@ def test_codex_args_denies_ember_folders_outside_home(
     )["permissions"]["ember"]["filesystem"]
     assert filesystem[str(config_home / "ember")] == "deny"
     assert filesystem[str(state_home / "ember")] == "deny"
+
+
+def _worker_worktrees(
+    env: dict[str, str], tmp_path: Path, location: str
+) -> tuple[Path, Path]:
+    if location != "home":
+        env["XDG_DATA_HOME"] = str(tmp_path / "data")
+    if location == "symlink":
+        target = tmp_path / "private"
+        target.mkdir(mode=0o700)
+        data = paths.data_dir(env)
+        data.mkdir(parents=True, mode=0o700)
+        (data / "worktrees").symlink_to(target, target_is_directory=True)
+    root = paths.ensure_worktrees_dir(env)
+    own = root / "own"
+    own.mkdir()
+    (own / ".git").write_text(f"gitdir: {tmp_path}/repo/.git/worktrees/own\n")
+    (root / "other").mkdir()
+    (root / "other/secret").write_text("private worker data")
+    (root / "private.txt").write_text("private worker metadata")
+    return root, own
+
+
+@pytest.mark.parametrize("engine", ["codex", "opencode", "claude"])
+def test_sandbox_creates_worktrees_folder_before_walking_it(
+    env: dict[str, str], tmp_path: Path, engine: str
+) -> None:
+    env["XDG_DATA_HOME"] = str(tmp_path / "data")
+    root = paths.worktrees_dir(env)
+    assert not root.exists()
+    if engine == "codex":
+        args = sandbox.codex_args(
+            tmp_path / "repo", tmp_path / "repo/.git", [tmp_path], env=env
+        )
+        filesystem = _profile(args)["permissions"]["ember"]["filesystem"]
+        assert str(root) not in filesystem
+    else:
+        wrap = sandbox.opencode_wrap if engine == "opencode" else sandbox.claude_wrap
+        args = wrap(
+            ["x"], worktree=tmp_path / "repo", common=tmp_path / "repo/.git", env=env
+        )
+        assert ("--tmpfs", str(root)) not in zip(args, args[1:], strict=False)
+    assert root.is_dir()
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("location", ["home", "external", "symlink"])
+@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize("owns_worktree", [False, True])
+@pytest.mark.parametrize("broad_read", [False, True])
+def test_codex_args_hides_worktrees_except_own(
+    env: dict[str, str],
+    tmp_path: Path,
+    location: str,
+    read_only: bool,
+    owns_worktree: bool,
+    broad_read: bool,
+) -> None:
+    root, own = _worker_worktrees(env, tmp_path, location)
+    worktree = own if owns_worktree else tmp_path / "readonly-checkout"
+    args = sandbox.codex_args(
+        worktree,
+        tmp_path / "repo/.git",
+        [tmp_path] if broad_read else [],
+        read_only=read_only,
+        env=env,
+    )
+    filesystem = _profile(args)["permissions"]["ember"]["filesystem"]
+    assert str(root) not in filesystem
+    assert filesystem[str(worktree)] == ("read" if read_only else "write")
+    assert filesystem[str(worktree / ".git")] == "read"
+    assert filesystem[str(root / "other")] == "deny"
+    assert filesystem[str(root / "private.txt")] == "deny"
+    if not owns_worktree:
+        assert filesystem[str(own)] == "deny"
+    _assert_no_kept_under_denial(
+        [Path(path) for path, access in filesystem.items() if access != "deny"],
+        [Path(path) for path, access in filesystem.items() if access == "deny"],
+    )
+
+
+def test_codex_args_keeps_protected_folders_hidden_inside_own_worktree(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    root, own = _worker_worktrees(env, tmp_path, "external")
+    env["XDG_CONFIG_HOME"] = str(own / "config")
+    env["XDG_STATE_HOME"] = str(own / "state")
+    for folder in (paths.config_dir(env), paths.state_dir(env)):
+        folder.mkdir(parents=True)
+    args = sandbox.codex_args(own, tmp_path / "repo/.git", env=env)
+    filesystem = _profile(args)["permissions"]["ember"]["filesystem"]
+    assert str(root) not in filesystem
+    assert filesystem[str(own)] == "write"
+    for folder in (paths.config_dir(env), paths.state_dir(env)):
+        assert filesystem[str(folder)] == "deny"
 
 
 def test_codex_args_unicode_path(env: dict[str, str], home: Path) -> None:
@@ -455,6 +754,26 @@ def _pairs(args: Sequence[str], flag: str) -> list[tuple[str, str]]:
     return [(args[i + 1], args[i + 2]) for i, arg in enumerate(args) if arg == flag]
 
 
+def _assert_no_kept_under_denial(kept: Sequence[Path], denied: Sequence[Path]) -> None:
+    for path in kept:
+        for hidden in denied:
+            assert not path.is_relative_to(hidden), (path, hidden)
+            assert not path.resolve().is_relative_to(hidden.resolve()), (path, hidden)
+
+
+def _assert_no_bind_under_mask(args: Sequence[str]) -> None:
+    binds = _pairs(args, "--bind") + _pairs(args, "--ro-bind")
+    # /tmp is a private namespace; sibling worktree masks are denials.
+    denied = [
+        Path(args[i + 1])
+        for i, arg in enumerate(args)
+        if arg == "--tmpfs" and args[i + 1] != "/tmp"
+    ]
+    denied.extend(Path(target) for source, target in binds if source == "/dev/null")
+    kept = [Path(target) for source, target in binds if source != "/dev/null"]
+    _assert_no_kept_under_denial(kept, denied)
+
+
 def test_opencode_wrap(env: dict[str, str], home: Path, tmp_path: Path) -> None:
     _tree(home, ".local/bin/", ".local/share/opencode/", ".config/opencode/", "wt/.git")
     worktree = home / "wt"
@@ -463,11 +782,13 @@ def test_opencode_wrap(env: dict[str, str], home: Path, tmp_path: Path) -> None:
     args = sandbox.opencode_wrap(
         ["opencode", "run"], worktree=worktree, common=common, env=env
     )
-    assert args[:9] == [
-        "bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs",
+    assert args[:8] == [
+        "bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
     ]  # fmt: skip
     tmpfs = [args[i + 1] for i, arg in enumerate(args) if arg == "--tmpfs"]
-    assert tmpfs[:3] == ["/tmp", str(home), env["XDG_RUNTIME_DIR"]]
+    assert env["XDG_RUNTIME_DIR"] in tmpfs
+    assert tmpfs[0] == "/tmp" and str(home) not in tmpfs
+    _assert_no_bind_under_mask(args)
     ro = _pairs(args, "--ro-bind")
     rw = _pairs(args, "--bind")
     assert (str(home / ".local/bin"),) * 2 in ro
@@ -486,13 +807,31 @@ def test_opencode_wrap(env: dict[str, str], home: Path, tmp_path: Path) -> None:
     ]
 
 
-def test_opencode_wrap_read_only(env: dict[str, str], home: Path) -> None:
+def test_opencode_wrap_legacy_read_only(env: dict[str, str], home: Path) -> None:
     (home / "wt").mkdir()
     args = sandbox.opencode_wrap(
         ["x"], worktree=home / "wt", common=home / "wt/.git", read_only=True, env=env
     )
     assert (str(home / "wt"),) * 2 not in _pairs(args, "--bind")
     assert (str(home / "wt"),) * 2 in _pairs(args, "--ro-bind")
+    assert (str(home / ".cache/ember/worker"),) * 2 in _pairs(args, "--bind")
+
+
+def test_opencode_wrap_gives_the_workers_cache(
+    env: dict[str, str], home: Path, tmp_path: Path
+) -> None:
+    cache_home = tmp_path / "cache"
+    env["XDG_CACHE_HOME"] = str(cache_home)
+    (home / "wt").mkdir()
+    args = sandbox.opencode_wrap(
+        ["x"], worktree=home / "wt", common=home / "wt/.git", env=env
+    )
+    cache = cache_home / "ember/worker"
+    assert cache.is_dir()
+    assert stat.S_IMODE(cache.stat().st_mode) == 0o700
+    assert (str(cache),) * 2 in _pairs(args, "--bind")
+    assert dict(_pairs(args, "--setenv")) == sandbox.worker_cache_env(env)
+    assert (str(cache_home / "opencode"),) * 2 not in _pairs(args, "--bind")
 
 
 def test_opencode_wrap_hides_ember_folders(env: dict[str, str], home: Path) -> None:
@@ -503,8 +842,174 @@ def test_opencode_wrap_hides_ember_folders(env: dict[str, str], home: Path) -> N
     tmpfs = [args[i + 1] for i, arg in enumerate(args) if arg == "--tmpfs"]
     assert str(home / ".config/ember") in tmpfs
     assert str(home / ".local/state/ember") in tmpfs
-    last_bind = max(i for i, arg in enumerate(args) if arg in ("--bind", "--ro-bind"))
+    last_bind = max(
+        i
+        for i, arg in enumerate(args)
+        if arg in ("--bind", "--ro-bind") and args[i + 1] != "/dev/null"
+    )
     assert args.index(str(home / ".config/ember")) > last_bind
+
+
+@pytest.mark.parametrize("engine", ["opencode", "claude"])
+@pytest.mark.parametrize("location", ["home", "external", "symlink"])
+@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize("owns_worktree", [False, True])
+@pytest.mark.parametrize("broad_read", [False, True])
+def test_wrap_hides_worktrees_except_own(
+    env: dict[str, str],
+    tmp_path: Path,
+    engine: str,
+    location: str,
+    read_only: bool,
+    owns_worktree: bool,
+    broad_read: bool,
+) -> None:
+    root, own = _worker_worktrees(env, tmp_path, location)
+    worktree = own if owns_worktree else tmp_path / "readonly-checkout"
+    wrap = sandbox.opencode_wrap if engine == "opencode" else sandbox.claude_wrap
+    args = wrap(
+        ["x"],
+        worktree=worktree,
+        common=tmp_path / "repo/.git",
+        read=[tmp_path] if broad_read else [],
+        read_only=read_only,
+        env=env,
+    )
+    masks = [i for i, arg in enumerate(args) if arg == "--tmpfs"]
+    mask = next(i for i in masks if args[i + 1] == str(root / "other"))
+    if broad_read:
+        read_bind = next(
+            i
+            for i, arg in enumerate(args)
+            if arg == "--ro-bind" and args[i + 1] == str(tmp_path)
+        )
+        assert mask > read_bind
+    assert ("/dev/null", str(root / "private.txt")) in _pairs(args, "--ro-bind")
+    binds = _pairs(args, "--ro-bind" if read_only else "--bind")
+    assert ((str(own), str(own)) in binds) is owns_worktree
+    if owns_worktree:
+        assert (str(own / ".git"),) * 2 in _pairs(args, "--ro-bind")
+    assert not any(
+        Path(source).is_relative_to(root / "other")
+        for source, _ in _pairs(args, "--bind") + _pairs(args, "--ro-bind")
+    )
+    assert str(root) not in [args[i + 1] for i in masks]
+    _assert_no_bind_under_mask(args)
+
+
+@pytest.mark.parametrize("engine", ["opencode", "claude"])
+@pytest.mark.parametrize("ancestor", ["data", "ember", "parent"])
+@pytest.mark.parametrize("read_only", [False, True])
+def test_wrap_hides_worktrees_through_symlinked_read_ancestors(
+    env: dict[str, str],
+    home: Path,
+    tmp_path: Path,
+    engine: str,
+    ancestor: str,
+    read_only: bool,
+) -> None:
+    root, own = _worker_worktrees(env, tmp_path, "external")
+    target = {"data": root.parent.parent, "ember": root.parent, "parent": tmp_path}[
+        ancestor
+    ]
+    first = home / "data-link"
+    first.symlink_to(target, target_is_directory=True)
+    second = home / "another-link"
+    second.symlink_to(first, target_is_directory=True)
+    # A read path can contain a symlink in its parent components too.
+    read = [first, second / root.parent.relative_to(target)]
+    common = tmp_path / "repo/.git"
+    sandbox.check_kept(own, common, read, env=env)
+    wrap = sandbox.opencode_wrap if engine == "opencode" else sandbox.claude_wrap
+    args = wrap(
+        ["x"], worktree=own, common=common, read=read, read_only=read_only, env=env
+    )
+    for alias in (root, *(link / root.relative_to(target) for link in (first, second))):
+        mask = next(
+            i
+            for i, arg in enumerate(args)
+            if arg == "--tmpfs" and args[i + 1] == str(alias / "other")
+        )
+        assert not any(
+            arg == "--tmpfs" and args[i + 1] == str(alias) for i, arg in enumerate(args)
+        )
+        assert mask > max(i for i, arg in enumerate(args) if arg == "--bind")
+        for flag in ("--bind", "--ro-bind"):
+            assert not any(
+                Path(destination).is_relative_to(alias / "other")
+                for source, destination in _pairs(args, flag)
+                if source != "/dev/null"
+            )
+    _assert_no_bind_under_mask(args)
+
+
+@pytest.mark.parametrize("engine", ["opencode", "claude"])
+@pytest.mark.parametrize("folder", ["config", "state"])
+def test_wrap_hides_protected_folders_through_symlinked_read_ancestors(
+    env: dict[str, str], home: Path, tmp_path: Path, engine: str, folder: str
+) -> None:
+    base = tmp_path / folder
+    protected = base / "ember"
+    protected.mkdir(parents=True)
+    env[f"XDG_{folder.upper()}_HOME"] = str(base)
+    alias = home / "folder-link"
+    alias.symlink_to(base, target_is_directory=True)
+    own = home / "wt"
+    own.mkdir()
+    common = tmp_path / "repo/.git"
+    sandbox.check_kept(own, common, [alias], env=env)
+    wrap = sandbox.opencode_wrap if engine == "opencode" else sandbox.claude_wrap
+    args = wrap(["x"], worktree=own, common=common, read=[alias], env=env)
+    last_bind = max(
+        i
+        for i, arg in enumerate(args)
+        if arg in ("--bind", "--ro-bind") and args[i + 1] != "/dev/null"
+    )
+    for hidden in (protected, alias / "ember"):
+        mask = next(
+            i
+            for i, arg in enumerate(args)
+            if arg == "--tmpfs" and args[i + 1] == str(hidden)
+        )
+        assert mask > last_bind
+
+
+def test_wrap_restores_git_protection_inside_own_worktree(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    root, own = _worker_worktrees(env, tmp_path, "external")
+    common = own / "git-metadata"
+    common.mkdir()
+    args = sandbox.opencode_wrap(["x"], worktree=own, common=common, env=env)
+    assert (str(common),) * 2 in _pairs(args, "--ro-bind")
+    assert args.index(str(common)) > args.index(str(own))
+    assert ("--tmpfs", str(root)) not in zip(args, args[1:], strict=False)
+    _assert_no_bind_under_mask(args)
+
+
+def test_wrap_hides_protected_folders_after_restoring_own_worktree(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    _, own = _worker_worktrees(env, tmp_path, "external")
+    env["XDG_CONFIG_HOME"] = str(own / "config")
+    env["XDG_STATE_HOME"] = str(own / "state")
+    for folder in (paths.config_dir(env), paths.state_dir(env)):
+        folder.mkdir(parents=True)
+    args = sandbox.opencode_wrap(
+        ["x"], worktree=own, common=tmp_path / "repo/.git", env=env
+    )
+    last_bind = max(
+        i
+        for i, arg in enumerate(args)
+        if arg in ("--bind", "--ro-bind") and args[i + 1] != "/dev/null"
+    )
+    for folder in (paths.config_dir(env), paths.state_dir(env)):
+        mask = next(
+            i
+            for i, arg in enumerate(args)
+            if arg == "--tmpfs" and args[i + 1] == str(folder)
+        )
+        assert mask > last_bind
 
 
 def test_opencode_wrap_keeps_binary_folder(env: dict[str, str], home: Path) -> None:
@@ -545,18 +1050,21 @@ def test_claude_wrap(env: dict[str, str], home: Path, tmp_path: Path) -> None:
     assert args[0] == "bwrap"
     assert args[-2:] == [str(home / ".local/bin/claude"), "-p"]
     binds = _pairs(args, "--bind")
-    for path in (home / ".claude", home / ".claude.json", worktree):
+    cache = home / ".cache/ember/worker"
+    for path in (home / ".claude", home / ".claude.json", worktree, cache):
         assert (str(path),) * 2 in binds
-    assert (str(home / ".cache/claude-cli-nodejs"),) * 2 in binds
+    assert (str(home / ".cache/claude-cli-nodejs"),) * 2 not in binds
+    assert ("XDG_CACHE_HOME", str(cache)) in _pairs(args, "--setenv")
     read_only = _pairs(args, "--ro-bind")
     assert (str(install),) * 2 in read_only
     assert (str(data),) * 2 in read_only
     assert not any("opencode" in pair[0] for pair in [*binds, *read_only])
     assert "--unshare-net" not in args
-    assert ("--tmpfs", str(home)) in zip(args, args[1:], strict=False)
+    assert ("--tmpfs", str(home)) not in zip(args, args[1:], strict=False)
+    _assert_no_bind_under_mask(args)
 
 
-def test_claude_wrap_read_only_and_config_dir(
+def test_claude_wrap_legacy_read_only_and_config_dir(
     env: dict[str, str], home: Path, tmp_path: Path
 ) -> None:
     config = tmp_path / "claude-config"
@@ -867,3 +1375,412 @@ def test_save_check_that_cannot_write_raises_nothing(
 def test_save_check_rejects_other_engines(cache_env: dict[str, str]) -> None:
     with pytest.raises(ValueError):
         sandbox.save_check(_sample("gemini"), cache_env)
+
+
+def _denial_snapshot(
+    env: dict[str, str], home: Path, read: tuple[str, ...] = ()
+) -> dict[str, Any]:
+    worktree = home / "project"
+    worktree.mkdir(exist_ok=True)
+    return sandbox.hidden_snapshot(worktree, worktree / ".git", read, env=env)
+
+
+@pytest.mark.parametrize(
+    "error", ["Permission denied", "Operation not permitted", "EACCES"]
+)
+def test_denials_match_hidden_folder_and_offer_deepest_safe_folder(
+    env: dict[str, str], home: Path, error: str
+) -> None:
+    tool = home / ".toolchain" / "versions" / "3.14"
+    tool.mkdir(parents=True)
+    binary = tool / "python"
+    binary.write_text("")
+    snapshot = _denial_snapshot(env, home)
+    expected = [
+        {"path": str(home / ".toolchain"), "reason": "hidden", "allow_path": str(tool)}
+    ]
+    assert sandbox.denied_paths(f"{error}: '{binary}'", snapshot) == expected
+    assert (
+        sandbox.denied_paths(f"{binary}: {error}\n{binary}: {error}", snapshot)
+        == expected
+    )
+    assert sandbox.denied_paths(f"{binary}: file not found", snapshot) == []
+    assert sandbox.denied_paths(f"{error}: /etc/passwd", snapshot) == []
+
+
+@pytest.mark.parametrize("relative", sandbox.SECRET_HOME_PATHS)
+def test_every_secret_location_is_reported_without_allow(
+    env: dict[str, str], home: Path, relative: str
+) -> None:
+    secret = home / relative
+    secret.parent.mkdir(parents=True, exist_ok=True)
+    if relative.endswith(("config.json", ".netrc")):
+        secret.touch()
+        denied = secret
+    else:
+        secret.mkdir(exist_ok=True)
+        denied = secret / "credentials"
+    result = sandbox.denied_paths(
+        f"'{denied}': Permission denied", _denial_snapshot(env, home)
+    )
+    assert len(result) == 1
+    assert result[0]["reason"] == "secret location"
+    assert result[0]["allow_path"] is None
+
+
+def test_denial_aliases_are_deduplicated_and_secret_target_is_checked(
+    env: dict[str, str], home: Path
+) -> None:
+    secret = home / ".ssh"
+    secret.mkdir()
+    alias = home / "tools"
+    alias.symlink_to(secret, target_is_directory=True)
+    snapshot = _denial_snapshot(env, home)
+    result = sandbox.denied_paths(
+        f"{alias}/id: EACCES\n{secret}/id: Permission denied", snapshot
+    )
+    assert len(result) == 1
+    assert result[0]["reason"] == "secret location"
+    assert result[0]["allow_path"] is None
+
+
+def test_snapshot_retains_hidden_names_and_resolved_targets(
+    env: dict[str, str], home: Path, tmp_path: Path
+) -> None:
+    target = tmp_path / "versions"
+    target.mkdir()
+    alias = home / "tools"
+    alias.symlink_to(target, target_is_directory=True)
+    snapshot = _denial_snapshot(env, home)
+    # Changing current settings does not change an existing run's inventory.
+    choices.set_settings({"sandbox.read": [str(alias)]}, env=env)
+    assert sandbox.denied_paths(f"{target}/python: EACCES", snapshot)[0]["path"] == str(
+        alias
+    )
+    assert (
+        sandbox.denied_paths(
+            f"{target}/python: EACCES", _denial_snapshot(env, home, (str(alias),))
+        )
+        == []
+    )
+
+
+def test_config_runtime_and_other_worktree_cannot_be_offered(
+    env: dict[str, str], home: Path
+) -> None:
+    config = home / ".config" / "tool"
+    config.mkdir(parents=True)
+    other = paths.ensure_worktrees_dir(env) / "other"
+    other.mkdir()
+    snapshot = _denial_snapshot(env, home)
+    for path, reason in (
+        (config / "a", "hidden"),
+        (Path(env["XDG_RUNTIME_DIR"]) / "a", "protected"),
+        (other / "a", "protected"),
+    ):
+        result = sandbox.denied_paths(f"{path}: EACCES", snapshot)
+        assert len(result) == 1
+        assert result[0]["reason"] == reason
+        assert result[0]["allow_path"] is None
+    assert not sandbox.allow_reading_path(config, env)
+    assert not sandbox.allow_reading_path(home, env)
+    assert not sandbox.allow_reading_path(home / ".config", env)
+
+
+def test_denials_handle_spaces_json_and_hidden_files(
+    env: dict[str, str], home: Path
+) -> None:
+    folder = home / "tool with spaces"
+    folder.mkdir()
+    file = home / ".toolrc"
+    file.touch()
+    snapshot = _denial_snapshot(env, home)
+    output = json.dumps(
+        {"output": f"'{folder}/python': Permission denied\n'{file}': EACCES"}
+    )
+    result = sandbox.denied_paths(output, snapshot)
+    assert result == [
+        {"path": str(folder), "reason": "hidden", "allow_path": str(folder)},
+        {"path": str(file), "reason": "hidden", "allow_path": None},
+    ]
+
+
+@pytest.mark.parametrize("engine", ["claude", "opencode"])
+def test_snapshot_excludes_engine_folders_and_binary(
+    env: dict[str, str], home: Path, engine: str
+) -> None:
+    own = home / (".claude" if engine == "claude" else ".config/opencode")
+    own.mkdir(parents=True)
+    binary = home / ".tool" / "version" / engine
+    binary.parent.mkdir(parents=True)
+    binary.touch()
+    worktree = home / "project"
+    worktree.mkdir()
+    snapshot = sandbox.hidden_snapshot(
+        worktree, worktree / ".git", engine=engine, binary=binary, env=env
+    )
+    assert sandbox.denied_paths(f"{own}/a: EACCES\n{binary}: EACCES", snapshot) == []
+
+
+def test_protected_folder_inside_own_worktree_is_still_reported(
+    env: dict[str, str], home: Path
+) -> None:
+    worktree = home / "project"
+    worktree.mkdir()
+    env["XDG_CONFIG_HOME"] = str(worktree / "config")
+    private = paths.config_dir(env)
+    private.mkdir(parents=True)
+    snapshot = sandbox.hidden_snapshot(worktree, worktree / ".git", env=env)
+    result = sandbox.denied_paths(f"{private}/settings.db: EACCES", snapshot)
+    assert result == [
+        {"path": str(private), "reason": "secret location", "allow_path": None}
+    ]
+
+
+def test_redirected_config_inventory_and_descendant_secrets_block_offer(
+    env: dict[str, str], home: Path
+) -> None:
+    config = home / "custom-config"
+    config.mkdir()
+    env["XDG_CONFIG_HOME"] = str(config)
+    (config / "gh").mkdir()
+    (config / "tool").mkdir()
+    snapshot = _denial_snapshot(env, home)
+    for folder, reason in (
+        (config / "gh", "secret location"),
+        (config / "tool", "hidden"),
+    ):
+        result = sandbox.denied_paths(f"{folder}/a: EACCES", snapshot)
+        assert result[0]["reason"] == reason
+        assert result[0]["allow_path"] is None
+    # A folder holding a credential location cannot be offered, even for a
+    # different denied file directly in that folder.
+    var = home / ".var" / "app"
+    var.mkdir(parents=True)
+    snapshot = _denial_snapshot(env, home)
+    result = sandbox.denied_paths(f"'{var}/marker': Permission denied", snapshot)
+    assert result[0]["allow_path"] is None
+
+
+def test_runtime_protection_takes_precedence_over_secret_alias(
+    env: dict[str, str], home: Path
+) -> None:
+    runtime = Path(env["XDG_RUNTIME_DIR"])
+    secret = runtime / "credentials"
+    secret.mkdir()
+    (home / ".ssh").symlink_to(secret, target_is_directory=True)
+    snapshot = _denial_snapshot(env, home)
+    item = sandbox.denied_paths(f"{home}/.ssh/id: EACCES", snapshot)[0]
+    assert item["reason"] == "protected"
+    assert item["allow_path"] is None
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "error: failed to read the installation directory\n"
+        "  Caused by: failed to read directory '{path}'\n"
+        "  Caused by: Permission denied (os error 13)",
+        "Permission denied:\n'{path}'",
+    ],
+)
+def test_denial_path_can_be_in_neighboring_diagnostic_line(
+    env: dict[str, str], home: Path, output: str
+) -> None:
+    folder = home / ".toolchain"
+    folder.mkdir()
+    snapshot = _denial_snapshot(env, home)
+    result = sandbox.denied_paths(output.format(path=folder), snapshot)
+    assert result == [
+        {"path": str(folder), "reason": "hidden", "allow_path": str(folder)}
+    ]
+    assert sandbox.denied_paths(f"'{folder}'\n\nPermission denied", snapshot) == []
+
+
+@pytest.mark.parametrize("spelling", ["absolute", "home"])
+def test_fully_stated_denial_paths_are_detected(
+    env: dict[str, str], home: Path, spelling: str
+) -> None:
+    folder = home / ".toolchain"
+    folder.mkdir()
+    snapshot = _denial_snapshot(env, home)
+    name = str(folder / "python") if spelling == "absolute" else "~/.toolchain/python"
+    assert sandbox.denied_paths(f"cat: {name}: Permission denied", snapshot) == [
+        {"path": str(folder), "reason": "hidden", "allow_path": str(folder)}
+    ]
+    # Expanding ~/ uses the launch snapshot even if the owner's HOME changes.
+    env["HOME"] = str(home / "different-home")
+    assert sandbox.denied_paths(f"{name}: EACCES", snapshot)[0]["path"] == str(folder)
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        "cat: ../.toolchain/python: Permission denied",
+        "cat: '../.toolchain/python': Permission denied",
+        "EACCES: `../.toolchain/python`",
+        "cat: ../other-worker/result.txt: Permission denied",
+        "cat: key: Permission denied",
+        "cat: 'key': Permission denied",
+    ],
+)
+def test_relative_denials_are_not_resolved(
+    env: dict[str, str], home: Path, diagnostic: str
+) -> None:
+    folder = home / ".toolchain"
+    folder.mkdir()
+    (folder / "python").touch()
+    snapshot = _denial_snapshot(env, home)
+    (home / "project/key").symlink_to(folder / "python")
+    # Even a record with the former cwd field does not supply missing context.
+    snapshot["cwd"] = str(home / "project")
+    assert sandbox.denied_paths(diagnostic, snapshot) == []
+
+
+def test_relative_names_with_absolute_looking_suffixes_are_ignored(
+    env: dict[str, str], home: Path
+) -> None:
+    folder = home / ".toolchain"
+    folder.mkdir()
+    snapshot = _denial_snapshot(env, home)
+    for name in (f"relative{folder}/python", f"../prefix {folder}/python"):
+        assert sandbox.denied_paths(f"cat: '{name}': Permission denied", snapshot) == []
+    assert (
+        sandbox.denied_paths(
+            f"cat: relative{folder}/python: Permission denied", snapshot
+        )
+        == []
+    )
+
+
+def test_absolute_denial_in_structured_message_is_detected(
+    env: dict[str, str], home: Path
+) -> None:
+    folder = home / "toolchain with spaces"
+    folder.mkdir()
+    snapshot = _denial_snapshot(env, home)
+    diagnostic = json.dumps({"message": f"cat: '{folder}/python': Permission denied"})
+    assert sandbox.denied_paths(diagnostic, snapshot) == [
+        {"path": str(folder), "reason": "hidden", "allow_path": str(folder)}
+    ]
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        "cat: ../.toolchain/python: Permission denied",
+        "cat: 'key': Permission denied",
+        "cat: key: Permission denied",
+        "Permission denied: key",
+    ],
+)
+def test_execution_directory_metadata_does_not_complete_a_relative_error(
+    env: dict[str, str],
+    home: Path,
+    diagnostic: str,
+) -> None:
+    folder = home / ".toolchain"
+    folder.mkdir()
+    snapshot = _denial_snapshot(env, home)
+    assert (
+        sandbox.denied_paths(
+            json.dumps(
+                {
+                    "cwd": str(folder),
+                    "input": {"command": f"cd {folder} && cat ../.toolchain/python"},
+                    "output": diagnostic,
+                }
+            ),
+            snapshot,
+        )
+        == []
+    )
+    assert sandbox.denied_paths(f"cwd: {folder}\n{diagnostic}", snapshot) == []
+
+
+@pytest.mark.parametrize(
+    "error", ["Permission denied", "Operation not permitted", "EACCES"]
+)
+@pytest.mark.parametrize("spelling", ["absolute", "home"])
+@pytest.mark.parametrize("container", ["output", "nested", "array", "scalar"])
+def test_structured_diagnostic_starting_with_path_is_not_quoted_as_filename(
+    env: dict[str, str],
+    home: Path,
+    error: str,
+    spelling: str,
+    container: str,
+) -> None:
+    folder = home / ".tools"
+    folder.mkdir()
+    snapshot = _denial_snapshot(env, home)
+    name = str(folder) if spelling == "absolute" else "~/.tools"
+    diagnostic = f"{name}: {error}"
+    structured: object = {
+        "output": {"output": diagnostic},
+        "nested": {"result": {"content": [{"text": diagnostic}]}},
+        "array": [{"output": diagnostic}],
+        "scalar": diagnostic,
+    }[container]
+    expected = [{"path": str(folder), "reason": "hidden", "allow_path": str(folder)}]
+    assert sandbox.denied_paths(diagnostic, snapshot) == expected
+    assert sandbox.denied_paths(json.dumps(structured), snapshot) == expected
+
+
+def test_standalone_path_field_can_contain_error_words_and_spaces(
+    env: dict[str, str], home: Path
+) -> None:
+    folder = home / "tools with Permission denied in the name"
+    folder.mkdir()
+    snapshot = _denial_snapshot(env, home)
+    assert sandbox.denied_paths(
+        json.dumps({"error": "EACCES", "path": str(folder)}), snapshot
+    ) == [{"path": str(folder), "reason": "hidden", "allow_path": str(folder)}]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_hidden_folder_and_credential_denials_always_merge_as_secret(
+    env: dict[str, str], home: Path, reverse: bool
+) -> None:
+    folder = home / ".docker"
+    folder.mkdir()
+    secret = folder / "config.json"
+    secret.touch()
+    snapshot = _denial_snapshot(env, home)
+    lines = [f"{folder}: Permission denied", f"{secret}: Permission denied"]
+    assert sandbox.denied_paths(lines[0], snapshot) == [
+        {"path": str(folder), "reason": "hidden", "allow_path": None}
+    ]
+    if reverse:
+        lines.reverse()
+    assert sandbox.denied_paths("\n".join(lines), snapshot) == [
+        {"path": str(folder), "reason": "secret location", "allow_path": None}
+    ]
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        (0, 1, 2),
+        (0, 2, 1),
+        (1, 0, 2),
+        (1, 2, 0),
+        (2, 0, 1),
+        (2, 1, 0),
+    ],
+)
+def test_denials_merge_as_protected_in_every_order(
+    env: dict[str, str], home: Path, order: tuple[int, int, int]
+) -> None:
+    folder = home / ".docker"
+    folder.mkdir()
+    secret = folder / "config.json"
+    secret.touch()
+    runtime = folder / "runtime"
+    runtime.mkdir(mode=0o700)
+    env["XDG_RUNTIME_DIR"] = str(runtime)
+    snapshot = _denial_snapshot(env, home)
+    names = [folder, secret, runtime / "socket"]
+    text = "\n".join(f"{names[index]}: Permission denied" for index in order)
+    assert sandbox.denied_paths(text, snapshot) == [
+        {"path": str(folder), "reason": "protected", "allow_path": None}
+    ]

@@ -1,0 +1,14 @@
+schema_version: "1.1"
+name: turn-results-counted
+expected_outcome: |
+  Claude reads emb run --status --json and counts from turns. The first
+  run has exit 73 with provider_error true on turn 1 and exit 0 on turn 2,
+  while last_exit is 0. Its provider kind is usage_limit; turn 2 succeeds
+  after a capacity attempt. Claude distinguishes attempts from turns. The older run has one successful engine result
+  with unknown exit and seconds. The unfinished run has one result whose
+  exit, state and provider_error are unknown. Claude reports one known
+  provider error and one unknown provider result, preserving nulls as unknown.
+  The older outcome omits provider_kind and attempts; their absence is unknown.
+  No worker starts and no existing run is sent, recovered, closed or changed.
+context:
+  scaffold_script: place-files.sh

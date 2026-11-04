@@ -11,6 +11,7 @@ cache folder and read again when the cache is `MAX_AGE` seconds old, missing
 or not valid, or when a refresh is asked for. A read that fails returns the
 cached list, however old, with the failure as its reason; without a cache it
 returns an empty list and the reason. A failed read never changes the cache.
+The `without_cache_writes` scope disables saving refreshed lists.
 """
 
 import contextlib
@@ -23,7 +24,8 @@ import shlex
 import subprocess
 import time
 import urllib.request
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -59,6 +61,26 @@ SOURCES = (CLI, OPENROUTER, CACHE)
 _OPENROUTER_ID = re.compile(r"~?[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:-]*")
 
 Fetch = Callable[[str, float], Any]
+
+_CACHE_WRITES = ContextVar("model_cache_writes", default=True)
+
+
+@contextlib.contextmanager
+def without_cache_writes() -> Iterator[None]:
+    """Disable model cache writes for nested lookups in the current context.
+
+    Lookups still read caches, refresh them from their sources and fall back
+    on discovery failures. The scope applies to lookups through drivers and
+    restores the previous policy on exit. Other threads keep their policy.
+
+    Yields:
+        Nothing.
+    """
+    token = _CACHE_WRITES.set(False)
+    try:
+        yield
+    finally:
+        _CACHE_WRITES.reset(token)
 
 
 @dataclass(frozen=True)
@@ -425,6 +447,8 @@ def list_models(
 ) -> ModelList:
     """Return an engine's model list.
 
+    Refreshed lists are saved unless inside `without_cache_writes`.
+
     Args:
         engine: `codex`, `opencode` or `claude`.
         env: The environment; `None` reads `os.environ`.
@@ -462,9 +486,13 @@ def list_models(
     except (OSError, ValueError, TypeError, http.client.HTTPException) as error:
         reason = f"OpenRouter model list: {error}"
     else:
-        payload = {"fetched_at": at, "models": [model.to_json() for model in models]}
-        with contextlib.suppress(OSError):
-            status.save_cache_file(path, payload, env)
+        if _CACHE_WRITES.get():
+            payload = {
+                "fetched_at": at,
+                "models": [model.to_json() for model in models],
+            }
+            with contextlib.suppress(OSError):
+                status.save_cache_file(path, payload, env)
         return ModelList(models=models, source=source, fetched_at=at, reason=None)
     if held is not None:
         return ModelList(
