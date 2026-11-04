@@ -377,22 +377,36 @@ def _codex_signed_in(binary: str, env: Mapping[str, str]) -> bool:
     raise ProbeError(f"codex login status printed {first_line(output)!r}")
 
 
-def parse_opencode_auth(output: str) -> tuple[tuple[str, str], ...]:
+_AUTH_LINE = re.compile(
+    r"(?P<name>.+?)\s+\(?(?P<method>oauth|api(?:\s+key)?|well-?known|env)\)?"
+    r"(?:\s+\S.*)?",
+    re.IGNORECASE,
+)
+_AUTH_LOGIN = {"oauth": "oauth", "api": "api", "api key": "api"}
+
+
+def parse_opencode_auth(output: str) -> tuple[tuple[str, str | None], ...]:
     """Read integration display names and login methods from auth-list output.
 
-    ANSI styling and terminal borders are ignored. An explicit empty list is
-    valid; output with neither credentials nor an empty-list message fails.
+    OpenCode 1 prints `●  <name> <method>` lines inside terminal borders;
+    OpenCode 2 prints `<name>  <method>  <state>` columns, where the method is
+    `OAuth` or `API key`. ANSI styling and borders are ignored. `oauth` and
+    `api` are the login methods; another recognized method, such as
+    `wellknown` or `env`, is connected with an unknown login method. An
+    explicit empty list is valid; output with neither credentials nor an
+    empty-list message fails.
 
     Raises:
         ProbeError: The output is not a recognizable auth list.
     """
     text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
-    entries: list[tuple[str, str]] = []
+    entries: list[tuple[str, str | None]] = []
     for line in text.splitlines():
         line = line.strip().lstrip("│┃┌└┐┘─●○◇◆■□ ").strip()
-        match = re.fullmatch(r"(.+?)\s+\(?(oauth|api)\)?", line, re.IGNORECASE)
+        match = _AUTH_LINE.fullmatch(line)
         if match:
-            entries.append((match[1].strip(), match[2].lower()))
+            method = " ".join(match["method"].lower().split())
+            entries.append((match["name"].strip(), _AUTH_LOGIN.get(method)))
     if entries:
         return tuple(entries)
     if re.search(
@@ -406,7 +420,7 @@ def parse_opencode_auth(output: str) -> tuple[tuple[str, str], ...]:
 
 def opencode_auth(
     binary: str, env: Mapping[str, str], version: str | None
-) -> tuple[tuple[str, str], ...]:
+) -> tuple[tuple[str, str | None], ...]:
     """Read connected integrations, using standalone mode for OpenCode 2."""
     match = re.fullmatch(
         r"(?:opencode\s+)?v?([0-9]+)\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?",

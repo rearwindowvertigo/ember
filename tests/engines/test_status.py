@@ -410,3 +410,36 @@ def test_save_cache_file_replaces_whole(env: dict[str, str]) -> None:
     assert json.loads(path.read_text()) == {"b": 2}
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
     assert sorted(entry.name for entry in path.parent.iterdir()) == ["x.json"]
+
+
+OPENCODE_2_AUTH_LIST = (
+    "Anthropic   OAuth                       stored\n"
+    "OpenAI      OAuth                       stored\n"
+    "OpenRouter  API key                     stored\n"
+)
+"""`opencode auth list --standalone` output captured from OpenCode 2.2.5."""
+
+
+def test_parse_opencode_auth_reads_opencode_2_columns() -> None:
+    assert status.parse_opencode_auth(OPENCODE_2_AUTH_LIST) == (
+        ("Anthropic", "oauth"),
+        ("OpenAI", "oauth"),
+        ("OpenRouter", "api"),
+    )
+
+
+def test_parse_opencode_auth_reads_opencode_1_lines() -> None:
+    output = (
+        "┌  Credentials ~/.local/share/opencode/auth.json\n│\n"
+        "●  Anthropic oauth\n│\n●  Amazon Bedrock api\n│\n└  2 credentials\n"
+    )
+    assert status.parse_opencode_auth(output) == (
+        ("Anthropic", "oauth"),
+        ("Amazon Bedrock", "api"),
+    )
+
+
+def test_parse_opencode_auth_keeps_other_methods_without_login() -> None:
+    assert status.parse_opencode_auth("Custom Gateway  wellknown  stored\n") == (
+        ("Custom Gateway", None),
+    )

@@ -33,7 +33,7 @@ from ember.app.screens.engines import (
     price_text,
     shortlist_with,
 )
-from ember.app.widgets import HINT_ROLE, CommandLine
+from ember.app.widgets import HINT_ROLE, CommandLine, InfoTip
 from ember.engines import models, status
 
 NOW = time.time()
@@ -1604,3 +1604,26 @@ def test_engine_cards_never_scroll_sideways_while_resizing(
         assert screen.scroll_area.horizontalScrollBar().maximum() == 0, width
         for card in screen.cards.values():
             assert card.width() >= card.minimumSizeHint().width(), width
+
+
+def test_opencode_filters_fit_the_default_window(
+    env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
+) -> None:
+    stubs["lists"] = {"opencode": _integrations_list()}
+    screen, context = _screen(env, qtbot)
+    panel = _open(screen, context, qtbot, "opencode")
+    names = {"Provider", "Tools", "Max price", "Min context"}
+    assert names <= {label.text() for label in panel.findChildren(QLabel)}
+    tips = {tip.accessibleName() for tip in panel.findChildren(InfoTip)}
+    assert {f"About {name}" for name in names} <= tips
+    rows = [
+        item.layout()
+        for item in (panel.layout().itemAt(i) for i in range(panel.layout().count()))
+        if item.layout() is not None
+        and any(
+            item.layout().indexOf(widget) >= 0
+            for widget in (panel.provider_picker, panel.price_picker)
+        )
+    ]
+    assert len(rows) == 2
+    assert all(row.minimumSize().width() <= 880 - 2 * 24 for row in rows)

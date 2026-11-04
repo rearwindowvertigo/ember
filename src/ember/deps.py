@@ -43,6 +43,7 @@ from typing import Any
 
 from ember import paths, skill
 from ember.engines import status
+from ember.web import USER_AGENT
 
 TIMEOUT = 10
 """Seconds each command and each network read may take."""
@@ -671,7 +672,7 @@ def fetch_text(url: str, timeout: float) -> str:
     Returns:
         The body, decoded as UTF-8.
     """
-    request = urllib.request.Request(url, headers={"User-Agent": "ember"})
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read().decode("utf-8")
 

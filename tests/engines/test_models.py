@@ -1,6 +1,8 @@
 import http.client
+import io
 import json
 import stat
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -9,6 +11,7 @@ import pytest
 
 from ember.engines import models, status
 from ember.engines.models import Model
+from ember.web import USER_AGENT
 
 T0 = 1_800_000_000.0
 HOUR = 60 * 60
@@ -385,11 +388,17 @@ def test_openrouter_list(env: dict[str, str]) -> None:
     assert len(fetch.calls) == 1
 
 
-def test_openrouter_failure_without_cache(env: dict[str, str]) -> None:
+def test_catalogue_failure_without_cache_lists_models_without_details(
+    env: dict[str, str],
+) -> None:
     result = models.list_models(
         "opencode", env, fetch=Fetcher(OSError("no network")), now=T0
     )
-    assert result.models == ()
+    assert result.models
+    assert all(
+        model.prompt_price is None and model.context_length is None
+        for model in result.models
+    )
     assert result.source == "cli"
     assert result.fetched_at is None
     assert result.reason is not None
@@ -410,8 +419,10 @@ def test_openrouter_failure_with_cache(env: dict[str, str]) -> None:
 
 def test_catalogue_reply_without_providers(env: dict[str, str]) -> None:
     result = models.list_models("opencode", env, fetch=Fetcher({"error": "x"}), now=T0)
-    assert result.models == ()
+    assert result.models
+    assert all(model.prompt_price is None for model in result.models)
     assert result.reason is not None
+    assert result.reason.startswith("models.dev catalogue:")
 
 
 def test_model_list_json(env: dict[str, str]) -> None:
@@ -493,9 +504,9 @@ def test_truncated_catalogue_response_reports_reason(
         raise http.client.IncompleteRead(b"partial")
 
     result = models.list_models("opencode", env, fetch=truncated, now=1000.0)
-    assert result.models == ()
+    assert result.models
     assert result.reason is not None
-    assert result.reason.startswith("OpenCode model list:")
+    assert result.reason.startswith("models.dev catalogue:")
 
 
 def test_opencode_tilde_ids_are_kept() -> None:
@@ -577,6 +588,9 @@ def test_failed_discovery(env: dict[str, str], failure: str, cached: bool) -> No
         if failure.startswith("auth"):
             assert len(result.models) == 3
             assert all(model.login is None for model in result.models)
+        elif failure == "catalogue":
+            assert len(result.models) == 3
+            assert all(model.prompt_price is None for model in result.models)
         else:
             assert result.models == ()
 
@@ -625,3 +639,19 @@ def test_empty_models_keep_connected_integrations(env: dict[str, str]) -> None:
         models.list_models("opencode", env, now=T0 + 1).integrations
         == result.integrations
     )
+
+
+def test_fetch_json_names_ember_as_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[urllib.request.Request] = []
+
+    class Reply(io.BytesIO):
+        def __enter__(self) -> Reply:
+            return self
+
+    def urlopen(request: urllib.request.Request, timeout: float) -> Reply:
+        sent.append(request)
+        return Reply(b"{}")
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    assert models.fetch_json(models.CATALOGUE_URL, 1) == {}
+    assert sent[0].get_header("User-agent") == USER_AGENT

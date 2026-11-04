@@ -3863,7 +3863,8 @@ models whose integration's login method is OAuth. Other prices are shown
 per million tokens; unknown figures show a dash.
 
 Search models matches the model id or label, ignoring case. The filter row
-has Provider, Tools, Max input price per million tokens and Min context.
+has two lines: Provider and Tools, with the model count at the end, then
+Max price and Min context. Each label is followed by an info icon.
 Provider offers All providers followed by each integration by name, including
 integrations with no models. Each option has its total model count as a hint
 line, before other filters. After a refresh, the selection is kept by
@@ -3871,8 +3872,14 @@ integration id; if it is absent, the picker returns to All providers.
 Provider filters the serving integration; a model served through OpenRouter
 has provider OpenRouter regardless of its maker.
 
-The Provider info icon reads: "The OpenCode integration that serves the
-model. Ember lists the integrations you connected with /connect in OpenCode."
+The info icons read:
+
+| Filter | Tooltip |
+|---|---|
+| Provider | "The OpenCode integration that serves the model. Ember lists the integrations you connected with /connect in OpenCode." |
+| Tools | "Shows only models that take tool calls. A worker needs tool calls to read and change files." |
+| Max price | "No more than this input price per million tokens. Models that show Subscription always pass." |
+| Min context | "At least this many tokens of context: how much text the model takes in at once." |
 
 Tools starts on and keeps models that report tool support. Switching it off
 removes that restriction. The price and context pickers start at Any. Filters

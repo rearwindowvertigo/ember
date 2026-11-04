@@ -762,17 +762,35 @@ class _ModelPanel(Card):
         )
         row.addWidget(self.provider_picker)
         row.addSpacing(12)
-        tools_label = QLabel("Tools")
-        row.addWidget(tools_label)
+        row.addWidget(QLabel("Tools"))
+        row.addWidget(
+            InfoTip(
+                "Tools",
+                "Shows only models that take tool calls. A worker needs tool "
+                "calls to read and change files.",
+            )
+        )
         self.tools_switch = Switch()
         self.tools_switch.setChecked(True)
         self.tools_switch.setAccessibleName("Only models that take tool calls")
         self.tools_switch.clicked.connect(lambda _on: self.apply_filters())
         row.addWidget(self.tools_switch)
-        row.addSpacing(12)
-        row.addWidget(QLabel("Max input price per million tokens"))
+        row.addStretch(1)
+        self.count_label = label(role="secondary")
+        row.addWidget(self.count_label)
+        layout.addLayout(row)
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        row.addWidget(QLabel("Max price"))
+        row.addWidget(
+            InfoTip(
+                "Max price",
+                "No more than this input price per million tokens. Models that "
+                "show Subscription always pass.",
+            )
+        )
         self.price_picker = Picker()
-        self.price_picker.setAccessibleName("Max input price per million tokens")
+        self.price_picker.setAccessibleName("Max price")
         for text, value in PRICE_CHOICES:
             self.price_picker.add_option(text, value)
         self.price_picker.setCurrentIndex(0)
@@ -780,6 +798,13 @@ class _ModelPanel(Card):
         row.addWidget(self.price_picker)
         row.addSpacing(12)
         row.addWidget(QLabel("Min context"))
+        row.addWidget(
+            InfoTip(
+                "Min context",
+                "At least this many tokens of context: how much text the model "
+                "takes in at once.",
+            )
+        )
         self.context_picker = Picker()
         self.context_picker.setAccessibleName("Min context")
         for text, value in CONTEXT_CHOICES:
@@ -788,8 +813,6 @@ class _ModelPanel(Card):
         self.context_picker.currentIndexChanged.connect(lambda _i: self.apply_filters())
         row.addWidget(self.context_picker)
         row.addStretch(1)
-        self.count_label = label(role="secondary")
-        row.addWidget(self.count_label)
         layout.addLayout(row)
 
     def load(self, refresh: bool = False) -> None:

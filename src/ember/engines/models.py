@@ -20,10 +20,11 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from ember import choices, paths
 from ember.engines import status
+from ember.web import USER_AGENT
 
 MAX_AGE = 6 * 60 * 60
 """Seconds a cached model list is used before it is read again."""
@@ -316,8 +317,16 @@ def parse_codex(text: str) -> tuple[Model, ...]:
     return tuple(result)
 
 
+def _is_catalogue(catalogue: object) -> TypeGuard[dict[str, dict[str, Any]]]:
+    """Return whether `catalogue` has the models.dev provider shape."""
+    return isinstance(catalogue, dict) and all(
+        isinstance(value, dict) and isinstance(value.get("models"), dict)
+        for value in catalogue.values()
+    )
+
+
 def parse_opencode(
-    output: str, catalogue: object, auth: tuple[tuple[str, str], ...]
+    output: str, catalogue: object, auth: tuple[tuple[str, str | None], ...]
 ) -> tuple[tuple[Model, ...], tuple[Integration, ...]]:
     """Join authoritative OpenCode ids to catalogue details and auth entries.
 
@@ -328,10 +337,7 @@ def parse_opencode(
     Raises:
         ValueError: The catalogue or model-command output is unreadable.
     """
-    if not isinstance(catalogue, dict) or any(
-        not isinstance(value, dict) or not isinstance(value.get("models"), dict)
-        for value in catalogue.values()
-    ):
+    if not _is_catalogue(catalogue):
         raise ValueError("models.dev reply is not a provider catalogue")
     ids = tuple(
         dict.fromkeys(line.strip() for line in output.splitlines() if line.strip())
@@ -344,7 +350,7 @@ def parse_opencode(
     }
     for ident in served:
         names.setdefault(ident, ident)
-    matched: dict[str, list[tuple[str, str]]] = {}
+    matched: dict[str, list[tuple[str, str | None]]] = {}
     for name, login in auth:
         matches = [
             ident
@@ -410,14 +416,20 @@ def _read_opencode(
         raise status.ProbeError(
             f"opencode models exited {code}: {status.first_line(errors or output)}"
         )
-    catalogue = fetch(CATALOGUE_URL, TIMEOUT)
     reason = None
+    try:
+        catalogue = fetch(CATALOGUE_URL, TIMEOUT)
+        if not _is_catalogue(catalogue):
+            raise ValueError("models.dev reply is not a provider catalogue")
+    except (OSError, ValueError, TypeError, http.client.HTTPException) as error:
+        catalogue = {}
+        reason = f"models.dev catalogue: {error}"
     try:
         _, version = status.run_probe([binary, "--version"], env)
         auth = status.opencode_auth(binary, env, version.strip())
     except status.ProbeError as error:
         auth = ()
-        reason = str(error)
+        reason = str(error) if reason is None else f"{reason}; {error}"
     models, integrations = parse_opencode(output, catalogue, auth)
     return models, integrations, reason
 
@@ -432,7 +444,9 @@ def fetch_json(url: str, timeout: float) -> Any:  # noqa: ANN401
     Returns:
         The decoded body.
     """
-    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    request = urllib.request.Request(
+        url, headers={"Accept": "application/json", "User-Agent": USER_AGENT}
+    )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read())
 
