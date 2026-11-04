@@ -156,6 +156,7 @@ class OpenCode2Driver(OpenCodeDriver):
                 session,
             ),  # fmt: skip
             env=variables,
+            binary=spec.argv[0],
         )
 
     def _server_identity(self, run: Run) -> dict[str, Any] | None:

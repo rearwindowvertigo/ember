@@ -281,6 +281,7 @@ def test_command(driver: OpenCode2Driver, run: Run, server: Server) -> None:
         str(state["port"]), state["session"],
     )  # fmt: skip
     assert spec.cwd == Path(run.worktree)
+    assert spec.binary == spec.argv[4]
     assert spec.first_message == "brief"
     assert state["turns"] == {} and state["sent"] == []
     for name in (opencode.STATE_NAME, opencode.PASSWORD_NAME):
