@@ -4,14 +4,16 @@ You are one member of a panel reviewing one Ember use survey entry. Other
 members answer the same question on their own; the lead compares your
 answers. Work read-only: change, create or delete no file.
 
-The entry to review is `{{ENTRY}}`, relative to the repository top.
+The entry to review is the survey issue saved at `{{ENTRY}}`.
 
 ## Read
 
-1. `dev/survey/README.md`, for the scoring scale and how entries are
-   filled.
+1. `dev/survey/README.md` and `dev/survey/agent.md`, for the scoring
+   scale and how entries are filled.
 2. The entry, `{{ENTRY}}`.
-3. Every other file in `dev/survey/entries/`, to find points that repeat.
+3. Every other file in `{{EARLIER}}` (earlier survey issues, named
+   `issue-<number>.md`) and in `dev/survey/entries/` (entries from before
+   survey issues), to find points that repeat.
 4. `AGENTS.md`, every file in `docs/design/` and every file in
    `docs/decisions/`, for what Ember is, what is decided, and what is not
    planned. `docs/design/` is history up to 0.5.0.
@@ -56,8 +58,8 @@ Group points that are about the same thing, whether positive, negative or
 neutral, under one tag. A tag is a few lowercase words joined by hyphens,
 such as `tray-menu` or `gap-check-premise`. A point can carry more than one
 tag. For each tag, list the points in this entry and the matching points in
-earlier entries (`<entry file name>: <section or quote>`). A point with no
-overlap gets no tag.
+earlier entries (`#<issue number>` or `<entry file name>`, then
+`: <section or quote>`). A point with no overlap gets no tag.
 
 ### 5. Decide on changes
 

@@ -67,5 +67,9 @@ File the filled survey as one issue in the Ember repository, with the
 gh issue create --repo rearwindowvertigo/ember --label survey --title 'Survey: <date> <task>' --body-file <filled file>
 ```
 
+The issue is the survey entry. File one issue for the whole survey, not
+one per finding: a panel reviews the entry, and the owner decides which of
+its proposed changes become issues. Leave the issue open.
+
 Report the issue's URL to the owner, then delete the temporary file. Do not
 open a pull request or change any file in the Ember repository.
