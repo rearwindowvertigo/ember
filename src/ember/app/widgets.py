@@ -836,7 +836,8 @@ class Picker(QComboBox):
         painter = QStylePainter(self)
         option = QStyleOptionComboBox()
         self.initStyleOption(option)
-        option.currentText = self.closed_text()
+        # PySide's stubs type this attribute wrongly; it holds the label text.
+        option.currentText = self.closed_text()  # pyrefly: ignore[bad-assignment]
         painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
         painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, option)
 

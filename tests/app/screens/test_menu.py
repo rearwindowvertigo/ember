@@ -1037,6 +1037,7 @@ def test_info_icons_sit_before_their_controls_in_tab_order(
     choices.set_settings({"multi.runs_as": "ask"}, env=env)
     _context, screen = _screen(env, qtbot)
     tips = screen.tip_rows
+    assert screen.panel_info is not None
     expected: list[QWidget] = [
         tips["single.writer"].info,
         screen.roles["writer"].picker,

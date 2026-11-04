@@ -372,6 +372,6 @@ def test_settings_rows_are_names_with_info_icons(
         assert row.info.toolTip()
     assert len({row.slot.width() for row in screen.tip_rows.values()}) == 1
     widget = screen.tip_rows["Start at login"].info.nextInFocusChain()
-    while not widget.focusPolicy() & Qt.FocusPolicy.TabFocus:
+    while widget is not None and not widget.focusPolicy() & Qt.FocusPolicy.TabFocus:
         widget = widget.nextInFocusChain()
     assert widget is screen.autostart
