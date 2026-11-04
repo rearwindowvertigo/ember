@@ -1340,3 +1340,20 @@ def test_check_now_has_the_refresh_icon(env: dict[str, str], qtbot: QtBot) -> No
     before = screen.check_button.icon().cacheKey()
     theme.signals.changed.emit(theme.current_mode())
     assert screen.check_button.icon().cacheKey() != before
+
+
+def test_engine_cards_fit_the_window_width(env: dict[str, str], qtbot: QtBot) -> None:
+    screen, _context = _screen(env, qtbot)
+    screen.resize(1400, 700)
+    screen.show()
+    qtbot.waitUntil(lambda: screen.columns == 3, timeout=2000)
+    screen.resize(500, 700)
+    qtbot.waitUntil(lambda: screen.columns < 3, timeout=2000)
+    assert screen.scroll_area.horizontalScrollBar().maximum() == 0
+    positions = [
+        (card.mapTo(screen, card.rect().topLeft()).y())
+        for card in screen.cards.values()
+    ]
+    assert len(set(positions)) > 1
+    screen.resize(1400, 700)
+    qtbot.waitUntil(lambda: screen.columns == 3, timeout=2000)

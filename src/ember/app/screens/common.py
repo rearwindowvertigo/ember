@@ -173,6 +173,25 @@ class ToneLine(QLabel):
         self.setVisible(bool(text))
 
 
+def fitting_columns(tile: int, area: QScrollArea, most: int, gap: int) -> int:
+    """Return the most columns, up to `most`, whose tiles fit beside the scroll bar.
+
+    Args:
+        tile: The narrowest a tile can be, such as its `minimumSizeHint`.
+        area: The scroll area holding the tiles.
+        most: The most columns.
+        gap: The space between columns.
+
+    Returns:
+        A column count from 1 to `most`.
+    """
+    width = area.contentsRect().width() - area.verticalScrollBar().sizeHint().width()
+    for count in range(most, 1, -1):
+        if count * tile + (count - 1) * gap <= width:
+            return count
+    return 1
+
+
 def scroll_area() -> QScrollArea:
     """Return a frameless scroll area that resizes its widget to fit."""
     area = QScrollArea()

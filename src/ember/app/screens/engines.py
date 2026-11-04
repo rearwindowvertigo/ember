@@ -19,12 +19,14 @@ from decimal import Decimal
 from math import ceil
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QFontMetricsF
 from PySide6.QtWidgets import (
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -38,6 +40,7 @@ from ember.app.screens.common import (
     clear_layout,
     discard,
     engine_name,
+    fitting_columns,
     inline,
     label,
     screen_header,
@@ -96,6 +99,9 @@ NO_EFFORT_NOTE = "This model reports no effort, so it cannot be shortlisted."
 """Shown on a Codex or Claude model row that has no effort to save."""
 
 CHECK_AGAIN = "Check again after the command finishes."
+
+CARD_GAP = 16
+"""The space between engine cards."""
 """Shown on a card after the owner ran one of its setup commands."""
 
 
@@ -1013,14 +1019,19 @@ class EnginesScreen(QWidget):
         layout.addLayout(self.failure_area)
         self.failure: Alert | None = None
 
-        cards = QHBoxLayout()
-        cards.setSpacing(16)
+        self.cards_grid = QGridLayout()
+        self.cards_grid.setHorizontalSpacing(CARD_GAP)
+        self.cards_grid.setVerticalSpacing(CARD_GAP)
         self.cards: dict[str, _EngineCard] = {}
         for engine in status.ENGINES:
-            card = _EngineCard(self, engine)
-            cards.addWidget(card, 1)
-            self.cards[engine] = card
-        layout.addLayout(cards)
+            self.cards[engine] = _EngineCard(self, engine)
+        layout.addLayout(self.cards_grid)
+        area = self.findChild(QScrollArea)
+        assert area is not None
+        self.scroll_area = area
+        self.columns = len(self.cards)
+        self._place_cards()
+        self.scroll_area.installEventFilter(self)
 
         self.panel_area = QVBoxLayout()
         layout.addLayout(self.panel_area)
@@ -1072,6 +1083,27 @@ class EnginesScreen(QWidget):
             self._redraw()
 
         self.context.tasks.run(read, loaded, lambda _error: None)
+
+    def fitting_columns(self) -> int:
+        """Return how many engine cards, up to three, fit side by side."""
+        tile = max(card.minimumSizeHint().width() for card in self.cards.values())
+        return fitting_columns(tile, self.scroll_area, len(self.cards), CARD_GAP)
+
+    def _place_cards(self) -> None:
+        for card in self.cards.values():
+            self.cards_grid.removeWidget(card)
+        for index in range(len(self.cards)):
+            self.cards_grid.setColumnStretch(index, 1 if index < self.columns else 0)
+        for index, card in enumerate(self.cards.values()):
+            self.cards_grid.addWidget(card, index // self.columns, index % self.columns)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: D102, N802
+        if watched is self.scroll_area and event.type() == QEvent.Type.Resize:
+            columns = self.fitting_columns()
+            if columns != self.columns:
+                self.columns = columns
+                self._place_cards()
+        return super().eventFilter(watched, event)
 
     def _engines_read(self, _result: dict) -> None:
         self._reading_engines = False
