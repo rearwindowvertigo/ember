@@ -231,15 +231,84 @@ def test_claude_output_not_json_is_check_failed(env: dict[str, str]) -> None:
     assert "Unknown command" in result.reason
 
 
-def test_opencode_without_openrouter_is_not_signed_in(env: dict[str, str]) -> None:
+@pytest.mark.parametrize(
+    ("version", "auth_args"),
+    [
+        ("0.9.0", "auth list"),
+        ("1.19.5", "auth list"),
+        ("opencode v2.2.5", "auth list --standalone"),
+        ("2.2.5", "auth list --standalone"),
+        ("opencode v2.invalid", "auth list"),
+        ("unknown", "auth list"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("output", "signed_in"),
+    [
+        ("Credentials\nOpenRouter api", True),
+        ("Anthropic oauth", False),
+        ("No authenticated integrations", False),
+    ],
+)
+def test_opencode_sign_in_uses_version(
+    env: dict[str, str],
+    tmp_path: Path,
+    version: str,
+    auth_args: str,
+    output: str,
+    signed_in: bool,
+) -> None:
+    """Probe sign-in with the arguments selected by the single version read."""
+    calls = tmp_path / "opencode-calls"
     _stub(
         _bin(env),
         "opencode",
-        'case "$1" in --version) echo "0.9.0";; auth) echo "Anthropic oauth";; esac\n',
+        f'echo "$*" >> "{calls}"\n'
+        f'case "$*" in\n--version) echo "{version}";;\n'
+        f'{auth_args!r}) echo "{output}";;\n'
+        '*) echo "unexpected arguments"; exit 9;;\nesac\n',
     )
     result = status.check("opencode", env)
-    assert result.state == status.NOT_SIGNED_IN
-    assert result.requirements[1].fix == "opencode auth login --provider openrouter"
+    assert calls.read_text().splitlines() == ["--version", auth_args]
+    assert result.version == version
+    assert result.signed_in is signed_in
+    assert result.connected is signed_in
+    assert result.state == (status.CONNECTED if signed_in else status.NOT_SIGNED_IN)
+    assert result.requirements[1].fix == (
+        None if signed_in else "opencode auth login --provider openrouter"
+    )
+
+
+@pytest.mark.parametrize("version", ["1.19.5", "opencode v2.2.5"])
+def test_opencode_failed_auth_is_check_failed(
+    env: dict[str, str], version: str
+) -> None:
+    """Report an auth command failure for either OpenCode version."""
+    _stub(
+        _bin(env),
+        "opencode",
+        f'case "$1" in --version) echo "{version}";; '
+        'auth) echo "store unavailable"; exit 3;; esac\n',
+    )
+    result = status.check("opencode", env)
+    assert result.state == status.CHECK_FAILED
+    assert result.signed_in is None
+    assert result.reason == "opencode auth list exited 3: store unavailable"
+
+
+def test_opencode_failed_version_uses_legacy_auth(env: dict[str, str]) -> None:
+    """Use the OpenCode 1 probe when the version command fails."""
+    _stub(
+        _bin(env),
+        "opencode",
+        'case "$*" in --version) echo "broken"; exit 2;; '
+        '"auth list") echo "OpenRouter api";; *) exit 9;; esac\n',
+    )
+    result = status.check("opencode", env)
+    assert result.state == status.CHECK_FAILED
+    assert result.version is None
+    assert result.signed_in is True
+    assert result.reason == "opencode --version exited 2: broken"
 
 
 def test_opencode_found_in_its_install_folder(env: dict[str, str]) -> None:
