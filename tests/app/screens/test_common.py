@@ -92,12 +92,40 @@ def test_discard_and_clear_layout(qtbot: QtBot) -> None:
     common.discard(None)
 
 
-def test_tooltip_row_puts_its_tooltip_on_the_info_icon_only(qtbot: QtBot) -> None:
+def test_tooltip_row_is_a_name_with_an_info_icon(qtbot: QtBot) -> None:
     control = QPushButton("Always")
-    row = common.TooltipRow("Run the gap check", "Before every flow.", "Full.", control)
+    row = common.TooltipRow("Run the gap check", "Full.", control)
     qtbot.addWidget(row)
     assert row.info.toolTip() == "Full."
     assert row.info.accessibleName() == "About Run the gap check"
     assert row.heading.toolTip() == ""
-    assert row.help.toolTip() == ""
     assert control.toolTip() == ""
+    labels = [label.text() for label in row.findChildren(QLabel)]
+    assert labels == ["Run the gap check"]
+
+
+def test_align_controls_gives_rows_one_column(qtbot: QtBot) -> None:
+    from ember.app import widgets
+
+    picker = widgets.Picker()
+    picker.add_option("gpt-6-astra · high", "x")
+    wide = widgets.Segmented((("a", "Ask each time"), ("f", "Flow"), ("w", "Claude")))
+    switch = widgets.Switch()
+    rows = [
+        common.TooltipRow(name, "Tip.", control)
+        for name, control in (("A", picker), ("B", wide), ("C", switch))
+    ]
+    host = QWidget()
+    qtbot.addWidget(host)
+    layout = QVBoxLayout(host)
+    for row in rows:
+        layout.addWidget(row)
+    width = common.align_controls(rows)
+    assert width >= max(common.CONTROL_COLUMN, wide.sizeHint().width())
+    host.resize(width + 400, 300)
+    host.show()
+    qtbot.waitExposed(host)
+    assert {row.slot.width() for row in rows} == {width}
+    assert picker.width() == width
+    right = {row.control.mapTo(host, row.control.rect().topRight()).x() for row in rows}
+    assert len(right) == 1

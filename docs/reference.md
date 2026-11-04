@@ -2785,10 +2785,14 @@ last input: a key press shows it, a mouse press does not.
 Tooltips draw in `fill-primary` with `on-primary`, 6-pixel corners and
 12-pixel text. A tooltip wider than 320 pixels wraps at 320 pixels, keeps
 its line breaks and may break a path after each `/`; a shorter one shows on
-one line. A setting row with more to say than its help line has an info
-icon after its name; hovering the icon, focusing it from the keyboard or
-clicking it shows the tooltip under it, and the name, help line and control
-have no tooltip. Nothing else in the window opens a tooltip: not cut-off
+one line. Every setting row on Team and Settings is its name with an info
+icon after it, and no line under the name; the icon's tooltip holds what
+the setting does. Hovering the icon, focusing it from the keyboard or
+clicking it shows the tooltip under it, in Ember's own window with 6-pixel
+rounded corners; it hides when the pointer leaves an unfocused icon, focus
+moves on, or Escape is pressed. A screen's setting controls share one
+column as wide as its widest control: pickers fill it, and segmented
+controls, switches and buttons sit at its right edge. Nothing else in the window opens a tooltip: not cut-off
 text, icon-only buttons (their accessible names stay), model names, file
 buttons or picker items. The tray icon's tooltip is drawn by the desktop.
 
@@ -3044,7 +3048,8 @@ Work of several tasks, Flows, Claude Workflows and Panel. Single tasks holds the
 for Codex, OpenCode and Claude in that order, each engine that is on and has
 shortlisted models, under the engine's name, with its models as
 `<model> · <effort>` (OpenCode entries without an effort show the model
-alone). The engine names are headers and cannot be chosen. While a picker
+alone). The engine names are headers and cannot be chosen. The closed
+picker names the engine: `Codex · gpt-6-astra · high`. While a picker
 holds a Claude model, a row under it picks how it runs, CLI or Subagent
 (`single.writer_as`, `single.reviewer_as`).
 
@@ -3058,10 +3063,12 @@ offers a model, the pickers hold Ask each time only and the screen shows
 "Shortlist models in Engines to offer them here." with Open Engines.
 
 Planning holds Gap check reviewer (`gapcheck.reviewer`), a picker of Same
-as Reviewer (`same`) and the same models as Reviewer; Run the gap check
-(`gapcheck.when`), a picker of Off, Always, 2+ tasks to 10+ tasks and Ask
-each time, whose help line states the effect of the chosen value, such as
-"Plans of 5 or more tasks. Plans of 1 to 4 tasks start without one."; and
+as Reviewer (`same`) and the same models as Reviewer; closed on Same as
+Reviewer it shows what that resolves to, such as `Same as Reviewer · Codex ·
+gpt-6-astra · high`, as Flow writer and Flow reviewer do. Run the gap check
+(`gapcheck.when`) is a picker of Off, Always, 2+ tasks to 10+ tasks and Ask
+each time; in its open list each option has a hint line with its effect,
+such as "Plans of 1 to 4 tasks start without one." under 5+ tasks; and
 Gaps Claude asks you about (`gapcheck.ask`): High only, High and medium,
 All.
 
@@ -3081,8 +3088,8 @@ same time; and When an agent runs late
 (`workflow.late`): Ask me, Wait once more, Stop. These are available even
 when no engine offers a model.
 
-Every setting in Planning, Flows and Claude Workflows has an info icon after
-its name whose tooltip explains it more fully.
+The Panel card's description is the tooltip of an info icon after its
+title.
 
 Panel lists `panel.members` in saved order. A member shows
 `<Engine> · <model> · <effort>`, omitting effort when none is set. A member

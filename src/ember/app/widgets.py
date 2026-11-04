@@ -10,6 +10,7 @@ import math
 from collections.abc import Callable, Sequence
 from typing import cast
 
+import shiboken6
 from PySide6.QtCore import (
     QEvent,
     QModelIndex,
@@ -32,7 +33,6 @@ from PySide6.QtGui import (
     QFont,
     QFontMetrics,
     QGuiApplication,
-    QHelpEvent,
     QHideEvent,
     QIcon,
     QKeyEvent,
@@ -64,8 +64,9 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QStyle,
     QStyledItemDelegate,
+    QStyleOptionComboBox,
     QStyleOptionViewItem,
-    QToolTip,
+    QStylePainter,
     QVBoxLayout,
     QWidget,
 )
@@ -181,11 +182,11 @@ PATH_BREAK = "\u200b"
 
 
 def tip_text(text: str) -> str:
-    """Return a tooltip's text, wrapped at `TIP_WIDTH` when it is wider.
+    """Return a tooltip's text, ready to wrap when it is wider than `TIP_WIDTH`.
 
     Text that fits in `TIP_WIDTH` on every line is returned unchanged. Wider
-    text becomes rich text in a table `TIP_WIDTH` wide, with its line breaks
-    kept and a break allowed after each `/`.
+    text becomes rich text with its line breaks kept, a break allowed after
+    each `/`, and breaks inside any word wider than `TIP_WIDTH`.
 
     Args:
         text: The tooltip's plain text.
@@ -201,10 +202,7 @@ def tip_text(text: str) -> str:
         " ".join(_breakable(word, metrics) for word in line.split(" "))
         for line in lines
     )
-    return (
-        f'<table width="{TIP_WIDTH}" cellspacing="0" cellpadding="0">'
-        f"<tr><td>{body}</td></tr></table>"
-    )
+    return f"<p>{body}</p>"
 
 
 def _breakable(word: str, metrics: QFontMetrics) -> str:
@@ -223,24 +221,95 @@ def _breakable(word: str, metrics: QFontMetrics) -> str:
     return PATH_BREAK.join(html.escape(piece, quote=False) for piece in pieces if piece)
 
 
-class TipWrapper(QObject):
-    """Lets only an info icon show a tooltip, wrapped by `tip_text`.
+class TipPopup(QWidget):
+    """Ember's tooltip window: `fill-primary` with `on-primary`, rounded corners.
 
-    Every other widget's tooltip event is dropped, so nothing without an
-    info icon opens a tooltip. The icon keeps its plain text in `toolTip()`;
-    only what is shown wraps.
+    Qt's own tooltip window cannot draw see-through corners, so the info
+    icon shows this one. It wraps text wider than `TIP_WIDTH` at that width.
+    """
+
+    RADIUS = 6
+    PADDING = (8, 4)
+
+    def __init__(self) -> None:
+        """Create the hidden window."""
+        super().__init__(
+            None,
+            Qt.WindowType.ToolTip
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.NoDropShadowWindowHint,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(*self.PADDING, *self.PADDING)
+        self.label = QLabel()
+        self.label.setFont(theme.font("caption"))
+        layout.addWidget(self.label)
+        self.owner: QWidget | None = None
+
+    def show_for(self, owner: QWidget, text: str) -> None:
+        """Show `text` under `owner`, wrapped at `TIP_WIDTH` when it is wider."""
+        self.owner = owner
+        shown = tip_text(text)
+        wide = shown != text
+        self.label.setTextFormat(
+            Qt.TextFormat.RichText if wide else Qt.TextFormat.PlainText
+        )
+        self.label.setWordWrap(wide)
+        if wide:
+            self.label.setFixedWidth(TIP_WIDTH)
+        else:
+            self.label.setMinimumWidth(0)
+            self.label.setMaximumWidth(16777215)  # QWIDGETSIZE_MAX
+        self.label.setText(shown)
+        color = theme.color("on-primary").name()
+        self.label.setStyleSheet(f"color: {color}; background: transparent;")
+        self.adjustSize()
+        self.move(owner.mapToGlobal(QPoint(0, owner.height() + 4)))
+        self.show()
+        self.raise_()
+
+    def hide_for(self, owner: QWidget) -> None:
+        """Hide the window when `owner` is the widget it shows for."""
+        if self.owner is owner:
+            self.hide()
+            self.owner = None
+
+    def text(self) -> str:
+        """Return the shown text as plain text."""
+        return self.label.text()
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: D102, N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(theme.color("fill-primary"))
+        painter.drawRoundedRect(QRectF(self.rect()), self.RADIUS, self.RADIUS)
+
+
+_popup: TipPopup | None = None
+
+
+def tip_popup() -> TipPopup:
+    """Return the app's one tooltip window, made again after Qt deleted it."""
+    global _popup  # noqa: PLW0603
+    if _popup is None or not shiboken6.isValid(_popup):
+        _popup = TipPopup()
+    return _popup
+
+
+class TipWrapper(QObject):
+    """Drops every tooltip event except an info icon's.
+
+    Nothing without an info icon opens a tooltip; the icon shows its own in
+    `TipPopup`.
     """
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: D102
         if event.type() != QEvent.Type.ToolTip or not isinstance(watched, QWidget):
             return False
-        if not isinstance(watched, InfoTip):
-            return True
-        text = watched.toolTip()
-        if not text:
-            return True
-        QToolTip.showText(cast(QHelpEvent, event).globalPos(), tip_text(text), watched)
-        return True
+        return not isinstance(watched, InfoTip)
 
 
 def install_tooltips(app: QApplication) -> TipWrapper:
@@ -253,7 +322,12 @@ def install_tooltips(app: QApplication) -> TipWrapper:
 
 
 class InfoTip(QPushButton):
-    """A small info icon that shows a tooltip on hover, keyboard focus or click."""
+    """A small info icon that shows a tooltip on hover, keyboard focus or click.
+
+    The tooltip stays while the pointer is over the icon or the icon has
+    focus, and hides when the pointer leaves an unfocused icon, focus moves
+    on, or Escape is pressed.
+    """
 
     def __init__(self, about: str, text: str) -> None:
         """Create the icon.
@@ -270,7 +344,6 @@ class InfoTip(QPushButton):
         self.setAccessibleName(f"About {about}")
         self.setAccessibleDescription(text)
         self.setToolTip(text)
-        self._show_on_release = False
         self._paint_icon()
         theme.signals.changed.connect(self._paint_icon)
         self.clicked.connect(self.show_tip)
@@ -278,34 +351,60 @@ class InfoTip(QPushButton):
     def _paint_icon(self, _mode: str = "") -> None:
         self.setIcon(icons.icon("info", theme.color("text-muted"), 16))
 
+    def set_text(self, text: str) -> None:
+        """Change the tooltip's text, redrawing it when shown."""
+        self.setToolTip(text)
+        self.setAccessibleDescription(text)
+        if self._tip_shown():
+            self.show_tip()
+
+    def _tip_shown(self) -> bool:
+        popup = _popup
+        return (
+            popup is not None
+            and shiboken6.isValid(popup)
+            and popup.owner is self
+            and popup.isVisible()
+        )
+
     def show_tip(self) -> None:
         """Show the tooltip under the icon."""
-        point = self.mapToGlobal(QPoint(0, self.height() + 4))
-        QToolTip.showText(point, tip_text(self.toolTip()), self)
+        tip_popup().show_for(self, self.toolTip())
+
+    def hide_tip(self) -> None:
+        """Hide the tooltip when it is this icon's."""
+        if _popup is not None and shiboken6.isValid(_popup):
+            _popup.hide_for(self)
+
+    def event(self, event: QEvent) -> bool:  # noqa: D102
+        if event.type() == QEvent.Type.ToolTip:
+            self.show_tip()
+            return True
+        return super().event(event)
+
+    def leaveEvent(self, event: QEvent) -> None:  # noqa: D102, N802
+        super().leaveEvent(event)
+        if not self.hasFocus():
+            self.hide_tip()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: D102, N802
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide_tip()
+            return
+        super().keyPressEvent(event)
 
     def focusInEvent(self, event: QFocusEvent) -> None:  # noqa: D102, N802
         super().focusInEvent(event)
         if event.reason() in KEYBOARD_REASONS:
             self.show_tip()
-            self._show_on_release = True
-
-    def keyReleaseEvent(self, event: QKeyEvent) -> None:  # noqa: D102, N802
-        super().keyReleaseEvent(event)
-        # Qt hides a tooltip on any key release, including the Tab that
-        # brought focus here, so the tooltip is shown again once the release
-        # has been handled.
-        if self._show_on_release:
-            self._show_on_release = False
-            QTimer.singleShot(0, self._show_if_focused)
-
-    def _show_if_focused(self) -> None:
-        if self.hasFocus():
-            self.show_tip()
 
     def focusOutEvent(self, event: QFocusEvent) -> None:  # noqa: D102, N802
         super().focusOutEvent(event)
-        self._show_on_release = False
-        QToolTip.hideText()
+        self.hide_tip()
+
+    def hideEvent(self, event: QHideEvent) -> None:  # noqa: D102, N802
+        super().hideEvent(event)
+        self.hide_tip()
 
 
 def button(
@@ -602,6 +701,9 @@ class Segmented(QWidget):
 HINT_ROLE = Qt.ItemDataRole.UserRole + 1
 """The item data role holding a picker item's hint line."""
 
+CLOSED_ROLE = Qt.ItemDataRole.UserRole + 3
+"""The item data role holding what a closed picker shows for the item."""
+
 HEADER_ROLE = Qt.ItemDataRole.UserRole + 2
 """The item data role marking a picker group header."""
 
@@ -677,22 +779,66 @@ class Picker(QComboBox):
         item.setFlags(Qt.ItemFlag.NoItemFlags)
         self._model.appendRow(item)
 
-    def add_option(self, text: str, value: object, hint: str | None = None) -> None:
+    def add_option(
+        self,
+        text: str,
+        value: object,
+        hint: str | None = None,
+        closed: str | None = None,
+    ) -> None:
         """Add an item.
 
         Args:
             text: The shown text.
             value: The value `value()` returns while the item is chosen.
             hint: A second line shown in the dropdown list, or `None`.
+            closed: The text the closed picker shows while the item is
+                chosen, or `None` for `text`.
         """
         item = QStandardItem(text)
         item.setData(value, Qt.ItemDataRole.UserRole)
         if hint:
             item.setData(hint, HINT_ROLE)
+        if closed:
+            item.setData(closed, CLOSED_ROLE)
         item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
         self._model.appendRow(item)
         if self.currentIndex() < 0 or self.is_header(self.currentIndex()):
             self.setCurrentIndex(self._model.rowCount() - 1)
+
+    def closed_text(self) -> str:
+        """Return what the closed picker shows: the chosen item's closed text."""
+        closed = self.currentData(CLOSED_ROLE)
+        return str(closed) if closed else self.currentText()
+
+    def sizeHint(self) -> QSize:  # noqa: D102
+        """Return a width that fits every item's text and closed text."""
+        hint = super().sizeHint()
+        metrics = self.fontMetrics()
+        texts = [self.itemText(row) for row in range(self.count())]
+        texts += [
+            str(self.itemData(row, CLOSED_ROLE))
+            for row in range(self.count())
+            if self.itemData(row, CLOSED_ROLE)
+        ]
+        longest = max((metrics.horizontalAdvance(text) for text in texts), default=0)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        size = self.style().sizeFromContents(
+            QStyle.ContentsType.CT_ComboBox,
+            option,
+            QSize(longest, metrics.height()),
+            self,
+        )
+        return QSize(max(hint.width(), size.width()), hint.height())
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: D102, N802
+        painter = QStylePainter(self)
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        option.currentText = self.closed_text()
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
+        painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, option)
 
     def is_header(self, row: int) -> bool:
         """Return whether a row is a group header."""

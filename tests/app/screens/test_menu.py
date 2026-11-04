@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QWidget
 from pytestqt.qtbot import QtBot
 
 from ember import choices, db
+from ember.app import widgets
 from ember.app.context import AppContext
 from ember.app.screens import menu
 from ember.app.screens.menu import MenuScreen
@@ -323,13 +324,16 @@ def test_cards_and_subtitle(env: dict[str, str], qtbot: QtBot) -> None:
         "Panel",
     ]
     assert menu.SUBTITLE in _texts(screen)
-    assert menu.MULTI_HELP in _texts(screen)
-    assert menu.PANEL_HELP in _texts(screen)
-    assert (
+    assert menu.MULTI_HELP not in _texts(screen)
+    assert menu.PANEL_HELP not in _texts(screen)
+    assert screen.tip_rows["multi.runs_as"].info.toolTip() == menu.MULTI_HELP
+    assert screen.panel_info is not None
+    assert screen.panel_info.toolTip() == menu.PANEL_HELP
+    assert screen.tip_rows["single.reviewer"].info.toolTip() == (
         "Reads the writer's branch and reports. Never edits. "
         "Used for read-only single runs, and by the Gap check reviewer and "
         "Flow reviewer while they are Same as Reviewer."
-    ) in _texts(screen)
+    )
     assert screen.multi.accessibleName() == "Multi-task work"
     assert screen.add_member.accessibleName() == "Add panel member"
 
@@ -920,9 +924,11 @@ def test_planning_rows_show_and_save_the_settings(
     choices.set_settings({"gapcheck.when": "5", "gapcheck.ask": "medium"}, env=env)
     context, screen = _screen(env, qtbot)
     assert screen.when.value() == "5"
-    assert screen.when_row.help.text() == (
-        "Plans of 5 or more tasks. Plans of 1 to 4 tasks start without one."
-    )
+    hints = {
+        screen.when.itemData(row, widgets.HINT_ROLE)
+        for row in range(screen.when.count())
+    }
+    assert "Plans of 1 to 4 tasks start without one." in hints
     assert screen.asks.value() == "medium"
     assert screen.derived["gapcheck.reviewer"].picker.value() == "same"
     assert screen.derived["gapcheck.reviewer"].picker.currentText() == (
@@ -935,7 +941,6 @@ def test_planning_rows_show_and_save_the_settings(
     screen.when.set_value("off")
     screen._when_picked(0)
     assert saved == [{"gapcheck.when": "off"}]
-    assert screen.when_row.help.text().startswith("No gap check.")
 
 
 @pytest.mark.parametrize(
@@ -979,19 +984,51 @@ def test_limit_settings_name_themselves_as_maximums(
     texts = [label.text() for label in screen.findChildren(QLabel)]
     for name in ("Max tasks at once", "Max agents at once", "Max review rounds"):
         assert name in texts
-    assert "No more than this many flow tasks run at the same time." in texts
-    assert (
-        "No more than this many Claude Workflow agents run at the same time." in texts
+    tips = {key: row.info.toolTip() for key, row in screen.tip_rows.items()}
+    assert tips["flow.parallel"].startswith(
+        "No more than this many flow tasks run at the same time."
     )
-    assert "The most times a reviewer can check one flow task." in texts
+    assert tips["workflow.agents"].startswith(
+        "No more than this many Claude Workflow agents run at the same time."
+    )
+    assert tips["flow.review_rounds"].startswith(
+        "The most times a reviewer can check one flow task."
+    )
 
 
-def test_when_help_covers_every_value() -> None:
+def test_when_hint_covers_every_value() -> None:
     for value, _text in menu.WHEN:
-        assert menu.when_help(value)
-    assert menu.when_help("2") == (
-        "Plans of 2 or more tasks. Plans of 1 task start without one."
+        assert menu.when_hint(value)
+    assert menu.when_hint("2") == "Plans of 1 task start without one."
+    assert menu.when_hint("off") == (
+        "Every flow and Claude Workflow starts without one."
     )
+
+
+def test_no_setting_name_has_a_line_under_it(env: dict[str, str], qtbot: QtBot) -> None:
+    _context, screen = _screen(env, qtbot)
+    for row in screen.tip_rows.values():
+        assert [label.text() for label in row.findChildren(QLabel)] == [
+            row.heading.text()
+        ]
+    widths = {row.slot.width() for row in screen.tip_rows.values()}
+    assert len(widths) == 1
+
+
+def test_closed_pickers_name_the_engine_and_resolve_same(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    choices.set_settings(SHORTLISTS, env=env)
+    choices.set_settings({"single.reviewer": "codex:gpt-5"}, env=env)
+    _context, screen = _screen(env, qtbot)
+    reviewer = screen.roles["reviewer"].picker
+    assert reviewer.closed_text().startswith("Codex · gpt-5")
+    assert reviewer.currentText().startswith("gpt-5")
+    same = screen.derived["gapcheck.reviewer"].picker
+    assert same.value() == "same"
+    assert same.closed_text() == f"Same as Reviewer · {reviewer.closed_text()}"
+    writer = screen.derived["flow.writer"].picker
+    assert writer.closed_text() == "Same as Writer · Ask each time"
 
 
 def test_info_icons_sit_before_their_controls_in_tab_order(
@@ -1001,6 +1038,10 @@ def test_info_icons_sit_before_their_controls_in_tab_order(
     _context, screen = _screen(env, qtbot)
     tips = screen.tip_rows
     expected: list[QWidget] = [
+        tips["single.writer"].info,
+        screen.roles["writer"].picker,
+        tips["single.reviewer"].info,
+        screen.roles["reviewer"].picker,
         tips["gapcheck.reviewer"].info,
         screen.derived["gapcheck.reviewer"].picker,
         tips["gapcheck.when"].info,
@@ -1019,7 +1060,8 @@ def test_info_icons_sit_before_their_controls_in_tab_order(
         screen.segments["workflow.agents"].buttons()[0],
         tips["workflow.late"].info,
         screen.segments["workflow.late"].buttons()[0],
+        screen.panel_info,
     ]
-    first = screen.roles["writer"].picker
+    first = tips["single.writer"].info
     chain = focus_chain(screen, qtbot, first)
     assert [w for w in chain if w in expected] == expected
