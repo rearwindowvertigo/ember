@@ -43,6 +43,9 @@
   file from that tag and replaces the attached one.
 - Without the job, `make deb` on Ubuntu 26.04 builds the file in `dist/`, and
   `gh release upload v<version> dist/ember_<version>_amd64.deb` attaches it.
-- The owner installs a release with
-  `sudo apt install ./ember_<version>_amd64.deb`, then runs
-  `emb skill install` once.
+- The owner installs a release in an empty folder with three commands, in
+  this order:
+
+  1. `gh release download v<version> --repo rearwindowvertigo/ember --pattern '*.deb'`
+  2. `sudo apt install ./ember_<version>_amd64.deb`
+  3. `emb skill install`
