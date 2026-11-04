@@ -56,14 +56,14 @@ INSTALL = {
 
 SIGN_IN_ARGS = {
     "codex": ("login",),
-    "opencode": ("auth", "login", "--provider", "openrouter"),
+    "opencode": ("auth", "login"),
     "claude": ("auth", "login"),
 }
 """The arguments to each engine's CLI that sign in."""
 
 SIGN_IN_LABEL = {
     "codex": "a ChatGPT sign-in for Codex",
-    "opencode": "an OpenRouter credential for OpenCode",
+    "opencode": "at least one integration connected in OpenCode (use /connect)",
     "claude": "a Claude Code sign-in",
 }
 """The sign-in requirement of each engine."""
@@ -377,10 +377,51 @@ def _codex_signed_in(binary: str, env: Mapping[str, str]) -> bool:
     raise ProbeError(f"codex login status printed {first_line(output)!r}")
 
 
-def _opencode_signed_in(
+_AUTH_LINE = re.compile(
+    r"(?P<name>.+?)\s+\(?(?P<method>oauth|api(?:\s+key)?|well-?known|env)\)?"
+    r"(?:\s+\S.*)?",
+    re.IGNORECASE,
+)
+_AUTH_LOGIN = {"oauth": "oauth", "api": "api", "api key": "api"}
+
+
+def parse_opencode_auth(output: str) -> tuple[tuple[str, str | None], ...]:
+    """Read integration display names and login methods from auth-list output.
+
+    OpenCode 1 prints `●  <name> <method>` lines inside terminal borders;
+    OpenCode 2 prints `<name>  <method>  <state>` columns, where the method is
+    `OAuth` or `API key`. ANSI styling and borders are ignored. `oauth` and
+    `api` are the login methods; another recognized method, such as
+    `wellknown` or `env`, is connected with an unknown login method. An
+    explicit empty list is valid; output with neither credentials nor an
+    empty-list message fails.
+
+    Raises:
+        ProbeError: The output is not a recognizable auth list.
+    """
+    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output)
+    entries: list[tuple[str, str | None]] = []
+    for line in text.splitlines():
+        line = line.strip().lstrip("│┃┌└┐┘─●○◇◆■□ ").strip()
+        match = _AUTH_LINE.fullmatch(line)
+        if match:
+            method = " ".join(match["method"].lower().split())
+            entries.append((match["name"].strip(), _AUTH_LOGIN.get(method)))
+    if entries:
+        return tuple(entries)
+    if re.search(
+        r"\b0 credentials?\b|\bno (?:authenticated integrations|credentials)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return ()
+    raise ProbeError(f"opencode auth list printed {first_line(text)!r}")
+
+
+def opencode_auth(
     binary: str, env: Mapping[str, str], version: str | None
-) -> bool:
-    """Read OpenRouter sign-in, using standalone mode for OpenCode 2 and later."""
+) -> tuple[tuple[str, str | None], ...]:
+    """Read connected integrations, using standalone mode for OpenCode 2."""
     match = re.fullmatch(
         r"(?:opencode\s+)?v?([0-9]+)\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?",
         version or "",
@@ -391,7 +432,14 @@ def _opencode_signed_in(
     code, output = run_probe(argv, env)
     if code != 0:
         raise ProbeError(f"opencode auth list exited {code}: {first_line(output)}")
-    return "openrouter" in output.lower()
+    return parse_opencode_auth(output)
+
+
+def _opencode_signed_in(
+    binary: str, env: Mapping[str, str], version: str | None
+) -> bool:
+    """Return whether at least one OpenCode integration is connected."""
+    return bool(opencode_auth(binary, env, version))
 
 
 _SIGNED_IN = {

@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from ember import paths
+from ember import choices, paths
 from ember.flows.plan import Plan, Worker, waves
 from ember.runs import record
 
@@ -181,6 +181,7 @@ def new_flow(
     at = time.time() if now is None else now
     return {
         "id": flow_id,
+        choices.OPENCODE_ID_FORMAT: 1,
         "plan": str(plan.path),
         "plan_waves": [[task.id for task in wave] for wave in waves(plan)],
         "dir": top,
@@ -329,6 +330,13 @@ def load(flow_id: str, env: Mapping[str, str] | None = None) -> dict[str, Any]:
         value.setdefault("base_branch", None)
         value.setdefault("common", None)
     _validate(flow_id, value)
+    if choices.OPENCODE_ID_FORMAT not in value:
+        for row in (value, *value["tasks"]):
+            for name in ("writer", "reviewer"):
+                worker = row.get(name)
+                if worker is not None and worker["engine"] == "opencode":
+                    worker["model"] = choices.full_opencode_id(worker["model"])
+        value[choices.OPENCODE_ID_FORMAT] = 1
     return value
 
 
@@ -336,6 +344,7 @@ def save(flow: dict[str, Any], env: Mapping[str, str] | None = None) -> None:
     """Atomically replace a validated record and update its timestamp."""
     path = folder(flow["id"], env) / FLOW_NAME
     _validate(flow["id"], flow)
+    flow[choices.OPENCODE_ID_FORMAT] = 1
     flow["updated_at"] = time.time()
     record.write_private(path, json.dumps(flow, indent=2) + "\n")
 
@@ -443,6 +452,7 @@ def _append(
                 "commit": None,
                 "worker": None,
                 **item,
+                choices.OPENCODE_ID_FORMAT: 1,
             }
             if item["kind"] not in ANSWER_KINDS or not isinstance(item["task"], str):
                 raise FlowError(flow_id, "answer needs a task and a valid kind")
@@ -514,8 +524,21 @@ def append_answer(
 def read_answers(
     flow_id: str, env: Mapping[str, str] | None = None
 ) -> list[dict[str, Any] | None]:
-    """Read complete answers; each unreadable line retains its place as None."""
-    return _read_lines(folder(flow_id, env) / ANSWERS_NAME)
+    """Read answers and convert unmarked worker ids without changing the log.
+
+    Each unreadable line retains its place as None.
+    """
+    answers = _read_lines(folder(flow_id, env) / ANSWERS_NAME)
+    for answer in answers:
+        if answer is None or choices.OPENCODE_ID_FORMAT in answer:
+            continue
+        worker = answer.get("worker")
+        if isinstance(worker, str) and worker.startswith("opencode:"):
+            answer["worker"] = "opencode:" + choices.full_opencode_id(
+                worker.removeprefix("opencode:")
+            )
+            answer[choices.OPENCODE_ID_FORMAT] = 1
+    return answers
 
 
 def read_cursor(flow_id: str, env: Mapping[str, str] | None = None) -> int:

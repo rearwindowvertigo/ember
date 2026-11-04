@@ -398,7 +398,7 @@ def panel_replies() -> dict[str, str]:
             (
                 ("codex", "gpt-6-astra"),
                 ("claude", "opus"),
-                ("opencode", "deepseek/deepseek-v4.1-flash-1017"),
+                ("opencode", "openrouter/deepseek/deepseek-v4.1-flash-1017"),
             ),
             1,
         )

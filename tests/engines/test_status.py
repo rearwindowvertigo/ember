@@ -246,7 +246,7 @@ def test_claude_output_not_json_is_check_failed(env: dict[str, str]) -> None:
     ("output", "signed_in"),
     [
         ("Credentials\nOpenRouter api", True),
-        ("Anthropic oauth", False),
+        ("Anthropic oauth", True),
         ("No authenticated integrations", False),
     ],
 )
@@ -274,9 +274,7 @@ def test_opencode_sign_in_uses_version(
     assert result.signed_in is signed_in
     assert result.connected is signed_in
     assert result.state == (status.CONNECTED if signed_in else status.NOT_SIGNED_IN)
-    assert result.requirements[1].fix == (
-        None if signed_in else "opencode auth login --provider openrouter"
-    )
+    assert result.requirements[1].fix == (None if signed_in else "opencode auth login")
 
 
 @pytest.mark.parametrize("version", ["1.19.5", "opencode v2.2.5"])
@@ -313,11 +311,13 @@ def test_opencode_failed_version_uses_legacy_auth(env: dict[str, str]) -> None:
 
 def test_opencode_found_in_its_install_folder(env: dict[str, str]) -> None:
     folder = Path(env["HOME"]) / ".opencode" / "bin"
-    binary = _stub(folder, "opencode", OPENCODE_OK.replace("OpenRouter api", "none"))
+    binary = _stub(
+        folder, "opencode", OPENCODE_OK.replace("OpenRouter api", "0 credentials")
+    )
     result = status.check("opencode", env)
     assert result.installed is True
     assert result.binary == str(binary)
-    assert result.requirements[1].fix == f"{binary} auth login --provider openrouter"
+    assert result.requirements[1].fix == f"{binary} auth login"
 
 
 def test_unknown_engine_raises(env: dict[str, str]) -> None:
@@ -410,3 +410,36 @@ def test_save_cache_file_replaces_whole(env: dict[str, str]) -> None:
     assert json.loads(path.read_text()) == {"b": 2}
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
     assert sorted(entry.name for entry in path.parent.iterdir()) == ["x.json"]
+
+
+OPENCODE_2_AUTH_LIST = (
+    "Anthropic   OAuth                       stored\n"
+    "OpenAI      OAuth                       stored\n"
+    "OpenRouter  API key                     stored\n"
+)
+"""`opencode auth list --standalone` output captured from OpenCode 2.2.5."""
+
+
+def test_parse_opencode_auth_reads_opencode_2_columns() -> None:
+    assert status.parse_opencode_auth(OPENCODE_2_AUTH_LIST) == (
+        ("Anthropic", "oauth"),
+        ("OpenAI", "oauth"),
+        ("OpenRouter", "api"),
+    )
+
+
+def test_parse_opencode_auth_reads_opencode_1_lines() -> None:
+    output = (
+        "┌  Credentials ~/.local/share/opencode/auth.json\n│\n"
+        "●  Anthropic oauth\n│\n●  Amazon Bedrock api\n│\n└  2 credentials\n"
+    )
+    assert status.parse_opencode_auth(output) == (
+        ("Anthropic", "oauth"),
+        ("Amazon Bedrock", "api"),
+    )
+
+
+def test_parse_opencode_auth_keeps_other_methods_without_login() -> None:
+    assert status.parse_opencode_auth("Custom Gateway  wellknown  stored\n") == (
+        ("Custom Gateway", None),
+    )

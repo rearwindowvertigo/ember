@@ -55,7 +55,7 @@ DERIVED_KEYS = {
 _ID = re.compile(r"[a-z0-9][a-z0-9-]{5,63}")
 _NAME = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 _OPENCODE_PROVIDER = r"~?[A-Za-z0-9][A-Za-z0-9._-]*"
-_OPENCODE_MODEL = r"[A-Za-z0-9][A-Za-z0-9._:-]*"
+_OPENCODE_MODEL = r"~?[A-Za-z0-9][A-Za-z0-9._:-]*(?:/~?[A-Za-z0-9][A-Za-z0-9._:-]*)*"
 _EFFORT = r"[a-z]+"
 _SHORTLIST_ENTRY = {
     "claude": re.compile(rf"(?P<model>{_NAME})@(?P<effort>{_EFFORT})"),
@@ -69,6 +69,75 @@ _MENU_MODEL = {
     "codex": re.compile(_NAME),
     "opencode": re.compile(rf"{_OPENCODE_PROVIDER}/{_OPENCODE_MODEL}"),
 }
+
+
+OPENCODE_ID_FORMAT = "opencode_id_format"
+"""Marker stored as 1 when OpenCode model ids include their integration."""
+
+
+def full_opencode_id(model: str) -> str:
+    """Convert a legacy stored OpenRouter id, retaining an existing prefix."""
+    return model if model.startswith("openrouter/") else f"openrouter/{model}"
+
+
+def _convert_stored_choice(name: str, value: object) -> object:
+    """Convert OpenCode selections in one unmarked settings value."""
+    if name == "shortlist.opencode" and isinstance(value, list):
+        return [
+            full_opencode_id(item) if isinstance(item, str) else item for item in value
+        ]
+    if name == "panel.members" and isinstance(value, list):
+        return [_convert_stored_choice("single.writer", item) for item in value]
+    if (
+        name in (*MENU_KEYS, *DERIVED_KEYS)
+        and isinstance(value, str)
+        and value.startswith("opencode:")
+    ):
+        return "opencode:" + full_opencode_id(value.removeprefix("opencode:"))
+    return value
+
+
+def _convert_stored_object(value: object) -> object:
+    if not isinstance(value, dict):
+        return value
+    return {name: _convert_stored_choice(name, item) for name, item in value.items()}
+
+
+def _legacy_ids(conn: sqlite3.Connection) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM meta WHERE key = ?", (OPENCODE_ID_FORMAT,)
+        ).fetchone()
+        is None
+    )
+
+
+def _migrate_ids(conn: sqlite3.Connection) -> bool:
+    """Convert every settings layer and its marker within the caller's transaction."""
+    if not _legacy_ids(conn):
+        return False
+    for name, text in conn.execute("SELECT key, value FROM settings").fetchall():
+        try:
+            value = _convert_stored_choice(name, json.loads(text))
+        except ValueError:
+            continue
+        conn.execute(
+            "UPDATE settings SET value = ? WHERE key = ?", (_canonical(value), name)
+        )
+    for table, column in (("once", "value"), ("claims", "copy")):
+        for ident, text in conn.execute(f"SELECT id, {column} FROM {table}").fetchall():
+            if text is None:
+                continue
+            try:
+                value = _convert_stored_object(json.loads(text))
+            except ValueError:
+                continue
+            conn.execute(
+                f"UPDATE {table} SET {column} = ? WHERE id = ?",
+                (_canonical(value), ident),
+            )
+    conn.execute("INSERT INTO meta (key, value) VALUES (?, '1')", (OPENCODE_ID_FORMAT,))
+    return True
 
 
 class InvalidChoiceError(ValueError):
@@ -532,6 +601,8 @@ def _decode_object(
     what: str,
     errors: list[str],
     panel_errors: list[str] | None = None,
+    *,
+    legacy: bool = False,
 ) -> dict[str, object] | None:
     try:
         value = json.loads(text)
@@ -541,6 +612,10 @@ def _decode_object(
     if not isinstance(value, dict):
         errors.append(f"{what} is not a JSON object")
         return None
+    if legacy:
+        value = {
+            name: _convert_stored_choice(name, item) for name, item in value.items()
+        }
     result: dict[str, object] = {}
     for name, item in value.items():
         try:
@@ -574,9 +649,12 @@ def _load(
         if run_id is not None:
             state.claim_status = "unknown"
         return state
+    legacy = _legacy_ids(conn)
     for name, text in conn.execute("SELECT key, value FROM settings ORDER BY key"):
         try:
             value = json.loads(text)
+            if legacy:
+                value = _convert_stored_choice(name, value)
             validate_value(name, value, SETTING)
         except ValueError as error:
             errors = state.panel_errors if name == "panel.members" else state.errors
@@ -586,7 +664,7 @@ def _load(
     row = conn.execute("SELECT value, set_at FROM once WHERE id = 1").fetchone()
     if include_once and row is not None and row[1] + ONCE_TTL > now:
         state.once = _decode_object(
-            row[0], "one-time choice", state.errors, state.panel_errors
+            row[0], "one-time choice", state.errors, state.panel_errors, legacy=legacy
         )
         state.once_set_at = row[1]
     if run_id is not None:
@@ -605,7 +683,11 @@ def _load(
                     state.errors.append(f"claim {run_id} has no copy")
                 else:
                     state.claim_copy = _decode_object(
-                        copy, f"claim {run_id} copy", state.errors, state.panel_errors
+                        copy,
+                        f"claim {run_id} copy",
+                        state.errors,
+                        state.panel_errors,
+                        legacy=legacy,
                     )
     return state
 
@@ -852,10 +934,11 @@ def _write(
 ) -> dict[str, Any]:
     """Run `change` in one write transaction and build the reply.
 
-    The transaction checks `expect_generation`, stores expiry, runs `change`
-    and raises the generation by one when `change` reports a settings or
+    The transaction checks `expect_generation`, migrates legacy model ids,
+    stores expiry, runs `change` and raises the generation by one when
+    `change` reports a settings or
     pending one-time choice write. Claim-table writes and expiry do not
-    raise the generation.
+    raise the generation. A model-id migration shares the same increment.
     """
     expect = _check_expect(expect_generation)
     with db.translate_errors(), db.open_write(env) as conn, db.transaction(conn):
@@ -864,13 +947,15 @@ def _write(
             raise db.StaleGenerationError(
                 f"generation is {generation}, not {expect}; reload and try again"
             )
+        migrated = _migrate_ids(conn)
         conn.execute("DELETE FROM once WHERE set_at + ? <= ?", (ONCE_TTL, now))
         conn.execute(
             "UPDATE claims SET status = 'gone', copy = NULL "
             "WHERE status = 'claimed' AND at + ? <= ?",
             (CLAIM_TTL, now),
         )
-        if change(conn):
+        changed = change(conn)
+        if changed or migrated:
             generation = db.bump_generation(conn)
         return reply(conn, generation)
 
@@ -888,7 +973,8 @@ def claim(
 
     An unknown id takes a copy of the live pending one-time choice, which is
     then removed, and is recorded `claimed`; with none pending it is recorded
-    `none`. A known id writes nothing and returns its stored status.
+    `none`. A known id returns its stored status without changing the claim.
+    Legacy model ids are migrated in the write transaction.
     A pending one-time choice that is not valid is not consumed: nothing is
     recorded, the reply has status `unknown` and fails closed.
 

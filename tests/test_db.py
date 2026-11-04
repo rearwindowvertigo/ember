@@ -72,7 +72,7 @@ def test_schema_is_created_with_generation_0(tmp_path: Path) -> None:
     with db.open_write(env) as conn, db.transaction(conn):
         assert db.ensure_schema(conn) == 0
         rows = dict(conn.execute("SELECT key, value FROM meta"))
-    assert rows == {"schema": "1", "generation": "0"}
+    assert rows == {"schema": "1", "generation": "0", "opencode_id_format": "1"}
 
 
 def test_transaction_commits_on_success(tmp_path: Path) -> None:

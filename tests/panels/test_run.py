@@ -1031,3 +1031,21 @@ def test_close_keeps_terminal_member_while_collection_lock_is_held(h: Harness) -
     assert not result["closed"]
     assert "another emb run command" in result["close_error"]
     assert Path(saved.worktree).exists()
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_legacy_panel_start_and_retry_keep_openrouter_routing(
+    h: Harness, retry: bool
+) -> None:
+    h.create(count=2)
+    data = h.panel()
+    data["members"][1]["model"] = "anthropic/claude-x"
+    if retry:
+        data["members"][1]["status"] = "failed"
+    data.pop("opencode_id_format")
+    path = record.folder(h.id, h.env) / record.PANEL_NAME
+    path.write_text(json.dumps(data))
+    result = h.retry("2") if retry else h.start()
+    member = result.panel["members"][1]
+    assert member["model"] == "openrouter/anthropic/claude-x"
+    assert runs.load(member["run"], h.env).model == "openrouter/anthropic/claude-x"

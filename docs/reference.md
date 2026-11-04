@@ -48,7 +48,7 @@ empty list.
 | `worker.network` | `on`, `off` | `off` | standing |
 | `engine.claude`, `engine.codex`, `engine.opencode` | `on`, `off` | `on` | standing |
 | `shortlist.claude`, `shortlist.codex` | List of `<model>@<effort>`; model `[A-Za-z0-9][A-Za-z0-9._-]*`, effort `[a-z]+` | `[]` | standing |
-| `shortlist.opencode` | List of `<provider>/<model>`, with optional `@<effort>`; each part `[A-Za-z0-9][A-Za-z0-9._-]*`, the provider part may start with `~` and the model part may also contain `:` | `[]` | standing |
+| `shortlist.opencode` | List of full `<integration>/<model>` ids, with optional `@<effort>`; integration `~?[A-Za-z0-9][A-Za-z0-9._-]*`, model one or more `/`-separated parts matching `~?[A-Za-z0-9][A-Za-z0-9._:-]*` | `[]` | standing |
 | `single.writer`, `single.reviewer` | `ask`, or `<engine>:<model>` with the model on that engine's shortlist when saved | `ask` | request, one-time, standing |
 | `multi.runs_as` | `ask`, `flow`, `workflow` | `ask` | request, one-time, standing |
 | `flow.review_rounds` | `1`, `2`, `3`, `4` | `3` | request, one-time, standing |
@@ -78,6 +78,23 @@ refusing Ember's configuration and state folders.
 
 A shortlist lists each model once. A request or one-time value for a
 standing-only key is refused.
+
+OpenCode ids include the integration that serves the model, such as
+`anthropic/claude-sonnet-4` or
+`openrouter/deepseek/deepseek-v4.1-flash-1017`. Stored ids are used as stored,
+independently of connected integrations and the model catalogue.
+
+Settings without the `opencode_id_format` marker are read with `openrouter/`
+added to every stored OpenCode model unless it already has that prefix.
+This covers the shortlist, worker rows and panel members in standing
+settings, pending one-time choices and claimed copies. For example, an old
+`anthropic/claude-sonnet-4` becomes
+`openrouter/anthropic/claude-sonnet-4`. Efforts, timestamps and claim states
+are kept. Reads, snapshots and dry runs return the converted values without
+writing. The next settings change writes the conversion and marker in its
+transaction, with the generation check and one generation increment.
+Run, flow and panel records without the marker use the same conversion
+on load and save with the marker. New records carry `opencode_id_format: 1`.
 
 `gapcheck.reviewer`, `flow.writer` and `flow.reviewer` follow their
 single-task row (`single.reviewer`, `single.writer`, `single.reviewer`)
@@ -256,7 +273,7 @@ Each check is a local command with a 10-second timeout:
 | Engine | CLI | Sign-in check | Signed in when |
 |---|---|---|---|
 | `codex` | `codex` on `PATH` | `codex login status` | it exits 0 and names ChatGPT |
-| `opencode` | `opencode` on `PATH`, else `~/.opencode/bin/opencode` | `opencode auth list` | it exits 0 and names OpenRouter |
+| `opencode` | `opencode` on `PATH`, else `~/.opencode/bin/opencode` | `opencode auth list` (`--standalone` with OpenCode 2) | it exits 0 and lists at least one connected integration |
 | `claude` | `claude` on `PATH` | `claude auth status --json` | it prints `"loggedIn": true` |
 
 Each CLI is also run with `--version`. `claude` runs without the variables
@@ -309,26 +326,60 @@ and its sign-in, with its sign-in command as the fix:
 | Engine | Install | Sign in |
 |---|---|---|
 | `codex` | `npm install -g @openai/codex` | `codex login` |
-| `opencode` | `curl -fsSL https://opencode.ai/install \| bash` | `opencode auth login --provider openrouter` |
+| `opencode` | `curl -fsSL https://opencode.ai/install \| bash` | `opencode auth login` |
 | `claude` | `curl -fsSL https://claude.ai/install.sh \| bash` | `claude auth login` |
 
 A sign-in command names the CLI by its path when it is not found on `PATH`.
+OpenCode's sign-in requirement reads "at least one integration connected
+in OpenCode (use /connect)".
 
 ### Models
 
 | Engine | Source | `source` |
 |---|---|---|
 | `codex` | `codex debug models`, models whose visibility is `list` | `cli` |
-| `opencode` | `https://openrouter.ai/api/v1/models`, ids of the form `<provider>/<model>` as `shortlist.opencode` takes them | `openrouter` |
+| `opencode` | `opencode models`, full `<integration>/<model>` ids, with details from `https://models.dev/api.json` | `cli` |
 | `claude` | The aliases Claude Code's `--model` takes: `fable`, `opus`, `sonnet`, `haiku`, each with efforts `low` to `max` | `cli` |
 
 The `codex` and `opencode` lists are cached in
 `$XDG_CACHE_HOME/ember/models-<engine>.json`, mode 600, and read from their
 source again when the cache is 6 hours old, not valid, or with `--refresh`.
 A list served from the cache has `source` `cache`. When the source cannot be
-read, the cached list is used however old, with `reason` set; with no cache
-the list is empty, `source` names the source that was tried, `fetched_at` is
-`null` and `reason` is set. A failed read leaves the cache as it was.
+read, the cached list is used however old, with `reason` set. With no cache,
+`source` names the source that was tried, `fetched_at` is `null` and `reason`
+is set. The list is empty except for the OpenCode auth-list and catalogue
+failures described below. A failed read leaves the cache as it was.
+
+For OpenCode, `opencode models` supplies the models of its connected
+integrations, including its own `opencode` provider when listed. The
+models.dev catalogue supplies each model's context length (`limit.context`),
+input and output prices (`cost.input`, `cost.output`) and tool support
+(`tool_call`). Missing details are unknown. Efforts come from the values of
+`reasoning_options` entries whose type is `effort`. `default_effort` is
+`null`; OpenCode's own default applies when no effort is selected. Saved
+efforts are kept.
+
+Integration names and login methods come from `opencode auth list`
+(`--standalone` with OpenCode 2). Ember reads OpenCode 1's `●  <name>
+<method>` lines and OpenCode 2's `<name>  <method>  <state>` columns. The
+methods `oauth` and `OAuth` give the login method `oauth`; `api` and
+`API key` give `api`; `wellknown` and `env` connect the integration with an
+unknown login method. A name
+matches an integration id or its catalogue name, ignoring case. An unmatched
+or ambiguous name assigns no login method. An integration without a matched
+auth entry uses its catalogue name, or its id when that name is absent.
+The `integrations` list includes matched connected integrations with no
+models as well as those in the model list.
+
+A failed or unreadable model command, auth-list command or catalogue uses
+the cached OpenCode list with a reason. With no cache, an auth-list failure
+returns the discovered models with unknown login methods and a reason, and
+a catalogue failure returns them with unknown details and a reason; a failed
+or unreadable model command returns an empty list. A cache without `format_version` is
+refreshed even when less than 6 hours old. Only if the refresh fails is that
+old cache used, with full `openrouter/` ids, provider OpenRouter, unknown
+login methods and no default effort. Connection metadata stays as cached
+until the next refresh.
 
 `--json` prints:
 
@@ -336,22 +387,28 @@ the list is empty, `source` names the source that was tried, `fetched_at` is
 {
   "models": [
     {
-      "id": "openai/gpt-4o", "label": "GPT-4o",
-      "efforts": ["low", "high"], "default_effort": "low",
+      "id": "openrouter/openai/gpt-4o", "label": "GPT-4o",
+      "efforts": [], "default_effort": null,
       "context_length": 128000,
       "prompt_price": 0.0000025, "completion_price": 0.00001,
-      "supports_tools": true
+      "supports_tools": true,
+      "provider": "openrouter", "provider_name": "OpenRouter", "login": "api"
     }
   ],
-  "source": "openrouter",
+  "integrations": [{"id": "openrouter", "name": "OpenRouter", "login": "api"}],
+  "source": "cli",
   "fetched_at": 1800000000.0,
   "reason": null
 }
 ```
 
 Prices are US dollars per token. `context_length`, the prices and
-`supports_tools` are `null` for `codex` and `claude` and when OpenRouter does
-not report them.
+`supports_tools` are `null` for `codex` and `claude` and when the catalogue
+does not report them. Catalogue prices per million tokens are converted
+to per-token values in JSON. `provider` is the integration id,
+`provider_name` its display name, and `login` is `oauth`, `api`, or `null`
+when unknown. These three fields are `null` for other engines, whose
+`integrations` list is empty.
 
 Text output starts with `<engine> models from <source>, read <age> ago` (or
 `never read`), then one line per model: its id, label, efforts, context
@@ -396,6 +453,11 @@ line from the exit table below.
 
 A start needs `--engine`, `--dir` and `--task-file`. The start options cannot
 be used with the other modes, and only one mode is given at a time.
+
+An explicit OpenCode `--model` is a full `<integration>/<model>` id and is
+used unchanged. For example, `--engine opencode --model anthropic/claude-sonnet-4`
+selects Anthropic's integration; an OpenRouter model uses
+`--model openrouter/anthropic/claude-sonnet-4`.
 
 ### Start
 
@@ -598,8 +660,8 @@ aliases and descendants. Other workers' worktrees and `$XDG_RUNTIME_DIR`
 are `protected` and have no Allow reading button.
 
 Network: Codex has network only when `network` is true; its web search is
-always on. OpenCode keeps network for OpenRouter. Claude keeps network for
-its API, so its `Bash` commands keep network too; `network` controls only
+always on. OpenCode keeps network for its integrations. Claude keeps network
+for its API, so its `Bash` commands keep network too; `network` controls only
 its `WebSearch` and `WebFetch` tools.
 
 A sandboxed run exits 69 when a kept path (the worktree, the repository's
@@ -953,7 +1015,7 @@ attempt seconds do not. Both totals persist across recovery.
 
 | | Codex | OpenCode | Claude |
 |---|---|---|---|
-| Starts | Codex's interactive session in the pane: `codex -C <worktree> -m <model> -c check_for_update_on_startup=false [-c model_reasoning_effort=<effort>] -a never --search`, with Ember's permission profile in `-c` options, or `--sandbox danger-full-access` when the sandbox is off | OpenCode's interactive view in the pane, with its built-in server on a free port of `127.0.0.1` protected by a password, OpenRouter as the provider and the agent `ember-worker`, inside `bwrap` when the sandbox is on | A program of Ember's in the pane that runs one `claude -p --output-format stream-json` per turn in the worktree, inside `bwrap` when the sandbox is on, and shows its progress; the program itself runs outside the sandbox |
+| Starts | Codex's interactive session in the pane: `codex -C <worktree> -m <model> -c check_for_update_on_startup=false [-c model_reasoning_effort=<effort>] -a never --search`, with Ember's permission profile in `-c` options, or `--sandbox danger-full-access` when the sandbox is off | OpenCode's interactive view in the pane, with its built-in server on a free port of `127.0.0.1` protected by a password, the stored model id passed unchanged to `--model` and the agent `ember-worker`, inside `bwrap` when the sandbox is on | A program of Ember's in the pane that runs one `claude -p --output-format stream-json` per turn in the worktree, inside `bwrap` when the sandbox is on, and shows its progress; the program itself runs outside the sandbox |
 | Brief | Pasted once Codex's composer shows `? for shortcuts` | Sent through the server's session API once the server answers and the view has drawn its screen | Written as turn 1's request before the pane starts; given to the CLI on standard input |
 | Turn end and reply | Read from Codex's rollout file: `task_complete` with its last message, or `turn_aborted`; an `error` event during the turn fails it | Read from the session status and messages: the turn's last assistant message, once the session is idle; its text parts are the reply | The CLI's exit; the reply is the assistant text after the turn's last tool result |
 | Later messages | Pasted | Sent through the session API | A new `claude -p` that resumes the previous turn's CLI session |
@@ -961,6 +1023,12 @@ attempt seconds do not. Both totals persist across recovery.
 | Sandbox provider | `codex` | `bubblewrap` | `bubblewrap` |
 | `--interrupt` | Presses Escape in the session | Aborts the turn through the session API | Sends `SIGINT` to the process group of the turn's CLI, as Ctrl+C in the pane does; the program takes the next turn |
 | Messages Ember did not send | Each `user_message` in the rollout that does not match, in order, a message Ember pasted | Each user message whose id Ember did not send | None; the pane takes no typed messages |
+
+OpenCode requests zero data retention through OpenRouter's provider options
+only for `openrouter/` models. Other integrations receive no OpenRouter
+options. The driver's payment-error note names the serving integration:
+`(<Integration> credit is exhausted)`. The name comes from the model list's
+integration metadata, with the integration id as fallback.
 
 The OpenCode column describes OpenCode 1. When `opencode --version` reports
 version 2 or later (`opencode v2.2.5`), Ember uses its OpenCode 2 driver. The
@@ -970,7 +1038,8 @@ pane runs, inside the same sandbox, a shell script that starts a private
 answers, then runs `opencode --server <url> --session <id>`. Ember chooses
 the session id (`ses_` and 26 hex characters) and, once the server answers,
 creates the session through `/api/session` with the agent `ember-worker`
-and the model as `{id, providerID: openrouter, variant: <effort>}`. Messages
+and the model as `{id, providerID, variant: <effort>}`, splitting the full
+model id at its first slash into `providerID` and `id`. Messages
 go to `/api/session/<id>/prompt`; a turn has ended when the session is not in
 `/api/session/active` and an `idle` message follows Ember's message, with
 outcome `succeeded` (the reply is the newest assistant text) or `failed`
@@ -2135,8 +2204,10 @@ finalization.
 Panel members use repeatable `--member <engine>:<model>[@<effort>]`
 options. Engines are `codex`, `opencode` and `claude`; models contain no
 whitespace or `@`, and efforts contain lowercase letters. Model names
-may contain slashes and colons. A panel has one to eight members. The
-same `<engine>:<model>` twice is refused, even with different efforts.
+may contain slashes and colons. OpenCode members use full ids, such as
+`--member opencode:openrouter/deepseek/deepseek-v4.1-flash-1017` or
+`--member opencode:anthropic/claude-sonnet-4`. A panel has one to eight
+members. The same `<engine>:<model>` twice is refused, even with different efforts.
 Malformed, repeated or ninth members exit 64 with `next: emb panel --help`.
 
 When any `--member` is given, those members are used in option order.
@@ -3128,7 +3199,7 @@ matched; dpkg is skipped and its method remains null.
 
 Every command runs with `LC_ALL=C`, standard input from `/dev/null` and a
 10-second deadline, in its own process group; at the deadline the whole group
-is killed. Every network read has a 10-second timeout.
+is killed. Every network read has a 10-second timeout. Requests to outside websites, here and for the models.dev catalogue, send `User-Agent: ember/<version>`.
 
 Versions read with apt are compared with `dpkg --compare-versions`, with the
 epoch and revision. Every other version is compared as dotted numbers: a
@@ -3783,6 +3854,44 @@ One-time choices are not shown. Each change saves at once with the settings
 generation check; choosing an already saved multi-task value saves nothing.
 Panel mutation controls stay disabled until the save resolves and the screen
 refreshes. A stale save reloads the settings and shows the app's stale alert.
+
+### Engines
+
+Engines shows each engine's connection status, Use and Sandbox switches,
+requirements and model list. Refresh list reads models from their source.
+Model switches save shortlist entries; OpenCode entries keep the full
+integration-prefixed id and any selected effort.
+
+The OpenCode table has Model, Provider, Context, Input $/M and Output $/M
+columns, alongside effort and shortlist controls. Provider is the serving
+integration's name in plain text. Both price cells show "Subscription" for
+models whose integration's login method is OAuth. Other prices are shown
+per million tokens; unknown figures show a dash.
+
+Search models matches the model id or label, ignoring case. The filter row
+has two lines: Provider and Tools, with the model count at the end, then
+Max price and Min context. Each label is followed by an info icon.
+Provider offers All providers followed by each integration by name, including
+integrations with no models. Each option has its total model count as a hint
+line, before other filters. After a refresh, the selection is kept by
+integration id; if it is absent, the picker returns to All providers.
+Provider filters the serving integration; a model served through OpenRouter
+has provider OpenRouter regardless of its maker.
+
+The info icons read:
+
+| Filter | Tooltip |
+|---|---|
+| Provider | "The OpenCode integration that serves the model. Ember lists the integrations you connected with /connect in OpenCode." |
+| Tools | "Shows only models that take tool calls. A worker needs tool calls to read and change files." |
+| Max price | "No more than this input price per million tokens. Models that show Subscription always pass." |
+| Min context | "At least this many tokens of context: how much text the model takes in at once." |
+
+Tools starts on and keeps models that report tool support. Switching it off
+removes that restriction. The price and context pickers start at Any. Filters
+combine; a model with an unknown detail passes Any and fails a restriction
+on that detail. OAuth models always pass the price filter. Other filters
+still apply to them.
 
 ### Settings
 

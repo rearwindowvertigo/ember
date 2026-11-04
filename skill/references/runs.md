@@ -33,6 +33,9 @@ the exit code and do not pipe the output.
 - `--model` wins. Otherwise the model comes from the menu row:
   `single.writer`, or `single.reviewer` for `--read-only`. The row must be
   `set` and name the same engine, or the start exits 64 naming the row.
+- An OpenCode `--model` is the full `<integration>/<model>` id from
+  `emb engines --models opencode --json`, such as `anthropic/claude-sonnet-4`
+  or `openrouter/deepseek/deepseek-v4.1-flash-1017`. Ember uses it unchanged.
 - A `claude` row whose run-as is `subagent` is refused with 64: use a
   Claude subagent instead. With `--model`, that row is not read.
 - `--effort` wins. Otherwise the effort is the row's when the row names the
@@ -237,7 +240,7 @@ Codex profile makes `/tmp` writable, including for read-only runs.
 `GRADLE_USER_HOME` are unchanged because they hold configuration and
 credentials as well as caches. An uncached download needs network access.
 Codex has network only when `worker.network` is on; OpenCode
-keeps network for OpenRouter; Claude keeps network for its API, and
+keeps network for its integrations; Claude keeps network for its API, and
 `worker.network` controls only its web tools.
 
 A read-only run prints `WARNING: read-only run <id> changed <path>` for

@@ -235,3 +235,31 @@ def test_saved_commit_and_legacy_panel(tmp_path: Path) -> None:
     del data["base"]
     (directory / "panel.json").write_text(json.dumps(data))
     assert record.load(data["id"], env)["base"] is None
+
+
+@pytest.mark.parametrize(
+    "model", ["anthropic/claude-x", "openrouter/anthropic/claude-x"]
+)
+@pytest.mark.parametrize("marked", [False, True])
+def test_opencode_members_migrate_at_load(
+    tmp_path: Path, model: str, marked: bool
+) -> None:
+    env = make_env(tmp_path)
+    data = panel()
+    data["members"] = [member(engine="opencode", model=model)]
+    folder = record.create(data, "question", "brief", env)
+    if not marked:
+        data.pop("opencode_id_format")
+    path = folder / record.PANEL_NAME
+    path.write_text(json.dumps(data))
+    before = path.read_bytes()
+    loaded = record.load(data["id"], env)
+    expected = (
+        model if marked or model.startswith("openrouter/") else "openrouter/" + model
+    )
+    assert loaded["members"][0]["model"] == expected
+    assert loaded["members"][0]["effort"] == "low"
+    assert path.read_bytes() == before
+    record.save(loaded, env)
+    assert record.load(data["id"], env) == loaded
+    assert json.loads(path.read_text())["opencode_id_format"] == 1

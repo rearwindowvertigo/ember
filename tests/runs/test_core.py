@@ -245,13 +245,12 @@ def test_dry_run_real_drivers_never_write_model_caches(
             "default_reasoning_level": "high",
         }]}), ""  # fmt: skip
 
-    def openrouter_reply(url: str, timeout: float) -> object:
-        discovered.append("opencode")
-        return {"data": [{"id": model, "reasoning": {"default_effort": "high"}}]}
+    def unexpected_fetch(url: str, timeout: float) -> object:
+        pytest.fail("OpenCode default effort does not discover models")
 
     monkeypatch.setattr(status, "locate", lambda engine, env: f"/mock/{engine}")
-    monkeypatch.setattr(models, "_run_codex", codex_reply)
-    monkeypatch.setattr(models, "fetch_json", openrouter_reply)
+    monkeypatch.setattr(models, "_run_models", codex_reply)
+    monkeypatch.setattr(models, "fetch_json", unexpected_fetch)
     cache = models.cache_path(engine, env)
     if expired_cache:
         status.save_cache_file(
@@ -282,10 +281,12 @@ def test_dry_run_real_drivers_never_write_model_caches(
         assert "does not take the effort" in err
     else:
         assert code == 0, err
-        assert f"{engine} {model} · high" in out
+        effort = (
+            "default" if engine == "opencode" and selection == "default" else "high"
+        )
+        assert f"{engine} {model} · {effort}" in out
         assert err == ""
-    if engine == "codex" or selection == "default":
-        assert discovered
+    assert bool(discovered) == (engine == "codex")
     if before is None:
         assert not Path(env["XDG_CACHE_HOME"]).exists()
     else:
