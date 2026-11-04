@@ -1681,7 +1681,10 @@ class OverviewScreen(QWidget):
             elif item["reason"] == "protected":
                 text += " This folder is protected from workers."
             elif allow is None:
-                text += " No folder can be offered without exposing the home folder."
+                text += (
+                    " No folder can be offered because each folder that holds it"
+                    " also holds private files."
+                )
             else:
                 text += f" Allow reading {allow} for future workers."
             notice = Alert(

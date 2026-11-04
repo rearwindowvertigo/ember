@@ -1708,7 +1708,7 @@ class Core:
                 elif item["reason"] == "hidden" and item["allow_path"] is None:
                     self._warn(
                         f"owner: {item['path']} is hidden; no folder can be offered "
-                        "without exposing the home folder"
+                        "because each folder that holds it also holds private files"
                     )
                 elif item["reason"] != "protected":
                     reads = [p for p in run.read_effective if p not in run.read]

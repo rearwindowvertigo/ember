@@ -1380,7 +1380,7 @@ def test_denied_path_case_keeps_every_attempt_and_owner_action(
     assert result.stderr.count("owner: Settings, Sandbox read paths;") == 2
     assert (
         "owner: /eval/home/.config/tool is hidden; no folder can be offered "
-        "without exposing the home folder"
+        "because each folder that holds it also holds private files"
     ) in result.stderr
     assert (
         result.stderr.count("it cannot be added to Settings, Sandbox read paths") == 2

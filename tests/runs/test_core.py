@@ -3726,4 +3726,7 @@ def test_home_file_denial_is_recorded_without_read_suggestion(
         assert "owner:" not in err
     else:
         assert f"owner: {file} is hidden" in err
-        assert "no folder can be offered without exposing the home folder" in err
+        assert (
+            "no folder can be offered because each folder that holds it "
+            "also holds private files" in err
+        )

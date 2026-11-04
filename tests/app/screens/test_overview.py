@@ -2132,8 +2132,8 @@ def test_home_file_denial_notice_uses_recorded_reason(
         notice = next(iter(screen.denied_notices.values()))
         assert notice.title_label.text() == f"A worker could not read {file}"
         assert (
-            "No folder can be offered without exposing the home folder."
-            in notice.text_label.text()
+            "No folder can be offered because each folder that holds it "
+            "also holds private files." in notice.text_label.text()
         )
         assert "Add a folder by hand" not in notice.text_label.text()
         assert [button.text() for button in notice.buttons] == ["Dismiss"]

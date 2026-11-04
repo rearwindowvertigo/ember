@@ -662,7 +662,7 @@ addable secret location's matched path. A startup, secret or protected
 warning appends `(startup file)`, `(secret location)` or `(protected)`.
 Startup-file denials receive no `owner:` line. A `hidden` denial with
 `allow_path: null` receives `owner: <path> is hidden; no folder can be
-offered without exposing the home folder`, with no `sandbox.read`
+offered because each folder that holds it also holds private files`, with no `sandbox.read`
 suggestion. Protected runtime and other worker worktree paths also receive
 no `sandbox.read` suggestion. A matched path inside Ember's own
 configuration or state folder instead receives an owner line saying it
@@ -3780,7 +3780,7 @@ confirmation.
 A secret location's notice says the folder holds credentials; a protected
 location's says it is protected from workers. Both have Dismiss only.
 A `hidden` notice without an offered folder says `No folder can be offered
-without exposing the home folder.` It has Dismiss only and gives no
+because each folder that holds it also holds private files.` It has Dismiss only and gives no
 `sandbox.read` suggestion. Older records that classify a startup file as
 `hidden` still show this notice.
 Dismiss hides the path until a later run or turn reports it again.

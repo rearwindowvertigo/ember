@@ -286,8 +286,8 @@ reasons: a startup file recorded as `hidden` still shows a notice.
 Overview's Allow reading appears only for `allow_path`, after confirmation
 that every future worker can read the folder and none can change it.
 For a `hidden` denial with `allow_path: null`, the notice and `owner:` line
-name the hidden path and say no folder can be offered without exposing
-the home folder. They give no `sandbox.read` suggestion.
+name the hidden path and say no folder can be offered because each folder that holds it
+also holds private files. They give no `sandbox.read` suggestion.
 Secret locations, including credentials and browser profiles, have Dismiss
 only. Folders inside `$XDG_CONFIG_HOME` are never offered; the owner can
 add them and other secret locations by hand in Settings, Sandbox read paths.
