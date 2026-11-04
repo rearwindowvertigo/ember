@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.11.0](https://github.com/rearwindowvertigo/ember/compare/v0.10.0...v0.11.0) (2026-11-04)
+
+
+### Added
+
+* **app:** fit the Engines cards to the window width ([a5d70ae](https://github.com/rearwindowvertigo/ember/commit/a5d70ae2a8209ea4fb9bfe964e3343d3cd08cde5)), closes [#74](https://github.com/rearwindowvertigo/ember/issues/74)
+* **app:** let only an info icon open a tooltip ([0ab7fda](https://github.com/rearwindowvertigo/ember/commit/0ab7fda3533093cfea3a56da72210759365ead58)), closes [#81](https://github.com/rearwindowvertigo/ember/issues/81)
+* **app:** one row convention, rounded tooltips, and clearer Team pickers ([e7f0e9a](https://github.com/rearwindowvertigo/ember/commit/e7f0e9a9b63d00c79969fd917eb29779a300f5e9)), closes [#68](https://github.com/rearwindowvertigo/ember/issues/68) [#72](https://github.com/rearwindowvertigo/ember/issues/72)
+* **app:** show Elapsed, run subjects and panel questions on Overview ([0bde2ae](https://github.com/rearwindowvertigo/ember/commit/0bde2ae4362b27d98c204867bf6e9edd244c1bb1)), closes [#69](https://github.com/rearwindowvertigo/ember/issues/69) [#73](https://github.com/rearwindowvertigo/ember/issues/73) [#77](https://github.com/rearwindowvertigo/ember/issues/77)
+
+
+### Fixed
+
+* **app:** bring fields, lists, paths and unavailable actions in line with the design system ([63b5ef6](https://github.com/rearwindowvertigo/ember/commit/63b5ef62d0f638879fd58fe6903c55e3b117cde9)), closes [#71](https://github.com/rearwindowvertigo/ember/issues/71)
+* **app:** close tooltips on Escape anywhere and keep them on screen ([3e2a39a](https://github.com/rearwindowvertigo/ember/commit/3e2a39a23c3ab50ce55a9de409589850470399b6)), closes [#68](https://github.com/rearwindowvertigo/ember/issues/68)
+* **app:** count the Engines content margins when fitting card columns ([3da899e](https://github.com/rearwindowvertigo/ember/commit/3da899ebfcec1f3cddff3b8612c559cd4a691896)), closes [#74](https://github.com/rearwindowvertigo/ember/issues/74)
+* **app:** pass the launch's activation token to the running Ember ([4a81f87](https://github.com/rearwindowvertigo/ember/commit/4a81f870a572b2cbf740304e6328c2ab31e9e0d4)), closes [#80](https://github.com/rearwindowvertigo/ember/issues/80)
+* **app:** satisfy the type check for the closed picker text and row tests ([3e7cf48](https://github.com/rearwindowvertigo/ember/commit/3e7cf487604cc54cbc773bcbd8936a10cf851313))
+* **app:** say why Add member is hidden when every shortlisted model is a member ([97e119b](https://github.com/rearwindowvertigo/ember/commit/97e119baa76fe9c10eea043cec57b2da2ec3a043)), closes [#71](https://github.com/rearwindowvertigo/ember/issues/71)
+* **app:** show a live run of an ended flow or panel in Live ([b3eb14c](https://github.com/rearwindowvertigo/ember/commit/b3eb14c86c554b0e1f6a14d50ad97987bbf2ed16)), closes [#70](https://github.com/rearwindowvertigo/ember/issues/70)
+* **deps:** follow Claude Code's update channel and never show newest below installed ([b23b8cd](https://github.com/rearwindowvertigo/ember/commit/b23b8cded320fda2f7a53fafe609fa21e7154264)), closes [#79](https://github.com/rearwindowvertigo/ember/issues/79)
+* **deps:** read the newest version again after a release channel change ([39ae52e](https://github.com/rearwindowvertigo/ember/commit/39ae52e2295cbcebf08e270663cfcd5e6ae6864c)), closes [#79](https://github.com/rearwindowvertigo/ember/issues/79)
+* **engines:** leave what a read folder shows to the sandbox ([ec560af](https://github.com/rearwindowvertigo/ember/commit/ec560afc8a523a28fb7f52f02ce74e265c067f02)), closes [#75](https://github.com/rearwindowvertigo/ember/issues/75)
+* **engines:** let OpenCode read its read paths and show its session ([fadb6de](https://github.com/rearwindowvertigo/ember/commit/fadb6de56fa416c3929cb11730a650e42bf7a959)), closes [#75](https://github.com/rearwindowvertigo/ember/issues/75) [#76](https://github.com/rearwindowvertigo/ember/issues/76)
+* **engines:** open a read file's folder only where the sandbox hides it ([2b23ebf](https://github.com/rearwindowvertigo/ember/commit/2b23ebf75c82914541eb8784be0aff839aefc983)), closes [#75](https://github.com/rearwindowvertigo/ember/issues/75)
+
 ## [0.10.0](https://github.com/rearwindowvertigo/ember/compare/v0.9.0...v0.10.0) (2026-11-03)
 
 
