@@ -1,13 +1,15 @@
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import Mock, call
 
 import pytest
-from PySide6.QtCore import QProcessEnvironment, Qt
+from PySide6.QtCore import QCoreApplication, QProcessEnvironment, Qt
 from PySide6.QtWidgets import QApplication, QWidget
 from pytestqt.qtbot import QtBot
 
 from ember import deps
 from ember.app import flows, state, theme
+from ember.app import window as window_module
 from ember.app.context import STALE_TITLE, AppContext
 from ember.app.screens import KEYS, SCREENS
 from ember.app.window import MINIMUM_HEIGHT, MINIMUM_WIDTH, MainWindow, app_version
@@ -353,19 +355,68 @@ def test_bring_forward_puts_a_token_where_qt_reads_it(
 
 
 @pytest.mark.parametrize("shown", [True, False])
-def test_quit_uses_a_tray_token_on_a_shown_window(
-    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, shown: bool
+@pytest.mark.parametrize("token", ["tray-token", ""])
+def test_quit_uses_a_tray_token_without_showing_the_main_window(
+    env: dict[str, str],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    shown: bool,
+    token: str,
 ) -> None:
+    """Use the token on a shown window or an invisible helper before quitting."""
     window, _context, quit_app = _window(env, qtbot)
     if shown:
         window.show()
-    activations: list[bool] = []
-    monkeypatch.setattr(window, "activateWindow", lambda: activations.append(True))
-    monkeypatch.setenv("XDG_ACTIVATION_TOKEN", "tray-token")
+    helper = QWidget()
+    qtbot.addWidget(helper)
+    calls = Mock()
+    calls.attach_mock(Mock(return_value=helper), "create")
+    calls.attach_mock(Mock(wraps=helper.show), "show")
+    calls.attach_mock(Mock(wraps=helper.activateWindow), "activate_helper")
+    calls.attach_mock(Mock(wraps=helper.hide), "hide")
+    calls.attach_mock(Mock(wraps=window.activateWindow), "activate_main")
+    calls.attach_mock(Mock(wraps=QCoreApplication.processEvents), "process_events")
+    calls.attach_mock(Mock(wraps=quit_app), "quit")
+    monkeypatch.setattr(window_module, "QWidget", calls.create)
+    monkeypatch.setattr(helper, "show", calls.show)
+    monkeypatch.setattr(helper, "activateWindow", calls.activate_helper)
+    monkeypatch.setattr(helper, "hide", calls.hide)
+    monkeypatch.setattr(window, "activateWindow", calls.activate_main)
+    monkeypatch.setattr(QCoreApplication, "processEvents", calls.process_events)
+    monkeypatch.setattr(window, "_quit", calls.quit)
+    show_main = Mock(wraps=window.show)
+    show_normal = Mock(wraps=window.showNormal)
+    monkeypatch.setattr(window, "show", show_main)
+    monkeypatch.setattr(window, "showNormal", show_normal)
+    if token:
+        monkeypatch.setenv("XDG_ACTIVATION_TOKEN", token)
+    else:
+        monkeypatch.delenv("XDG_ACTIVATION_TOKEN", raising=False)
+
     window.quit_app()
+
     assert quit_app.calls == 1
-    assert activations == ([True] if shown else [])
-    monkeypatch.delenv("XDG_ACTIVATION_TOKEN")
-    activations.clear()
-    window.quit_app()
-    assert activations == []
+    show_main.assert_not_called()
+    show_normal.assert_not_called()
+    assert window.isVisible() == shown
+    assert not helper.isVisible()
+    if token and not shown:
+        assert calls.mock_calls == [
+            call.create(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint),
+            call.show(),
+            call.activate_helper(),
+            call.process_events(),
+            call.hide(),
+            call.quit(),
+        ]
+        assert helper.size().width() == helper.size().height() == 1
+        assert helper.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        assert helper.windowOpacity() == 0
+    elif token:
+        assert calls.mock_calls == [
+            call.activate_main(),
+            call.process_events(),
+            call.quit(),
+        ]
+    else:
+        assert calls.mock_calls == [call.quit()]
