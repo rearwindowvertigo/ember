@@ -3114,8 +3114,10 @@ members or shortlist them in Engines. Remove saves only when every remaining
 member is shortlisted. Otherwise it sends no save, names the first remaining
 member to shortlist, and shows Remove all, which saves an empty list. An
 engine being off or not connected alone does not block saving. Add member
-is also hidden when no unused shortlisted model is offered, where the
-screen says to shortlist models in Engines.
+is also hidden when no unused shortlisted model is offered: with no
+shortlist the screen says to shortlist models in Engines, and with every
+shortlisted model already a member the card says "Every shortlisted model is
+a member. Shortlist more in Engines to add one."
 
 One-time choices are not shown. Each change saves at once with the settings
 generation check; choosing an already saved multi-task value saves nothing.

@@ -78,6 +78,7 @@ NO_MEMBERS = (
     "No members. Claude asks for members, or uses the ones it is given, each time."
 )
 FULL = "A panel has at most eight members."
+ALL_ADDED = "Every shortlisted model is a member. Shortlist more in Engines to add one."
 ADD_BLOCKED = (
     "Remove the members not on their shortlist, or shortlist them "
     "in Engines, to add a member."
@@ -606,9 +607,16 @@ class MenuScreen(QWidget):
         self.remove_warning.show_text(warning_text)
         self.remove_all.setVisible(warning_text is not None)
         self.remove_all.setEnabled(not self._panel_pending)
-        self.add_warning.show_text(ADD_BLOCKED if blocked else None)
-        self.full.setVisible(len(members) >= PANEL_LIMIT)
         groups = addable(answers, members)
+        full = len(members) >= PANEL_LIMIT
+        if blocked:
+            add_text = ADD_BLOCKED
+        elif not full and not groups and offered(answers):
+            add_text = ALL_ADDED
+        else:
+            add_text = None
+        self.add_warning.show_text(add_text)
+        self.full.setVisible(full)
         self.add_member.blockSignals(True)
         try:
             self.add_member.clear()
@@ -622,10 +630,9 @@ class MenuScreen(QWidget):
         finally:
             self.add_member.blockSignals(False)
         # A line on the card or the screen says why a member cannot be added:
-        # the eight-member limit, a member to fix first, or no shortlist.
-        self.add_member.setVisible(
-            not blocked and len(members) < PANEL_LIMIT and bool(groups)
-        )
+        # the eight-member limit, a member to fix first, every shortlisted
+        # model added, or no shortlist.
+        self.add_member.setVisible(not blocked and not full and bool(groups))
         self.add_member.setEnabled(not self._panel_pending)
 
     def _draw_icons(self) -> None:

@@ -1066,3 +1066,15 @@ def test_info_icons_sit_before_their_controls_in_tab_order(
     first = tips["single.writer"].info
     chain = focus_chain(screen, qtbot, first)
     assert [w for w in chain if w in expected] == expected
+
+
+def test_add_member_says_why_when_every_shortlisted_model_is_a_member(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    choices.set_settings({"shortlist.codex": ["gpt-5@high"]}, env=env)
+    choices.set_settings({"panel.members": ["codex:gpt-5"]}, env=env)
+    _context, screen = _screen(env, qtbot)
+    assert not screen.add_member.isVisibleTo(screen)
+    assert screen.add_warning.isVisibleTo(screen)
+    assert screen.add_warning.text() == menu.ALL_ADDED
+    assert not screen.empty.isVisibleTo(screen)
