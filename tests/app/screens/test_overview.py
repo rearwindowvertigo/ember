@@ -145,16 +145,20 @@ def test_live_header_collapses_when_empty(
     assert empty.text() == "Nothing running"
     assert empty.property("role") == "secondary"
     assert empty.isVisible()
+    # Font metrics differ between machines, so the centres may differ by 1 px.
     assert (
-        heading.mapTo(screen.live_card, heading.rect().center()).y()
-        == empty.mapTo(screen.live_card, empty.rect().center()).y()
+        abs(
+            heading.mapTo(screen.live_card, heading.rect().center()).y()
+            - empty.mapTo(screen.live_card, empty.rect().center()).y()
+        )
+        <= 1
     )
     assert empty.geometry().left() > heading.geometry().right()
     layout = screen.live_card.layout()
     assert layout is not None
     margins = layout.contentsMargins()
     assert screen.live_card.height() == (
-        heading.height() + margins.top() + margins.bottom()
+        max(heading.height(), empty.height()) + margins.top() + margins.bottom()
     )
 
     write_run(make_run(env, LIVE_A))
