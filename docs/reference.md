@@ -3894,6 +3894,14 @@ integration's name in plain text. Both price cells show "Subscription" for
 models whose integration's login method is OAuth. Other prices are shown
 per million tokens; unknown figures show a dash.
 
+The Model column is as wide as the longest id when the other columns leave
+room; otherwise it takes the room they leave, down to 140 logical pixels,
+and longer ids end in an ellipsis. Provider fits the longest integration
+name, up to 130 pixels; Context and the price columns fit their longest
+values and headers. A window too narrow for the table at that width scrolls
+the table sideways inside its own area; the screen never widens past the
+window.
+
 Search models matches the model id or label, ignoring case. The filter row
 has two lines: Provider and Tools, with the model count at the end, then
 Max price and Min context. Each label is followed by an info icon.

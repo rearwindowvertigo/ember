@@ -15,14 +15,15 @@ Every read, check and save runs in a task.
 
 import html
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from decimal import Decimal
 from math import ceil
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import QEvent, QObject, Qt
-from PySide6.QtGui import QFontMetricsF
+from PySide6.QtCore import QEvent, QObject, QSize, Qt
+from PySide6.QtGui import QFontMetricsF, QResizeEvent
 from PySide6.QtWidgets import (
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -543,21 +544,27 @@ class _ModelRow(QWidget):
         if columns:
             provider = ElidedLabel(model.provider_name or model.provider or "—")
             provider.setProperty("role", "secondary")
-            provider.setFixedWidth(_PROVIDER_WIDTH)
+            provider.setFixedWidth(panel.provider_width)
             layout.addWidget(provider, 0, Qt.AlignmentFlag.AlignVCenter)
             self.figures.append(provider)
-            for text in (
-                context_text(model.context_length),
-                "Subscription"
-                if model.login == "oauth"
-                else price_text(model.prompt_price),
-                "Subscription"
-                if model.login == "oauth"
-                else price_text(model.completion_price),
+            for text, cell_width in (
+                (context_text(model.context_length), panel.context_width),
+                (
+                    "Subscription"
+                    if model.login == "oauth"
+                    else price_text(model.prompt_price),
+                    panel.column_width,
+                ),
+                (
+                    "Subscription"
+                    if model.login == "oauth"
+                    else price_text(model.completion_price),
+                    panel.column_width,
+                ),
             ):
                 cell = QLabel(text)
                 cell.setProperty("role", "secondary")
-                cell.setFixedWidth(_COLUMN)
+                cell.setFixedWidth(cell_width)
                 cell.setAlignment(
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
                 )
@@ -630,10 +637,7 @@ class _MissingRow(QWidget):
             state += f" · effort {effort}"
         self.info = ElidedLabel(state)
         self.info.setProperty("role", "secondary")
-        figures_width = (
-            _PROVIDER_WIDTH + 12 + 3 * (_COLUMN + 12) if panel.columns else 0
-        )
-        self.info.setFixedWidth(figures_width + _EFFORT_WIDTH)
+        self.info.setFixedWidth(panel.figures_width() + _EFFORT_WIDTH)
         layout.addWidget(self.info, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addStretch(1)
         self.remove_button = button("Remove", "secondary", size="sm")
@@ -643,9 +647,67 @@ class _MissingRow(QWidget):
         layout.addWidget(self.remove_button, 0, Qt.AlignmentFlag.AlignVCenter)
 
 
-_COLUMN = 110
-_PROVIDER_WIDTH = 130
 _EFFORT_WIDTH = 130
+_NAME_MIN = 140
+"""The narrowest the model column gets before the table scrolls sideways."""
+_PROVIDER_MAX = 130
+_PRICE_TEXTS = ("Input $/M", "Output $/M", "Subscription", "$1,000.00")
+"""The widest texts a price column holds; the column fits the widest."""
+_CONTEXT_TEXTS = ("Context", "10.5M", "1000k")
+"""The widest texts the Context column holds."""
+
+
+class _TableArea(QScrollArea):
+    """A model table that scrolls sideways only when its columns do not fit.
+
+    Its height follows the table's, so the screen's own scroll area scrolls it
+    vertically; the screen never widens past its window.
+    """
+
+    def __init__(self, table: QWidget, resized: Callable[[], None]) -> None:
+        super().__init__()
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setWidget(table)
+        self.viewport().setAutoFillBackground(False)
+        table.setAutoFillBackground(False)
+        self._resized = resized
+        self._bar_height = 0
+        table.installEventFilter(self)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        """Follow the table's height when its layout changes."""
+        if watched is self.widget() and event.type() == QEvent.Type.LayoutRequest:
+            self.updateGeometry()
+        return super().eventFilter(watched, event)
+
+    def _bar(self) -> int:
+        table = self.widget()
+        if table is None or table.minimumSizeHint().width() <= self.viewport().width():
+            return 0
+        return self.horizontalScrollBar().sizeHint().height()
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        """Return no width of its own and the table's height."""
+        table = self.widget()
+        height = 0 if table is None else table.sizeHint().height()
+        return QSize(0, height + self._bar())
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        """Return no minimum width and the table's height."""
+        return self.sizeHint()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        """Refit the model column and follow the scroll bar's height."""
+        super().resizeEvent(event)
+        self._resized()
+        bar = self._bar()
+        if bar != self._bar_height:
+            self._bar_height = bar
+            self.updateGeometry()
 
 
 class _ModelPanel(Card):
@@ -657,6 +719,15 @@ class _ModelPanel(Card):
         self.engine = engine
         self.columns = engine == "opencode"
         self.name_width = 0
+        self.measured_name = 0
+        figures = QFontMetricsF(theme.font("body"))
+        self.column_width = ceil(
+            max(figures.horizontalAdvance(text) for text in _PRICE_TEXTS) + 8
+        )
+        self.context_width = ceil(
+            max(figures.horizontalAdvance(text) for text in _CONTEXT_TEXTS) + 8
+        )
+        self.provider_width = _PROVIDER_MAX
         measure = button("Remove", "secondary", size="sm")
         self.use_width = max(Switch.WIDTH + 4, measure.sizeHint().width())
         measure.deleteLater()
@@ -694,13 +765,17 @@ class _ModelPanel(Card):
         self.name_header = label("Model", "muted", wrap=False)
         header.addWidget(self.name_header)
         if self.columns:
-            provider = label("Provider", "muted", wrap=False)
-            provider.setFixedWidth(_PROVIDER_WIDTH)
-            header.addWidget(provider)
-            for text in ("Context", "Input $/M", "Output $/M"):
+            self.provider_header = label("Provider", "muted", wrap=False)
+            self.provider_header.setFixedWidth(self.provider_width)
+            header.addWidget(self.provider_header)
+            for text, cell_width in (
+                ("Context", self.context_width),
+                ("Input $/M", self.column_width),
+                ("Output $/M", self.column_width),
+            ):
                 cell = QLabel(text)
                 cell.setProperty("role", "muted")
-                cell.setFixedWidth(_COLUMN)
+                cell.setFixedWidth(cell_width)
                 cell.setAlignment(
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
                 )
@@ -716,21 +791,27 @@ class _ModelPanel(Card):
         use.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header.addWidget(use)
         self.header.hide()
-        layout.addWidget(self.header)
+        self.table = QWidget()
+        table = QVBoxLayout(self.table)
+        table.setContentsMargins(0, 0, 0, 0)
+        table.setSpacing(12)
+        table.addWidget(self.header)
 
         self.rows_widget = QWidget()
         self.rows_area = QVBoxLayout(self.rows_widget)
         self.rows_area.setContentsMargins(0, 0, 0, 0)
         self.rows_area.setSpacing(0)
-        layout.addWidget(self.rows_widget)
+        table.addWidget(self.rows_widget)
         self.rows: list[_ModelRow] = []
 
         self.missing_widget = QWidget()
         self.missing_area = QVBoxLayout(self.missing_widget)
         self.missing_area.setContentsMargins(0, 0, 0, 0)
         self.missing_area.setSpacing(0)
-        layout.addWidget(self.missing_widget)
+        table.addWidget(self.missing_widget)
         self.missing: list[_MissingRow] = []
+        self.table_area = _TableArea(self.table, self._fit_names)
+        layout.addWidget(self.table_area)
 
         self.state = StateView()
         layout.addWidget(self.state)
@@ -968,10 +1049,56 @@ class _ModelPanel(Card):
             measured = max(measured, width(name_label, names))
             if not self.rows:
                 name_label.deleteLater()
-        self.name_width = min(320, measured)
-        self.name_header.setFixedWidth(self.name_width)
+        self.measured_name = min(320, measured)
+        if self.columns:
+            names = ["Provider"] + [
+                model.provider_name or model.provider or "—"
+                for model in self.models or ()
+            ]
+            self.provider_header.ensurePolished()
+            metrics = QFontMetricsF(self.provider_header.font())
+            self.provider_width = min(
+                _PROVIDER_MAX,
+                ceil(max(metrics.horizontalAdvance(text) for text in names) + 8),
+            )
+            self.provider_header.setFixedWidth(self.provider_width)
+            for row in self.rows:
+                row.figures[0].setFixedWidth(self.provider_width)
+            for row in self.missing:
+                row.info.setFixedWidth(self.figures_width() + _EFFORT_WIDTH)
+        self.name_width = 0
+        self._fit_names()
+
+    def figures_width(self) -> int:
+        """Return the width of the Provider and figure columns with their gaps."""
+        if not self.columns:
+            return 0
+        return (
+            self.provider_width
+            + 12
+            + self.context_width
+            + 12
+            + 2 * (self.column_width + 12)
+        )
+
+    def _fit_names(self) -> None:
+        """Give the model column the width the other columns leave.
+
+        It is as wide as the longest id when that fits, and never narrower
+        than `_NAME_MIN` or that id; below that the table scrolls sideways
+        inside its own area.
+        """
+        rest = 12 + self.figures_width() + _EFFORT_WIDTH + 12 + self.use_width
+        room = self.table_area.viewport().width() - rest
+        fitted = min(self.measured_name, max(_NAME_MIN, room))
+        if fitted == self.name_width:
+            return
+        self.name_width = fitted
+        self.name_header.setFixedWidth(fitted)
         for row in self.rows:
-            row.name.setFixedWidth(self.name_width)
+            row.name.setFixedWidth(fitted)
+        for row in self.missing:
+            row.name.setFixedWidth(fitted)
 
     def sync(self) -> None:
         """Show the saved shortlist on the rows."""
