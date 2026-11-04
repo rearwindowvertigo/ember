@@ -300,16 +300,6 @@ def _runtime_base(env: Mapping[str, str]) -> Path:
     return paths.runtime_dir(env).parent
 
 
-def hidden_roots(env: Mapping[str, str] | None = None) -> list[Path]:
-    """Return the folders the sandbox empties: `/tmp`, home and the runtime base.
-
-    Inside them a worker sees only the paths mounted back, such as its read
-    paths; everything else on the machine is visible read-only.
-    """
-    env = _env(env)
-    return [Path("/tmp"), paths.home_dir(env), _runtime_base(env)]
-
-
 def codex_args(
     worktree: Path,
     common: Path,

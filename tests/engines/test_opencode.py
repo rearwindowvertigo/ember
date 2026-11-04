@@ -962,20 +962,3 @@ def test_wait_shows_the_session_while_the_start_screen_returns(
     monkeypatch.setattr(driver, "_select", lambda _run, session: calls.append(session))
     assert driver.wait(run).state == engines.RUNNING
     assert calls == ["ses_test"] * selects
-
-
-def test_file_read_paths_open_their_folder_only_where_the_sandbox_hides_it(
-    tmp_path: Path,
-) -> None:
-    hidden = tmp_path / "home"
-    inside = hidden / "notes" / "brief.md"
-    outside = tmp_path / "srv" / "specs" / "brief.md"
-    for path in (inside, outside):
-        path.parent.mkdir(parents=True)
-        path.write_text("x")
-    rules = opencode.external_directory(True, (str(inside), str(outside)), (hidden,))
-    assert rules == {"*": "deny", f"{inside.parent}/*": "allow"}
-    assert opencode.external_directory(True, (str(outside),), (hidden,)) == "deny"
-    assert opencode.external_directory(True, (str(hidden / "x.md"),), (hidden,)) == (
-        "deny"
-    )

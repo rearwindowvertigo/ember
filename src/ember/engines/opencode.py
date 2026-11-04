@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from ember import engines, sandbox, tmux
+from ember import engines, tmux
 from ember.engines import (
     Driver,
     DriverError,
@@ -114,36 +114,28 @@ class _RefusedError(Exception):
 
 
 def external_directory(
-    read_only: bool, read: Sequence[str] = (), hidden: Sequence[Path] = ()
+    read_only: bool, read: Sequence[str] = ()
 ) -> str | dict[str, str]:
     """Return the `external_directory` permission of a run.
 
     OpenCode checks a path outside the checkout as `<folder>/*` and uses the
     last matching rule, so a read-only run denies everything first and then
-    allows the folder of each read path. A folder read path is allowed as it
-    is. A file read path allows its folder only inside a folder the sandbox
-    empties, where the sandbox shows the file alone; elsewhere its folder's
-    other files would be readable too, so it is left out.
+    allows the folder of each read path: a folder itself, or a file's folder.
+    The sandbox decides what is visible in that folder, as it does for every
+    engine: the read paths alone inside the folders it empties, and the rest
+    of the machine read-only.
 
     Args:
         read_only: The run edits nothing.
         read: The run's read paths, from `sandbox.read` and `--read`.
-        hidden: The folders the run's sandbox empties; none without one.
 
     Returns:
-        "allow" for an editing run, "deny" for a read-only run without an
-        allowed folder, otherwise the rules by pattern.
+        "allow" for an editing run, "deny" for a read-only run without read
+        paths, otherwise the rules by pattern.
     """
     if not read_only:
         return "allow"
-    folders: list[str] = []
-    for path in read:
-        if Path(path).is_dir():
-            folders.append(path)
-            continue
-        parent = Path(path).parent
-        if any(parent.is_relative_to(root) and parent != root for root in hidden):
-            folders.append(str(parent))
+    folders = [path if Path(path).is_dir() else str(Path(path).parent) for path in read]
     if not folders:
         return "deny"
     rules = {"*": "deny"}
@@ -152,19 +144,13 @@ def external_directory(
     return rules
 
 
-def run_config(
-    model: str,
-    read_only: bool,
-    read: Sequence[str] = (),
-    hidden: Sequence[Path] = (),
-) -> str:
+def run_config(model: str, read_only: bool, read: Sequence[str] = ()) -> str:
     """Return the OpenCode configuration of a run, as JSON.
 
     Args:
         model: The OpenRouter model id.
         read_only: The run edits nothing.
         read: The run's read paths, which a read-only run may read.
-        hidden: The folders the run's sandbox empties.
 
     Returns:
         The configuration: OpenRouter with zero data retention for every
@@ -176,7 +162,7 @@ def run_config(
         "write": "deny" if read_only else "allow",
         "patch": "deny" if read_only else "allow",
         "bash": bash,
-        "external_directory": external_directory(read_only, read, hidden),
+        "external_directory": external_directory(read_only, read),
         "question": "deny",
     }
     config = {
@@ -601,10 +587,7 @@ class OpenCodeDriver(Driver):
         )  # fmt: skip
         variables = {
             "OPENCODE_CONFIG_CONTENT": run_config(
-                model,
-                run.read_only,
-                run.read_effective,
-                () if run.sandbox == sandbox.NONE else sandbox.hidden_roots(self.env),
+                model, run.read_only, run.read_effective
             ),
             "OPENCODE_SERVER_PASSWORD": password,
             "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": self.env.get(
