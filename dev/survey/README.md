@@ -9,6 +9,44 @@ Nothing in Ember, its skill, `AGENTS.md`, `CLAUDE.md` or any memory file
 refers to this folder. A session fills the survey only when the owner asks.
 `review-prompt.md` is the question a panel answers to review an entry.
 
+A session working in any other repository takes the survey through
+`agent.md`, which it fetches from `main` with `gh`, and files its entry as
+an issue with the `survey` label. A session in this repository imports
+those issues into `entries/`. `agent.md` carries its own copy of the score
+scale below; a change to one is made to both.
+
+## Taking the survey from another repository
+
+`ember-survey/SKILL.md` is a Claude Code skill that only fetches
+`agent.md` from `main` and follows it. It runs when the owner types
+`/ember-survey`, never on its own (`disable-model-invocation: true`). It
+holds no survey text, so it does not change when the survey does. To
+install it on a machine:
+
+```bash
+mkdir -p ~/.claude/skills/ember-survey && gh api repos/rearwindowvertigo/ember/contents/dev/survey/ember-survey/SKILL.md -H "Accept: application/vnd.github.raw+json" > ~/.claude/skills/ember-survey/SKILL.md
+```
+
+Without the skill, the owner asks the session to take the Ember use survey
+by running this command and following what it prints:
+
+```bash
+gh api repos/rearwindowvertigo/ember/contents/dev/survey/agent.md -H "Accept: application/vnd.github.raw+json"
+```
+
+## Importing survey issues
+
+When the owner asks, a session in this repository imports every open issue
+with the `survey` label:
+
+1. List them: `gh issue list --label survey --state open --json number,title,body`.
+2. For each, save the body unchanged as `entries/<date>-<topic>.md`, with
+   `<date>` from its front matter and `<topic>` as in step 1 of Filling in
+   an entry, and add its index row.
+3. Commit the entries and rows on their own branch, with a
+   `chore(survey):` subject, and open one pull request whose description
+   has a `Closes #<n>` line for each issue.
+
 ## Filling in an entry
 
 1. Copy `survey.md` to `entries/<yyyy-mm-dd>-<topic>.md`, where `<topic>` is
