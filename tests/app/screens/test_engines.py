@@ -968,7 +968,7 @@ def _router_list() -> models.ModelList:
                 "other/chat", "Chat", (), None, 128_000, 0.0000004, 0.000001, False
             ),
         ),
-        source=models.OPENROUTER,
+        source=models.CLI,
         fetched_at=NOW,
         reason=None,
     )
@@ -1205,9 +1205,7 @@ def test_list_with_a_reason_keeps_cached_rows(
 def test_unreadable_list_shows_error_with_try_again(
     env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
 ) -> None:
-    stubs["lists"] = {
-        "opencode": models.ModelList((), models.OPENROUTER, None, "no network")
-    }
+    stubs["lists"] = {"opencode": models.ModelList((), models.CLI, None, "no network")}
     screen, context = _screen(env, qtbot)
     panel = _open(screen, context, qtbot, "opencode")
     assert "no network" in panel.state.error_text.text()
@@ -1224,9 +1222,7 @@ def test_unreadable_list_lists_no_shortlist_entry_as_missing(
     choices.set_settings(
         {"shortlist.opencode": ["openai/gpt-5@high", "anthropic/claude-x"]}, env=env
     )
-    stubs["lists"] = {
-        "opencode": models.ModelList((), models.OPENROUTER, None, "no network")
-    }
+    stubs["lists"] = {"opencode": models.ModelList((), models.CLI, None, "no network")}
     screen, context = _screen(env, qtbot)
     panel = _open(screen, context, qtbot, "opencode")
     assert "no network" in panel.state.error_text.text()

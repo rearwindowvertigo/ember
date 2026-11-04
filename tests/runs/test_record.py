@@ -90,6 +90,7 @@ def test_save_and_load_round_trip(env: dict[str, str]) -> None:
         "updated_at", "ended_at", "last_exit", "last_reason", "commits",
         "subject", "main", "common", "detached", "last_screen_change_at",
         "capacity_retries", "capacity_wait", "sandbox_paths", "parent",
+        "opencode_id_format",
     }  # fmt: skip
     assert [entry.name for entry in folder.iterdir()] == ["run.json"]
 
@@ -482,3 +483,28 @@ def test_orphaned(
 def test_run_without_parent_is_never_orphaned(env: dict[str, str]) -> None:
     run = replace(_run(env), status=record.RUNNING, parent=None)
     assert not record.orphaned(run)
+
+
+@pytest.mark.parametrize(
+    "model", ["anthropic/claude-x", "openrouter/anthropic/claude-x"]
+)
+@pytest.mark.parametrize("marked", [False, True])
+def test_opencode_id_migration_load_update_reload(
+    env: dict[str, str], model: str, marked: bool
+) -> None:
+    run = replace(_run(env), engine="opencode", model=model)
+    value = run.to_json()
+    if not marked:
+        value.pop("opencode_id_format")
+    path = run.folder / record.RECORD_NAME
+    path.write_text(json.dumps(value))
+    before = path.read_bytes()
+    loaded = record.load(run.id, env)
+    expected = (
+        model if marked or model.startswith("openrouter/") else "openrouter/" + model
+    )
+    assert loaded.model == expected
+    assert path.read_bytes() == before
+    record.update(loaded, {"subject": "updated"})
+    assert json.loads(path.read_text())["opencode_id_format"] == 1
+    assert record.load(run.id, env).model == expected

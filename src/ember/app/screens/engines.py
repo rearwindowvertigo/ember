@@ -922,7 +922,7 @@ class _ModelPanel(Card):
         text = self.search.text().strip()
         price_value = self.price_picker.value()
         context_value = self.context_picker.value()
-        kept = models.filter_openrouter(
+        kept = models.filter_opencode(
             self.models,
             text=text or None,
             max_prompt_price=per_token(

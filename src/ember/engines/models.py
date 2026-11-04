@@ -1,17 +1,9 @@
-"""Each engine's model list.
+"""Engine model discovery and cached integration metadata.
 
-Codex's models come from `codex debug models`. Claude Code's are the model
-aliases its `--model` option takes. OpenCode's are OpenRouter's public model
-list, read through an injectable `fetch(url, timeout)` that returns the
-decoded JSON reply; their ids are OpenRouter's own, as `shortlist.opencode`
-holds them.
-
-The Codex and OpenRouter lists are cached in `models-<engine>.json` in Ember's
-cache folder and read again when the cache is `MAX_AGE` seconds old, missing
-or not valid, or when a refresh is asked for. A read that fails returns the
-cached list, however old, with the failure as its reason; without a cache it
-returns an empty list and the reason. A failed read never changes the cache.
-The `without_cache_writes` scope disables saving refreshed lists.
+OpenCode supplies full integration/model ids. models.dev supplies details;
+OpenCode's auth list supplies integration names and login methods. Failed
+refreshes retain the cached list and report a reason. Unversioned OpenCode
+caches are converted only as a fallback after a failed refresh.
 """
 
 import contextlib
@@ -26,12 +18,11 @@ import time
 import urllib.request
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from ember import paths
+from ember import choices, paths
 from ember.engines import status
 
 MAX_AGE = 6 * 60 * 60
@@ -40,8 +31,10 @@ MAX_AGE = 6 * 60 * 60
 TIMEOUT = 10
 """Seconds a model list command or request may take."""
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/models"
-"""OpenRouter's public model list."""
+CATALOGUE_URL = "https://models.dev/api.json"
+"""Integration and model details, with prices per million tokens."""
+
+CACHE_VERSION = 1
 
 CODEX_COMMAND = ("debug", "models")
 """The arguments to `codex` that print its model list."""
@@ -53,12 +46,11 @@ CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 """The efforts Claude Code's `--effort` option takes."""
 
 CLI = "cli"
-OPENROUTER = "openrouter"
 CACHE = "cache"
-SOURCES = (CLI, OPENROUTER, CACHE)
+SOURCES = (CLI, CACHE)
 """Where a model list came from."""
 
-_OPENROUTER_ID = re.compile(r"~?[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:-]*")
+_OPENCODE_ID = re.compile(r"[^/\s]+/[^\s]+")
 
 Fetch = Callable[[str, float], Any]
 
@@ -87,8 +79,9 @@ def without_cache_writes() -> Iterator[None]:
 class Model:
     """One model an engine can run.
 
-    Prices are in US dollars per token. Fields that only OpenRouter reports
-    are `None` for other engines and when OpenRouter does not report them.
+    Prices are in US dollars per token. Missing catalogue details are `None`.
+    OpenCode ids include the integration prefix; provider metadata describes
+    the integration serving the model, including models routed by OpenRouter.
     """
 
     id: str
@@ -115,6 +108,15 @@ class Model:
     supports_tools: bool | None = None
     """Whether the model takes tool calls."""
 
+    provider: str | None = None
+    """The OpenCode integration id; `None` for other engines."""
+
+    provider_name: str | None = None
+    """The integration display name from auth list or the catalogue."""
+
+    login: str | None = None
+    """`oauth`, `api`, or `None` when the login method is unknown."""
+
     def to_json(self) -> dict[str, Any]:
         """Return the model as a JSON-ready dict.
 
@@ -130,7 +132,23 @@ class Model:
             "prompt_price": self.prompt_price,
             "completion_price": self.completion_price,
             "supports_tools": self.supports_tools,
+            "provider": self.provider,
+            "provider_name": self.provider_name,
+            "login": self.login,
         }
+
+
+@dataclass(frozen=True)
+class Integration:
+    """An OpenCode integration, including one with no model rows."""
+
+    id: str
+    name: str
+    login: str | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the integration id, display name and login method."""
+        return {"id": self.id, "name": self.name, "login": self.login}
 
 
 @dataclass(frozen=True)
@@ -141,7 +159,7 @@ class ModelList:
     """The models, in the order the source lists them."""
 
     source: str
-    """`cli`, `openrouter` or `cache`."""
+    """`cli` or `cache`."""
 
     fetched_at: float | None
     """When the list was read from its source; `None` when it never was."""
@@ -149,14 +167,18 @@ class ModelList:
     reason: str | None
     """Why the list could not be read fresh; `None` when it was."""
 
+    integrations: tuple[Integration, ...] = ()
+    """Integrations independent of model rows, including connected empty ones."""
+
     def to_json(self) -> dict[str, Any]:
         """Return the list as a JSON-ready dict.
 
         Returns:
-            `{"models", "source", "fetched_at", "reason"}`.
+            `{"models", "integrations", "source", "fetched_at", "reason"}`.
         """
         return {
             "models": [model.to_json() for model in self.models],
+            "integrations": [item.to_json() for item in self.integrations],
             "source": self.source,
             "fetched_at": self.fetched_at,
             "reason": self.reason,
@@ -201,6 +223,9 @@ def _model_from_json(value: object) -> Model | None:
         absent_or("prompt_price", _number),
         absent_or("completion_price", _number),
         tools is None or isinstance(tools, bool),
+        absent_or("provider", _str),
+        absent_or("provider_name", _str),
+        value.get("login") in (None, "oauth", "api"),
     )
     if not all(checks) or ident is None or label is None:
         return None
@@ -213,6 +238,9 @@ def _model_from_json(value: object) -> Model | None:
         prompt_price=_number(value.get("prompt_price")),
         completion_price=_number(value.get("completion_price")),
         supports_tools=tools if isinstance(tools, bool) else None,
+        provider=_str(value.get("provider")),
+        provider_name=_str(value.get("provider_name")),
+        login=_str(value.get("login")),
     )
 
 
@@ -229,9 +257,8 @@ def cache_path(engine: str, env: Mapping[str, str] | None = None) -> Path:
     return paths.cache_dir(env) / f"models-{engine}.json"
 
 
-def _read_cache(path: Path) -> tuple[float, tuple[Model, ...]] | None:
+def _read_cache(value: object) -> tuple[float, tuple[Model, ...]] | None:
     """Return (fetched_at, models) from a cache file, or `None` if not valid."""
-    value = status.load_cache_file(path)
     if not isinstance(value, dict) or not isinstance(value.get("models"), list):
         return None
     fetched_at = status.finite_number(value.get("fetched_at"))
@@ -289,73 +316,110 @@ def parse_codex(text: str) -> tuple[Model, ...]:
     return tuple(result)
 
 
-def price(value: object) -> float | None:
-    """Read a per-token price as OpenRouter writes it.
+def parse_opencode(
+    output: str, catalogue: object, auth: tuple[tuple[str, str], ...]
+) -> tuple[tuple[Model, ...], tuple[Integration, ...]]:
+    """Join authoritative OpenCode ids to catalogue details and auth entries.
 
-    Args:
-        value: A decimal string or a number.
-
-    Returns:
-        US dollars per token, or `None` when missing, not a number or negative.
-    """
-    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
-        return None
-    try:
-        number = Decimal(str(value))
-    except InvalidOperation:
-        return None
-    if not number.is_finite() or number < 0:
-        return None
-    return float(number)
-
-
-def parse_openrouter(reply: object) -> tuple[Model, ...]:
-    """Parse OpenRouter's model list reply.
-
-    Models whose id is not `<provider>/<model>` as `shortlist.opencode` takes
-    it are left out, as is a repeated id.
-
-    Args:
-        reply: The decoded JSON reply, `{"data": [...]}`.
-
-    Returns:
-        The models, in the order listed.
+    Auth names match an id or catalogue name, ignoring case. Ambiguous and
+    unmatched names do not assign a login method. Catalogue-only providers
+    are included only when matched by auth, including providers with no models.
 
     Raises:
-        ValueError: The reply holds no list of models.
+        ValueError: The catalogue or model-command output is unreadable.
     """
-    items = reply.get("data") if isinstance(reply, dict) else None
-    if not isinstance(items, list):
-        raise ValueError("the OpenRouter reply holds no model list")
+    if not isinstance(catalogue, dict) or any(
+        not isinstance(value, dict) or not isinstance(value.get("models"), dict)
+        for value in catalogue.values()
+    ):
+        raise ValueError("models.dev reply is not a provider catalogue")
+    ids = tuple(
+        dict.fromkeys(line.strip() for line in output.splitlines() if line.strip())
+    )
+    if any(not _OPENCODE_ID.fullmatch(ident) for ident in ids):
+        raise ValueError("opencode models printed invalid model ids")
+    served = dict.fromkeys(ident.split("/", 1)[0] for ident in ids)
+    names = {
+        ident: _str(item.get("name")) or ident for ident, item in catalogue.items()
+    }
+    for ident in served:
+        names.setdefault(ident, ident)
+    matched: dict[str, list[tuple[str, str]]] = {}
+    for name, login in auth:
+        matches = [
+            ident
+            for ident, label in names.items()
+            if name.casefold() in (ident.casefold(), label.casefold())
+        ]
+        if len(matches) == 1:
+            ident = matches[0]
+            served.setdefault(ident, None)
+            matched.setdefault(ident, []).append((name, login))
+    integrations = tuple(
+        Integration(ident, *matched[ident][0])
+        if len(matched.get(ident, [])) == 1
+        else Integration(ident, names[ident])
+        for ident in served
+    )
+    by_id = {item.id: item for item in integrations}
     result: list[Model] = []
-    seen: set[str] = set()
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        ident = _str(item.get("id"))
-        if ident is None or not _OPENROUTER_ID.fullmatch(ident) or ident in seen:
-            continue
-        seen.add(ident)
-        pricing = item.get("pricing")
-        pricing = pricing if isinstance(pricing, dict) else {}
-        reasoning = item.get("reasoning")
-        reasoning = reasoning if isinstance(reasoning, dict) else {}
-        parameters = item.get("supported_parameters")
+    for ident in ids:
+        provider, model_id = ident.split("/", 1)
+        integration = by_id[provider]
+        item = catalogue.get(provider, {}).get("models", {}).get(model_id, {})
+        item = item if isinstance(item, dict) else {}
+        limit = item.get("limit")
+        cost = item.get("cost")
+        options = item.get("reasoning_options")
+        efforts = tuple(
+            value
+            for option in (options if isinstance(options, list) else [])
+            if isinstance(option, dict) and option.get("type") == "effort"
+            for value in _strings(option.get("values"))
+        )
+        prompt = _number(cost.get("input")) if isinstance(cost, dict) else None
+        completion = _number(cost.get("output")) if isinstance(cost, dict) else None
+        tools = item.get("tool_call")
         result.append(
             Model(
                 id=ident,
                 label=_str(item.get("name")) or ident,
-                efforts=_strings(reasoning.get("supported_efforts")),
-                default_effort=_str(reasoning.get("default_effort")),
-                context_length=_int(item.get("context_length")),
-                prompt_price=price(pricing.get("prompt")),
-                completion_price=price(pricing.get("completion")),
-                supports_tools=(
-                    "tools" in parameters if isinstance(parameters, list) else None
-                ),
+                efforts=efforts,
+                context_length=_int(limit.get("context"))
+                if isinstance(limit, dict)
+                else None,
+                prompt_price=None if prompt is None else prompt / 1_000_000,
+                completion_price=None if completion is None else completion / 1_000_000,
+                supports_tools=tools if isinstance(tools, bool) else None,
+                provider=provider,
+                provider_name=integration.name,
+                login=integration.login,
             )
         )
-    return tuple(result)
+    return tuple(result), integrations
+
+
+def _read_opencode(
+    env: Mapping[str, str], fetch: Fetch
+) -> tuple[tuple[Model, ...], tuple[Integration, ...], str | None]:
+    binary = status.locate("opencode", env)
+    if binary is None:
+        raise status.ProbeError("the opencode CLI is not installed")
+    code, output, errors = _run_models([binary, "models"], env)
+    if code != 0:
+        raise status.ProbeError(
+            f"opencode models exited {code}: {status.first_line(errors or output)}"
+        )
+    catalogue = fetch(CATALOGUE_URL, TIMEOUT)
+    reason = None
+    try:
+        _, version = status.run_probe([binary, "--version"], env)
+        auth = status.opencode_auth(binary, env, version.strip())
+    except status.ProbeError as error:
+        auth = ()
+        reason = str(error)
+    models, integrations = parse_opencode(output, catalogue, auth)
+    return models, integrations, reason
 
 
 def fetch_json(url: str, timeout: float) -> Any:  # noqa: ANN401
@@ -373,8 +437,8 @@ def fetch_json(url: str, timeout: float) -> Any:  # noqa: ANN401
         return json.loads(response.read())
 
 
-def _run_codex(argv: list[str], env: Mapping[str, str]) -> tuple[int, str, str]:
-    """Run the Codex model list command with standard error kept apart.
+def _run_models(argv: list[str], env: Mapping[str, str]) -> tuple[int, str, str]:
+    """Run a model list command with standard error kept apart.
 
     Args:
         argv: The command and its arguments.
@@ -418,7 +482,7 @@ def _read_codex(env: Mapping[str, str]) -> tuple[Model, ...]:
     binary = status.locate("codex", env)
     if binary is None:
         raise status.ProbeError("the codex CLI is not installed")
-    code, output, errors = _run_codex([binary, *CODEX_COMMAND], env)
+    code, output, errors = _run_models([binary, *CODEX_COMMAND], env)
     if code != 0:
         shown = status.first_line(errors if errors.strip() else output)
         raise status.ProbeError(f"codex debug models exited {code}: {shown}")
@@ -453,13 +517,14 @@ def list_models(
         engine: `codex`, `opencode` or `claude`.
         env: The environment; `None` reads `os.environ`.
         refresh: Read the source even when the cache is current.
-        fetch: Reads OpenRouter's list; `None` uses `fetch_json`.
+        fetch: Reads models.dev; `None` uses `fetch_json`.
         now: The time; `None` for the current time.
 
     Returns:
         The list. When the source cannot be read it is the cached list with
-        `source` `cache`, or an empty list with the source that was tried and
-        `fetched_at` `None`; either way `reason` says what failed.
+        `source` `cache`. Without a cache, an auth-list failure returns models
+        with unknown login methods; other failures return an empty list.
+        Failed refreshes set `reason` and never replace the cache.
 
     Raises:
         ValueError: `engine` is not an engine.
@@ -471,48 +536,87 @@ def list_models(
         return _claude_list(at)
     env = os.environ if env is None else env
     path = cache_path(engine, env)
-    held = _read_cache(path)
-    if held is not None and not refresh and 0 <= at - held[0] < MAX_AGE:
-        return ModelList(models=held[1], source=CACHE, fetched_at=held[0], reason=None)
-    source = CLI if engine == "codex" else OPENROUTER
+    payload = status.load_cache_file(path)
+    held = _read_cache(payload)
+    cached_integrations: tuple[Integration, ...] = ()
+    legacy = False
+    if engine == "opencode" and held is not None and isinstance(payload, dict):
+        legacy = "format_version" not in payload
+        if legacy:
+            held = (
+                held[0],
+                tuple(
+                    replace(
+                        model,
+                        id=choices.full_opencode_id(model.id),
+                        provider="openrouter",
+                        provider_name="OpenRouter",
+                        login=None,
+                        default_effort=None,
+                    )
+                    for model in held[1]
+                ),
+            )
+            cached_integrations = (Integration("openrouter", "OpenRouter"),)
+        elif payload.get("format_version") != CACHE_VERSION:
+            held = None
+        else:
+            entries = payload.get("integrations")
+            if not isinstance(entries, list) or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("id"), str)
+                or not isinstance(item.get("name"), str)
+                or item.get("login") not in (None, "oauth", "api")
+                for item in entries
+            ):
+                held = None
+            else:
+                cached_integrations = tuple(
+                    Integration(item["id"], item["name"], item.get("login"))
+                    for item in entries
+                )
+    if held is not None and not legacy and not refresh and 0 <= at - held[0] < MAX_AGE:
+        return ModelList(held[1], CACHE, held[0], None, cached_integrations)
+    found: tuple[Model, ...] = ()
+    integrations: tuple[Integration, ...] = ()
     try:
         if engine == "codex":
-            models = _read_codex(env)
+            found = _read_codex(env)
+            reason = None
         else:
-            reply = (fetch_json if fetch is None else fetch)(OPENROUTER_URL, TIMEOUT)
-            models = parse_openrouter(reply)
+            found, integrations, reason = _read_opencode(
+                env, fetch_json if fetch is None else fetch
+            )
     except status.ProbeError as error:
         reason = str(error)
     except (OSError, ValueError, TypeError, http.client.HTTPException) as error:
-        reason = f"OpenRouter model list: {error}"
-    else:
+        reason = f"OpenCode model list: {error}"
+    if reason is None:
+        result = ModelList(found, CLI, at, None, integrations)
         if _CACHE_WRITES.get():
-            payload = {
-                "fetched_at": at,
-                "models": [model.to_json() for model in models],
-            }
+            payload = {**result.to_json(), "format_version": CACHE_VERSION}
             with contextlib.suppress(OSError):
                 status.save_cache_file(path, payload, env)
-        return ModelList(models=models, source=source, fetched_at=at, reason=None)
+        return result
     if held is not None:
-        return ModelList(
-            models=held[1], source=CACHE, fetched_at=held[0], reason=reason
-        )
-    return ModelList(models=(), source=source, fetched_at=None, reason=reason)
+        return ModelList(held[1], CACHE, held[0], reason, cached_integrations)
+    return ModelList(found, CLI, None, reason, integrations)
 
 
-def filter_openrouter(
+def filter_opencode(
     models: Iterable[Model],
     *,
     text: str | None = None,
     max_prompt_price: float | None = None,
     min_context: int | None = None,
     tools: bool | None = None,
+    provider: str | None = None,
 ) -> tuple[Model, ...]:
     """Keep the models that pass every given filter.
 
     A filter left at `None` keeps every model. A model whose value for an
-    active filter is unknown is left out. Bounds are inclusive.
+    active filter is unknown is left out. OAuth integrations bypass the price
+    filter. Bounds are inclusive.
 
     Args:
         models: The models to filter.
@@ -520,6 +624,7 @@ def filter_openrouter(
         max_prompt_price: The highest price per input token, in US dollars.
         min_context: The smallest context window, in tokens.
         tools: Whether the model must, or must not, take tool calls.
+        provider: Integration id; `None` keeps all integrations.
 
     Returns:
         The models kept, in their order.
@@ -531,8 +636,12 @@ def filter_openrouter(
             needle in model.id.casefold() or needle in model.label.casefold()
         ):
             return False
-        if max_prompt_price is not None and (
-            model.prompt_price is None or model.prompt_price > max_prompt_price
+        if provider is not None and model.provider != provider:
+            return False
+        if (
+            max_prompt_price is not None
+            and model.login != "oauth"
+            and (model.prompt_price is None or model.prompt_price > max_prompt_price)
         ):
             return False
         if min_context is not None and (

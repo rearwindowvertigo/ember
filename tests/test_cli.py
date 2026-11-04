@@ -499,7 +499,7 @@ def test_engines_text(env: dict[str, str], capsys: pytest.CaptureFixture[str]) -
     assert (
         lines[2] == "  the opencode CLI: curl -fsSL https://opencode.ai/install | bash"
     )
-    assert lines[3] == "  an OpenRouter credential for OpenCode"
+    assert lines[3] == "  at least one integration connected in OpenCode (use /connect)"
     assert lines[4].startswith("claude: not installed: ")
 
 
@@ -532,16 +532,21 @@ def test_engines_models_text_from_cache(
 ) -> None:
     payload = {
         "fetched_at": time.time() - 120,
+        "format_version": models.CACHE_VERSION,
+        "integrations": [{"id": "openrouter", "name": "OpenRouter", "login": "api"}],
         "models": [
             models.Model(
-                "openai/gpt-4o",
+                "openrouter/openai/gpt-4o",
                 "GPT-4o",
                 ("low", "high"),
-                "low",
+                None,
                 128000,
                 0.0000025,
                 0.00001,
                 True,
+                "openrouter",
+                "OpenRouter",
+                "api",
             ).to_json()
         ],
     }
@@ -551,7 +556,7 @@ def test_engines_models_text_from_cache(
     assert err == ""
     assert out.splitlines() == [
         "opencode models from cache, read 2 min ago",
-        "openai/gpt-4o  GPT-4o  efforts low, high (default low)  context 128000  "
+        "openrouter/openai/gpt-4o  GPT-4o  efforts low, high  context 128000  "
         "$2.50/M in  $10.00/M out  tools",
     ]
 
@@ -569,6 +574,7 @@ def test_engines_models_failure_reason_on_stderr(
     data = json.loads(out)
     assert data == {
         "models": [],
+        "integrations": [],
         "source": "cli",
         "fetched_at": None,
         "reason": data["reason"],

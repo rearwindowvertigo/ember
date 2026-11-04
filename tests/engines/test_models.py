@@ -20,6 +20,9 @@ def env(tmp_path: Path) -> dict[str, str]:
     home.mkdir()
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    stub = bin_dir / "opencode"
+    stub.write_text(OPENCODE_STUB)
+    stub.chmod(0o755)
     return {
         "HOME": str(home),
         "XDG_CACHE_HOME": str(tmp_path / "cache"),
@@ -64,37 +67,41 @@ def _calls(calls: Path) -> int:
     return len(calls.read_text().splitlines()) if calls.exists() else 0
 
 
-OPENROUTER_REPLY = {
-    "data": [
-        {
-            "id": "openai/gpt-4o",
-            "name": "OpenAI: GPT-4o",
-            "context_length": 128000,
-            "pricing": {"prompt": "0.0000025", "completion": "0.00001"},
-            "supported_parameters": ["tools", "temperature"],
-            "reasoning": {
-                "supported_efforts": ["low", "high"],
-                "default_effort": "low",
+OPENCODE_STUB = """#!/bin/sh
+case "$*" in
+--version) echo '1.19.5';;
+models) echo 'openrouter/openai/gpt-4o
+openrouter/qwen/qwen3:free
+mystery/model';;
+'auth list'|'auth list --standalone') echo 'OpenRouter api';;
+*) exit 9;;
+esac
+"""
+
+CATALOGUE = {
+    "openrouter": {
+        "name": "OpenRouter",
+        "models": {
+            "openai/gpt-4o": {
+                "name": "GPT-4o",
+                "limit": {"context": 128000},
+                "cost": {"input": 2.5, "output": 10},
+                "tool_call": True,
+                "reasoning_options": [{"type": "effort", "values": ["low", "high"]}],
+            },
+            "qwen/qwen3:free": {
+                "name": "Qwen Free",
+                "limit": {"context": 32000},
+                "cost": {"input": 0, "output": 0},
+                "tool_call": False,
             },
         },
-        {
-            "id": "qwen/qwen3:free",
-            "name": "Qwen3 (free)",
-            "context_length": 32000,
-            "pricing": {"prompt": "0", "completion": "0"},
-            "supported_parameters": ["temperature"],
-        },
-        {"id": "mystery/model"},
-        {"id": "openai/gpt-4o", "name": "duplicate"},
-        {"id": "no-slash"},
-        {"id": "bad id/x"},
-        {"name": "no id"},
-    ]
+    },
 }
 
 
 class Fetcher:
-    def __init__(self, reply: object = OPENROUTER_REPLY) -> None:
+    def __init__(self, reply: object = CATALOGUE) -> None:
         self.reply = reply
         self.calls: list[tuple[str, float]] = []
 
@@ -148,11 +155,7 @@ def test_without_cache_writes_preserves_discovery_and_existing_caches(
     assert result.reason is None
     assert result.models
     assert result.source == (
-        "cache"
-        if cache_state == "current"
-        else "cli"
-        if engine == "codex"
-        else "openrouter"
+        "cache" if cache_state == "current" else "cli" if engine == "codex" else "cli"
     )
     probes = _calls(calls) if engine == "codex" else len(fetch.calls)
     assert probes == (2 if cache_state == "expired" else 1)
@@ -328,44 +331,44 @@ def test_invalid_cache_is_absent(env: dict[str, str], content: str) -> None:
 
 
 @pytest.mark.parametrize("version", ["1.19.5", "opencode v2.2.5"])
-def test_openrouter_list_does_not_run_opencode(
-    env: dict[str, str], tmp_path: Path, version: str
-) -> None:
-    """Read models from OpenRouter without invoking either OpenCode version."""
+def test_opencode_commands(env: dict[str, str], tmp_path: Path, version: str) -> None:
     calls = tmp_path / "opencode-calls"
     stub = Path(env["PATH"]) / "opencode"
     stub.write_text(
-        f'#!/bin/sh\necho "$*" >> "{calls}"\n'
-        f'if [ "$*" = "--version" ]; then echo "{version}"; else exit 9; fi\n'
+        OPENCODE_STUB.replace(
+            "#!/bin/sh", f'#!/bin/sh\necho "$*" >> "{calls}"'
+        ).replace("1.19.5", version)
     )
-    stub.chmod(0o755)
-    fetch = Fetcher()
-    result = models.list_models("opencode", env, fetch=fetch, now=T0)
-    assert result.source == "openrouter"
+    result = models.list_models("opencode", env, fetch=Fetcher(), now=T0)
     assert result.reason is None
-    assert result.models
-    assert fetch.calls == [(models.OPENROUTER_URL, models.TIMEOUT)]
-    assert not calls.exists()
+    assert calls.read_text().splitlines() == [
+        "models",
+        "--version",
+        "auth list --standalone" if version.startswith("opencode v2") else "auth list",
+    ]
 
 
 def test_openrouter_list(env: dict[str, str]) -> None:
     fetch = Fetcher()
     result = models.list_models("opencode", env, fetch=fetch, now=T0)
-    assert fetch.calls == [(models.OPENROUTER_URL, models.TIMEOUT)]
-    assert result.source == "openrouter"
+    assert fetch.calls == [(models.CATALOGUE_URL, models.TIMEOUT)]
+    assert result.source == "cli"
     assert result.fetched_at == T0
     assert result.reason is None
     assert [model.id for model in result.models] == [
-        "openai/gpt-4o",
-        "qwen/qwen3:free",
+        "openrouter/openai/gpt-4o",
+        "openrouter/qwen/qwen3:free",
         "mystery/model",
     ]
     gpt, qwen, mystery = result.models
     assert gpt == Model(
-        id="openai/gpt-4o",
-        label="OpenAI: GPT-4o",
+        id="openrouter/openai/gpt-4o",
+        label="GPT-4o",
+        provider="openrouter",
+        provider_name="OpenRouter",
+        login="api",
         efforts=("low", "high"),
-        default_effort="low",
+        default_effort=None,
         context_length=128000,
         prompt_price=0.0000025,
         completion_price=0.00001,
@@ -373,7 +376,9 @@ def test_openrouter_list(env: dict[str, str]) -> None:
     )
     assert qwen.prompt_price == 0.0
     assert qwen.supports_tools is False
-    assert mystery == Model("mystery/model", "mystery/model")
+    assert mystery == Model(
+        "mystery/model", "mystery/model", provider="mystery", provider_name="mystery"
+    )
     cached = models.list_models("opencode", env, fetch=fetch, now=T0 + 1)
     assert cached.source == "cache"
     assert cached.models == result.models
@@ -385,7 +390,7 @@ def test_openrouter_failure_without_cache(env: dict[str, str]) -> None:
         "opencode", env, fetch=Fetcher(OSError("no network")), now=T0
     )
     assert result.models == ()
-    assert result.source == "openrouter"
+    assert result.source == "cli"
     assert result.fetched_at is None
     assert result.reason is not None
     assert "no network" in result.reason
@@ -403,7 +408,7 @@ def test_openrouter_failure_with_cache(env: dict[str, str]) -> None:
     assert result.reason is not None
 
 
-def test_openrouter_reply_without_list(env: dict[str, str]) -> None:
+def test_catalogue_reply_without_providers(env: dict[str, str]) -> None:
     result = models.list_models("opencode", env, fetch=Fetcher({"error": "x"}), now=T0)
     assert result.models == ()
     assert result.reason is not None
@@ -412,21 +417,13 @@ def test_openrouter_reply_without_list(env: dict[str, str]) -> None:
 def test_model_list_json(env: dict[str, str]) -> None:
     result = models.list_models("opencode", env, fetch=Fetcher(), now=T0)
     data = json.loads(json.dumps(result.to_json()))
-    assert set(data) == {"models", "source", "fetched_at", "reason"}
-    assert data["models"][0]["id"] == "openai/gpt-4o"
+    assert set(data) == {"models", "integrations", "source", "fetched_at", "reason"}
+    assert data["models"][0]["id"] == "openrouter/openai/gpt-4o"
     assert data["models"][0]["efforts"] == ["low", "high"]
     assert data["models"][0]["supports_tools"] is True
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [("0.000001", 0.000001), (0, 0.0), ("-1", None), ("x", None), (None, None)],
-)
-def test_price(value: object, expected: float | None) -> None:
-    assert models.price(value) == expected
-
-
-# filter_openrouter
+# filter_opencode
 
 SAMPLE = (
     Model(
@@ -452,48 +449,45 @@ def _ids(found: tuple[Model, ...]) -> list[str]:
 
 
 def test_filter_without_filters_keeps_all() -> None:
-    assert models.filter_openrouter(SAMPLE) == SAMPLE
-    assert models.filter_openrouter(list(SAMPLE)) == SAMPLE
+    assert models.filter_opencode(SAMPLE) == SAMPLE
+    assert models.filter_opencode(list(SAMPLE)) == SAMPLE
 
 
 def test_filter_text_matches_id_or_label_ignoring_case() -> None:
-    assert _ids(models.filter_openrouter(SAMPLE, text="OPENAI")) == ["openai/gpt-4o"]
-    assert _ids(models.filter_openrouter(SAMPLE, text="free")) == ["qwen/qwen3:free"]
-    assert _ids(models.filter_openrouter(SAMPLE, text="mYsT")) == ["mystery/model"]
+    assert _ids(models.filter_opencode(SAMPLE, text="OPENAI")) == ["openai/gpt-4o"]
+    assert _ids(models.filter_opencode(SAMPLE, text="free")) == ["qwen/qwen3:free"]
+    assert _ids(models.filter_opencode(SAMPLE, text="mYsT")) == ["mystery/model"]
 
 
 def test_filter_price_is_inclusive_and_skips_unknown() -> None:
-    found = models.filter_openrouter(SAMPLE, max_prompt_price=0.0000025)
+    found = models.filter_opencode(SAMPLE, max_prompt_price=0.0000025)
     assert _ids(found) == ["openai/gpt-4o", "qwen/qwen3:free"]
-    assert _ids(models.filter_openrouter(SAMPLE, max_prompt_price=0)) == [
+    assert _ids(models.filter_opencode(SAMPLE, max_prompt_price=0)) == [
         "qwen/qwen3:free"
     ]
 
 
 def test_filter_context_is_inclusive_and_skips_unknown() -> None:
-    assert _ids(models.filter_openrouter(SAMPLE, min_context=32000)) == [
+    assert _ids(models.filter_opencode(SAMPLE, min_context=32000)) == [
         "openai/gpt-4o",
         "qwen/qwen3:free",
     ]
-    assert _ids(models.filter_openrouter(SAMPLE, min_context=32001)) == [
-        "openai/gpt-4o"
-    ]
+    assert _ids(models.filter_opencode(SAMPLE, min_context=32001)) == ["openai/gpt-4o"]
 
 
 def test_filter_tools_skips_unknown() -> None:
-    assert _ids(models.filter_openrouter(SAMPLE, tools=True)) == ["openai/gpt-4o"]
-    assert _ids(models.filter_openrouter(SAMPLE, tools=False)) == ["qwen/qwen3:free"]
+    assert _ids(models.filter_opencode(SAMPLE, tools=True)) == ["openai/gpt-4o"]
+    assert _ids(models.filter_opencode(SAMPLE, tools=False)) == ["qwen/qwen3:free"]
 
 
 def test_filters_combine() -> None:
-    found = models.filter_openrouter(SAMPLE, text="o", min_context=100000, tools=True)
+    found = models.filter_opencode(SAMPLE, text="o", min_context=100000, tools=True)
     assert _ids(found) == ["openai/gpt-4o"]
 
 
-def test_truncated_openrouter_response_falls_back_to_cache_reason(
-    tmp_path: Path,
+def test_truncated_catalogue_response_reports_reason(
+    env: dict[str, str],
 ) -> None:
-    env = {"HOME": str(tmp_path), "PATH": str(tmp_path)}
 
     def truncated(url: str, timeout: float) -> dict[str, object]:
         raise http.client.IncompleteRead(b"partial")
@@ -501,9 +495,133 @@ def test_truncated_openrouter_response_falls_back_to_cache_reason(
     result = models.list_models("opencode", env, fetch=truncated, now=1000.0)
     assert result.models == ()
     assert result.reason is not None
-    assert result.reason.startswith("OpenRouter model list:")
+    assert result.reason.startswith("OpenCode model list:")
 
 
-def test_openrouter_tilde_ids_are_kept() -> None:
-    reply = {"data": [{"id": "~openai/gpt-sol-latest", "name": "GPT Sol latest"}]}
-    assert [m.id for m in models.parse_openrouter(reply)] == ["~openai/gpt-sol-latest"]
+def test_opencode_tilde_ids_are_kept() -> None:
+    found, _ = models.parse_opencode("openrouter/~openai/gpt-sol-latest", {}, ())
+    assert [m.id for m in found] == ["openrouter/~openai/gpt-sol-latest"]
+
+
+def test_all_integrations_and_empty_provider() -> None:
+    catalogue = {
+        **CATALOGUE,
+        "anthropic": {"name": "Anthropic", "models": {}},
+        "openai": {"name": "OpenAI", "models": {}},
+        "opencode": {"name": "OpenCode", "models": {}},
+        "empty": {"name": "Empty", "models": {}},
+    }
+    found, integrations = models.parse_opencode(
+        "anthropic/claude\nopenai/gpt\nopenrouter/openai/gpt-4o\nopencode/free",
+        catalogue,
+        (
+            ("ANTHROPIC", "oauth"),
+            ("OpenAI", "oauth"),
+            ("OpenRouter", "api"),
+            ("Empty", "api"),
+        ),
+    )
+    assert [p.id for p in integrations] == [
+        "anthropic",
+        "openai",
+        "openrouter",
+        "opencode",
+        "empty",
+    ]
+    assert found[0].provider_name == "ANTHROPIC"
+    assert found[0].login == "oauth"
+    assert found[3].provider_name == "OpenCode"
+    assert found[3].login is None
+    assert models.filter_opencode(found, provider="openai") == (found[1],)
+    assert models.filter_opencode(found, max_prompt_price=0) == found[:2]
+    assert models.filter_opencode(found, tools=True) == (found[2],)
+    assert models.filter_opencode(found, min_context=1) == (found[2],)
+    assert models.filter_opencode(found, provider="empty") == ()
+
+
+def test_ambiguous_and_unmatched_auth_names_stay_unknown() -> None:
+    found, integrations = models.parse_opencode(
+        "one/m\ntwo/m\nmissing/m",
+        {"one": {"name": "Same", "models": {}}, "two": {"name": "Same", "models": {}}},
+        (("Same", "oauth"), ("Unknown Name", "oauth")),
+    )
+    assert all(model.login is None for model in found)
+    assert [p.name for p in integrations] == ["Same", "Same", "missing"]
+
+
+@pytest.mark.parametrize("failure", ["models", "auth", "auth-output", "catalogue"])
+@pytest.mark.parametrize("cached", [False, True])
+def test_failed_discovery(env: dict[str, str], failure: str, cached: bool) -> None:
+    first = (
+        models.list_models("opencode", env, fetch=Fetcher(), now=T0) if cached else None
+    )
+    path = models.cache_path("opencode", env)
+    before = path.read_bytes() if cached else None
+    script = OPENCODE_STUB
+    if failure == "models":
+        script = script.replace("models) echo", "models) exit 3; echo")
+    if failure == "auth":
+        script = script.replace("echo 'OpenRouter api'", "echo 'unavailable'; exit 4")
+    if failure == "auth-output":
+        script = script.replace("OpenRouter api", "unreadable")
+    (Path(env["PATH"]) / "opencode").write_text(script)
+    fetch = Fetcher(OSError("offline")) if failure == "catalogue" else Fetcher()
+    result = models.list_models("opencode", env, fetch=fetch, now=T0 + 1, refresh=True)
+    assert result.reason
+    if first is not None:
+        assert result.models == first.models
+        assert result.integrations == first.integrations
+        assert path.read_bytes() == before
+    else:
+        assert not path.exists()
+        if failure.startswith("auth"):
+            assert len(result.models) == 3
+            assert all(model.login is None for model in result.models)
+        else:
+            assert result.models == ()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_legacy_cache_refreshes_before_fallback(
+    env: dict[str, str], fails: bool
+) -> None:
+    path = models.cache_path("opencode", env)
+    status.save_cache_file(
+        path,
+        {"fetched_at": T0, "models": [Model("anthropic/claude-x", "Claude").to_json()]},
+        env,
+    )
+    before = path.read_bytes()
+    result = models.list_models(
+        "opencode",
+        env,
+        fetch=Fetcher(OSError("offline")) if fails else Fetcher(),
+        now=T0 + 1,
+    )
+    if fails:
+        assert result.source == "cache"
+        assert result.models[0].id == "openrouter/anthropic/claude-x"
+        assert result.models[0].provider_name == "OpenRouter"
+        assert result.models[0].login is None
+        assert path.read_bytes() == before
+    else:
+        assert result.source == "cli"
+        assert result.models[0].id == "openrouter/openai/gpt-4o"
+        assert json.loads(path.read_text())["format_version"] == models.CACHE_VERSION
+
+
+def test_empty_models_keep_connected_integrations(env: dict[str, str]) -> None:
+    (Path(env["PATH"]) / "opencode").write_text(
+        '#!/bin/sh\ncase "$*" in models) exit 0;;\n'
+        "--version) echo '1.0.0';; *) echo 'OpenRouter api';; esac\n"
+    )
+    result = models.list_models("opencode", env, fetch=Fetcher(), now=T0)
+    assert result.models == ()
+    assert result.reason is None
+    assert result.integrations == (
+        models.Integration("openrouter", "OpenRouter", "api"),
+    )
+    assert (
+        models.list_models("opencode", env, now=T0 + 1).integrations
+        == result.integrations
+    )

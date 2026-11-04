@@ -111,7 +111,10 @@ ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 def env(tmp_path: Path) -> dict[str, str]:
     binary = tmp_path / "bin with 'quotes" / "opencode"
     binary.parent.mkdir()
-    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.write_text(
+        '#!/bin/sh\ncase "$*" in --version) echo 2.0.0;;\n'
+        "'auth list --standalone') echo 'OpenRouter api';; esac\n"
+    )
     binary.chmod(0o755)
     return {
         "HOME": str(tmp_path / "home"),
@@ -160,7 +163,12 @@ def run(env: dict[str, str], tmp_path: Path) -> Run:
 
 @pytest.fixture
 def driver(env: dict[str, str]) -> OpenCode2Driver:
-    return OpenCode2Driver(env, stop_seconds=2, poll_seconds=0.01)
+    return OpenCode2Driver(
+        env,
+        stop_seconds=2,
+        poll_seconds=0.01,
+        fetch=lambda url, timeout: {"openrouter": {"name": "OpenRouter", "models": {}}},
+    )
 
 
 class Server:
@@ -558,7 +566,10 @@ def test_wait_failed(
     server.write("messages.json", [idle("failed", error=error), prompt(server)])
     outcome = driver.wait(run)
     assert outcome.state == engines.FAILED
-    assert outcome.reason == error["message"]
+    expected = error["message"]
+    if error.get("status") == 402:
+        expected += " (OpenRouter credit is exhausted)"
+    assert outcome.reason == expected
     assert outcome.signed_out == signed_out
     assert outcome.provider_error == provider_error
     assert outcome.provider_kind == ("outage" if provider_error else None)
@@ -724,3 +735,33 @@ def test_turn_output_stops_at_current_prompt(
     output = driver.turn_output(run)
     assert "Permission denied: /home/owner/tools/python" in output
     assert "old denial" not in output
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "anthropic/claude-x",
+        "openai/gpt-4o",
+        "custom/nested/model",
+        "openrouter/deepseek/model",
+    ],
+)
+def test_routes_full_id_in_session(
+    driver: OpenCode2Driver, run: Run, server: Server, model: str
+) -> None:
+    run = dataclasses.replace(run, model=model)
+    spec = driver.command(run, "brief")
+    config = json.loads(spec.env["OPENCODE_CONFIG_CONTENT"])
+    provider, model_id = model.split("/", 1)
+    if provider == "openrouter":
+        assert list(config["provider"]["openrouter"]["models"]) == [model_id]
+    else:
+        assert config["provider"] == {}
+    server.start()
+    assert driver.ready(run)
+    creates = [r for r in server.requests("/api/session") if r["method"] == "POST"]
+    assert creates[0]["body"]["model"] == {
+        "providerID": provider,
+        "id": model_id,
+        "variant": "high",
+    }

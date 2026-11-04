@@ -38,7 +38,7 @@
         "fix": null
       },
       {
-        "label": "an OpenRouter credential for OpenCode",
+        "label": "at least one integration connected in OpenCode (use /connect)",
         "met": true,
         "fix": null
       }

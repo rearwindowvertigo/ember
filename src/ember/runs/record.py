@@ -22,7 +22,7 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
-from ember import engines, paths, processes
+from ember import choices, engines, paths, processes
 
 RECORD_NAME = "run.json"
 BRIEF_NAME = "brief.md"
@@ -200,7 +200,8 @@ class Run:
         """Return the stored fields as a JSON-ready dict.
 
         Returns:
-            Every field except `folder` and `env`, with tuples as lists.
+            Every field except `folder` and `env`, with tuples as lists,
+            plus the marker for full OpenCode model ids.
         """
         result: dict[str, Any] = {}
         for item in fields(self):
@@ -208,6 +209,7 @@ class Run:
                 continue
             value = getattr(self, item.name)
             result[item.name] = list(value) if isinstance(value, tuple) else value
+        result[choices.OPENCODE_ID_FORMAT] = 1
         return result
 
 
@@ -553,6 +555,8 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
     for key in ("started_at", "updated_at", "ended_at", "last_screen_change_at"):
         if values[key] is not None:
             values[key] = float(values[key])
+    if choices.OPENCODE_ID_FORMAT not in value and values["engine"] == "opencode":
+        values["model"] = choices.full_opencode_id(values["model"])
     return Run(**values, folder=folder, env=_env(env))
 
 
