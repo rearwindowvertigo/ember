@@ -14,6 +14,7 @@ Every read, check and save runs in a task.
 """
 
 import html
+from collections import Counter
 from collections.abc import Sequence
 from decimal import Decimal
 from math import ceil
@@ -43,6 +44,7 @@ from ember.app.screens.common import (
     fitting_columns,
     inline,
     label,
+    plural,
     screen_header,
     scrolled,
     sentence,
@@ -54,6 +56,7 @@ from ember.app.widgets import (
     Card,
     CommandLine,
     ElidedLabel,
+    InfoTip,
     Picker,
     StateView,
     Switch,
@@ -83,7 +86,7 @@ PRICE_CHOICES: tuple[tuple[str, str | None], ...] = (
     ("$5", "5"),
     ("$10", "10"),
 )
-"""The OpenRouter input price filter: label and US dollars per million tokens."""
+"""The OpenCode input price filter: label and US dollars per million tokens."""
 
 CONTEXT_CHOICES: tuple[tuple[str, int | None], ...] = (
     ("Any", None),
@@ -93,7 +96,7 @@ CONTEXT_CHOICES: tuple[tuple[str, int | None], ...] = (
     ("256k", 256_000),
     ("1M", 1_000_000),
 )
-"""The OpenRouter context filter: label and the smallest context in tokens."""
+"""The OpenCode context filter: label and the smallest context in tokens."""
 
 NO_EFFORT_NOTE = "This model reports no effort, so it cannot be shortlisted."
 """Shown on a Codex or Claude model row that has no effort to save."""
@@ -538,10 +541,19 @@ class _ModelRow(QWidget):
         layout.addWidget(self.name, 0, Qt.AlignmentFlag.AlignVCenter)
         self.figures: list[QLabel] = []
         if columns:
+            provider = ElidedLabel(model.provider_name or model.provider or "—")
+            provider.setProperty("role", "secondary")
+            provider.setFixedWidth(_PROVIDER_WIDTH)
+            layout.addWidget(provider, 0, Qt.AlignmentFlag.AlignVCenter)
+            self.figures.append(provider)
             for text in (
                 context_text(model.context_length),
-                price_text(model.prompt_price),
-                price_text(model.completion_price),
+                "Subscription"
+                if model.login == "oauth"
+                else price_text(model.prompt_price),
+                "Subscription"
+                if model.login == "oauth"
+                else price_text(model.completion_price),
             ):
                 cell = QLabel(text)
                 cell.setProperty("role", "secondary")
@@ -618,7 +630,9 @@ class _MissingRow(QWidget):
             state += f" · effort {effort}"
         self.info = ElidedLabel(state)
         self.info.setProperty("role", "secondary")
-        figures_width = 3 * (_COLUMN + 12) if panel.columns else 0
+        figures_width = (
+            _PROVIDER_WIDTH + 12 + 3 * (_COLUMN + 12) if panel.columns else 0
+        )
         self.info.setFixedWidth(figures_width + _EFFORT_WIDTH)
         layout.addWidget(self.info, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addStretch(1)
@@ -629,7 +643,8 @@ class _MissingRow(QWidget):
         layout.addWidget(self.remove_button, 0, Qt.AlignmentFlag.AlignVCenter)
 
 
-_COLUMN = 80
+_COLUMN = 110
+_PROVIDER_WIDTH = 130
 _EFFORT_WIDTH = 130
 
 
@@ -663,6 +678,8 @@ class _ModelPanel(Card):
         self.notice: Alert | None = None
 
         self.search: QLineEdit | None = None
+        self.provider_picker: Picker | None = None
+        self.provider_info: InfoTip | None = None
         self.tools_switch: Switch | None = None
         self.price_picker: Picker | None = None
         self.context_picker: Picker | None = None
@@ -677,6 +694,9 @@ class _ModelPanel(Card):
         self.name_header = label("Model", "muted", wrap=False)
         header.addWidget(self.name_header)
         if self.columns:
+            provider = label("Provider", "muted", wrap=False)
+            provider.setFixedWidth(_PROVIDER_WIDTH)
+            header.addWidget(provider)
             for text in ("Context", "Input $/M", "Output $/M"):
                 cell = QLabel(text)
                 cell.setProperty("role", "muted")
@@ -727,6 +747,21 @@ class _ModelPanel(Card):
         layout.addWidget(self.search)
         row = QHBoxLayout()
         row.setSpacing(12)
+        row.addWidget(QLabel("Provider"))
+        self.provider_info = InfoTip(
+            "Provider",
+            "The OpenCode integration that serves the model. Ember lists the "
+            "integrations you connected with /connect in OpenCode.",
+        )
+        row.addWidget(self.provider_info)
+        self.provider_picker = Picker()
+        self.provider_picker.setAccessibleName("Provider")
+        self.provider_picker.add_option("All providers", None)
+        self.provider_picker.currentIndexChanged.connect(
+            lambda _i: self.apply_filters()
+        )
+        row.addWidget(self.provider_picker)
+        row.addSpacing(12)
         tools_label = QLabel("Tools")
         row.addWidget(tools_label)
         self.tools_switch = Switch()
@@ -792,6 +827,25 @@ class _ModelPanel(Card):
         clear_layout(self.rows_area)
         self.rows = []
         self.models = result.models
+        if self.provider_picker is not None:
+            selected = self.provider_picker.value()
+            counts = Counter(model.provider for model in result.models)
+            self.provider_picker.blockSignals(True)
+            try:
+                self.provider_picker.clear()
+                self.provider_picker.add_option(
+                    "All providers", None, plural(len(result.models), "model")
+                )
+                for integration in result.integrations:
+                    self.provider_picker.add_option(
+                        integration.name,
+                        integration.id,
+                        plural(counts[integration.id], "model"),
+                    )
+                index = self.provider_picker.findData(selected)
+                self.provider_picker.setCurrentIndex(max(0, index))
+            finally:
+                self.provider_picker.blockSignals(False)
         self.delivered = bool(result.models) or result.reason is None
         saved = self.saved()
         for model in result.models:
@@ -911,7 +965,7 @@ class _ModelPanel(Card):
             self.owner.chain_focus()
 
     def apply_filters(self) -> None:
-        """Show the rows that pass the OpenRouter search and filters."""
+        """Show the rows that pass the OpenCode search and filters."""
         if not self.columns or self.models is None:
             return
         assert self.search is not None
@@ -919,9 +973,11 @@ class _ModelPanel(Card):
         assert self.price_picker is not None
         assert self.context_picker is not None
         assert self.count_label is not None
+        assert self.provider_picker is not None
         text = self.search.text().strip()
         price_value = self.price_picker.value()
         context_value = self.context_picker.value()
+        provider_value = self.provider_picker.value()
         kept = models.filter_opencode(
             self.models,
             text=text or None,
@@ -930,6 +986,7 @@ class _ModelPanel(Card):
             ),
             min_context=context_value if isinstance(context_value, int) else None,
             tools=True if self.tools_switch.isChecked() else None,
+            provider=provider_value if isinstance(provider_value, str) else None,
         )
         ids = {model.id for model in kept}
         for row in self.rows:
@@ -976,6 +1033,8 @@ class _ModelPanel(Card):
             w
             for w in (
                 self.search,
+                self.provider_info,
+                self.provider_picker,
                 self.tools_switch,
                 self.price_picker,
                 self.context_picker,

@@ -150,7 +150,7 @@ class SettingsScreen(QWidget):
             column,
             "Worker network",
             "Lets Codex workers and Claude's web tools reach the network. "
-            "OpenCode keeps network for OpenRouter.",
+            "OpenCode keeps network for its providers.",
             self.network,
         )
         self.terminal = widgets.Picker()

@@ -23,6 +23,7 @@ from ember.app.context import AppContext
 from ember.app.screens.common import inline, when
 from ember.app.screens.engines import (
     NO_EFFORT_NOTE,
+    PRICE_CHOICES,
     EnginesScreen,
     badge_for,
     cause_advice,
@@ -32,7 +33,7 @@ from ember.app.screens.engines import (
     price_text,
     shortlist_with,
 )
-from ember.app.widgets import CommandLine
+from ember.app.widgets import HINT_ROLE, CommandLine
 from ember.engines import models, status
 
 NOW = time.time()
@@ -954,7 +955,7 @@ def _router_list() -> models.ModelList:
     return models.ModelList(
         models=(
             models.Model(
-                "acme/big",
+                "openrouter/acme/big",
                 "Big",
                 ("low", "high"),
                 None,
@@ -962,15 +963,83 @@ def _router_list() -> models.ModelList:
                 0.000002,
                 0.000008,
                 True,
+                provider="openrouter",
+                provider_name="OpenRouter",
+                login="api",
             ),
-            models.Model("acme/small", "Small", (), None, 32_768, 0.0000001, 0, True),
             models.Model(
-                "other/chat", "Chat", (), None, 128_000, 0.0000004, 0.000001, False
+                "openrouter/acme/small",
+                "Small",
+                (),
+                None,
+                32_768,
+                0.0000001,
+                0,
+                True,
+                provider="openrouter",
+                provider_name="OpenRouter",
+                login="api",
+            ),
+            models.Model(
+                "openrouter/other/chat",
+                "Chat",
+                (),
+                None,
+                128_000,
+                0.0000004,
+                0.000001,
+                False,
+                provider="openrouter",
+                provider_name="OpenRouter",
+                login="api",
             ),
         ),
         source=models.CLI,
         fetched_at=NOW,
         reason=None,
+        integrations=(models.Integration("openrouter", "OpenRouter", "api"),),
+    )
+
+
+def _integrations_list() -> models.ModelList:
+    router = _router_list()
+    return replace(
+        router,
+        models=(
+            models.Model(
+                "anthropic/claude",
+                "Claude",
+                context_length=200_000,
+                prompt_price=0.00002,
+                completion_price=0.00003,
+                supports_tools=True,
+                provider="anthropic",
+                provider_name="Anthropic",
+                login="oauth",
+            ),
+            models.Model(
+                "openai/gpt",
+                "GPT",
+                supports_tools=True,
+                provider="openai",
+                provider_name="OpenAI",
+                login="oauth",
+            ),
+            *router.models,
+            models.Model(
+                "opencode/unknown",
+                "Unknown",
+                provider="opencode",
+                provider_name="OpenCode",
+            ),
+        ),
+        integrations=(
+            models.Integration("anthropic", "Anthropic", "oauth"),
+            models.Integration("openai", "OpenAI", "oauth"),
+            *router.integrations,
+            models.Integration("opencode", "OpenCode"),
+            models.Integration("empty", "Empty provider", "api"),
+        ),
     )
 
 
@@ -1103,7 +1172,10 @@ def test_opencode_entries_with_and_without_effort(
         qtbot,
         lambda: qtbot.mouseClick(big.switch, Qt.MouseButton.LeftButton),
     )
-    assert context.setting("shortlist.opencode") == ["acme/small", "acme/big"]
+    assert context.setting("shortlist.opencode") == [
+        "openrouter/acme/small",
+        "openrouter/acme/big",
+    ]
     index = big.picker.findData("high")
 
     def pick() -> None:
@@ -1111,7 +1183,10 @@ def test_opencode_entries_with_and_without_effort(
         big.picker.activated.emit(index)
 
     _save(context, qtbot, pick)
-    assert context.setting("shortlist.opencode") == ["acme/small", "acme/big@high"]
+    assert context.setting("shortlist.opencode") == [
+        "openrouter/acme/small",
+        "openrouter/acme/big@high",
+    ]
 
 
 def test_opencode_filters_and_search(
@@ -1124,22 +1199,185 @@ def test_opencode_filters_and_search(
     def shown() -> list[str]:
         return [row.model.id for row in panel.rows if not row.isHidden()]
 
-    assert shown() == ["acme/big", "acme/small"]
+    assert shown() == ["openrouter/acme/big", "openrouter/acme/small"]
     assert panel.count_label.text() == "2 of 3 models"
     qtbot.mouseClick(panel.tools_switch, Qt.MouseButton.LeftButton)
-    assert shown() == ["acme/big", "acme/small", "other/chat"]
+    assert shown() == [
+        "openrouter/acme/big",
+        "openrouter/acme/small",
+        "openrouter/other/chat",
+    ]
     panel.price_picker.set_value("0.5")
-    assert shown() == ["acme/small", "other/chat"]
+    assert shown() == ["openrouter/acme/small", "openrouter/other/chat"]
     panel.context_picker.set_value(64_000)
-    assert shown() == ["other/chat"]
+    assert shown() == ["openrouter/other/chat"]
     panel.context_picker.set_value(None)
     panel.search.setText("SMALL")
-    assert shown() == ["acme/small"]
+    assert shown() == ["openrouter/acme/small"]
     assert panel.count_label.text() == "1 of 3 models"
     panel.search.setText("nothing")
     assert shown() == []
     assert not panel.state.empty.isHidden()
     assert panel.state.empty_title.text() == "No models match"
+
+
+def test_provider_picker_counts_and_filters(
+    env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
+) -> None:
+    result = _integrations_list()
+    stubs["lists"] = {"opencode": result}
+    screen, context = _screen(env, qtbot)
+    panel = _open(screen, context, qtbot, "opencode")
+    picker = panel.provider_picker
+    assert picker.accessibleName() == "Provider"
+    assert [picker.itemText(i) for i in range(picker.count())] == [
+        "All providers",
+        "Anthropic",
+        "OpenAI",
+        "OpenRouter",
+        "OpenCode",
+        "Empty provider",
+    ]
+    assert [picker.itemData(i, HINT_ROLE) for i in range(picker.count())] == [
+        "6 models",
+        "1 model",
+        "1 model",
+        "3 models",
+        "1 model",
+        "0 models",
+    ]
+    assert panel.provider_info.toolTip() == (
+        "The OpenCode integration that serves the model. Ember lists the "
+        "integrations you connected with /connect in OpenCode."
+    )
+    assert panel.provider_info.nextInFocusChain() is picker
+    panel.tools_switch.click()
+    for integration in result.integrations:
+        picker.set_value(integration.id)
+        assert [row.model.id for row in panel.rows if not row.isHidden()] == [
+            model.id for model in result.models if model.provider == integration.id
+        ]
+    assert panel.state.empty_title.text() == "No models match"
+    picker.set_value("openrouter")
+    panel.search.setText("small")
+    panel.price_picker.set_value("0.5")
+    panel.context_picker.set_value(32_000)
+    assert [row.model.id for row in panel.rows if not row.isHidden()] == [
+        "openrouter/acme/small"
+    ]
+    assert picker.itemData(picker.findData("openrouter"), HINT_ROLE) == "3 models"
+    picker.set_value("anthropic")
+    assert all(row.isHidden() for row in panel.rows)
+
+
+def test_provider_columns_and_subscription_prices(
+    env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any], engine_theme: None
+) -> None:
+    stubs["lists"] = {"opencode": _integrations_list()}
+    screen, context = _screen(env, qtbot)
+    panel = _open(screen, context, qtbot, "opencode")
+    screen.resize(1500, 1000)
+    screen.show()
+    QApplication.processEvents()
+    assert [cell.text() for cell in panel.header.findChildren(QLabel)] == [
+        "Model",
+        "Provider",
+        "Context",
+        "Input $/M",
+        "Output $/M",
+        "Effort",
+        "Use",
+    ]
+    for row in panel.rows:
+        assert row.figures[0].text() == row.model.provider_name
+        if row.model.login == "oauth":
+            for cell in row.figures[2:]:
+                assert cell.text() == "Subscription"
+                assert (
+                    cell.contentsRect().width()
+                    >= cell.fontMetrics().horizontalAdvance(cell.text())
+                )
+        else:
+            assert [cell.text() for cell in row.figures[2:]] == [
+                price_text(row.model.prompt_price),
+                price_text(row.model.completion_price),
+            ]
+    for _text, value in PRICE_CHOICES:
+        panel.price_picker.set_value(value)
+        assert all(not row.isHidden() for row in panel.rows[:2])
+    panel.context_picker.set_value(128_000)
+    assert not panel.rows[0].isHidden()
+    assert panel.rows[1].isHidden()
+    panel.context_picker.set_value(None)
+    panel.provider_picker.set_value("opencode")
+    panel.price_picker.set_value(None)
+    panel.tools_switch.click()
+    assert not panel.rows[-1].isHidden()
+    panel.price_picker.set_value("0.5")
+    assert panel.rows[-1].isHidden()
+    panel.price_picker.set_value(None)
+    panel.context_picker.set_value(32_000)
+    assert panel.rows[-1].isHidden()
+
+
+def test_provider_refresh_preserves_id_and_resets_when_removed(
+    env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
+) -> None:
+    result = _integrations_list()
+    stubs["lists"] = {"opencode": result}
+    screen, context = _screen(env, qtbot)
+    panel = _open(screen, context, qtbot, "opencode")
+    panel.provider_picker.set_value("anthropic")
+    refreshed = replace(
+        result,
+        models=result.models[1:],
+        integrations=(
+            *result.integrations[1:],
+            models.Integration("anthropic", "Renamed integration", "oauth"),
+        ),
+    )
+    stubs["lists"]["opencode"] = refreshed
+    panel.refresh_button.click()
+    qtbot.waitUntil(lambda: panel.models is refreshed.models)
+    assert panel.provider_picker.value() == "anthropic"
+    assert panel.provider_picker.currentText() == "Renamed integration"
+    assert panel.provider_picker.currentData(HINT_ROLE) == "0 models"
+    assert all(row.isHidden() for row in panel.rows)
+    removed = replace(refreshed, integrations=refreshed.integrations[:-1])
+    stubs["lists"]["opencode"] = removed
+    panel.refresh_button.click()
+    qtbot.waitUntil(lambda: panel.provider_picker.value() is None)
+    assert panel.provider_picker.currentText() == "All providers"
+    assert any(not row.isHidden() for row in panel.rows)
+
+
+@pytest.mark.parametrize("connected", (False, True))
+def test_provider_picker_with_no_models(
+    env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any], connected: bool
+) -> None:
+    integrations = (models.Integration("empty", "Empty"),) if connected else ()
+    stubs["lists"] = {
+        "opencode": models.ModelList((), models.CLI, NOW, None, integrations)
+    }
+    screen, context = _screen(env, qtbot)
+    panel = _open(screen, context, qtbot, "opencode")
+    assert panel.provider_picker.count() == 1 + int(connected)
+    for index in range(panel.provider_picker.count()):
+        panel.provider_picker.setCurrentIndex(index)
+        assert panel.provider_picker.currentData(HINT_ROLE) == "0 models"
+        assert panel.state.empty_title.text() == "No models"
+        assert panel.count_label.text() == "0 of 0 models"
+
+
+def test_shortlist_keeps_selected_integration(
+    env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
+) -> None:
+    stubs["lists"] = {"opencode": _integrations_list()}
+    screen, context = _screen(env, qtbot)
+    panel = _open(screen, context, qtbot, "opencode")
+    panel.provider_picker.set_value("anthropic")
+    _save(context, qtbot, panel.rows[0].switch.click)
+    assert context.setting("shortlist.opencode") == ["anthropic/claude"]
 
 
 def test_saved_entry_missing_from_the_list_can_be_removed(
