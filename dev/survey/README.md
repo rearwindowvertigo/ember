@@ -31,10 +31,11 @@ other file of this repository except `survey.md`.
 `agent.md` from `main` and follows it. It runs when the owner types
 `/ember-survey`, never on its own (`disable-model-invocation: true`). It
 holds no survey text, so it does not change when the survey does. To
-install it on a machine:
+install it on a machine, with `gh` signed in to an account that can read
+this repository (the file is written only when the download succeeds):
 
 ```bash
-mkdir -p ~/.claude/skills/ember-survey && gh api repos/rearwindowvertigo/ember/contents/dev/survey/ember-survey/SKILL.md -H "Accept: application/vnd.github.raw+json" > ~/.claude/skills/ember-survey/SKILL.md
+mkdir -p ~/.claude/skills/ember-survey && gh api repos/rearwindowvertigo/ember/contents/dev/survey/ember-survey/SKILL.md -H "Accept: application/vnd.github.raw+json" > /tmp/ember-survey-SKILL.md && mv /tmp/ember-survey-SKILL.md ~/.claude/skills/ember-survey/SKILL.md
 ```
 
 Without the skill, the owner asks the session to take the Ember use survey
