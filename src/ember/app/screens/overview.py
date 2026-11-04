@@ -1618,7 +1618,7 @@ class OverviewScreen(QWidget):
         row.show_details(True)
 
     def check_denials(self) -> None:
-        """Show undismissed denied folders from all recorded worker turns."""
+        """Show undismissed denials except startup files from recorded turns."""
         if not self.context.settings_ready():
             return
         saved = state.load(self.context.env)
@@ -1628,6 +1628,8 @@ class OverviewScreen(QWidget):
         groups: dict[str, list[dict[str, Any]]] = {}
         for run in self.context.runs.runs():
             for item in record.run_denials(run):
+                if item["reason"] == "startup file":
+                    continue
                 path = str(Path(item["path"]).resolve())
                 target = Path(item["allow_path"] or item["path"]).resolve()
                 if any(target.is_relative_to(read) for read in reads):
@@ -1679,7 +1681,10 @@ class OverviewScreen(QWidget):
             elif item["reason"] == "protected":
                 text += " This folder is protected from workers."
             elif allow is None:
-                text += " Add a folder by hand in Settings, Sandbox read paths."
+                text += (
+                    " No folder can be offered because each folder that holds it"
+                    " also holds private files."
+                )
             else:
                 text += f" Allow reading {allow} for future workers."
             notice = Alert(

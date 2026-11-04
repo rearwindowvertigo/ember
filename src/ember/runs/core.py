@@ -1697,11 +1697,18 @@ class Core:
                     f"WARNING: {run.id} was denied {item['path']}"
                     + (f" ({item['reason']})" if item["reason"] != "hidden" else "")
                 )
+                if item["reason"] == "startup file":
+                    continue
                 problem = sandbox.read_path_problem(item["path"], self.env)
                 if problem:
                     self._warn(
                         f"owner: {problem}; it cannot be added to "
                         "Settings, Sandbox read paths"
+                    )
+                elif item["reason"] == "hidden" and item["allow_path"] is None:
+                    self._warn(
+                        f"owner: {item['path']} is hidden; no folder can be offered "
+                        "because each folder that holds it also holds private files"
                     )
                 elif item["reason"] != "protected":
                     reads = [p for p in run.read_effective if p not in run.read]

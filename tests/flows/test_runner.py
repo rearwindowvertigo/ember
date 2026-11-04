@@ -1639,23 +1639,31 @@ def test_capacity_exhaustion_does_not_halt_other_flow_tasks(
     assert flow["tasks"][1]["status"] == "merged"
 
 
+@pytest.mark.parametrize("startup", [False, True])
 def test_denied_paths_are_saved_and_emitted_after_successful_turn(
-    h: Harness, monkeypatch: pytest.MonkeyPatch
+    h: Harness, monkeypatch: pytest.MonkeyPatch, startup: bool
 ) -> None:
     from ember import sandbox
 
-    folder = Path(h.env["HOME"]) / ".toolchain"
-    folder.mkdir()
+    folder = Path(h.env["HOME"]) / (".profile" if startup else ".toolchain")
+    if startup:
+        folder.touch()
+    else:
+        folder.mkdir()
+    denied = folder if startup else folder / "python"
+    reason = "startup file" if startup else "hidden"
     choices.set_settings({"sandbox.codex": "on"}, env=h.env)
     monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
     monkeypatch.setattr(Core, "_sandboxed", lambda self, spec, run, common: spec)
     h.create(
-        [task("a", text=f"@write a value\n@reply Permission denied: {folder}/python")]
+        [task("a", text=f"@write a value\n@reply bash: {denied}: Permission denied")]
     )
     flow = h.run()
     saved = flow["tasks"][0]["denied_paths"]
     assert len(saved) == 1
     assert saved[0]["path"] == str(folder)
+    assert saved[0]["reason"] == reason
+    assert saved[0]["allow_path"] == (None if startup else str(folder))
     assert saved[0]["run"] == flow["tasks"][0]["writer_run"]
     assert saved[0]["turn"] == 1
     events = [

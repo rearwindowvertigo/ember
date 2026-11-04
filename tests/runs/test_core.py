@@ -3685,3 +3685,48 @@ def test_a_run_started_by_emb_run_has_no_parent(
     one = _status(env, run_id, capsys)
     assert one["parent"] is None and one["orphaned"] is False
     _core(env).close(run_id, force=True)
+
+
+@pytest.mark.parametrize("engine", ["codex", "claude"])
+@pytest.mark.parametrize(
+    "name, reason", [(".profile", "startup file"), (".toolrc", "hidden")]
+)
+def test_home_file_denial_is_recorded_without_read_suggestion(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    engine: str,
+    name: str,
+    reason: str,
+) -> None:
+    file = Path(env["HOME"]) / name
+    file.touch()
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    choices.set_settings({f"sandbox.{engine}": "on"}, env=env)
+    brief = _brief(tmp_path, f"Task\n@reply bash: {file}: Permission denied\n")
+    monkeypatch.setattr(Core, "_sandboxed", lambda self, spec, run, common: spec)
+    core_ = _core(env, _driver(env, engine))
+    assert _start(core_, repo, brief, engine=engine, model="test") == 0
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    item = {"path": str(file), "reason": reason, "allow_path": None}
+    assert run.sandbox == ("codex" if engine == "codex" else "bubblewrap")
+    assert record.load_outcome(run, 1)["denied_paths"] == [item]
+    assert _status(env, run.id, capsys)["turns"][0]["denied_paths"] == [item]
+    assert core_.status(run.id) == 0
+    status_out, _ = capsys.readouterr()
+    assert json.dumps(item) in status_out
+    assert f"was denied {file}" in err
+    assert "sandbox.read" not in err
+    assert "Settings, Sandbox read paths" not in err
+    if reason == "startup file":
+        assert "(startup file)" in err
+        assert "owner:" not in err
+    else:
+        assert f"owner: {file} is hidden" in err
+        assert (
+            "no folder can be offered because each folder that holds it "
+            "also holds private files" in err
+        )

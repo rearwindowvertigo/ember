@@ -427,6 +427,32 @@ SECRET_HOME_PATHS = (
 """Secret locations relative to the home folder, including browser profiles."""
 
 
+STARTUP_HOME_FILES = (
+    ".profile",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".bash_logout",
+    ".zshrc",
+    ".zprofile",
+    ".zshenv",
+    ".zlogin",
+    ".zlogout",
+    ".shrc",
+    ".kshrc",
+    ".mkshrc",
+    ".cshrc",
+    ".tcshrc",
+    ".login",
+    ".logout",
+    ".yashrc",
+    ".yash_profile",
+    ".inputrc",
+    ".editrc",
+)
+"""Home shell and line-editor startup files whose denials need no read offer."""
+
+
 def _variants(entries: Iterable[Path]) -> list[str]:
     return sorted({str(p) for entry in entries for p in (entry, entry.resolve())})
 
@@ -494,6 +520,11 @@ def valid_snapshot(value: object) -> bool:
         return True
     if not isinstance(value.get("home"), str) or not Path(value["home"]).is_absolute():
         return False
+    startup = value.get("startup", [])
+    if not isinstance(startup, list) or not all(
+        isinstance(p, str) and Path(p).is_absolute() for p in startup
+    ):
+        return False
     for key in ("secret", "protected", "config", "own"):
         entries = value.get(key)
         if not isinstance(entries, list) or not all(
@@ -521,7 +552,7 @@ def hidden_snapshot(
     binary: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Record the hidden paths and their resolved names at launch."""
+    """Record hidden paths, startup files and their resolved names at launch."""
     env = _env(env)
     home = paths.home_dir(env)
     worktrees = paths.ensure_worktrees_dir(env)
@@ -555,6 +586,7 @@ def hidden_snapshot(
             for p in denied
         ],
         "secret": _variants(secret_paths(env)),
+        "startup": _variants(home / name for name in STARTUP_HOME_FILES),
         "protected": _variants([runtime, worktrees]),
         "config": _variants([_git_config_dir(home, env).parent]),
         "own": _variants([worktree]),
@@ -569,10 +601,10 @@ def _inside(candidate: Path, folders: Iterable[str]) -> bool:
 def merge_denial(first: Mapping[str, Any], second: Mapping[str, Any]) -> dict[str, Any]:
     """Merge reports of one resolved hidden path without weakening restrictions.
 
-    Reasons rank protected, secret location, then hidden. A missing read
+    Reasons rank protected, secret location, startup file, then hidden. A missing read
     permission is retained, and paths use lexical order to break ties.
     """
-    ranks = {"hidden": 0, "secret location": 1, "protected": 2}
+    ranks = {"hidden": 0, "startup file": 1, "secret location": 2, "protected": 3}
     reason = max((first["reason"], second["reason"]), key=ranks.__getitem__)
     allowances = (first["allow_path"], second["allow_path"])
     allow = (
@@ -723,7 +755,9 @@ def denied_paths(text: str, snapshot: Mapping[str, Any]) -> list[dict[str, Any]]
             ):
                 continue
             reason = "hidden"
-            if any(_inside(p, snapshot.get("protected", [])) for p in views):
+            if any(str(p) in snapshot.get("startup", []) for p in views):
+                reason = "startup file"
+            elif any(_inside(p, snapshot.get("protected", [])) for p in views):
                 reason = "protected"
             elif any(_inside(p, snapshot.get("secret", [])) for p in views):
                 reason = "secret location"
@@ -742,10 +776,16 @@ def denied_paths(text: str, snapshot: Mapping[str, Any]) -> list[dict[str, Any]]
                 )
             ):
                 allow = None
-            # One warning per resolved hidden path, even through an alias.
-            key = entry["resolved"]
+            # Startup files inside hidden folders have their own identity so
+            # their denials do not suppress reports of other files there.
+            reported = (
+                str(target)
+                if reason == "startup file" and entry["directory"]
+                else entry["path"]
+            )
+            key = str(target) if reason == "startup file" else entry["resolved"]
             previous = found.get(key)
-            item = {"path": entry["path"], "reason": reason, "allow_path": allow}
+            item = {"path": reported, "reason": reason, "allow_path": allow}
             found[key] = item if previous is None else merge_denial(previous, item)
     return list(found.values())
 

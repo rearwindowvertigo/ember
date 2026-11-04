@@ -957,13 +957,19 @@ def test_close_cleans_terminal_member_worktree_after_changes_are_removed(
         assert run.close(h.id, h.env, core_factory=h.factory) == []
 
 
+@pytest.mark.parametrize("startup", [False, True])
 def test_member_denial_is_kept_in_diagnostics_and_record(
-    h: Harness, monkeypatch: pytest.MonkeyPatch
+    h: Harness, monkeypatch: pytest.MonkeyPatch, startup: bool
 ) -> None:
     from ember import sandbox
 
-    folder = Path(h.env["HOME"]) / ".toolchain"
-    folder.mkdir()
+    folder = Path(h.env["HOME"]) / (".profile" if startup else ".toolchain")
+    if startup:
+        folder.touch()
+    else:
+        folder.mkdir()
+    denied = folder if startup else folder / "python"
+    reason = "startup file" if startup else "hidden"
     choices.set_settings({"sandbox.codex": "on"}, env=h.env)
     monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
     monkeypatch.setattr(Core, "_sandboxed", lambda self, spec, run, common: spec)
@@ -971,21 +977,22 @@ def test_member_denial_is_kept_in_diagnostics_and_record(
     panel = h.panel()
     panel["read"] = []
     record.save(panel, h.env)
-    h.script(codex=f"@reply Permission denied: {folder}/python")
+    h.script(codex=f"@reply bash: {denied}: Permission denied")
     panel = h.start().panel
     member = panel["members"][0]
     assert member["denied_paths"] == [
         {
             "path": str(folder),
-            "reason": "hidden",
-            "allow_path": str(folder),
+            "reason": reason,
+            "allow_path": None if startup else str(folder),
             "run": member["run"],
             "turn": 1,
         }
     ]
     log = record.folder(h.id, h.env) / "members" / "1.log"
     assert f"WARNING: {member['run']} was denied {folder}" in log.read_text()
-    assert "Settings, Sandbox read paths" in log.read_text()
+    assert ("Settings, Sandbox read paths" in log.read_text()) is not startup
+    assert ("owner:" in log.read_text()) is not startup
     assert f"was denied {folder}" in h.err.getvalue()
 
 
