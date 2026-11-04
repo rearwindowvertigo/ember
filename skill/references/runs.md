@@ -255,7 +255,9 @@ Report every warning.
 After every sandboxed turn, read `denied_paths` in its status and report
 each entry's `path`, `reason`, run and turn to the owner, even at exit 0.
 Each entry has `{path, reason, allow_path}`. `path` is the hidden path
-matched at launch; `allow_path` is the folder Overview may offer, or null.
+matched at launch, or the resolved startup file inside a hidden folder;
+`allow_path` is the folder Overview may offer, or null. Reasons are `hidden`,
+`startup file`, `secret location` and `protected`.
 Ember checks the output and screen for `Permission denied`, `Operation
 not permitted` or `EACCES` naming an absolute or `~/` path. It keeps the
 union across capacity attempts, deduplicated by resolved hidden path, and
@@ -265,13 +267,27 @@ A broken outcome gives null, which is unknown.
 
 Report every printed `owner:` line. When it offers reading, give the owner
 the `Settings, Sandbox read paths; emb choices --set ...` action.
-The command keeps existing read paths and adds the offered folder, or the
-matched path when none is offered. Never run it, edit the settings database,
-add a path to `sandbox.read`, or bypass the denial with `--read` yourself.
+The command keeps existing read paths and adds the offered folder, or an
+addable secret location's matched path. Never run it, edit the settings
+database, add a path to `sandbox.read`, or bypass the denial with `--read`
+yourself.
 Wait for the owner before retrying work that needs the denied path.
+
+Home shell and line-editor startup files, including `.profile`, `.bashrc`,
+`.bash_profile`, `.zshrc`, `.zprofile`, `.zshenv` and `.inputrc`, are
+classified as `startup file`, including through symlinks. The full list is
+`sandbox.STARTUP_HOME_FILES`. These entries have `allow_path: null`, no
+`owner:` line, no `sandbox.read` suggestion and no Overview notice or Allow
+reading button. Report them from `emb run --status`, even if they are the
+turn's only denials. A tool that needs a startup file's settings can still
+fail; the owner can add the file by hand. Older records keep their stored
+reasons: a startup file recorded as `hidden` still shows a notice.
 
 Overview's Allow reading appears only for `allow_path`, after confirmation
 that every future worker can read the folder and none can change it.
+For a `hidden` denial with `allow_path: null`, the notice and `owner:` line
+name the hidden path and say no folder can be offered because each folder that holds it
+also holds private files. They give no `sandbox.read` suggestion.
 Secret locations, including credentials and browser profiles, have Dismiss
 only. Folders inside `$XDG_CONFIG_HOME` are never offered; the owner can
 add them and other secret locations by hand in Settings, Sandbox read paths.

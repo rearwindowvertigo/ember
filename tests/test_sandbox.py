@@ -1784,3 +1784,118 @@ def test_denials_merge_as_protected_in_every_order(
     assert sandbox.denied_paths(text, snapshot) == [
         {"path": str(folder), "reason": "protected", "allow_path": None}
     ]
+
+
+@pytest.mark.parametrize("name", sandbox.STARTUP_HOME_FILES)
+@pytest.mark.parametrize("link", ["none", "alias", "target"])
+@pytest.mark.parametrize("engine", ["codex", "claude", "opencode"])
+def test_startup_file_denials_keep_reason_without_read_offer(
+    env: dict[str, str], home: Path, name: str, link: str, engine: str
+) -> None:
+    startup = home / name
+    if link == "target":
+        target = home / "dotfiles" / "shell-settings"
+        target.parent.mkdir()
+        target.touch()
+        startup.symlink_to(target)
+    else:
+        startup.touch()
+    alias = home / "startup-alias"
+    alias.symlink_to(startup)
+    worktree = home / "repo"
+    worktree.mkdir()
+    snapshot = sandbox.hidden_snapshot(
+        worktree, worktree / ".git", engine=engine, env=env
+    )
+    assert sandbox.valid_snapshot(snapshot)
+    denied = alias if link == "alias" else startup
+    result = sandbox.denied_paths(f"bash: {denied}: Permission denied", snapshot)
+    assert len(result) == 1
+    assert result[0]["reason"] == "startup file"
+    assert result[0]["allow_path"] is None
+    # Resolved names and the original shell diagnostic identify the same denial.
+    assert (
+        sandbox.denied_paths(f"bash: {denied.resolve()}: Permission denied", snapshot)
+        == result
+    )
+
+
+def test_startup_symlink_does_not_hide_other_denials_in_target_folder(
+    env: dict[str, str], home: Path
+) -> None:
+    folder = home / "dotfiles"
+    folder.mkdir()
+    target = folder / "profile"
+    target.touch()
+    (home / ".profile").symlink_to(target)
+    snapshot = _denial_snapshot(env, home)
+    result = sandbox.denied_paths(
+        f"bash: {home}/.profile: Permission denied\n"
+        f"cat: {folder}/needed: Permission denied",
+        snapshot,
+    )
+    assert result == [
+        {"path": str(target), "reason": "startup file", "allow_path": None},
+        {"path": str(folder), "reason": "hidden", "allow_path": str(folder)},
+    ]
+
+
+def test_startup_snapshot_keeps_launch_time_symlink_target(
+    env: dict[str, str], home: Path
+) -> None:
+    target = home / "shell-settings"
+    target.touch()
+    startup = home / ".profile"
+    startup.symlink_to(target)
+    snapshot = _denial_snapshot(env, home)
+    startup.unlink()
+    startup.symlink_to(home / "new-settings")
+    result = sandbox.denied_paths(f"bash: {target}: Permission denied", snapshot)
+    assert result[0]["reason"] == "startup file"
+    assert result[0]["allow_path"] is None
+
+
+def test_legacy_snapshot_without_startup_inventory_is_valid(
+    env: dict[str, str], home: Path
+) -> None:
+    (home / ".profile").touch()
+    snapshot = _denial_snapshot(env, home)
+    del snapshot["startup"]
+    assert sandbox.valid_snapshot(snapshot)
+    assert sandbox.denied_paths(
+        f"bash: {home}/.profile: Permission denied", snapshot
+    ) == [{"path": str(home / ".profile"), "reason": "hidden", "allow_path": None}]
+
+
+@pytest.mark.parametrize("startup", [None, "a", ["relative"], [1]])
+def test_invalid_startup_snapshot_is_rejected(
+    env: dict[str, str], home: Path, startup: object
+) -> None:
+    snapshot = _denial_snapshot(env, home)
+    snapshot["startup"] = startup
+    assert not sandbox.valid_snapshot(snapshot)
+
+
+@pytest.mark.parametrize("secret", [False, True])
+def test_startup_symlink_into_restricted_folder_has_no_read_offer(
+    env: dict[str, str], home: Path, secret: bool
+) -> None:
+    folder = home / ".ssh" if secret else Path(env["XDG_RUNTIME_DIR"])
+    folder.mkdir(exist_ok=True)
+    target = folder / "settings"
+    target.touch()
+    (home / ".profile").symlink_to(target)
+    snapshot = _denial_snapshot(env, home)
+    for name in (home / ".profile", target):
+        result = sandbox.denied_paths(f"bash: {name}: Permission denied", snapshot)
+        assert len(result) == 1
+        assert result[0]["reason"] == "startup file"
+        assert result[0]["allow_path"] is None
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_startup_and_hidden_denials_merge_without_read_offer(reverse: bool) -> None:
+    hidden = {"path": "/home/owner/.profile", "reason": "hidden", "allow_path": None}
+    startup = {**hidden, "reason": "startup file"}
+    first, second = (startup, hidden) if reverse else (hidden, startup)
+    assert sandbox.merge_denial(first, second) == startup

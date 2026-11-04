@@ -25,6 +25,10 @@
 - A `BEGIN_COMMIT_OVERRIDE` / `END_COMMIT_OVERRIDE` block in a merged pull
   request's body applies to every commit that pull request brings to `main`,
   including its merge commit.
+- A pull request with more than one commit uses no override entry that
+  Release Please lists, since each commit repeats it. Its changes land as
+  one commit whose message holds one entry per change, in the multi-change
+  footer format in Release Please's README.
 - The release pull request is merged only when every issue in the
   release's milestone is closed. The milestone is then closed.
 - Release Please also sets the project's version in `uv.lock` and the

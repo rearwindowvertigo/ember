@@ -388,6 +388,7 @@ def test_invalid_retry_journal_is_rejected(
         ["/home/a"],
         [{"path": "relative", "reason": "hidden"}],
         [{"path": "/a", "reason": "other"}],
+        [{"path": "/a", "reason": "startup file", "allow_path": "/a"}],
         [{"path": "/a", "reason": "secret location", "allow_path": "/a"}],
     ],
 )
@@ -402,13 +403,16 @@ def test_invalid_denials_are_record_errors(
         record.load_outcome(run, 1)
 
 
-def test_run_denials_keep_run_and_turn_and_legacy_default(env: dict[str, str]) -> None:
+@pytest.mark.parametrize("reason", ["hidden", "startup file"])
+def test_run_denials_keep_run_and_turn_and_legacy_default(
+    env: dict[str, str], reason: str
+) -> None:
     run = replace(_run(env), turn=2)
     record.save(run)
     item = {
-        "path": "/home/a/tools",
-        "reason": "hidden",
-        "allow_path": "/home/a/tools/bin",
+        "path": "/home/a/.profile",
+        "reason": reason,
+        "allow_path": None,
     }
     record.outcome_path(run, 1).write_text(
         json.dumps({**_outcome(), "denied_paths": [item]})

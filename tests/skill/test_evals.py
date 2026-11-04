@@ -1377,7 +1377,11 @@ def test_denied_path_case_keeps_every_attempt_and_owner_action(
         if reason != "hidden":
             warning += f" ({reason})"
         assert result.stderr.splitlines().count(warning) == 1
-    assert result.stderr.count("owner: Settings, Sandbox read paths;") == 3
+    assert result.stderr.count("owner: Settings, Sandbox read paths;") == 2
+    assert (
+        "owner: /eval/home/.config/tool is hidden; no folder can be offered "
+        "because each folder that holds it also holds private files"
+    ) in result.stderr
     assert (
         result.stderr.count("it cannot be added to Settings, Sandbox read paths") == 2
     )
@@ -1395,7 +1399,6 @@ def test_denied_path_case_keeps_every_attempt_and_owner_action(
     assert additions == [
         "/eval/home/.toolchain/versions/3.14",
         "/eval/home/.ssh",
-        "/eval/home/.config/tool",
     ]
     # The earlier attempt's path is available only through warnings and status.
     assert "/eval/home/.toolchain" not in result.stdout.split("--- reply ---")[1]

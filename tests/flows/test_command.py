@@ -1379,13 +1379,14 @@ def test_dry_run_reports_the_gap_check_decision(
     assert line.startswith("skipped, " if status == "skipped" else "ask the owner")
 
 
+@pytest.mark.parametrize("reason", ["hidden", "startup file"])
 def test_status_keeps_denial_provenance_from_completed_workers(
-    env: dict[str, str], flow: dict[str, Any]
+    env: dict[str, str], flow: dict[str, Any], reason: str
 ) -> None:
     item = {
-        "path": "/home/owner/tools",
-        "reason": "hidden",
-        "allow_path": "/home/owner/tools/bin",
+        "path": "/home/owner/.profile",
+        "reason": reason,
+        "allow_path": None,
         "run": "codex-20260101-000000-abcdef",
         "turn": 2,
     }
@@ -1401,7 +1402,7 @@ def test_status_keeps_denial_provenance_from_completed_workers(
     ]
     code, out, _ = invoke(env, "--status", flow["id"])
     assert code == 0
-    assert f"denied {item['path']} (hidden) run {item['run']} turn 2" in out
+    assert f"denied {item['path']} ({reason}) run {item['run']} turn 2" in out
 
 
 @pytest.mark.parametrize("held", [True, False])
