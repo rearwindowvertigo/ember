@@ -14,8 +14,12 @@ The entry to review is `{{ENTRY}}`, relative to the repository top.
 3. Every other file in `dev/survey/entries/`, to find points that repeat.
 4. `AGENTS.md`, every file in `docs/design/` and every file in
    `docs/decisions/`, for what Ember is, what is decided, and what is not
-   planned.
-5. Any source file, test or skill file an entry point names, to check it.
+   planned. `docs/design/` is history up to 0.5.0.
+5. `{{DECISIONS}}`, the decisions recorded as "Decision (owner, ...)" and
+   "Decision (lead, ...)" comments on the repository's GitHub issues, one
+   JSON object per issue. Where it and `docs/` disagree, the later decision
+   holds.
+6. Any source file, test or skill file an entry point names, to check it.
 
 ## What to do
 
@@ -63,8 +67,8 @@ For each point that is not a `note`, decide one outcome:
   would address it. Say what to change, in which file, command or screen,
   and what it would improve. Keep it to the point's evidence.
 - `owner`: a change would conflict with something decided or not planned
-  in `docs/design/` or `docs/decisions/`, or needs a decision only the
-  owner can make. Name the decision or the conflicting item.
+  in `docs/design/`, `docs/decisions/` or the issue decisions, or needs a
+  decision only the owner can make. Name the decision or the conflicting item.
 - `done`: the repository already holds a change that addresses it. Name it.
 - `none`: no change is reasonable, for example because the point is
   outside Ember's control (another program's behaviour) or one-off. Say
