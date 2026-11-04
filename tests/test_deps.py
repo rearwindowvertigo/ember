@@ -1578,3 +1578,36 @@ def test_a_text_channel_needs_its_placeholder() -> None:
             "newest",
             {"kind": "text", "url": "https://x.test/latest", "channel": "claude-code"},
         )
+
+
+CHANNELLED = """
+[[components]]
+id = "claude"
+label = "Claude Code"
+group = "apps"
+installed = { kind = "command", argv = ["claude-stub"], pattern = '^(\\S+)$' }
+newest.kind = "text"
+newest.url = "https://example.test/{channel}"
+newest.channel = "claude-code"
+"""
+
+
+def test_a_channel_change_reads_the_newest_version_again(env: dict[str, str]) -> None:
+    _stub(env, "claude-stub", "echo 2.1.311\n")
+    fetch = Fetcher(
+        {
+            "https://example.test/latest": "2.1.318",
+            "https://example.test/stable": "2.1.311",
+        }
+    )
+    item = _one(_read(env, CHANNELLED, fetch))
+    assert (item.newest, item.status) == ("2.1.318", deps.UPDATE_AVAILABLE)
+    settings = Path(env["HOME"]) / ".claude" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"autoUpdatesChannel": "stable"}))
+    item = _one(_read(env, CHANNELLED, fetch, now=NOW + 60))
+    assert (item.newest, item.status) == ("2.1.311", deps.CURRENT)
+    assert fetch.calls == ["https://example.test/latest", "https://example.test/stable"]
+    item = _one(_read(env, CHANNELLED, fetch, now=NOW + 120))
+    assert item.newest == "2.1.311"
+    assert len(fetch.calls) == 2

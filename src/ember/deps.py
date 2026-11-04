@@ -693,9 +693,14 @@ class _Installed:
 class _Newest:
     version: str
     read_at: float
+    channel: str | None = None
+    """The release channel the version was read from, for a source with one."""
 
     def to_json(self) -> dict[str, Any]:
-        return {"version": self.version, "read_at": self.read_at}
+        result: dict[str, Any] = {"version": self.version, "read_at": self.read_at}
+        if self.channel is not None:
+            result["channel"] = self.channel
+        return result
 
 
 def _installed_apt(package: str, env: Mapping[str, str], deadline: float) -> str | None:
@@ -946,9 +951,12 @@ def _newest_from_json(value: object) -> _Newest | None:
         return None
     version = value.get("version")
     read_at = status.finite_number(value.get("read_at"))
+    channel = value.get("channel")
     if not isinstance(version, str) or not version or read_at is None:
         return None
-    return _Newest(version, read_at)
+    if channel is not None and not isinstance(channel, str):
+        return None
+    return _Newest(version, read_at, channel)
 
 
 def _load_cache(
@@ -1095,6 +1103,11 @@ def _evaluate_versions(
         errors.append("installed version: not read and nothing cached")
     elif found.error is not None:
         errors.append(f"installed version: {found.error}")
+    channel = claude_channel(options.env) if spec.newest.channel else None
+    if held_newest is not None and held_newest.channel != channel:
+        # A version cached from another release channel says nothing about
+        # this one.
+        held_newest = None
     reported = held_newest
     if _due(held_newest, options):
         try:
@@ -1103,7 +1116,7 @@ def _evaluate_versions(
             errors.append(f"newest version: {error}")
             reported = None
         else:
-            reported = _Newest(version, options.now)
+            reported = _Newest(version, options.now, channel)
     elif held_newest is None:
         errors.append("newest version: not read and nothing cached")
     installed = None if found is None else found.version

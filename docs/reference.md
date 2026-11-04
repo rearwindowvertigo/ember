@@ -2374,7 +2374,7 @@ The list is `ember/data/components.toml` in the package:
 |---|---|---|---|---|---|---|
 | `codex` | Codex | `apps` | `codex --version`, `codex-cli (\S+)` | `version` of `https://registry.npmjs.org/@openai/codex/latest` | Detected install method | `npm install -g @openai/codex` |
 | `opencode` | OpenCode | `apps` | `opencode --version`, `^(\S+)$` | `version` of `https://registry.npmjs.org/opencode-ai/latest` | Detected install method | `curl -fsSL https://opencode.ai/install \| bash` |
-| `claude` | Claude Code | `apps` | `claude --version`, `^(\S+) \(Claude Code\)$` | the text of `https://downloads.claude.ai/claude-code-releases/<channel>`, where `<channel>` is `autoUpdatesChannel` from Claude Code's `settings.json` (in `CLAUDE_CONFIG_DIR`, else `~/.claude`): `stable`, or `latest` when it is unset or anything else | Detected install method | `curl -fsSL https://claude.ai/install.sh \| bash` |
+| `claude` | Claude Code | `apps` | `claude --version`, `^(\S+) \(Claude Code\)$` | the text of `https://downloads.claude.ai/claude-code-releases/<channel>`, where `<channel>` is `autoUpdatesChannel` from Claude Code's `settings.json` (in `CLAUDE_CONFIG_DIR`, else `~/.claude`): `stable`, or `latest` when it is unset or anything else; a version cached from another channel is read again | Detected install method | `curl -fsSL https://claude.ai/install.sh \| bash` |
 | `claude-desktop` | Claude Desktop | `apps` | apt `claude-desktop` | apt | `sudo apt install --only-upgrade claude-desktop` | none; note "Not installed." |
 | `ember-skill` | ember skill | `apps` | `emb skill status` link state | none | none | By link state, below |
 | `tmux` | tmux | `system` | apt `tmux` | apt | `sudo apt install --only-upgrade tmux` | `sudo apt install tmux` |
