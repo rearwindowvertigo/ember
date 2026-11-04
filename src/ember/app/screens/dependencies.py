@@ -233,10 +233,12 @@ class DependenciesScreen(QWidget):
         self._checking = False
         self._dirty = True
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(
-            SCREEN_MARGIN, SCREEN_MARGIN, SCREEN_MARGIN, SCREEN_MARGIN
-        )
+        layout.setContentsMargins(SCREEN_MARGIN, SCREEN_MARGIN, 0, SCREEN_MARGIN)
         layout.setSpacing(SCREEN_SPACING)
+        fixed = QVBoxLayout()
+        fixed.setContentsMargins(0, 0, SCREEN_MARGIN, 0)
+        fixed.setSpacing(SCREEN_SPACING)
+        layout.addLayout(fixed)
 
         self.spinner = widgets.Spinner(16)
         self.checking_label = label("Checking versions", "secondary", wrap=False)
@@ -247,7 +249,7 @@ class DependenciesScreen(QWidget):
         self.check_button.setAccessibleName("Check now")
         self.check_button.clicked.connect(self.check_now)
         self.subtitle = screen_header(
-            layout,
+            fixed,
             self.TITLE,
             trailing=(self.spinner, self.checking_label, self.check_button),
         )
@@ -255,10 +257,10 @@ class DependenciesScreen(QWidget):
         self.alert_area = QVBoxLayout()
         self.alert_area.setContentsMargins(0, 0, 0, 0)
         self.alert: widgets.Alert | None = None
-        layout.addLayout(self.alert_area)
+        fixed.addLayout(self.alert_area)
 
         self.state_view = widgets.StateView()
-        layout.addWidget(self.state_view, 1)
+        fixed.addWidget(self.state_view, 1)
         self.scroll_area = scroll_area()
         self.scroll_area.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.scroll_area.setHorizontalScrollBarPolicy(
@@ -378,7 +380,7 @@ class DependenciesScreen(QWidget):
         self.state_view.hide()
         content = QWidget()
         column = QVBoxLayout(content)
-        column.setContentsMargins(0, 0, 0, 0)
+        column.setContentsMargins(0, 0, SCREEN_MARGIN, 0)
         column.setSpacing(16)
         for key, title, items in groups:
             heading = QLabel(title)
@@ -412,7 +414,9 @@ class DependenciesScreen(QWidget):
         if not self.tiles:
             return COLUMNS
         tile = max(t.minimumSizeHint().width() for t in self.tiles.values())
-        return fitting_columns(tile, self.scroll_area, COLUMNS, GAP)
+        return fitting_columns(
+            tile, self.scroll_area, COLUMNS, GAP, margins=SCREEN_MARGIN
+        )
 
     def _place(self) -> None:
         for grid, tiles in self.grids:
