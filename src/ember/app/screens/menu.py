@@ -138,9 +138,11 @@ WHEN_TIP = (
 )
 ASKS = (("high", "High only"), ("medium", "High and medium"), ("all", "All"))
 ASKS_TIP = (
-    "Which gaps Claude brings to you. Gaps below the line take the default the "
-    "gap check proposes, written into the plan, and Claude lists them in its "
-    "report."
+    "Which gaps Claude brings to you. High only: medium and low gaps take "
+    "their default. High and medium: low gaps take their default. All: high "
+    "gaps one by one, medium and low together in one question. A gap that is "
+    "not asked takes the default the gap check proposes, written into the "
+    "plan, and Claude lists it in its report."
 )
 PARALLEL = tuple((value, value) for value in choices.FLOW_PARALLEL)
 STALL = tuple((value, f"{value} min") for value in choices.FLOW_STALL)

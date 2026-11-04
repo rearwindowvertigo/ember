@@ -879,3 +879,42 @@ def test_tip_popup_is_rounded_and_wraps_at_the_tip_width(
         assert popup.text() == "Short."
     finally:
         popup.hide_for(host)
+
+
+def test_escape_closes_a_tooltip_wherever_focus_is(
+    qapp: QApplication, qtbot: QtBot
+) -> None:
+    widgets.install_tooltips(qapp)
+    host = QWidget()
+    qtbot.addWidget(host)
+    layout = QVBoxLayout(host)
+    field = QLineEdit()
+    info = widgets.InfoTip("Terminal", LONG_TIP)
+    layout.addWidget(field)
+    layout.addWidget(info)
+    host.show()
+    try:
+        info.show_tip()
+        assert widgets.tip_popup().isVisible()
+        qtbot.keyClick(field, Qt.Key.Key_Escape)
+        assert not widgets.tip_popup().isVisible()
+    finally:
+        info.hide_tip()
+
+
+def test_tip_popup_stays_on_the_screen(qapp: QApplication, qtbot: QtBot) -> None:
+    host = QWidget()
+    qtbot.addWidget(host)
+    host.resize(40, 20)
+    host.show()
+    screen = host.screen()
+    assert screen is not None
+    area = screen.availableGeometry()
+    host.move(area.right() - 40, area.bottom() - 20)
+    popup = widgets.tip_popup()
+    try:
+        popup.show_for(host, LONG_TIP)
+        assert area.contains(popup.geometry())
+        assert popup.geometry().bottom() < host.mapToGlobal(QPoint(0, 0)).y()
+    finally:
+        popup.hide_for(host)

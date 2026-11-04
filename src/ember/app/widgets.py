@@ -266,9 +266,26 @@ class TipPopup(QWidget):
         color = theme.color("on-primary").name()
         self.label.setStyleSheet(f"color: {color}; background: transparent;")
         self.adjustSize()
-        self.move(owner.mapToGlobal(QPoint(0, owner.height() + 4)))
+        self.move(self._place(owner))
         self.show()
         self.raise_()
+
+    def _place(self, owner: QWidget) -> QPoint:
+        """Return a top-left under `owner`, kept on its screen.
+
+        Near the bottom of the screen the window opens above `owner`; near
+        the right edge it moves left.
+        """
+        below = owner.mapToGlobal(QPoint(0, owner.height() + 4))
+        screen = owner.screen()
+        if screen is None:
+            return below
+        area = screen.availableGeometry()
+        x = max(area.left(), min(below.x(), area.right() - self.width()))
+        y = below.y()
+        if y + self.height() > area.bottom():
+            y = owner.mapToGlobal(QPoint(0, 0)).y() - self.height() - 4
+        return QPoint(x, max(area.top(), y))
 
     def hide_for(self, owner: QWidget) -> None:
         """Hide the window when `owner` is the widget it shows for."""
@@ -300,13 +317,23 @@ def tip_popup() -> TipPopup:
 
 
 class TipWrapper(QObject):
-    """Drops every tooltip event except an info icon's.
+    """Drops every tooltip event except an info icon's, and closes on Escape.
 
     Nothing without an info icon opens a tooltip; the icon shows its own in
-    `TipPopup`.
+    `TipPopup`. Escape closes an open tooltip wherever focus is.
     """
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: D102
+        if (
+            event.type() == QEvent.Type.KeyPress
+            and cast(QKeyEvent, event).key() == Qt.Key.Key_Escape
+            and _popup is not None
+            and shiboken6.isValid(_popup)
+            and _popup.isVisible()
+        ):
+            # Escape closes an open tooltip wherever focus is, then goes on.
+            _popup.hide()
+            return False
         if event.type() != QEvent.Type.ToolTip or not isinstance(watched, QWidget):
             return False
         return not isinstance(watched, InfoTip)
