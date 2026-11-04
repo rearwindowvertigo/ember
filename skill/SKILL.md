@@ -93,7 +93,7 @@ usage reading.
 |---|---|
 | No worker | A few lines in one or two files already open. |
 | Codex, `emb run --engine codex` | Coding, drafting, tests and research; the default. |
-| OpenCode, `emb run --engine opencode` | An OpenRouter model suited to the task; after a Codex exit 73 with `provider_kind: usage_limit`, or when the owner names it. It spends OpenRouter credit. |
+| OpenCode, `emb run --engine opencode` | An OpenRouter model suited to the task; after a Codex exit 73 with `provider_kind: usage_limit`, or when the owner names it. |
 | Claude CLI, `emb run --engine claude` | A requested Claude CLI run. |
 | Claude subagent | Work needing Claude's tools, the browser, connectors, its own workers, or a folder that is not a git checkout. |
 | Claude Workflow | Claude-side fan-out of two or more tasks, with opt-in. |
