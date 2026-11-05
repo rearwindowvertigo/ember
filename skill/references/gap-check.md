@@ -112,7 +112,8 @@ Each gap in `steps` carries an `id` and `ask_owner`, from the owner's Gaps
 Claude asks you about.
 
 Before asking about any gap or recording its answer, check its factual
-premise by reading the code, record or file it or its default names.
+premise against the code, record or file that the gap or its default
+names.
 When the premise cannot be checked, say so in the owner question or report.
 When the premise does not hold, record a corrected default yourself for
 `ask_owner: false` gaps and `medium` or `low` gaps, including defaults the
