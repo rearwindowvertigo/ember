@@ -179,27 +179,19 @@ Both are standing settings reported by `emb choices`. Each run saves them
 at start for all its turns and recovery; later Team changes apply to new
 runs. Never change these settings to clear an error.
 
-Report every `WARNING: <engine> <model> at capacity; retry <n> of <max> in
-<secs>s`, including when the turn succeeds. Exhausted or disabled retries
-end at exit 73. `usage_limit` and `outage` exit 73 without retrying.
-Codex recognizes capacity and usage-limit messages; Claude and both
-OpenCode drivers classify provider errors as `outage`. Unmatched provider
-errors are `outage`.
+Exhausted or disabled retries end at exit 73. `usage_limit` and `outage`
+exit 73 without retrying. Codex recognizes capacity and usage-limit
+messages; Claude and both OpenCode drivers classify provider errors as
+`outage`. Unmatched provider errors are `outage`.
 
-After a capacity error or an outage (exit 73 with `provider_kind:
-capacity` or `outage`), offer the owner only a retry with the same model
-and effort once the error clears. Offer no other model of the same engine,
-no other engine, no Claude subagent and no Claude doing the work itself.
-A same-worker retry after a usage limit needs no new question; a
-replacement worker or model does. After a Codex `usage_limit` only,
-OpenCode may be offered in the next worker question; never switch silently.
+Never switch workers silently. Only a Codex `usage_limit` permits offering
+OpenCode in the next worker question.
 
 Recovery keeps the retry budget and pending resend. `--interrupt` cancels
-a pending resend. If delivery is uncertain, inspect the session and ask
-the lead before sending again, as `next:` says; never resend automatically.
-Earlier attempts' edits stay in the worktree and are committed once after
-the final attempt; uncertain delivery leaves them uncommitted. Turn seconds
-include waits; attempt seconds exclude them. Both persist across recovery.
+a pending resend. Earlier attempts' edits stay in the worktree and are
+committed once after the final attempt; uncertain delivery leaves them
+uncommitted. Turn seconds include waits; attempt seconds exclude them.
+Both persist across recovery.
 
 ## Sandbox
 
@@ -220,6 +212,12 @@ denied parent folder. A read-only run's detached worktree is writable in
 the Codex profile and bubblewrap. The run has no branch or Ember commit
 step and keeps its reviewer brief. Older read-only records that name a
 source checkout keep that checkout protected as read-only.
+
+A read-only Claude CLI worker has `Bash` limited to these commands, each
+with any arguments: `git diff`, `git log`, `git show`, `git status`,
+`git blame`, `git grep`, `git ls-files`, `git rev-parse`, `make check`,
+`make test`, `pytest` and `uv run pytest`. Every other command is refused.
+The git write verbs stay refused as for editing runs.
 
 A new run worktree holds only tracked files, with no installed dependencies.
 Install dependencies before running checks that need them. Use the shared
@@ -262,17 +260,22 @@ prints one `WARNING: <run> was denied <path>` per path per turn. No detected
 denials gives `[]`; an older outcome without the field also gives `[]`.
 A broken outcome gives null, which is unknown.
 
-Report every printed `owner:` line. When it offers reading, give the owner
+When an `owner:` line offers reading, give the owner
 the `Settings, Sandbox read paths; emb choices --set ...` action.
 At exit 0, say the turn finished. Read access is needed only if the
 worker's report says the work needed the denied path. When the report shows
-the work did not need it, still give the printed action, say the work did not
-need the path, and go on without waiting.
+the work did not need it, say so.
 The command keeps existing read paths and adds the offered folder, or an
 addable secret location's matched path. Never run it, edit the settings
 database, add a path to `sandbox.read`, or bypass the denial with `--read`
 yourself.
-Wait for the owner before retrying work that needs the denied path.
+
+A finished turn with pending owner actions (denied paths, or any printed
+`owner:` line) prints no carry-on `next:` line. Wait for the owner's answer
+on every pending owner action. After the owner answers a waiting run's
+owner action, run `emb run --answered <run>`, then follow the `next:` line
+it prints. `emb run --status <run>` shows the step as waiting for the owner
+until it is answered, then prints the `next:` line.
 
 Home shell and line-editor startup files, including `.profile`, `.bashrc`,
 `.bash_profile`, `.zshrc`, `.zprofile`, `.zshenv` and `.inputrc`, are
@@ -302,30 +305,31 @@ path, is not detected.
 
 ## Exits
 
-Every non-zero exit prints one `next:` or `owner:` line; follow it as
-SKILL.md step 6 says.
+SKILL.md step 6 covers the printed lines. These exits have additional rules.
 
 | Exit | Meaning | Response |
 |---|---|---|
-| 0 | Success | Read the reply and every `WARNING:`; follow `next:`. |
-| 1 | Unexpected error, or the settings database cannot be read | Show the error; follow `next:`; an `owner:` line goes to the owner. |
 | 64 | Usage error, unanswerable menu row, switched-off engine or invalid claim | Fix the call, or ask the named row live. Never edit settings. A `gone` or `unknown` claim stops the run (claims reference). |
-| 65 | Not a git checkout | Follow `next:`, or use a read-only Claude subagent for a folder that is not a checkout. |
-| 66 | Missing file or path | Follow `next:`. |
-| 69 | Engine, driver, `git` or `tmux` missing, not signed in, Codex does not trust the repository, a sandbox conflict, a kept path in a hidden Ember folder outside its own worktree, a worktree folder inside any Git working tree or the source repository's git folder, no working `bwrap`, or no runtime folder | Give the owner the `owner:` command and wait. Do not run it; do not retry the start or start another engine without a question. Codex trust refusal in a dry run or start creates nothing, including no worktree. It prints the trust message and an `owner:` line asking the owner to run `codex` in the repository once, with no `next:` line. Do not follow close-and-restart for this refusal. |
-| 70 | Worktree creation failed, or no main checkout or commit | Follow `next:`; never force-remove a worktree. |
-| 71 | Engine or session failed | Report; follow `next:`. |
-| 72 | Session or window unavailable, or the run was closed | Follow `next:`; a new start is a new run. |
-| 73 | Capacity retries exhausted or disabled, usage limit or outage | Tell the owner the kind (`provider_kind`) and every retry warning. After it clears, follow `next:`; Provider errors says what may be offered. |
-| 74 | Interrupted; partial edits may be committed; a pending capacity resend is cancelled | Tell the owner; follow `next:`. |
-| 75 | Refused: a turn runs or is collected, a busy session, another command on the run, or messages Ember did not send | Do not retry. Follow `next:`; for foreign messages, ask the owner. |
-| 76 | Branch or `HEAD` moved; nothing committed | Tell the owner; follow `next:`. Recover only when the record's branch and the worktree's `HEAD` are as recorded; otherwise leave the work for the owner. |
-| 77 | A hook refused the commit | Inspect the uncommitted work with `git -C <worktree> status`; tell the owner. |
-| 80 | The turn ended with no reply | Tell the owner; follow `next:`. |
-| 124 | Stall; the turn may still run | Follow `next:`. |
+| 69 | Codex does not trust the repository | A trust refusal in a dry run or start creates nothing, including no worktree. It prints the trust message and an `owner:` line asking the owner to run `codex` in the repository once, with no `next:` line. Do not follow close-and-restart for this refusal. |
+| 70 | Worktree creation failed, or no main checkout or commit | Never force-remove a worktree. |
+| 77 | A hook refused the commit | Inspect the uncommitted work with `git -C <worktree> status`. |
 
-Tell the owner about 73, 74, 76 and 80, and about every `WARNING:`. A
-stalled run's partial edits need the owner's approval before discard.
+A stalled run's partial edits need the owner's approval before discard.
+
+## Test builds
+
+For a test build of any worker branch, including `ember/flow/<id>`, give
+the owner one command to run in their own terminal outside the lead's
+session. The command changes to the branch's recorded worktree, installs
+the dependencies the build needs and starts it:
+`cd '<worktree>' && <dependency install command> && <project run command>`.
+Fill in the path and commands before handing it to the owner.
+
+Before `emb merge` or `emb cleanup` of that branch, check that no process
+still runs from its worktree. Run `ls -l /proc/*/cwd` and filter by the
+worktree path, including its subfolders. If a process remains, wait for the
+owner to quit it and check again before removing the worktree. This applies
+to run and flow worktrees.
 
 ## Closing
 
