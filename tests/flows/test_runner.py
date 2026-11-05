@@ -187,6 +187,56 @@ def test_dependencies_and_overlaps_form_two_waves(h: Harness, overlap: bool) -> 
     assert flow["wave"] == 2
     a, b = flow["tasks"]
     assert runs.load(b["writer_run"], h.env).base == a["merge_commit"]
+    folder = record.folder(h.id, h.env) / "briefs"
+    review = next(folder.glob("b-review-*.md")).read_text()
+    assert "## Merged sibling tasks" not in review
+
+
+def test_review_lists_merged_siblings_absent_from_task_branch(h: Harness) -> None:
+    h.scripts_update(**{"Review of task a, round 1,": "@reply " + FIX})
+    h.create([task("a"), task("b"), task("c", after=["a"])], rounds=0, parallel=1)
+    flow = h.run()
+    a, b, c = flow["tasks"]
+    assert [item["status"] for item in (a, b, c)] == ["stopped", "merged", "blocked"]
+    folder = record.folder(h.id, h.env) / "briefs"
+    first = next(folder.glob("a-review-*.md"))
+    assert "## Merged sibling tasks" not in first.read_text()
+    h.scripts_update(**{"Review of task a, round 1,": "@reply " + PASS})
+    h.answer("review")
+    assert h.run()["status"] == "done"
+    review = next(path for path in folder.glob("a-review-*.md") if path != first)
+    text = review.read_text()
+    section = text.split("## Merged sibling tasks\n\n", 1)[1].split("\n\n## ", 1)[0]
+    assert f"    b: {b['subject']}\n    commit: {b['merge_commit']}" in section
+    assert "on the flow branch and absent from the task branch" in section
+    assert f"a: {a['subject']}" not in section
+    assert f"c: {c['subject']}" not in section
+    for path in (flow["worktree"], a["worktree"], str(h.repo)):
+        assert path not in text
+
+
+@pytest.mark.parametrize("commit", [None, "missing"])
+def test_merged_sibling_without_recorded_commit_is_omitted(
+    h: Harness, commit: str | None
+) -> None:
+    h.create([task("a"), task("b")])
+    instance = h.instance()
+    a, b = instance.flow["tasks"]
+    a["head"] = instance.flow["base"]
+    b.update(status="merged", merge_commit=commit)
+    if commit == "missing":
+        del b["merge_commit"]
+    assert instance.merged_siblings(a) == []
+
+
+def test_merged_sibling_unreadable_commit_is_not_reported_absent(h: Harness) -> None:
+    h.create([task("a"), task("b")])
+    instance = h.instance()
+    a, b = instance.flow["tasks"]
+    a["head"] = instance.flow["base"]
+    b.update(status="merged", merge_commit="0" * 40)
+    with pytest.raises(runner.RunnerError, match="git merge-base"):
+        instance.merged_siblings(a)
 
 
 def test_fix_round_has_previous_head_and_real_plan_briefs(h: Harness) -> None:
