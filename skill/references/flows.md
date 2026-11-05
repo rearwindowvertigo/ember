@@ -24,8 +24,9 @@ Otherwise resolution uses the plan's `writer` and `reviewer`, then the
 reviewer, which follow `single.writer` and `single.reviewer` while `same`). Normally leave workers out of
 the plan. Team rows must be `set`; a Claude subagent row exits 64. Ask the
 owner for a CLI worker when the row cannot answer and none was named;
-pass the answer explicitly. Say both resolved
-workers and their efforts in one line before the dry run.
+pass the answer explicitly. After the latest dry run, copy its `writer` and
+`reviewer` announce lines from the text output to the owner, and use those
+same names in reports and pull request text.
 
 Write a JSON plan in the session scratchpad:
 
@@ -91,10 +92,13 @@ plans and empty `tasks` are refused with exit 64.
 ## Dry run, gap check and start
 
 ```bash
+emb flow --plan <file> --dry-run --claim <id> [--writer W] [--reviewer W]
 emb flow --plan <file> --dry-run --claim <id> [--writer W] [--reviewer W] --json
 ```
 
-Read `waves`, `warnings` and `gapcheck`. Clear or explain every warning.
+Read `waves`, `warnings`, `gapcheck` and `whole_review` from each flow's
+JSON dry run. Announce its `whole_review` value to the owner.
+Clear or explain every warning.
 Run the printed gap check command as `references/gap-check.md` says, which
 also covers recording the owner's answers and repeat checks; write the answers
 into the plan before starting. `emb flow --previous` is accepted only with
@@ -124,15 +128,9 @@ exits 69, naming the folder and the setting that placed it there.
 
 A `lead_stop` returns exit 0; it is not a completed flow. For every stop,
 send the owner one message naming the task, status, reason, open `lead`
-and `must` findings, and the tasks it blocks (or none). List every choice
-in its `choices`, each with its flags (an optional flag such as
-`--accept --commit <commit>` is its own choice), what each does, and your
-recommendation among them. Say that no runner is live and that the owner's
-answer starts it, when the stop's `next:` line names no live runner;
-otherwise say the runner is still live for the other tasks, and keep
-watching as `next:` says. End the message with one direct question
-ending in a question mark. Use the report's available choices, not an
-assumed list:
+and `must` findings, and the tasks it blocks (or none). End the message with
+one direct question ending in a question mark. Use the report's available
+choices, not an assumed list:
 
 | Answer after `emb flow --lead <id> <task>` | Does |
 |---|---|
@@ -152,6 +150,14 @@ already in the flow branch needs no `--drop`.
 Do not settle a flow stop yourself, edit to choose its answer, or merge a
 task branch into the session branch. Call `emb flow --lead` only after the
 owner's answer. A `--send` file carries that decision, not your own choice.
+
+Every sent correction appears in that task's later reviewer briefs, in
+order, as a settled decision; files it allows are in scope for the review.
+When a reviewer repeats a finding already settled by a sent correction or
+an owner answer, name the earlier decision to the owner. Recommend
+`--accept` only when every open finding at the stop repeats such a decision;
+otherwise recommend among the other available choices.
+
 For a refused answer, report the refusal and the choices now available.
 Watch again only when `next:` names a live runner; otherwise wait for
 the owner's answer. After the answer, follow its printed watch command.
@@ -195,10 +201,8 @@ stops that task without halting new runs. A `usage_limit` or `outage` exit 73,
 or a provider error without a recorded kind, halts new runs with
 `provider error on <engine>; new runs halted`; active jobs finish and
 queued writers stay pending. Resume clears the halt, but the failed task
-still needs a lead answer. Report the kind and retry warnings. List every
-printed choice for the stop, but after a capacity error recommend only the
-same-worker retry and name no other worker as an option; the capacity rule
-is in `references/runs.md` (Provider errors).
+still needs a lead answer. Report the kind. After a capacity error, name no
+other worker as an option; the capacity `report:` line gives the recommendation.
 
 ## Denied paths
 
@@ -212,17 +216,6 @@ handled as `references/runs.md` (Denied paths) says. Report printed owner
 actions and hidden-path restrictions as `references/runs.md` (Denied paths)
 describes.
 
-## Exits
-
-Exit 82 means cancelled, failed or ended with tasks unmerged. Report every task's
-status and reason and leave unmerged work to the owner. Do not merge the
-flow branch until the owner decides what to do with it.
-
-Exit 72 means the runner is gone and work may still be running. Tell the
-owner, then follow `next: emb flow --resume <id>`. Other exits follow the
-`emb flow` exit table in the command reference and their `next:` or
-`owner:` lines; a refusal is not permission to force an action.
-
 ## Verify, merge and report
 
 Before accepting a flow, fetch the remote default branch and compare it
@@ -234,10 +227,12 @@ At `end`, exit 0 with every task merged, verify in the flow worktree with the
 `--branch ember/flow/<id>` and `--worktree <flow worktree>`. Run your own
 checks and apply the skill's exact review bar to the whole flow diff.
 
-When the dry run's and the flow record's `whole_review` is true (Team's
-Review the whole flow), also run one read-only review of the whole flow
-before the merge: `emb run --read-only` on the flow's reviewer, with
-`--dir` naming the flow worktree. The reviewer reads its own detached
+At the flow's end, read the flow record's `whole_review` with
+`emb flow --status <id> --json` before running or skipping the whole-flow
+review. When that value is true (Team's Review the whole flow), run one
+read-only review of the whole flow before the merge: `emb run --read-only`
+on the flow's reviewer, with `--dir` naming the flow worktree.
+The reviewer reads its own detached
 worktree at the flow's committed `HEAD`. Give it a brief that holds the
 skill's exact review bar and asks for findings on `git diff <base>...ember/flow/<id>`. Handle its findings as
 any review's, and close the run after reading its reply. When
