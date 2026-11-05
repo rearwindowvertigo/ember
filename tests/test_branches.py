@@ -289,6 +289,7 @@ def test_merge_with_keep_merges_and_cleans_up(
     assert f"closed {run.id}" in lines[1]
     assert f"removed worktree {run.worktree}" in lines[1]
     assert f"closed {run.id}" in err
+    assert "next:" not in err
     assert git(repo, "log", "-1", "--format=%P", env=env).count(" ") == 0
     assert git(repo, "log", "-1", "--format=%s", env=env) == "feat: work"
     assert (repo / "work.txt").read_text() == "work\n"
@@ -311,6 +312,7 @@ def test_merge_json(
     assert document["target"] == "main"
     assert document["merge_commit"] == git(repo, "rev-parse", "HEAD", env=env)
     assert document["contained_before"] is False
+    assert document["next"] is None
     [item] = document["cleanup"]
     assert item["branch"] == run.branch
     assert item["run"] == run.id
@@ -650,8 +652,9 @@ def test_cleanup_filters_recorded_claims_and_merge_suggestions(
     streams = Streams()
     options = {"branch": runs[0].branch if single_branch else None, "claim": claim}
     assert _cleanup(env, driver, streams, repo, **options) == 0
-    out, _ = streams.take()
+    out, err = streams.take()
     assert len(out.splitlines()) == len(expected)
+    assert ("next: emb choices --finish" in err) == (claim is not None and not expected)
     for run in runs:
         assert run.branch is not None
         if run in expected:
@@ -690,8 +693,10 @@ def test_cleanup_claim_removes_only_matching_merged_runs(
         )
         == 0
     )
-    [item] = json.loads(streams.take()[0])
+    out, err = streams.take()
+    [item] = json.loads(out)
     assert item["run"] == first.id and item["claim"] == first.claim
+    assert ("next: emb choices --finish claim-a\n" in err) == (not dry_run)
     assert item["action"] == ("would remove" if dry_run else "removed")
     assert _branch_exists(repo, first.branch, env) == dry_run
     assert Path(first.worktree).exists() == dry_run
@@ -2070,3 +2075,91 @@ def test_cleanup_keeps_uncertain_detached_run(
     assert result["action"] == "kept"
     assert "delivery is uncertain" in result["reason"]
     assert Path(saved.worktree).exists()
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("parent", [False, True])
+def test_merge_prints_only_the_step_after_cleanup(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    as_json: bool,
+    parent: bool,
+) -> None:
+    run = replace(
+        _start(tmp_path, env, repo, driver),
+        claim="claim-a",
+        parent=record.parent("gapcheck") if parent else None,
+    )
+    record.save(run)
+    assert run.branch is not None
+    streams = Streams()
+    assert _merge(env, driver, streams, run.branch, repo, as_json=as_json) == 0
+    out, err = streams.take()
+    line = None if parent else "next: emb choices --finish claim-a"
+    assert [s for s in err.splitlines() if s.startswith("next:")] == (
+        [] if line is None else [line]
+    )
+    if as_json:
+        assert json.loads(out)["next"] == line
+    assert record.load(run.id, env).status == record.CLOSED
+    assert not _branch_exists(repo, run.branch, env)
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_merge_kept_result_has_no_finish_line(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    as_json: bool,
+) -> None:
+    run = replace(_start(tmp_path, env, repo, driver), claim="claim-a")
+    record.save(run)
+    assert run.branch is not None
+    (Path(run.worktree) / "uncommitted").write_text("keep")
+    streams = Streams()
+    assert _merge(env, driver, streams, run.branch, repo, as_json=as_json) == 0
+    out, err = streams.take()
+    assert "next:" not in err
+    if as_json:
+        document = json.loads(out)
+        assert document["next"] is None
+        assert document["cleanup"][0]["action"] == branches.KEPT
+        assert document["cleanup"][0]["next"].startswith("next: git -C ")
+    else:
+        assert "kept " in out and out.count("next:") == 1
+    assert record.load(run.id, env).status != record.CLOSED
+
+
+def test_merge_with_no_run_has_null_next(
+    env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    branch, _ = _manual_branch(repo, env, "manual-000001")
+    streams = Streams()
+    assert _merge(env, driver, streams, branch, repo, as_json=True) == 0
+    out, err = streams.take()
+    assert json.loads(out)["next"] is None
+    assert "next:" not in err
+
+
+@pytest.mark.parametrize("claim", [None, "claim-a"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_cleanup_empty_claim_finishes_only_when_requested(
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    claim: str | None,
+    dry_run: bool,
+) -> None:
+    streams = Streams()
+    assert (
+        _cleanup(env, driver, streams, repo, claim=claim, dry_run=dry_run, as_json=True)
+        == 0
+    )
+    out, err = streams.take()
+    assert json.loads(out) == []
+    assert err == (
+        "next: emb choices --finish claim-a\n" if claim and not dry_run else ""
+    )

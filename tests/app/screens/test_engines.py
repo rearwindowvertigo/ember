@@ -1686,5 +1686,12 @@ def test_opencode_table_height_follows_its_scroll_bar(
     area = panel.table_area
     for width in range(850, 835, -1):
         screen.resize(width, 720)
-        qtbot.wait(50)
-        assert area.viewport().height() >= panel.table.sizeHint().height()
+        QApplication.processEvents()
+        qtbot.waitUntil(
+            lambda: (
+                area.viewport().height() >= panel.table.sizeHint().height()
+                and area.horizontalScrollBar().isVisible()
+                == (panel.table.minimumSizeHint().width() > area.viewport().width())
+            ),
+            timeout=2000,
+        )

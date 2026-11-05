@@ -19,6 +19,7 @@ after Quit Ember or when the running app takes over, 64 for a usage error and
 """
 
 import argparse
+import contextlib
 import json
 import sys
 import time
@@ -914,7 +915,21 @@ def _run_run(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
         "recover": lambda: core.recover(args.recover),
         "status": lambda: core.status(args.status or None, as_json=args.json),
     }
-    return core.execute(actions[mode])
+    code = core.execute(actions[mode])
+    if code == EX_OK and not args.dry_run:
+        next_line = None
+        if mode == "status":
+            next_line = core.status_next
+        elif mode in ("start", "send", "recover", "close"):
+            run_id = core.last_run_id if mode == "start" else getattr(args, mode)
+            if run_id is not None:
+                from ember.runs import record
+
+                with contextlib.suppress(record.RecordError):
+                    _, next_line = core.step(record.load(run_id, env))
+        if next_line is not None:
+            print(next_line, file=sys.stderr)
+    return code
 
 
 def _run_ground(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
