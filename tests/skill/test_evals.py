@@ -1608,6 +1608,189 @@ def test_runner_needs_its_arguments(tmp_path: Path) -> None:
     assert result.stderr.startswith("usage: run_case.sh")
 
 
+REPEAT = EVALS / "_runner" / "run_repeat.sh"
+TALLY = EVALS / "_runner" / "tally.py"
+
+
+def test_repeat_runs_each_side_in_its_own_folder(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    home = Path(env["HOME"])
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    (fakes / "bwrap").write_text(FAKE_BWRAP)
+    (fakes / "bwrap").chmod(0o755)
+    (home / ".local" / "bin").mkdir(parents=True)
+    claude = home / ".local" / "bin" / "claude"
+    claude.write_text(
+        "#!/usr/bin/env bash\n"
+        'echo \'{"type":"result","session_id":"s","result":"Done."}\'\n'
+    )
+    claude.chmod(0o755)
+    (home / ".claude").mkdir()
+    (home / ".claude.json").write_text("{}")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    out = tmp_path / "out"
+    result = subprocess.run(
+        [
+            "bash",
+            str(REPEAT),
+            "--runs",
+            "1",
+            "--jobs",
+            "2",
+            "--base",
+            "HEAD",
+            str(EVALS / "provider-uncertain"),
+            str(out),
+        ],
+        env={**env, "PATH": f"{fakes}:{env['PATH']}", "FAKE_LOG": str(logs)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert sorted(line.split(" ", 2)[:2] for line in result.stdout.splitlines()) == [
+        ["base", "run-1"],
+        ["skill", "run-1"],
+    ]
+    assert all(" exit 0 in " in line for line in result.stdout.splitlines())
+    for side in ("skill", "base"):
+        assert json.loads((out / side / "run-1" / "run.json").read_text())["exit"] == 0
+    base = out / "base-skill" / "skill"
+    assert (base / "SKILL.md").is_file()
+    bwrap = (logs / "bwrap.log").read_text()
+    assert f"--ro-bind {SKILL} {home}/.claude/skills/ember" in bwrap
+    assert f"--ro-bind {base} {home}/.claude/skills/ember" in bwrap
+
+
+CASE_ARGS = [str(EVALS / "provider-uncertain"), "out"]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (["--runs", "0", *CASE_ARGS], "--runs must be a whole number from 1 to 50"),
+        (["--jobs", "9", *CASE_ARGS], "--jobs must be a whole number from 1 to 8"),
+        (["--base", "no-such-ref-for-the-test", *CASE_ARGS], "is not a commit"),
+        (["--runs"], "--runs needs a value"),
+    ],
+)
+def test_repeat_refuses_bad_options(
+    tmp_path: Path, arguments: list[str], message: str
+) -> None:
+    result = subprocess.run(
+        ["bash", str(REPEAT), *arguments],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 64
+    assert message in result.stderr
+
+
+def test_repeat_needs_a_case(tmp_path: Path) -> None:
+    result = subprocess.run(
+        ["bash", str(REPEAT), str(tmp_path), str(tmp_path / "out")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 66
+    assert "prompt.md is missing" in result.stderr
+    result = subprocess.run(
+        ["bash", str(REPEAT), str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 64
+    assert result.stderr.startswith("usage: run_repeat.sh")
+
+
+def write_grading(run: Path, passed: list[Any]) -> None:
+    run.mkdir(parents=True)
+    expectations = [
+        {"text": f"expectation {index}", "passed": value, "evidence": "-"}
+        for index, value in enumerate(passed)
+    ]
+    (run / "grading.json").write_text(json.dumps({"expectations": expectations}))
+
+
+def run_tally(*arguments: Path | str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(TALLY), *map(str, arguments)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_tally_counts_each_grader_for_each_side(tmp_path: Path) -> None:
+    case = tmp_path / "some-case"
+    (case / "graders").mkdir(parents=True)
+    for name in ("02-second", "01-first"):
+        (case / "graders" / f"{name}.md").write_text("x")
+    out = tmp_path / "out"
+    write_grading(out / "skill" / "run-1", [True, True])
+    write_grading(out / "skill" / "run-2", [True, False])
+    write_grading(out / "skill" / "run-10", [False, False])
+    write_grading(out / "base" / "run-1", [True, True])
+    write_grading(out / "base" / "run-2", [True])
+    write_grading(out / "base" / "run-3", [True, "yes"])
+    (out / "base" / "run-4").mkdir()
+    (out / "base-skill" / "skill").mkdir(parents=True)
+    result = run_tally(case, out)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "some-case",
+        "grader       skill  base",
+        "01-first     2/3    1/1",
+        "02-second    1/3    1/1",
+        "all graders  1/3    1/1",
+    ]
+    assert result.stderr.splitlines() == [
+        "base run-2 not graded: grading.json has 1 expectations, the case has 2"
+        " graders",
+        "base run-3 not graded: grading.json has an expectation without a true or"
+        " false passed",
+        "base run-4 not graded: no grading.json",
+    ]
+    table = json.loads(run_tally(case, out, "--json").stdout)
+    assert table["sides"]["skill"] == {
+        "graded": 3,
+        "passed": [2, 1],
+        "all_passed": 1,
+        "not_graded": {},
+    }
+
+
+def test_tally_counts_zero_graded_runs(tmp_path: Path) -> None:
+    case = tmp_path / "case"
+    (case / "graders").mkdir(parents=True)
+    (case / "graders" / "01-only.md").write_text("x")
+    out = tmp_path / "out"
+    (out / "skill" / "run-1").mkdir(parents=True)
+    result = run_tally(case, out)
+    assert result.returncode == 0
+    assert result.stdout.splitlines()[-1] == "all graders  0/0"
+
+
+def test_tally_needs_graders_and_runs(tmp_path: Path) -> None:
+    case = tmp_path / "case"
+    (case / "graders").mkdir(parents=True)
+    out = tmp_path / "out"
+    out.mkdir()
+    assert run_tally(case, out).returncode == 66
+    (case / "graders" / "01-only.md").write_text("x")
+    result = run_tally(case, out)
+    assert result.returncode == 66
+    assert "has no run-<i> folders" in result.stderr
+    assert run_tally(case, tmp_path / "missing").returncode == 66
+
+
 # The skill's text
 
 

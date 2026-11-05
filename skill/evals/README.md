@@ -388,3 +388,45 @@ expectation each), the run's `trace.jsonl` and `calls.log`, and writes
 and exit of every stubbed call; `trace.jsonl` gives the messages, the
 questions to the owner, the owner's replies and whether a Bash call ran in
 the background.
+`grading.json` lists the expectations in the order of the case's
+`graders/*.md` file names.
+
+## Repeated runs: `_runner/run_repeat.sh` and `_runner/tally.py`
+
+```
+bash skill/evals/_runner/run_repeat.sh [--runs <n>] [--jobs <n>] [--base <git ref>] <case dir> <out dir>
+```
+
+`run_repeat.sh` runs `run_case.sh` `--runs` times (1 to 50, default 3) for
+one case, with this checkout's `skill/` folder, in `<out dir>/skill/run-<i>`.
+With `--base`, it extracts the `skill/` folder at that ref with
+`git archive` to `<out dir>/base-skill/skill` and runs the case the same
+number of times with it, in `<out dir>/base/run-<i>`. Both sides use this
+checkout's case files, stubs and runner, so only the skill text differs.
+`--jobs` (1 to 8, default 1) sets how many runs go at once. Each run is a
+separate `claude -p` session on the owner's account.
+
+It prints one line per finished run, `<side> run-<i> <summary line>`, in the
+order the runs finish. A run whose `run_case.sh` exits non-zero is reported
+on standard error, and `run_repeat.sh` then exits with that code once every
+run has finished. It exits 64 on a usage error or an unknown ref, and 66
+when the case has no `prompt.md` or the ref has no `skill/SKILL.md`.
+
+After each run is graded as in Grading, `tally.py` counts the passes:
+
+```
+python3 skill/evals/_runner/tally.py <case dir> <out dir> [--json]
+```
+
+It prints one row per grader and an `all graders` row, with
+`<passed>/<graded>` for each side. A run counts once its `grading.json` has
+one expectation per grader, each with a true or false `passed`; other runs
+are listed on standard error as not graded and left out. It exits 66 when
+the case has no graders or the out dir has no runs.
+
+```
+<case name>
+grader        skill              base
+<grader>      <passed>/<graded>  <passed>/<graded>
+all graders   <passed>/<graded>  <passed>/<graded>
+```
