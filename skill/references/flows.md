@@ -229,6 +229,10 @@ owner, then follow `next: emb flow --resume <id>`. Other exits follow the
 
 ## Verify, merge and report
 
+Before accepting a flow, fetch the remote default branch and compare it
+with the flow's recorded base. If the default branch has moved, merge it
+into the flow branch and run the plan `check` again in the flow worktree.
+
 At `end`, exit 0 with every task merged, verify in the flow worktree:
 
 ```bash
