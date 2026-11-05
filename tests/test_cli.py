@@ -7,6 +7,7 @@ import sys
 import time
 import types
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -887,16 +888,147 @@ def test_run_start_status_and_close(
         "--trailer", "Co-Authored-By: X <x@y>", "--quiet",
     ]  # fmt: skip
     assert main(argv, env=run_env) == 0
-    out = capsys.readouterr().out.splitlines()
+    captured = capsys.readouterr()
+    out = captured.out.splitlines()
     assert len(out) == 2
     run_id = out[0].removeprefix("run ")
     assert out[1].endswith(" · exit 0 · 1 files · turn 1")
+    [next_line] = [
+        line for line in captured.err.splitlines() if line.startswith("next:")
+    ]
+    assert "--expect-files 1, then emb merge " in next_line
     assert main(["run", "--status", run_id, "--json"], env=run_env) == 0
-    data = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["step"] == "merge"
+    assert data["next"] == next_line
+    assert captured.err == next_line + "\n"
     assert data["trailers"] == ["Co-Authored-By: X <x@y>"]
     assert data["session_state"] == "live"
+    assert main(["run", "--status", run_id], env=run_env) == 0
+    captured = capsys.readouterr()
+    assert "step: merge\n" in captured.out
+    assert "next:" not in captured.out
+    assert captured.err == next_line + "\n"
+    assert main(["run", "--status"], env=run_env) == 0
+    captured = capsys.readouterr()
+    assert "step:" not in captured.out and "next:" not in captured.err
     assert main(["run", "--close", run_id], env=run_env) == 0
-    assert capsys.readouterr().out == f"closed {run_id}\n"
+    captured = capsys.readouterr()
+    assert captured.out == f"closed {run_id}\n"
+    assert captured.err == next_line + "\n"
+
+
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("parent", [False, True])
+def test_run_turn_commands_print_one_step(
+    tmp_path: Path,
+    run_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    force: bool,
+    parent: bool,
+) -> None:
+    from ember import engines
+    from ember.runs import core, record
+
+    stub = _stub_engine()
+    monkeypatch.setattr(core, "POLL_SECONDS", 0.02)
+    monkeypatch.setattr(
+        engines,
+        "load_driver",
+        lambda name, env=None: stub.StubDriver(name, stub.script_path(run_env)),
+    )
+    repo = stub.make_repo(tmp_path, run_env)
+    brief = tmp_path / "brief.md"
+    brief.write_text("Task\n")
+    assert (
+        main(
+            [
+                "run",
+                "--engine",
+                "claude",
+                "--dir",
+                str(repo),
+                "--task-file",
+                str(brief),
+                "--quiet",
+            ],
+            env=run_env,
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    run_id = captured.out.splitlines()[0].removeprefix("run ")
+    line = f"next: emb run --close {run_id}"
+    assert captured.err.splitlines()[-1] == line
+    run = record.load(run_id, run_env)
+    record.save(
+        replace(
+            run, claim="claim-a", parent=record.parent("gapcheck") if parent else None
+        )
+    )
+    for argv in (
+        ["--send", run_id, "--message-file", str(brief)],
+        ["--recover", run_id],
+    ):
+        assert main(["run", *argv, "--quiet"], env=run_env) == 0
+        captured = capsys.readouterr()
+        assert [s for s in captured.err.splitlines() if s.startswith("next:")] == (
+            [] if parent else [line]
+        )
+    assert (
+        main(["run", "--close", run_id, *(["--force"] if force else [])], env=run_env)
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert captured.err == ("" if parent else "next: emb choices --finish claim-a\n")
+
+
+def test_gapcheck_prints_no_run_step(
+    tmp_path: Path,
+    run_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ember import engines
+    from ember.runs import core
+
+    stub = _stub_engine()
+    repo = stub.make_repo(tmp_path, run_env)
+    plan = tmp_path / "plan.md"
+    plan.write_text("## Failure model\nStop on failure.\n1. First\n2. Second\n")
+    reply = tmp_path / "reply.json"
+    reply.write_text('{"steps": [{"step": 1, "gaps": []}, {"step": 2, "gaps": []}]}')
+    monkeypatch.setattr(core, "POLL_SECONDS", 0.02)
+    monkeypatch.setattr(
+        engines,
+        "load_driver",
+        lambda name, env=None: stub.StubDriver(
+            name, stub.script_path(run_env), reply_file=reply
+        ),
+    )
+    assert (
+        main(
+            [
+                "gapcheck",
+                "--plan",
+                str(plan),
+                "--dir",
+                str(repo),
+                "--engine",
+                "claude",
+                "--model",
+                "opus",
+                "--json",
+            ],
+            env=run_env,
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["run"]["closed"] is True
+    assert "next:" not in captured.err
 
 
 def test_run_without_driver_exits_69(

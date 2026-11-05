@@ -1268,6 +1268,12 @@ def cleanup(
         print(f"emb cleanup: no Ember run branch against {target}", file=err)
     if failure is not None:
         return _print_failure("cleanup", failure, err)
+    if (
+        claim is not None
+        and not dry_run
+        and not any(item.action == KEPT and item.claim == claim for item in job.results)
+    ):
+        print(f"next: emb choices --finish {shlex.quote(claim)}", file=err)
     return exits.OK
 
 
@@ -1604,6 +1610,23 @@ def _merge(
     )
 
 
+def _merged_run_next(job: Cleanup, branch: str) -> str | None:
+    """Derive the newest unparented run's next step after cleanup."""
+    results = [item for item in job.results if item.branch == branch]
+    if any(item.action == KEPT for item in results):
+        return None
+    runs = []
+    for item in results:
+        if item.run is not None:
+            with contextlib.suppress(record.RecordError):
+                runs.append(record.load(item.run, job.repo.env))
+    for run in sorted(runs, key=lambda run: run.started_at, reverse=True):
+        if run.parent is None:
+            core = job._core or job.make_core(job.err)
+            return core.step(run)[1]
+    return None
+
+
 def merge(
     branch: str,
     target: str,
@@ -1716,6 +1739,7 @@ def merge(
         job.run([branch])
     except GitFailedError as error:
         failure = error
+    next_line = _merged_run_next(job, branch) if failure is None else None
     if as_json:
         document = {
             "branch": branch,
@@ -1725,8 +1749,11 @@ def merge(
             "merge_commit": commit,
             "contained_before": contained_before,
             "cleanup": [item.to_json() for item in job.results],
+            "next": next_line,
         }
         print(json.dumps(document, indent=2), file=out)
     if failure is not None:
         return _print_failure("merge", failure, err)
+    if next_line is not None:
+        print(next_line, file=err)
     return exits.OK

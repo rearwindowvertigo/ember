@@ -2622,6 +2622,8 @@ def test_status_one_and_all(
     assert one["id"] == run_id
     assert one["session_state"] == "live"
     assert one["status"] == "waiting"
+    assert one["step"] == "close"
+    assert one["next"] == f"next: emb run --close {run_id}"
     assert len(one["turns"]) == 1
     assert one["turns"][0]["turn"] == 1
     assert one["turns"][0]["exit"] == 0
@@ -2634,6 +2636,8 @@ def test_status_one_and_all(
     listing = json.loads(out)
     assert [item["id"] for item in listing] == [run_id]
     assert listing[0]["turns"] == one["turns"]
+    assert listing[0]["step"] == one["step"]
+    assert listing[0]["next"] == one["next"]
     assert "skipped claude-broken-000000: run.json is not valid JSON" in err
     _core(env).close(run_id, force=True)
     capsys.readouterr()
@@ -2757,9 +2761,11 @@ def test_status_text(
     assert core_.execute(lambda: core_.status(None)) == 0
     assert capsys.readouterr().out == f"{run_id}  waiting  live  turn 1  Task\n"
     assert core_.execute(lambda: core_.status(run_id)) == 0
-    out = capsys.readouterr().out
+    out, err = capsys.readouterr()
     assert f"id: {run_id}\n" in out
     assert "session_state: live\n" in out
+    assert "step: close\n" in out
+    assert "next:" not in out and "next:" not in err
 
 
 def test_run_error_carries_context() -> None:
@@ -3785,6 +3791,7 @@ def test_start_records_the_parent_and_status_reports_an_orphan(
     run_id = _run_id(capsys.readouterr().out)
     one = _status(env, run_id, capsys)
     assert one["parent"] == parent and one["orphaned"] is False
+    assert one["step"] == "parent" and one["next"] is None
     run = record.load(run_id, env)
     record.save(replace(run, parent={**parent, "start": parent["start"] + 1}))
     core_ = _core(env)

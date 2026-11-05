@@ -1,0 +1,119 @@
+"""Derive the next command from a run's existing records and git history."""
+
+import shlex
+import sqlite3
+import subprocess
+from collections.abc import Callable
+
+from ember import db, skill
+from ember.runs import exits, record
+from ember.runs.record import Run
+
+
+def derive(
+    run: Run,
+    session_state: str,
+    needs_collection: bool,
+    git: Callable[..., subprocess.CompletedProcess[str]],
+) -> tuple[str, str | None]:
+    """Return the run's step and next line without changing its state.
+
+    Args:
+        run: The record, including its environment.
+        session_state: The session state read by run status.
+        needs_collection: The core's check for unfinished result collection.
+        git: Run git with a directory followed by command arguments.
+
+    Returns:
+        The step name and its command line, or None when none applies.
+    """
+    if run.parent is not None:
+        return "parent", None
+    if run.status == record.CLOSED:
+        if run.read_only or not run.commits or _merged(run):
+            return "finish", _finish(run)
+        return "merge", _verify(run, git)
+    if run.status == record.FAILED or (
+        run.turn_state != record.SENT and run.last_exit not in (None, 0)
+    ):
+        return "failed", exits.line(
+            run.last_exit or 0,
+            None,
+            run=run.id,
+            worktree=run.worktree,
+            engine=run.engine,
+        )
+    if run.status == record.STARTING or run.turn == 0:
+        return "starting", f"next: emb run --status {run.id}"
+    if run.turn_state == record.SENT and session_state == "live":
+        return "running", f"next: emb run --status {run.id}"
+    if run.turn_state == record.SENT or needs_collection:
+        return "recover", f"next: emb run --recover {run.id}"
+    if not run.read_only and run.commits and not _merged(run):
+        return "merge", _verify(run, git)
+    return "close", f"next: emb run --close {run.id}"
+
+
+def _merged(run: Run) -> bool:
+    from ember import branches
+
+    try:
+        return bool(
+            run.commits
+            and run.base_branch
+            and branches.is_contained(
+                run.main or run.repo,
+                run.commits[-1],
+                run.base_branch,
+                run.env,
+                scratch=True,
+            )
+        )
+    except OSError, subprocess.SubprocessError, branches.BranchError:
+        return False
+
+
+def _finish(run: Run) -> str | None:
+    if run.claim is None:
+        return None
+    try:
+        with db.open_read(run.env) as conn:
+            if conn is not None:
+                row = conn.execute(
+                    "SELECT status FROM claims WHERE id = ?", (run.claim,)
+                ).fetchone()
+                if row is not None and row[0] == "gone":
+                    return None
+    except OSError, sqlite3.Error:
+        pass
+    return f"next: emb choices --finish {shlex.quote(run.claim)}"
+
+
+def _verify(run: Run, git: Callable[..., subprocess.CompletedProcess[str]]) -> str:
+    from ember.runs.core import RunError
+
+    base_branch = (
+        shlex.quote(run.base_branch) if run.base_branch else "<session branch>"
+    )
+    branch = shlex.quote(run.branch) if run.branch else "<branch>"
+    directory = run.main or run.repo
+    script = skill.link_path(run.env) / "scripts" / "verify_branch.py"
+    line = (
+        f"next: python3 {shlex.quote(str(script))} --repo {shlex.quote(directory)} "
+        f"--base {base_branch} --branch {branch} "
+        f"--worktree {shlex.quote(run.worktree)}"
+    )
+    if run.turn == 1 and run.base is not None:
+        try:
+            result = git(
+                directory, "diff", "--name-only", "-z", run.base, run.commits[-1]
+            )
+            if result.returncode == 0:
+                count = len([path for path in result.stdout.split("\0") if path])
+                line += f" --expect-files {count}"
+        except RunError, OSError, subprocess.SubprocessError:
+            pass
+    return (
+        f"{line}, then emb merge {branch} --into {base_branch} "
+        "--verdict keep --note '<verdict>' --subject '<subject>'"
+    )
