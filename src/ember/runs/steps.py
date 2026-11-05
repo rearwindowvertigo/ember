@@ -30,7 +30,12 @@ def derive(
     if run.parent is not None:
         return "parent", None
     if run.status == record.CLOSED:
-        if run.read_only or not run.commits or _merged(run):
+        if (
+            run.read_only
+            or not run.commits
+            or _merged(run)
+            or not _branch_exists(run, git)
+        ):
             return "finish", _finish(run)
         return "merge", _verify(run, git)
     if run.status == record.FAILED or (
@@ -71,6 +76,32 @@ def _merged(run: Run) -> bool:
         )
     except OSError, subprocess.SubprocessError, branches.BranchError:
         return False
+
+
+def _branch_exists(
+    run: Run, git: Callable[..., subprocess.CompletedProcess[str]]
+) -> bool:
+    """Return whether a closed run's branch is still there to merge.
+
+    A branch that git reports missing, or a checkout that is gone, has
+    nothing left to merge. Any other git failure counts as present, so the
+    merge line stays.
+    """
+    from ember.runs.core import RunError
+
+    if run.branch is None:
+        return False
+    try:
+        result = git(
+            run.main or run.repo,
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            f"refs/heads/{run.branch}",
+        )
+    except RunError, OSError, subprocess.SubprocessError:
+        return True
+    return result.returncode not in (1, 128)
 
 
 def _finish(run: Run) -> str | None:

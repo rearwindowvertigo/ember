@@ -972,8 +972,8 @@ complete `next:` or `owner:` line, or null. The first matching row applies:
 | Condition | `step` | `next` |
 |---|---|---|
 | The run has a `parent` | `parent` | null |
-| Closed and either read-only, without commits, or with its last commit contained in its base branch | `finish` | `next: emb choices --finish <claim>`; null without a claim or when its status is `gone` |
-| Closed with uncontained editing commits | `merge` | Verify and merge line below |
+| Closed and either read-only, without commits, with its last commit contained in its base branch, or with no branch left in its checkout | `finish` | `next: emb choices --finish <claim>`; null without a claim or when its status is `gone` |
+| Closed with uncontained editing commits on a branch that still exists | `merge` | Verify and merge line below |
 | Status `failed`, or a turn not `sent` whose `last_exit` is nonzero | `failed` | The default exit line for `last_exit`; null for 0 or null, and the exit-1 line for an unknown code |
 | Status `starting`, or turn 0 | `starting` | `next: emb run --status <run>` |
 | Turn `sent` and session `live` | `running` | `next: emb run --status <run>` |
@@ -996,8 +996,9 @@ on turn 1 when the run has a base commit and git can count the changed
 paths between that base and its last commit. Missing branch names use
 `<branch>` and `<session branch>` placeholders. The lead fills in `--note`
 and `--subject`. There is no separate verification or cleanup step value.
-`--status --json` includes `step` and `next` in each record, but prints no
-derived next lines on standard error. `--dry-run --json` has neither field;
+`--status RUN --json` includes `step` and `next` and prints the next line on
+standard error, as text output does. The `--status --json` list includes
+`step` and `next` in each record and prints no next line. `--dry-run --json` has neither field;
 `--json` remains limited to status and dry runs.
 
 `orphaned` is true when the run records a `parent`, is `starting`, `running`

@@ -242,3 +242,47 @@ def test_pruned_tip_counts_as_not_merged(tmp_path: Path, run: record.Run) -> Non
     step, line = steps.derive(run, core.MISSING, False, core.Core(run.env)._git)
     assert step == "merge" and line is not None
     assert "--expect-files" not in line
+
+
+@pytest.mark.parametrize("base_branch", [None, "main"])
+def test_closed_run_with_missing_branch_finishes(
+    tmp_path: Path, run: record.Run, base_branch: str | None
+) -> None:
+    """A closed run whose branch is gone has nothing to merge, merged or not."""
+    repo = make_repo(tmp_path, run.env)
+    run = replace(
+        run,
+        status=record.CLOSED,
+        main=str(repo),
+        base_branch=base_branch,
+        commits=("f" * 40,),
+    )
+    assert steps.derive(run, core.MISSING, False, core.Core(run.env)._git) == (
+        "finish",
+        "next: emb choices --finish claim-a",
+    )
+
+
+def test_closed_run_in_a_removed_checkout_finishes(run: record.Run) -> None:
+    run = replace(run, status=record.CLOSED, commits=("f" * 40,))
+    assert steps.derive(run, core.MISSING, False, core.Core(run.env)._git) == (
+        "finish",
+        "next: emb choices --finish claim-a",
+    )
+
+
+def test_closed_run_with_its_branch_keeps_the_merge_line(
+    tmp_path: Path, run: record.Run
+) -> None:
+    repo = make_repo(tmp_path, run.env)
+    git(repo, "branch", "worker", env=run.env)
+    run = replace(
+        run,
+        status=record.CLOSED,
+        main=str(repo),
+        branch="worker",
+        base_branch=None,
+        commits=("f" * 40,),
+    )
+    step, line = steps.derive(run, core.MISSING, False, core.Core(run.env)._git)
+    assert step == "merge" and line is not None
