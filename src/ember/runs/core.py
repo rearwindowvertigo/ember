@@ -1304,6 +1304,7 @@ class Core:
                 self._record_exit(
                     run, exits.PROVIDER_ERROR, outcome.reason, status=record.FAILED
                 )
+                self._warn_denial_owners(run, exits.PROVIDER_ERROR)
                 raise RunError(
                     exits.PROVIDER_ERROR, outcome.reason or "", "uncertain", run=run.id
                 )
@@ -1622,6 +1623,7 @@ class Core:
                 **({"retry_clock": None} if "retry_clock" in saved else {}),
             },
         )
+        self._warn_denial_owners(run, code)
         self._print_turn(run, code, files, commit, reply, seconds, window)
         if code:
             raise RunError(code, message or "", variant, **context)
@@ -1697,35 +1699,6 @@ class Core:
                     f"WARNING: {run.id} was denied {item['path']}"
                     + (f" ({item['reason']})" if item["reason"] != "hidden" else "")
                 )
-                if item["reason"] == "startup file":
-                    continue
-                problem = sandbox.read_path_problem(item["path"], self.env)
-                if problem:
-                    self._warn(
-                        f"owner: {problem}; it cannot be added to "
-                        "Settings, Sandbox read paths"
-                    )
-                elif item["reason"] == "hidden" and item["allow_path"] is None:
-                    self._warn(
-                        f"owner: {item['path']} is hidden; no folder can be offered "
-                        "because each folder that holds it also holds private files"
-                    )
-                elif item["reason"] != "protected":
-                    reads = [p for p in run.read_effective if p not in run.read]
-                    with contextlib.suppress(db.DatabaseError):
-                        reads = list(
-                            choices.read(env=self.env)["answers"]["sandbox.read"][
-                                "value"
-                            ]
-                        )
-                    reads = list(
-                        dict.fromkeys([*reads, item["allow_path"] or item["path"]])
-                    )
-                    setting = shlex.quote("sandbox.read=" + json.dumps(reads))
-                    self._warn(
-                        "owner: Settings, Sandbox read paths; "
-                        f"emb choices --set {setting}"
-                    )
         data = {
             **saved,
             "denied_paths": denials,
@@ -1739,6 +1712,43 @@ class Core:
             "seconds": seconds,
         }
         self._write_outcome(run, data)
+
+    def _warn_denial_owners(self, run: Run, code: int) -> None:
+        """Print denied-path owner actions after the turn's exit is recorded."""
+        for item in self._saved_outcome(run).get("denied_paths", []):
+            if item["reason"] == "startup file":
+                continue
+            problem = sandbox.read_path_problem(item["path"], self.env)
+            if problem:
+                self._warn(
+                    f"owner: {problem}; it cannot be added to "
+                    "Settings, Sandbox read paths"
+                )
+            elif item["reason"] == "hidden" and item["allow_path"] is None:
+                self._warn(
+                    f"owner: {item['path']} is hidden; no folder can be offered "
+                    "because each folder that holds it also holds private files"
+                )
+            elif item["reason"] != "protected":
+                reads = [p for p in run.read_effective if p not in run.read]
+                with contextlib.suppress(db.DatabaseError):
+                    reads = list(
+                        choices.read(env=self.env)["answers"]["sandbox.read"]["value"]
+                    )
+                reads = list(
+                    dict.fromkeys([*reads, item["allow_path"] or item["path"]])
+                )
+                setting = shlex.quote("sandbox.read=" + json.dumps(reads))
+                qualification = (
+                    "the turn finished (exit 0); read access is needed only if "
+                    "the worker's report says the work needed the path; "
+                    if code == exits.OK
+                    else ""
+                )
+                self._warn(
+                    f"owner: {qualification}Settings, Sandbox read paths; "
+                    f"emb choices --set {setting}"
+                )
 
     def _saved_outcome(self, run: Run) -> dict[str, Any]:
         try:
@@ -1781,6 +1791,7 @@ class Core:
                     "seconds": time.monotonic() - started,
                 },
             )
+            self._warn_denial_owners(run, _outcome_exit(outcome) or result[3])
             return result
 
     def _commit(

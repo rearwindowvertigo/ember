@@ -3205,6 +3205,7 @@ def test_corrupt_retry_journal_does_not_reset_the_budget(
 
 
 @pytest.mark.parametrize("secret", [False, True])
+@pytest.mark.parametrize("result", ["success", "worker_failure", "commit_failure"])
 def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
     tmp_path: Path,
     env: dict[str, str],
@@ -3212,15 +3213,22 @@ def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     secret: bool,
+    result: str,
 ) -> None:
     folder = Path(env["HOME"]) / (".ssh" if secret else ".toolchain, version")
     folder.mkdir()
     monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
     choices.set_settings({"sandbox.claude": "on"}, env=env)
     text = f"Permission denied: '{folder}/python'"
-    brief = _brief(tmp_path, f"Task\n@reply {text}\n")
+    command = "@fail" if result == "worker_failure" else "@reply"
+    brief = _brief(tmp_path, f"Task\n@write result.txt done\n{command} {text}\n")
+    if result == "commit_failure":
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+    expected = {"success": 0, "worker_failure": 71, "commit_failure": 77}[result]
     core_ = _core(env)
-    assert _start(core_, repo, brief) == 0
+    assert _start(core_, repo, brief) == expected
     out, err = capsys.readouterr()
     run = record.load(_run_id(out), env)
     item = {
@@ -3230,11 +3238,20 @@ def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
     }
     assert record.load_outcome(run, 1)["denied_paths"] == [item]
     assert err.count(f"WARNING: {run.id} was denied {folder}") == 1
-    assert "owner: Settings, Sandbox read paths; emb choices --set " in err
-    owner = next(
-        line for line in err.splitlines() if line.startswith("owner: Settings")
+    assert record.load_outcome(run, 1)["exit"] == expected
+    owners = [line for line in err.splitlines() if line.startswith("owner:")]
+    assert len(owners) == 1
+    owner = owners[0]
+    qualification = (
+        "the turn finished (exit 0); read access is needed only if "
+        "the worker's report says the work needed the path; "
+        if expected == 0
+        else ""
     )
-    command = shlex.split(owner.split("; ", 1)[1])
+    assert owner.startswith(
+        f"owner: {qualification}Settings, Sandbox read paths; emb choices --set "
+    )
+    command = shlex.split(owner.rsplit("; ", 1)[1])
     key, value = command[-1].split("=", 1)
     assert key == "sandbox.read"
     assert choices.parse_value(key, value) == [str(folder)]
@@ -3243,7 +3260,7 @@ def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
     # A permission change applies to the next launch, never the saved snapshot.
     choices.set_settings({"sandbox.read": [str(folder)]}, env=env)
     assert sandbox.denied_paths(text, run.sandbox_paths) == [item]
-    assert _start(core_, repo, brief) == 0
+    assert _start(core_, repo, brief) == expected
     out, err = capsys.readouterr()
     next_run = record.load(_run_id(out), env)
     assert record.load_outcome(next_run, 1)["denied_paths"] == []
@@ -3251,12 +3268,14 @@ def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
     assert sandbox.denied_paths(text, next_run.sandbox_paths) == []
 
 
+@pytest.mark.parametrize("retry_succeeds", [False, True])
 def test_denials_union_all_capacity_attempts_with_one_warning_each(
     tmp_path: Path,
     env: dict[str, str],
     repo: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    retry_succeeds: bool,
 ) -> None:
     folders = [Path(env["HOME"]) / name for name in (".rustup", ".pyenv")]
     for folder in folders:
@@ -3264,7 +3283,7 @@ def test_denials_union_all_capacity_attempts_with_one_warning_each(
     choices.set_settings(
         {"sandbox.codex": "on", "provider.capacity_wait": "5"}, env=env
     )
-    driver = _ProviderDriver(env, ["capacity", "done"])
+    driver = _ProviderDriver(env, ["capacity", "done" if retry_succeeds else "outage"])
     monkeypatch.setattr(
         driver,
         "turn_output",
@@ -3276,16 +3295,27 @@ def test_denials_union_all_capacity_attempts_with_one_warning_each(
     monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
     core_ = _core(env, driver)
     monkeypatch.setattr(core_, "_sandboxed", lambda spec, run, common: spec)
-    assert (
-        _start(core_, repo, _brief(tmp_path, "Task"), engine="codex", model="gpt-5")
-        == 0
-    )
+    assert _start(
+        core_, repo, _brief(tmp_path, "Task"), engine="codex", model="gpt-5"
+    ) == (0 if retry_succeeds else 73)
     out, err = capsys.readouterr()
     run = record.load(_run_id(out), env)
     denials = record.load_outcome(run, 1)["denied_paths"]
     assert {item["path"] for item in denials} == {str(folder) for folder in folders}
     for folder in folders:
         assert err.count(f"WARNING: {run.id} was denied {folder}") == 1
+
+    assert record.load_outcome(run, 1)["exit"] == (0 if retry_succeeds else 73)
+    owners = [line for line in err.splitlines() if line.startswith("owner:")]
+    assert len(owners) == len(folders)
+    for owner in owners:
+        if retry_succeeds:
+            assert owner.startswith(
+                "owner: the turn finished (exit 0); read access is needed only if "
+                "the worker's report says the work needed the path; "
+            )
+        else:
+            assert owner.startswith("owner: Settings, Sandbox read paths; ")
 
 
 def test_protected_runtime_denial_has_no_settings_suggestion(
