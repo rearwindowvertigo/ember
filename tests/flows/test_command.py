@@ -1562,3 +1562,119 @@ def test_dry_run_passes_read_files_to_the_gap_check_and_counts_sandbox_read(
     code, out, err = invoke(env, "--plan", str(plan_file), "--dry-run", "--json")
     assert code == 0, err
     assert not [w for w in json.loads(out)["warnings"] if " cites " in w]
+
+
+@pytest.mark.parametrize("mode", ["--dry-run", "--start"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "empty",
+        "whitespace",
+        "nonempty",
+        "folder",
+        "symlink",
+        "missing",
+        "broken symlink",
+        "fifo",
+        "device",
+        "undecodable",
+        "unreadable",
+    ],
+)
+def test_read_file_validation(
+    tmp_path: Path,
+    env: dict[str, str],
+    plan_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    kind: str,
+) -> None:
+    source = tmp_path / "read file.md"
+    if kind == "folder":
+        source.mkdir()
+        (source / "empty.md").touch()
+    elif kind == "symlink":
+        target = tmp_path / "empty.md"
+        target.touch()
+        source.symlink_to(target)
+    elif kind == "broken symlink":
+        source.symlink_to(tmp_path / "missing.md")
+    elif kind == "fifo":
+        os.mkfifo(source)
+    elif kind == "device":
+        source = Path("/dev/null")
+    elif kind == "undecodable":
+        source.write_bytes(b"\xff")
+    elif kind != "missing":
+        source.write_text(
+            " \t\n\r\u2003"
+            if kind == "whitespace"
+            else "source text"
+            if kind == "nonempty"
+            else ""
+        )
+    if kind == "unreadable":
+        original = Path.read_text
+
+        def read_text(
+            path: Path, encoding: str | None = None, errors: str | None = None
+        ) -> str:
+            if path == source:
+                raise PermissionError("read denied")
+            return original(path, encoding=encoding, errors=errors)
+
+        monkeypatch.setattr(Path, "read_text", read_text)
+    raw = json.loads(plan_file.read_text())
+    raw["read"] = [str(source)]
+    plan_file.write_text(json.dumps(raw))
+    code, out, err = invoke(env, "--plan", str(plan_file), mode)
+    if kind in ("empty", "whitespace", "symlink"):
+        assert code == 64 and not out
+        assert err == (
+            f"emb flow: the read file {source} is empty\nnext: emb flow --help\n"
+        )
+        assert not paths.runs_dir(env).exists()
+        assert not tmux_log(tmp_path)
+    else:
+        assert code == 0, err
+        assert "the read file" not in err
+        assert out
+
+
+@pytest.mark.parametrize("mode", ["--dry-run", "--start"])
+@pytest.mark.parametrize("directory", ["missing", "not-checkout"])
+def test_empty_reads_report_in_order_before_directory_and_git_checks(
+    tmp_path: Path,
+    env: dict[str, str],
+    plan_file: Path,
+    mode: str,
+    directory: str,
+) -> None:
+    first, second = tmp_path / "first.md", tmp_path / "second.md"
+    first.touch()
+    second.write_text(" \n")
+    raw = json.loads(plan_file.read_text())
+    raw["read"] = [str(second), str(first)]
+    raw["dir"] = str(tmp_path / "missing" if directory == "missing" else tmp_path)
+    plan_file.write_text(json.dumps(raw))
+    code, out, err = invoke(env, "--plan", str(plan_file), mode)
+    assert code == 64 and not out
+    assert err.splitlines() == [
+        f"emb flow: the read file {second} is empty",
+        f"emb flow: the read file {first} is empty",
+        "next: emb flow --help",
+    ]
+    assert not paths.runs_dir(env).exists()
+    assert not tmux_log(tmp_path)
+
+
+@pytest.mark.parametrize("mode", ["--dry-run", "--start"])
+def test_empty_sandbox_read_is_accepted(
+    tmp_path: Path, env: dict[str, str], plan_file: Path, mode: str
+) -> None:
+    source = tmp_path / "empty.md"
+    source.touch()
+    choices.set_settings({"sandbox.read": [str(source)]}, env=env)
+    code, out, err = invoke(env, "--plan", str(plan_file), mode)
+    assert code == 0, err
+    assert out

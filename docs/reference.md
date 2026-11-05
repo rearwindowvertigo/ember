@@ -426,6 +426,12 @@ Data goes to standard output. Errors go to standard error as
 `emb run: <message>`; each non-zero exit then prints one `next:` or `owner:`
 line from the exit table below.
 
+After exit 0, a start, `--send`, `--recover`, `--close` (including
+`--force`) or `--status RUN` prints the run's derived next line once on
+standard error when one applies. `--quiet` does not suppress it. Dry runs
+and status lists print no derived next line. Runs with a `parent` have no
+derived next line; status still prints the orphan warnings described below.
+
 ### Options
 
 | Option | Does |
@@ -448,7 +454,7 @@ line from the exit table below.
 | `--recover RUN` | Collect and commit a turn that ended while no command waited, or wait for it |
 | `--status [RUN]` | Print one run's record, or every run's |
 | `--json` | With `--status` or `--dry-run`: print JSON |
-| `--quiet` | Print only the run id, resolved worker and each turn's summary |
+| `--quiet` | Limit progress output to the run id, resolved worker and each turn's summary; retain the next line |
 | `--stall MINUTES` | Minutes without a change on the session's screen before exit 124; default 10 |
 
 A start needs `--engine`, `--dir` and `--task-file`. The start options cannot
@@ -949,13 +955,50 @@ Paths are absolute.
 `--status RUN --json` prints the record with `session_state`: `live`, `dead`
 (the pane's command ended) or `missing` (no session), `orphaned`,
 `waiting_for_flow` (the parent flow id when waiting for its lead answer,
-otherwise null), and a `turns` array.
+otherwise null), a `turns` array, `step` and `next`.
 `--status --json` prints a list of these records, oldest first, each with
 `turns`. A run with no recorded turns has `turns: []`; no runs gives `[]`.
 A folder whose `run.json` cannot be read is skipped with a message on
 standard error. Without `--json`, `--status RUN`
-prints one `<field>: <value>` line per field, and `--status` one line per run:
+prints one `<field>: <value>` line per field except `next`, including
+`step: <step>`. The `next` text goes to standard error when non-null.
+`--status` prints one line per run:
 `<id>  <status>  <session_state>  turn <n>  <subject>`.
+
+`step` and `next` are derived from the existing run and claim records,
+session and git history, and are not stored in `run.json`. `next` is the
+complete `next:` or `owner:` line, or null. The first matching row applies:
+
+| Condition | `step` | `next` |
+|---|---|---|
+| The run has a `parent` | `parent` | null |
+| Closed and either read-only, without commits, or with its last commit contained in its base branch | `finish` | `next: emb choices --finish <claim>`; null without a claim or when its status is `gone` |
+| Closed with uncontained editing commits | `merge` | Verify and merge line below |
+| Status `failed`, or a turn not `sent` whose `last_exit` is nonzero | `failed` | The default exit line for `last_exit`; null for 0 or null, and the exit-1 line for an unknown code |
+| Status `starting`, or turn 0 | `starting` | `next: emb run --status <run>` |
+| Turn `sent` and session `live` | `running` | `next: emb run --status <run>` |
+| Turn `sent`, or result collection remains unfinished | `recover` | `next: emb run --recover <run>` |
+| Editing run with commits whose last commit is not contained in its base branch | `merge` | Verify and merge line below |
+| Otherwise | `close` | `next: emb run --close <run>` |
+
+Containment uses the same checks as cleanup, including `Ember-Task-Tip`
+trailers, even after the worker branch is deleted. A missing base branch
+or a failed containment check counts as not contained.
+
+The verify and merge line is:
+
+```text
+next: python3 <installed skill>/scripts/verify_branch.py --repo <main or repo> --base <base_branch> --branch <branch> --worktree <worktree> [--expect-files <count>], then emb merge <branch> --into <base_branch> --verdict keep --note '<verdict>' --subject '<subject>'
+```
+
+Paths and branch names are shell-quoted. `--expect-files` is included only
+on turn 1 when the run has a base commit and git can count the changed
+paths between that base and its last commit. Missing branch names use
+`<branch>` and `<session branch>` placeholders. The lead fills in `--note`
+and `--subject`. There is no separate verification or cleanup step value.
+`--status --json` includes `step` and `next` in each record, but prints no
+derived next lines on standard error. `--dry-run --json` has neither field;
+`--json` remains limited to status and dry runs.
 
 `orphaned` is true when the run records a `parent`, is `starting`, `running`
 or `waiting`, and that parent process is no longer running, compared by
@@ -963,7 +1006,9 @@ process id and start time, unless its parent flow is stopped for the lead.
 Each orphaned run prints
 `WARNING: run <id> is orphaned: emb <command> [<parent id>] ended without collecting it`
 and `next: emb run --recover <id>, then emb run --close <id>` on standard
-error. A run started by `emb run` has no parent and is never orphaned.
+error. Its derived fields remain `step: parent` and `next: null`; the
+orphan recovery line is separate. A run started by `emb run` has no parent
+and is never orphaned.
 
 A starting, running or waiting run whose parent flow has status `stopped`
 has `orphaned: false`. Its text status and `WARNING:` line say
@@ -1008,7 +1053,7 @@ evidence that no provider error occurred.
 
 | Code | Meaning | Line |
 |---|---|---|
-| 0 | Success | |
+| 0 | Success | The derived next line when applicable (see Status) |
 | 1 | Unexpected error, or the settings database cannot be read | `next: emb run --status`; for the database, `owner:` |
 | 64 | Usage error, unanswerable menu row, switched-off engine or invalid claim | `next: emb run --help`, or `owner:` naming the setting |
 | 65 | Not a git checkout | `next:` a start inside a checkout |
@@ -1137,7 +1182,7 @@ claim to the run.
 | `--model MODEL` | Use this model, whether or not shortlisted; requires `--engine` |
 | `--effort EFFORT` | Use this effort; requires `--engine` |
 | `--claim ID` | Read choices with this claim and pass it to the run |
-| `--read PATH` | Add a readable path to the run; repeatable; also accepted with `--brief`, where it only covers citations and lists sources. Citations in the plan that neither these paths nor the `sandbox.read` setting supply are warned about on standard error |
+| `--read PATH` | Add a readable path to the run; repeatable; an empty or whitespace-only UTF-8 file exits 64. Also accepted with `--brief`, where it covers citations and lists sources. Citations in the plan that neither these paths nor the `sandbox.read` setting supply are warned about on standard error |
 | `--window` | Open a terminal window on the run's session |
 | `--stall MINUTES` | Stop waiting after this many minutes without a screen change; default 10 |
 | `--json` | Print the result as JSON |
@@ -1150,9 +1195,21 @@ claim to the run.
 | `--help` | Print the command's options |
 
 `--brief` and `--reply` cannot be combined. Neither accepts `--engine`,
-`--model`, `--effort`, `--claim`, `--read`, `--window` or `--stall`.
-`--brief` accepts no `--json`; `--reply` accepts no `--dir`. `--previous`
+`--model`, `--effort`, `--claim`, `--window` or `--stall`.
+`--brief` accepts `--read` but no `--json`; `--reply` accepts neither
+`--read` nor `--dir`. `--previous`
 works on the direct run, on `--brief` and on `--reply`.
+
+After option validation and the empty-plan check, each `--read` path that
+is a regular file (following symlinks) is read as UTF-8. Empty or
+whitespace-only text (`str.strip()`) exits 64 before reading the previous
+result or applying the skip or ask decision, including with `--brief`.
+Standard error prints `emb gapcheck: the read file <path> is empty` for
+each empty file in argument order, then one `next: emb gapcheck --help`.
+`--reply --read` is refused by option validation before this check;
+`--answer` does not perform it. The check skips folders and their contents,
+FIFOs, devices, missing paths and files that cannot be read or decoded.
+Other path checks still apply. It does not check `sandbox.read` paths.
 
 `--answer` requires `--id` and `--text`, accepts `--json`, and accepts no
 other mode or run options. It starts no run and reads no settings. Without
@@ -1161,7 +1218,7 @@ with it, standard output holds the updated result. It reloads and validates
 the result under an adjacent `<result>.lock` and replaces it atomically.
 The lock file remains in place. Closed gap ids and unknown ids are refused.
 
-Before anything else is read, `gapcheck.when` decides the plan unless
+After these input checks, `gapcheck.when` decides the plan unless
 `--confirmed` is given (with `--reply` it is not applied). A plan it skips
 (`off`, or fewer steps than its number) starts no run: the command prints
 `gap check skipped: <reason>`, or JSON `{"plan", "status": "skipped",
@@ -1466,7 +1523,7 @@ existing reply exits 66. A successful turn with no reply file exits 81.
 |---|---|---|
 | 0 | The reply covers every step and earlier gap, the brief was printed, an answer was recorded, or settings skip or ask | A failed close prints a warning |
 | 1 | Settings database or run record cannot be read, or checkout discovery times out | `owner: repair or remove the settings database the message names`, `next: emb run --status <run>` or a new check |
-| 64 | Usage error, invalid claim, reviewer row not `set`, Claude subagent row, or a run start check | `next: emb gapcheck --help`, the claim's `emb choices` line, `owner: name the reviewer for this gap check, or set Gap check reviewer on the Team screen`, the `--brief`/`--reply` route, or the run's line |
+| 64 | Usage error, empty or whitespace-only plan or `--read` file, invalid claim, reviewer row not `set`, Claude subagent row, or a run start check | `next: emb gapcheck --help` for usage or empty files, the claim's `emb choices` line, `owner: name the reviewer for this gap check, or set Gap check reviewer on the Team screen`, the `--brief`/`--reply` route, or the run's line |
 | 65 | `--dir` is not in a git checkout, or the `--previous`/`--answer` file is not a valid complete result | `next: emb gapcheck --plan <plan> --dir <a folder in the checkout>`, or `next: correct <file> to the emb gapcheck result format, with answers on their gaps in steps or settled` |
 | 66 | Plan, reply, `--previous` or `--answer` file cannot be read, or `--dir` does not exist or is not a folder | `next: ls -l <path>` |
 | 69 | Git is unavailable, the runtime folder cannot be used, or the run exits 69 | `owner: install git`, the run's runtime-folder instruction, or the run's line |
@@ -1523,13 +1580,25 @@ accepted only with `--dry-run` or `--start`. Answer options require
 `--worker` and `--drop`. `--previous` without `--dry-run` exits 64 with
 `next: emb flow --help`. Other combinations exit 64 before reading files.
 
-Validation reads the plan, checks that its directory exists and belongs to
+Validation reads the plan, checks its read files for empty text, then
+checks that its directory exists and belongs to
 a checkout, resolves the base commit, reads the claim and settings, then
 resolves and checks both workers. All plan problems print together. A
 `gone` or `unknown` claim exits 64 even with explicit workers. The command
 resolves omitted effort from a matching set menu row, then the driver's
 default. Stored workers include `effort_frozen: true`; `null` effort denotes
 an engine default. Replacement-worker answers carry the same marker.
+
+With `--dry-run` or `--start`, immediately after loading the plan and before
+directory or git checks, each plan `read` path that is a regular file
+(following symlinks) is read as UTF-8. Empty or whitespace-only text
+(`str.strip()`) exits 64. Standard error prints
+`emb flow: the read file <path> is empty` for each empty file in plan order,
+then one `next: emb flow --help`. The check skips folders and their
+contents, FIFOs, devices, missing paths and files that cannot be read or
+decoded. Other path checks still apply. It does not check
+`sandbox.read` paths. Loading saved plans and resuming flows do not perform
+this check.
 
 Dry runs create no flow record, branch, worktree or session. The gap check
 command uses the resolved reviewer. Starting a flow does not run or require
@@ -2216,7 +2285,7 @@ every top-level field except `tasks`, then each task's state and reason.
 |---|---|---|
 | 0 | Dry run printed, flow started, answer queued, runner resumed, flow cancelled, lead stop reported, or every task merged | Watch reports give their next action |
 | 1 | Unexpected error or unreadable settings database | `next: emb flow --status`; database errors name an owner action |
-| 64 | Invalid option combination, plan, flow, task, worker, commit or claim | `next: emb flow --help`, a worker's owner action, the claim action or `--status` |
+| 64 | Invalid option combination, plan, flow, task, worker, commit or claim, or an empty or whitespace-only plan `read` file on `--dry-run` or `--start` | `next: emb flow --help` for invalid options, plans or empty read files, a worker's owner action, the claim action or `--status` |
 | 65 | The plan directory is not in a checkout, or `--cancel` names an unknown flow | Repeat `--dry-run` with `dir` inside a checkout, or `next: emb flow --status` |
 | 66 | Unreadable plan or correction, or missing plan directory | `next: ls -l <path>` |
 | 69 | Missing git, tmux, engine or driver, disconnected engine, unusable runtime folder, or a worktree folder inside any Git working tree or the source repository's git folder | `owner:` naming the fix |
@@ -2833,6 +2902,13 @@ from the repository's main checkout, which cleanup never removes.
 The cleanup's lines follow the first line. A branch that is not an Ember run
 branch is kept with `not an Ember run branch; next: git branch -d BRANCH`.
 
+After successful cleanup, the command derives the next line from the
+newest matching run without a parent and prints it once on standard error
+when non-null, using the rules in `emb run` Status. Cleanup normally closes
+the run, so a contained, closed run with an unfinished claim gives
+`next: emb choices --finish <claim>`. A kept branch, a cleanup failure, or
+no readable matching run without a parent gives no derived next line.
+
 A flow branch `ember/flow/<flow id>` follows the run-branch cleanup path
 without a run record, with the worktree its flow record names. Cleanup keeps it while the flow's runner is live, with
 `the flow <id> is running` and `next: emb flow --status <id>`. A task branch
@@ -2850,6 +2926,9 @@ the same rules.
 | `warnings` | List of warning strings, also printed on standard error |
 | `contained_before` | Whether the branch was already contained |
 | `cleanup` | The cleanup's list, as `emb cleanup --json` prints it |
+| `next` | The derived next line printed on standard error, or null |
+
+The merge JSON object has no `step` field.
 
 ## `emb prune`
 
@@ -3095,6 +3174,11 @@ suggests a merge. A detached worktree uses its run id in place of
 `BRANCH`. With nothing to handle it prints nothing on standard
 output and a message on standard error.
 
+After exit 0 with `--claim ID`, unless `--dry-run`, the command prints
+`next: emb choices --finish <id>` once on standard error if no kept result
+has that claim, including when there are no results. Without `--claim`, it
+prints no claim-finish line. The command does not finish the claim itself.
+
 `--json` prints a list of objects:
 
 | Field | Value |
@@ -3105,6 +3189,9 @@ output and a message on standard error.
 | `action` | `removed`, `kept` or `would remove` |
 | `reason` | What was done, or why it was kept |
 | `next` | For a keep with an action, `next: <command>` or `owner: <step>`, the same text as the printed line ends with; null otherwise, including an uncontained branch without `--claim` |
+
+Cleanup JSON has no `step` field or top-level `next` field. Its per-result
+`next` fields do not contain the claim-finish line printed on standard error.
 
 A git command that fails (worktree removal, `git worktree prune`, branch
 deletion, or a git command that reads the repository) stops the cleanup at

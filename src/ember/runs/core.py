@@ -33,7 +33,7 @@ from typing import Any, TextIO
 from ember import choices, db, engines, paths, processes, sandbox, tmux
 from ember.engines import Driver, LaunchSpec, TurnOutcome, models, status
 from ember.engines.opencode2 import DeliveryUncertainError
-from ember.runs import exits, record, worktrees
+from ember.runs import exits, record, steps, worktrees
 from ember.runs.record import Run
 
 POLL_SECONDS = 1.0
@@ -315,6 +315,8 @@ class Core:
         self.poll_seconds = POLL_SECONDS if poll_seconds is None else poll_seconds
         self.out = out
         self.err = err
+        self.last_run_id: str | None = None
+        self.status_next: str | None = None
 
     # Output
 
@@ -836,6 +838,7 @@ class Core:
             RunError: The run cannot start, or its first turn did not end
                 with exit 0.
         """
+        self.last_run_id = None
         engine = options.engine
         for name in (options.dir, options.task_file, *options.read):
             if not os.path.exists(name):
@@ -954,6 +957,7 @@ class Core:
             try:
                 record.write_private(run.folder / record.BRIEF_NAME, brief)
                 record.save(run)
+                self.last_run_id = run.id
                 self._say(f"run {run_id}")
                 self._warn(worker.line())
                 if run.read_only:
@@ -2306,13 +2310,17 @@ class Core:
         Returns:
             The exit code.
         """
+        self.status_next = None
         if run_id is not None:
             document = self._document(self._load(run_id))
+            self.status_next = document["next"]
             self._warn_parent([document])
             if as_json:
                 self._say(json.dumps(document, indent=2))
             else:
                 for key, value in document.items():
+                    if key == "next":
+                        continue
                     if key == "status" and document["waiting_for_flow"]:
                         value = self._flow_wait(document)
                     shown = value if isinstance(value, str) else json.dumps(value)
@@ -2343,13 +2351,40 @@ class Core:
         turns, errors = record.turn_results(run)
         for error in errors:
             self._warn(f"WARNING: {error}")
+        session_state = self._session_state(run.id)
+        step, next_line = self.step(run, session_state)
         return {
             **run.to_json(),
-            "session_state": self._session_state(run.id),
+            "session_state": session_state,
             "orphaned": waiting is None and record.orphaned(run),
             "waiting_for_flow": waiting,
             "turns": turns,
+            "step": step,
+            "next": next_line,
         }
+
+    def step(
+        self, run: Run, session_state: str | None = None
+    ) -> tuple[str, str | None]:
+        """Derive a run's step using the core's session and collection checks.
+
+        Args:
+            run: The run record.
+            session_state: An already observed session state, or None to read it.
+
+        Returns:
+            The step name and next line, without printing either.
+        """
+        try:
+            needs_collection = self._needs_collection(run)
+        except RunError:
+            needs_collection = True
+        return steps.derive(
+            run,
+            session_state if session_state is not None else self._session_state(run.id),
+            needs_collection,
+            self._git,
+        )
 
     @staticmethod
     def _flow_wait(document: dict[str, Any]) -> str:

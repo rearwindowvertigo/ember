@@ -198,7 +198,6 @@ def test_subagent_route(
         ["--brief", "--json"],
         ["--brief", "--stall", "10"],
         ["--reply", "answer", "--window"],
-        ["--reply", "answer", "--read", "."],
         ["--reply", "answer", "--claim", "claim-123"],
     ],
 )
@@ -1355,3 +1354,155 @@ def test_sandbox_read_files_supply_citations_and_are_listed(
     code, out, err = invoke(env, cited, "--brief", "--dir", str(repo))
     assert code == 0 and not err
     assert "## Sources to read" in out and f"- {issue}" in out
+
+
+@pytest.mark.parametrize("mode", ["run", "brief", "skip", "ask"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "empty",
+        "whitespace",
+        "nonempty",
+        "folder",
+        "symlink",
+        "missing",
+        "broken symlink",
+        "fifo",
+        "device",
+        "undecodable",
+        "unreadable",
+    ],
+)
+def test_read_file_validation(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    driver: StubDriver,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    kind: str,
+) -> None:
+    source = tmp_path / "read file.md"
+    if kind == "folder":
+        source.mkdir()
+        (source / "empty.md").touch()
+    elif kind == "symlink":
+        target = tmp_path / "empty.md"
+        target.touch()
+        source.symlink_to(target)
+    elif kind == "broken symlink":
+        source.symlink_to(tmp_path / "missing.md")
+    elif kind == "fifo":
+        os.mkfifo(source)
+    elif kind == "device":
+        source = Path("/dev/null")
+    elif kind == "undecodable":
+        source.write_bytes(b"\xff")
+    elif kind != "missing":
+        source.write_text(
+            " \t\n\r\u2003"
+            if kind == "whitespace"
+            else "source text"
+            if kind == "nonempty"
+            else ""
+        )
+    if kind == "unreadable":
+        original = Path.read_text
+
+        def read_text(
+            path: Path, encoding: str | None = None, errors: str | None = None
+        ) -> str:
+            if path == source:
+                raise PermissionError("read denied")
+            return original(path, encoding=encoding, errors=errors)
+
+        monkeypatch.setattr(Path, "read_text", read_text)
+    choices.set_settings(
+        {
+            "single.reviewer": "codex:gpt-5",
+            "gapcheck.when": {"skip": "off", "ask": "ask"}.get(mode, "always"),
+        },
+        env=env,
+    )
+    options = ["--read", str(source), "--dir", str(repo)]
+    if mode == "brief":
+        options += ["--brief"]
+    code, out, err = invoke(env, plan_file, *options, driver=driver)
+    if kind in ("empty", "whitespace", "symlink"):
+        assert code == 64 and not out
+        assert err == (
+            f"emb gapcheck: the read file {source} is empty\n"
+            "next: emb gapcheck --help\n"
+        )
+        assert not paths.runs_dir(env).exists()
+    elif mode == "run" and kind in ("missing", "broken symlink"):
+        assert code == 66 and not out
+        assert "does not exist" in err
+        assert "the read file" not in err
+    else:
+        assert code == 0, err
+        assert "the read file" not in err
+        assert out
+
+
+@pytest.mark.parametrize("mode", ["run", "brief", "skip", "ask"])
+def test_empty_reads_report_in_order_before_other_checks(
+    tmp_path: Path,
+    env: dict[str, str],
+    plan_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "first.md").touch()
+    (tmp_path / "second.md").write_text(" \n")
+    choices.set_settings(
+        {"gapcheck.when": {"skip": "off", "ask": "ask"}.get(mode, "always")},
+        env=env,
+    )
+    options = [
+        "--read",
+        "~/second.md",
+        "--read",
+        "first.md",
+        "--dir",
+        "missing-checkout",
+    ]
+    if mode == "brief":
+        options += ["--brief"]
+    code, out, err = invoke(env, plan_file, *options, "--previous", "missing.json")
+    assert code == 64 and not out
+    assert err.splitlines() == [
+        "emb gapcheck: the read file ~/second.md is empty",
+        "emb gapcheck: the read file first.md is empty",
+        "next: emb gapcheck --help",
+    ]
+    assert not paths.runs_dir(env).exists()
+
+
+def test_reply_rejects_read_before_checking_empty_file(
+    tmp_path: Path, env: dict[str, str], plan_file: Path, reply_file: Path
+) -> None:
+    source = tmp_path / "empty.md"
+    source.touch()
+    code, out, err = invoke(
+        env, plan_file, "--reply", str(reply_file), "--read", str(source)
+    )
+    assert code == 64 and not out
+    assert err == (
+        "emb gapcheck: --read cannot be used with --reply\nnext: emb gapcheck --help\n"
+    )
+    assert str(source) not in err
+
+
+def test_empty_sandbox_read_is_accepted(
+    tmp_path: Path, env: dict[str, str], repo: Path, plan_file: Path
+) -> None:
+    source = tmp_path / "empty.md"
+    source.touch()
+    choices.set_settings({"sandbox.read": [str(source)]}, env=env)
+    code, out, err = invoke(env, plan_file, "--brief", "--dir", str(repo))
+    assert code == 0, err
+    assert str(source) in out

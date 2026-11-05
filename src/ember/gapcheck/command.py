@@ -627,6 +627,19 @@ def main(
             raise CommandError(
                 64, f"the plan {document.path} is empty", "next: emb gapcheck --help"
             )
+        empty_reads = []
+        for item in args.read:
+            path = Path(item).expanduser().absolute()
+            try:
+                if path.is_file() and not path.read_text(encoding="utf-8").strip():
+                    empty_reads.append(item)
+            except OSError, UnicodeError:
+                continue
+        if empty_reads:
+            for item in empty_reads:
+                print(f"emb gapcheck: the read file {item} is empty", file=err)
+            print("next: emb gapcheck --help", file=err)
+            return 64
         earlier = _load_previous(args.previous)
         if earlier is not None:
             command += f" --previous {shlex.quote(str(earlier.path))}"
