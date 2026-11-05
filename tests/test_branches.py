@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Iterator, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -137,12 +138,14 @@ def _cleanup(
     *,
     target: str = "main",
     branch: str | None = None,
+    claim: str | None = None,
     dry_run: bool = False,
     as_json: bool = False,
 ) -> int:
     return branches.cleanup(
         target,
         branch=branch,
+        claim=claim,
         directory=directory,
         dry_run=dry_run,
         as_json=as_json,
@@ -529,7 +532,8 @@ def test_merge_of_a_branch_that_is_not_a_run_branch_keeps_it(
     assert _merge(env, driver, streams, "feature", repo) == 0
     out, _ = streams.take()
     assert out.splitlines()[1] == (
-        "kept feature: not an Ember run branch; next: git branch -d feature"
+        "kept feature: not an Ember run branch; no claim is recorded; "
+        "next: git branch -d feature"
     )
     assert _branch_exists(repo, "feature", env)
     assert len(git(repo, "log", "-1", "--format=%P", env=env).split()) == 2
@@ -625,6 +629,154 @@ def test_merge_takes_the_branch_over_a_tag_of_the_same_name(
 # emb cleanup
 
 
+@pytest.mark.parametrize("claim", [None, "claim-a", "claim-b", "claim", "unknown"])
+@pytest.mark.parametrize("single_branch", [False, True])
+def test_cleanup_filters_recorded_claims_and_merge_suggestions(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    claim: str | None,
+    single_branch: bool,
+) -> None:
+    runs = [
+        replace(_start(tmp_path, env, repo, driver), claim=recorded_claim)
+        for recorded_claim in ["claim-a", "claim-b"]
+    ]
+    for run in runs:
+        record.save(run)
+    selected = runs[:1] if single_branch else runs
+    expected = [run for run in selected if claim is None or run.claim == claim]
+    streams = Streams()
+    options = {"branch": runs[0].branch if single_branch else None, "claim": claim}
+    assert _cleanup(env, driver, streams, repo, **options) == 0
+    out, _ = streams.take()
+    assert len(out.splitlines()) == len(expected)
+    for run in runs:
+        assert run.branch is not None
+        if run in expected:
+            assert f"kept {run.branch}: not contained in main; claim {run.claim}" in out
+            assert (f"next: emb merge {run.branch}" in out) == (claim is not None)
+        else:
+            assert run.branch not in out
+        assert run.branch is not None and _branch_exists(repo, run.branch, env)
+        assert _session_live(tmp_path, run.id)
+    assert _cleanup(env, driver, streams, repo, as_json=True, **options) == 0
+    results = json.loads(streams.take()[0])
+    assert {item["claim"] for item in results} == {run.claim for run in expected}
+    assert {item["run"] for item in results} == {run.id for run in expected}
+    for item in results:
+        assert (item["next"] is not None) == (claim is not None)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_cleanup_claim_removes_only_matching_merged_runs(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    dry_run: bool,
+) -> None:
+    first = replace(_start(tmp_path, env, repo, driver), claim="claim-a")
+    second = replace(_start(tmp_path, env, repo, driver), claim="claim-b")
+    record.save(first)
+    record.save(second)
+    assert first.branch is not None and second.branch is not None
+    _squash(repo, first.branch, env)
+    streams = Streams()
+    assert (
+        _cleanup(
+            env, driver, streams, repo, claim="claim-a", dry_run=dry_run, as_json=True
+        )
+        == 0
+    )
+    [item] = json.loads(streams.take()[0])
+    assert item["run"] == first.id and item["claim"] == first.claim
+    assert item["action"] == ("would remove" if dry_run else "removed")
+    assert _branch_exists(repo, first.branch, env) == dry_run
+    assert Path(first.worktree).exists() == dry_run
+    assert _branch_exists(repo, second.branch, env)
+    assert Path(second.worktree).exists()
+    assert _session_live(tmp_path, second.id)
+
+
+@pytest.mark.parametrize("kind", ["empty", "no-record", "no-claim"])
+def test_cleanup_claim_skips_missing_claims(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    kind: str,
+) -> None:
+    branch = None
+    if kind == "no-record":
+        branch, _ = _manual_branch(repo, env, "manual-000001")
+    elif kind == "no-claim":
+        branch = _start(tmp_path, env, repo, driver).branch
+    streams = Streams()
+    assert _cleanup(env, driver, streams, repo, claim="claim-a", as_json=True) == 0
+    assert json.loads(streams.take()[0]) == []
+    if branch is not None:
+        assert _branch_exists(repo, branch, env)
+        assert _cleanup(env, driver, streams, repo, branch=branch, claim="claim-a") == 0
+        assert streams.take()[0] == ""
+        assert _cleanup(env, driver, streams, repo) == 0
+        assert "no claim is recorded" in streams.take()[0]
+
+
+@pytest.mark.parametrize("claim", [None, "claim-a", "claim-b"])
+def test_cleanup_claim_filters_flow_branches(
+    env: dict[str, str], repo: Path, driver: StubDriver, claim: str | None
+) -> None:
+    flow = branches.create_flow_branch(repo, FLOW_ID, "HEAD", env)
+    data = _flow_record(env, repo, flow.worktree)
+    data["claim"] = "claim-a"
+    flow_record.save(data, env)
+    (flow.worktree / "flow.txt").write_text("flow\n")
+    git(flow.worktree, "add", "flow.txt", env=env)
+    git(flow.worktree, "commit", "-q", "-m", "feat: flow", env=env)
+    streams = Streams()
+    assert _cleanup(env, driver, streams, repo, claim=claim) == 0
+    out, _ = streams.take()
+    if claim == "claim-b":
+        assert out == ""
+    else:
+        assert f"kept {flow.branch}: not contained in main; claim claim-a" in out
+        assert ("next: emb merge" in out) == (claim is not None)
+    assert _branch_exists(repo, flow.branch, env)
+    _squash(repo, flow.branch, env)
+    assert _cleanup(env, driver, streams, repo, claim=claim) == 0
+    assert flow.worktree.exists() == (claim == "claim-b")
+    assert _branch_exists(repo, flow.branch, env) == (claim == "claim-b")
+
+
+@pytest.mark.parametrize("claim", [None, "claim-a", "claim-b"])
+def test_cleanup_claim_filters_detached_worktrees(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    claim: str | None,
+) -> None:
+    run = _start(tmp_path, env, repo, driver, "Review\n", read_only=True)
+    run = replace(run, claim="claim-a")
+    record.save(run)
+    folder = Path(run.worktree)
+    evidence = folder / "evidence"
+    evidence.touch()
+    assert _factory(env, driver)(io.StringIO()).close(run.id) == 0
+    streams = Streams()
+    assert _cleanup(env, driver, streams, repo, claim=claim) == 0
+    out, _ = streams.take()
+    if claim == "claim-b":
+        assert out == ""
+    else:
+        assert f"kept {run.id}:" in out and "; claim claim-a;" in out
+    evidence.unlink()
+    assert _cleanup(env, driver, streams, repo, claim=claim) == 0
+    assert folder.exists() == (claim == "claim-b")
+
+
 def test_cleanup_removes_a_squash_merged_branch(
     tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
 ) -> None:
@@ -663,11 +815,7 @@ def test_cleanup_keeps_a_branch_not_contained(
     streams = Streams()
     assert _cleanup(env, driver, streams, repo) == 0
     out, _ = streams.take()
-    assert out == (
-        f"kept {run.branch}: not contained in main; next: emb merge {run.branch} "
-        "--into main --verdict keep --note '<verdict line>' "
-        "--subject '<commit subject>' (after a Keep verdict)\n"
-    )
+    assert out == (f"kept {run.branch}: not contained in main; no claim is recorded\n")
     assert _branch_exists(repo, run.branch, env)
     assert _session_live(tmp_path, run.id)
     assert record.load(run.id, env).status != record.CLOSED
@@ -744,6 +892,7 @@ def test_cleanup_keeps_a_worktree_with_changes(
     out, _ = streams.take()
     assert out == (
         f"kept {run.branch}: the worktree {worktree} has changes; "
+        "no claim is recorded; "
         f"next: git -C {worktree} status --short\n"
     )
     assert _branch_exists(repo, run.branch, env)
@@ -1058,7 +1207,8 @@ def test_cleanup_branch_option_acts_on_that_branch_only(
     git(repo, "branch", "feature", env=env)
     assert _cleanup(env, driver, streams, repo, branch="feature") == 0
     assert streams.take()[0].splitlines()[-1] == (
-        "kept feature: not an Ember run branch; next: git branch -d feature"
+        "kept feature: not an Ember run branch; no claim is recorded; "
+        "next: git branch -d feature"
     )
 
 

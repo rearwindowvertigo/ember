@@ -420,9 +420,9 @@ def _test_file(file: str) -> bool:
     """Recognize test folders and conventional test filenames."""
     path = PurePosixPath(file)
     return bool(
-        {"test", "tests"}.intersection(path.parts[:-1])
+        {"test", "tests", "__tests__"}.intersection(path.parts[:-1])
         or path.name.startswith("test_")
-        or re.search(r"_test\.", path.name)
+        or re.search(r"_test\.|\.test\.|\.spec\.", path.name)
     )
 
 

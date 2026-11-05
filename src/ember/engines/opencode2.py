@@ -32,6 +32,12 @@ from ember.engines.opencode import (
 )
 from ember.runs.record import Run
 
+PROMPT_TIMEOUT = 120.0
+"""Seconds allowed for a prompt POST, including first-use directory setup."""
+
+DELIVERY_TIMEOUT = 10.0
+"""Seconds to check the recorded message id after a prompt POST times out."""
+
 # Arguments are passed separately so paths and session ids cannot become shell code.
 PANE_SCRIPT = r"""
 binary=$1
@@ -80,6 +86,10 @@ echo "OpenCode server stopped before its session was ready" >&2
 exit 1
 """
 """Start a server and attach its view, selecting Ember's session when ready."""
+
+
+class DeliveryUncertainError(DriverError):
+    """A timed-out prompt could not be confirmed in the session's messages."""
 
 
 def run_config(model: str, read_only: bool, read: Sequence[str] = ()) -> str:
@@ -243,11 +253,55 @@ class OpenCode2Driver(OpenCodeDriver):
         )
         path = f"/api/session/{quote(session, safe='')}/prompt"
         try:
-            code, _ = self._request(run, "POST", path, {"id": message_id, "text": text})
+            code, _ = self._request(
+                run,
+                "POST",
+                path,
+                {"id": message_id, "text": text},
+                timeout=PROMPT_TIMEOUT,
+            )
+        except TimeoutError as error:
+            if self._delivered(run, session, message_id):
+                return
+            raise DeliveryUncertainError(
+                "OpenCode message delivery is uncertain: the prompt timed out "
+                f"and message {message_id} could not be found in the session; "
+                "the message was not resent"
+            ) from error
         except (_RefusedError, OSError, http.client.HTTPException) as error:
             raise DriverError(f"OpenCode did not take the message: {error}") from error
         if code != 200:
             raise DriverError(f"OpenCode did not take the message: HTTP {code}")
+
+    def _delivered(self, run: Run, session: str, message_id: str) -> bool:
+        """Look for the recorded id within a separate bounded delivery check."""
+        deadline = time.monotonic() + DELIVERY_TIMEOUT
+        first = f"/api/session/{quote(session, safe='')}/message"
+        path = first
+        cursors: set[str] = set()
+        while (remaining := deadline - time.monotonic()) > 0:
+            value = self._get(
+                run, path, dict, timeout=min(opencode.HTTP_TIMEOUT, remaining)
+            )
+            messages = value.get("data") if value is not None else None
+            if value is not None and isinstance(messages, list):
+                if any(
+                    isinstance(message, dict) and message.get("id") == message_id
+                    for message in messages
+                ):
+                    return True
+                pagination = value.get("cursor")
+                cursor = (
+                    pagination.get("next") if isinstance(pagination, dict) else None
+                )
+                if isinstance(cursor, str) and cursor not in cursors:
+                    cursors.add(cursor)
+                    path = f"{first}?cursor={quote(cursor, safe='')}"
+                    continue
+            path = first
+            cursors.clear()
+            time.sleep(min(self.poll_seconds, max(0, deadline - time.monotonic())))
+        return False
 
     def _messages(self, run: Run, session: str) -> list[Any] | None:
         """Read all message pages, newest first, retrying an unreadable page."""

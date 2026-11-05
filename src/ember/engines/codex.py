@@ -765,6 +765,32 @@ class CodexDriver(Driver):
         except OSError, UnicodeError, ValueError, AttributeError:
             return False
 
+    def check_trust(
+        self,
+        root: Path,
+        env: Mapping[str, str],
+        *,
+        worktree: Path | None = None,
+    ) -> None:
+        """Refuse a repository Codex does not trust.
+
+        Args:
+            root: The repository root.
+            env: The environment, for Codex's home folder.
+            worktree: An existing worktree whose own trust also permits launch.
+
+        Raises:
+            DriverError: Neither the repository nor the worktree is trusted.
+        """
+        if self.trusted(root, env) or (
+            worktree is not None and self.trusted(worktree, env)
+        ):
+            return
+        raise DriverError(
+            f"Codex does not trust {root}; the owner trusts it by running "
+            "codex there once and choosing to trust the folder"
+        )
+
     def command(self, run: Run, first_message: str) -> LaunchSpec:
         """Return the Codex command, with the first message to paste.
 
@@ -787,13 +813,7 @@ class CodexDriver(Driver):
         if binary is None:
             raise DriverError("the codex CLI is not on PATH")
         root = self._repository_root(run)
-        if not (
-            self.trusted(root, run.env) or self.trusted(Path(run.worktree), run.env)
-        ):
-            raise DriverError(
-                f"Codex does not trust {root}; the owner trusts it by running "
-                "codex there once and choosing to trust the folder"
-            )
+        self.check_trust(root, run.env, worktree=Path(run.worktree))
         argv = [binary, "-C", run.worktree, "-m", run.model]
         # An update prompt would hold the session before it takes the brief.
         argv += ["-c", "check_for_update_on_startup=false"]

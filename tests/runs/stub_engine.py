@@ -465,6 +465,11 @@ def make_repo(tmp_path: Path, env: Mapping[str, str]) -> Path:
     (repo / "README.md").write_text("hello\n")
     git(repo, "add", "-A", env=env)
     git(repo, "commit", "-q", "-m", "first", env=env)
+    codex = Path(env["HOME"]) / ".codex"
+    codex.mkdir(parents=True, exist_ok=True)
+    (codex / "config.toml").write_text(
+        f'[projects.{json.dumps(str(repo))}]\ntrust_level = "trusted"\n'
+    )
     return repo
 
 

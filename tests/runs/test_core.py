@@ -4,6 +4,7 @@ import os
 import shlex
 import stat
 import subprocess
+import sys
 import threading
 import time
 import tomllib
@@ -16,12 +17,13 @@ from typing import Any
 import pytest
 
 from ember import choices, engines, paths, processes, sandbox
-from ember.engines import Driver, LaunchSpec, models, status
-from ember.engines.codex import CodexDriver
+from ember.engines import Driver, LaunchSpec, models, opencode2, status
+from ember.engines.codex import CodexDriver, codex_home
 from ember.engines.opencode import OpenCodeDriver
-from ember.engines.opencode2 import OpenCode2Driver
+from ember.engines.opencode2 import DeliveryUncertainError, OpenCode2Driver
 from ember.runs import core, exits, record
 from ember.runs.core import Core, RunError, StartOptions
+from engines.test_opencode2 import STUB_SERVER  # pyrefly: ignore[missing-import]
 
 from .stub_engine import (  # pyrefly: ignore[missing-import]
     StubDriver,
@@ -111,6 +113,83 @@ def _events(tmp_path: Path, run_id: str) -> list[dict[str, str]]:
 
 
 # Starting an editing run
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize("linked", [False, True])
+def test_codex_trust_refusal_precedes_launch_setup(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    dry_run: bool,
+    read_only: bool,
+    linked: bool,
+) -> None:
+    (codex_home(env) / "config.toml").unlink()
+    checkout = repo
+    if linked:
+        checkout = tmp_path / "linked"
+        git(repo, "worktree", "add", "-q", "--detach", str(checkout), env=env)
+        # Trusting the source checkout does not trust a new worker worktree.
+        (codex_home(env) / "config.toml").write_text(
+            f'[projects.{json.dumps(str(checkout))}]\ntrust_level = "trusted"\n'
+        )
+    folder = checkout / "subfolder"
+    folder.mkdir()
+    brief = _brief(tmp_path, "Task\n")
+    branches = git(repo, "branch", "--list", env=env)
+    worktrees = git(repo, "worktree", "list", "--porcelain", env=env)
+    before = set(tmp_path.rglob("*"))
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("untrusted repository reached launch setup")
+
+    monkeypatch.setattr(record, "new_id", forbidden)
+    monkeypatch.setattr(sandbox, "require", forbidden)
+    monkeypatch.setattr(paths, "ensure_worker_cache_dir", forbidden)
+    assert _start(
+        _core(env, CodexDriver(env)), folder, brief,
+        engine="codex", model="gpt-5", effort="high",
+        dry_run=dry_run, read_only=read_only,
+    ) == 69  # fmt: skip
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.splitlines() == [
+        f"emb run: Codex does not trust {repo}; the owner trusts it by running "
+        "codex there once and choosing to trust the folder",
+        f"owner: run codex in {repo} once and choose to trust the folder",
+    ]
+    assert "next:" not in err
+    assert not paths.runs_dir(env).exists()
+    assert not paths.worktrees_dir(env).exists()
+    assert git(repo, "branch", "--list", env=env) == branches
+    assert git(repo, "worktree", "list", "--porcelain", env=env) == worktrees
+    assert set(tmp_path.rglob("*")) - before <= {
+        paths.settings_db_path(env).with_suffix(".db-wal"),
+        paths.settings_db_path(env).with_suffix(".db-shm"),
+    }
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("read_only", [False, True])
+def test_codex_repository_trust_allows_a_linked_checkout(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    dry_run: bool,
+    read_only: bool,
+) -> None:
+    linked = tmp_path / "linked"
+    git(repo, "worktree", "add", "-q", "--detach", str(linked), env=env)
+    assert _start(
+        _core(env, _driver(env, "codex")), linked, _brief(tmp_path, "Task\n"),
+        engine="codex", model="gpt-5", effort="high",
+        dry_run=dry_run, read_only=read_only,
+    ) == 0, capsys.readouterr().err  # fmt: skip
 
 
 @pytest.mark.parametrize("read_only", [False, True])
@@ -3142,6 +3221,12 @@ def test_uncertain_capacity_delivery_is_never_resent_on_recovery(
     saved = record.load_outcome(run, 1)
     assert saved["attempts"][-1]["sending"]
     assert not saved["attempts"][-1]["sent"]
+    core.tmux.kill(run.id, env=env)
+    record.update(run, {"last_reason": None})
+    assert core_.execute(lambda: core_.close(run.id)) == 75
+    assert "delivery is uncertain" in capsys.readouterr().err
+    assert record.load(run.id, env).status == record.FAILED
+    assert core_.close(run.id, force=True) == 0
 
 
 def test_recovery_observes_a_confirmed_retry_without_sending_again(
@@ -3205,6 +3290,7 @@ def test_corrupt_retry_journal_does_not_reset_the_budget(
 
 
 @pytest.mark.parametrize("secret", [False, True])
+@pytest.mark.parametrize("result", ["success", "worker_failure", "commit_failure"])
 def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
     tmp_path: Path,
     env: dict[str, str],
@@ -3212,15 +3298,22 @@ def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     secret: bool,
+    result: str,
 ) -> None:
     folder = Path(env["HOME"]) / (".ssh" if secret else ".toolchain, version")
     folder.mkdir()
     monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
     choices.set_settings({"sandbox.claude": "on"}, env=env)
     text = f"Permission denied: '{folder}/python'"
-    brief = _brief(tmp_path, f"Task\n@reply {text}\n")
+    command = "@fail" if result == "worker_failure" else "@reply"
+    brief = _brief(tmp_path, f"Task\n@write result.txt done\n{command} {text}\n")
+    if result == "commit_failure":
+        hook = repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+    expected = {"success": 0, "worker_failure": 71, "commit_failure": 77}[result]
     core_ = _core(env)
-    assert _start(core_, repo, brief) == 0
+    assert _start(core_, repo, brief) == expected
     out, err = capsys.readouterr()
     run = record.load(_run_id(out), env)
     item = {
@@ -3230,11 +3323,20 @@ def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
     }
     assert record.load_outcome(run, 1)["denied_paths"] == [item]
     assert err.count(f"WARNING: {run.id} was denied {folder}") == 1
-    assert "owner: Settings, Sandbox read paths; emb choices --set " in err
-    owner = next(
-        line for line in err.splitlines() if line.startswith("owner: Settings")
+    assert record.load_outcome(run, 1)["exit"] == expected
+    owners = [line for line in err.splitlines() if line.startswith("owner:")]
+    assert len(owners) == 1
+    owner = owners[0]
+    qualification = (
+        "the turn finished (exit 0); read access is needed only if "
+        "the worker's report says the work needed the path; "
+        if expected == 0
+        else ""
     )
-    command = shlex.split(owner.split("; ", 1)[1])
+    assert owner.startswith(
+        f"owner: {qualification}Settings, Sandbox read paths; emb choices --set "
+    )
+    command = shlex.split(owner.rsplit("; ", 1)[1])
     key, value = command[-1].split("=", 1)
     assert key == "sandbox.read"
     assert choices.parse_value(key, value) == [str(folder)]
@@ -3243,7 +3345,7 @@ def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
     # A permission change applies to the next launch, never the saved snapshot.
     choices.set_settings({"sandbox.read": [str(folder)]}, env=env)
     assert sandbox.denied_paths(text, run.sandbox_paths) == [item]
-    assert _start(core_, repo, brief) == 0
+    assert _start(core_, repo, brief) == expected
     out, err = capsys.readouterr()
     next_run = record.load(_run_id(out), env)
     assert record.load_outcome(next_run, 1)["denied_paths"] == []
@@ -3251,12 +3353,14 @@ def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
     assert sandbox.denied_paths(text, next_run.sandbox_paths) == []
 
 
+@pytest.mark.parametrize("retry_succeeds", [False, True])
 def test_denials_union_all_capacity_attempts_with_one_warning_each(
     tmp_path: Path,
     env: dict[str, str],
     repo: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    retry_succeeds: bool,
 ) -> None:
     folders = [Path(env["HOME"]) / name for name in (".rustup", ".pyenv")]
     for folder in folders:
@@ -3264,7 +3368,7 @@ def test_denials_union_all_capacity_attempts_with_one_warning_each(
     choices.set_settings(
         {"sandbox.codex": "on", "provider.capacity_wait": "5"}, env=env
     )
-    driver = _ProviderDriver(env, ["capacity", "done"])
+    driver = _ProviderDriver(env, ["capacity", "done" if retry_succeeds else "outage"])
     monkeypatch.setattr(
         driver,
         "turn_output",
@@ -3276,16 +3380,27 @@ def test_denials_union_all_capacity_attempts_with_one_warning_each(
     monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
     core_ = _core(env, driver)
     monkeypatch.setattr(core_, "_sandboxed", lambda spec, run, common: spec)
-    assert (
-        _start(core_, repo, _brief(tmp_path, "Task"), engine="codex", model="gpt-5")
-        == 0
-    )
+    assert _start(
+        core_, repo, _brief(tmp_path, "Task"), engine="codex", model="gpt-5"
+    ) == (0 if retry_succeeds else 73)
     out, err = capsys.readouterr()
     run = record.load(_run_id(out), env)
     denials = record.load_outcome(run, 1)["denied_paths"]
     assert {item["path"] for item in denials} == {str(folder) for folder in folders}
     for folder in folders:
         assert err.count(f"WARNING: {run.id} was denied {folder}") == 1
+
+    assert record.load_outcome(run, 1)["exit"] == (0 if retry_succeeds else 73)
+    owners = [line for line in err.splitlines() if line.startswith("owner:")]
+    assert len(owners) == len(folders)
+    for owner in owners:
+        if retry_succeeds:
+            assert owner.startswith(
+                "owner: the turn finished (exit 0); read access is needed only if "
+                "the worker's report says the work needed the path; "
+            )
+        else:
+            assert owner.startswith("owner: Settings, Sandbox read paths; ")
 
 
 def test_protected_runtime_denial_has_no_settings_suggestion(
@@ -3655,10 +3770,15 @@ def test_forced_close_keeps_detached_worktree_while_command_holds_lock(
     assert not Path(saved.worktree).exists()
 
 
+@pytest.mark.parametrize("command", ["gapcheck", "panel"])
 def test_start_records_the_parent_and_status_reports_an_orphan(
-    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
 ) -> None:
-    parent = record.parent("gapcheck")
+    parent = record.parent(command)
     assert parent is not None
     code = _start(_core(env), repo, _brief(tmp_path, "Task\n"), parent=parent)
     assert code == 0
@@ -3671,7 +3791,8 @@ def test_start_records_the_parent_and_status_reports_an_orphan(
     assert core_.execute(lambda: core_.status(run_id, as_json=True)) == 0
     out, err = capsys.readouterr()
     assert json.loads(out)["orphaned"] is True
-    assert f"WARNING: run {run_id} is orphaned: emb gapcheck ended" in err
+    assert json.loads(out)["waiting_for_flow"] is None
+    assert f"WARNING: run {run_id} is orphaned: emb {command} ended" in err
     assert err.splitlines()[-1] == (
         f"next: emb run --recover {run_id}, then emb run --close {run_id}"
     )
@@ -3730,3 +3851,119 @@ def test_home_file_denial_is_recorded_without_read_suggestion(
             "no folder can be offered because each folder that holds it "
             "also holds private files" in err
         )
+
+
+@pytest.mark.parametrize("failure", ["refused", "absent", "unreadable"])
+def test_opencode_failed_send_stops_server_and_client_and_keeps_worktree(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    folder = tmp_path / "server"
+    folder.mkdir()
+    (folder / "view-hang").write_text("true")
+    if failure == "refused":
+        (folder / "prompt-code").write_text("400")
+    else:
+        (folder / "prompt-hang").write_text("true")
+    if failure == "unreadable":
+        (folder / "messages-code").write_text("500")
+    binary = Path(env["PATH"].split(os.pathsep)[0]) / "opencode"
+    binary.write_text(f"#!{sys.executable}\n" + STUB_SERVER)
+    binary.chmod(0o755)
+    for name, target in (
+        ("sh", "/bin/sh"),
+        ("python3", sys.executable),
+        ("sleep", "/bin/sleep"),
+    ):
+        (binary.parent / name).symlink_to(target)
+    monkeypatch.setattr(opencode2, "PROMPT_TIMEOUT", 0.05)
+    monkeypatch.setattr(opencode2, "DELIVERY_TIMEOUT", 0.1)
+    children: list[processes.Process] = []
+
+    class FailingStart(OpenCode2Driver):
+        def command(self, run: record.Run, first_message: str) -> LaunchSpec:
+            spec = super().command(run, first_message)
+            return replace(
+                spec,
+                env={
+                    **spec.env,
+                    "STUB_FOLDER": str(folder),
+                    "STUB_STATE": str(run.folder / opencode2.opencode.STATE_NAME),
+                },
+            )
+
+        def ready(self, run: record.Run) -> bool:
+            if not super().ready(run) or not (folder / "view.json").exists():
+                return False
+            pid = core.tmux.pane_pid(run.id, env=env)
+            assert pid is not None
+            children.extend(processes.tree(pid))
+            return True
+
+    driver = FailingStart(env, poll_seconds=0.01, stop_seconds=1)
+    core_ = _core(env, driver)
+    assert (
+        _start(
+            core_,
+            repo,
+            _brief(tmp_path, "Review\n"),
+            engine="opencode",
+            model="openrouter/test",
+            read_only=True,
+        )
+        == 71
+    )
+    out, err = capsys.readouterr()
+    saved = record.load(_run_id(out), env)
+    assert saved.status == record.FAILED
+    assert saved.turn_state == record.SENT
+    assert Path(saved.worktree).is_dir()
+    assert children and not any(processes.running(child) for child in children)
+    assert driver._server_state(saved) == opencode2.DOWN
+    assert not core.tmux.exists(saved.id, env=env)
+    requests = [
+        json.loads(line)
+        for line in (folder / "requests.jsonl").read_text().splitlines()
+    ]
+    assert sum(request["path"].endswith("/prompt") for request in requests) == 1
+    assert driver._state(saved)["turns"]["1"]
+    if failure != "refused":
+        assert "delivery is uncertain" in err
+        assert "message was not resent" in err
+    assert core_.close(saved.id) == 0
+    assert record.load(saved.id, env).status == record.CLOSED
+    assert not Path(saved.worktree).exists()
+
+
+def test_uncertain_followup_keeps_new_turn_pending(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class Uncertain(StubDriver):
+        def send(self, run: record.Run, text: str) -> None:
+            if run.turn > 1:
+                raise DeliveryUncertainError("OpenCode message delivery is uncertain")
+            super().send(run, text)
+
+    driver = Uncertain("opencode", script_path(env))
+    core_ = _core(env, driver)
+    assert (
+        _start(core_, repo, _brief(tmp_path, "Task\n"), engine="opencode", model="a/b")
+        == 0
+    )
+    saved = record.load(_run_id(capsys.readouterr().out), env)
+    message = _brief(tmp_path, "Next\n", "next.md")
+    assert core_.execute(lambda: core_.send(saved.id, message)) == 71
+    err = capsys.readouterr().err
+    assert "delivery is uncertain" in err
+    assert "the message was not sent" not in err
+    saved = record.load(saved.id, env)
+    assert saved.turn == 2 and saved.turn_state == record.SENT
+    assert core_.execute(lambda: core_.send(saved.id, message)) == 75
+    assert Path(saved.worktree).is_dir()

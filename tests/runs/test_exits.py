@@ -44,6 +44,12 @@ def test_unknown_code_uses_exit_1_line() -> None:
     assert exits.line(99) == "next: emb run --status"
 
 
+def test_codex_trust_requires_owner_action() -> None:
+    assert exits.line(69, "trust", dir="/repo") == (
+        "owner: run codex in /repo once and choose to trust the folder"
+    )
+
+
 def test_emit_prints_the_line() -> None:
     stream = io.StringIO()
     text = exits.emit(75, "close", stream=stream, run="r1")

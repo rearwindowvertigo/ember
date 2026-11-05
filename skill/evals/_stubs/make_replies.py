@@ -364,6 +364,7 @@ def denied_path_replies() -> dict[str, str]:
                 run, engines.TurnOutcome(engines.DONE, reply=reply), 45.0
             )
         core._write_outcome(run, {**core._saved_outcome(run), "exit": 0})
+        core._warn_denial_owners(run, 0)
         core._say(f"run {run.id}")
         core._print_turn(run, 0, 0, None, reply, 45.0, None)
         prefix = "sandbox-denied-paths/files/.ember-eval/replies/"

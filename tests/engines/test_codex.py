@@ -323,6 +323,39 @@ def test_command_trusts_a_worktree_through_its_repository(setup: Setup) -> None:
     assert spec.cwd == worktree
 
 
+@pytest.mark.parametrize("config", [None, "not = [valid", "projects = []", ""])
+def test_check_trust_refuses_without_writing_files(
+    setup: Setup, config: str | None
+) -> None:
+    path = setup.codex_home / "config.toml"
+    if config is None:
+        path.unlink()
+    else:
+        path.write_text(config)
+    before = {p: p.read_bytes() for p in setup.codex_home.rglob("*") if p.is_file()}
+    with pytest.raises(DriverError) as caught:
+        CodexDriver(setup.env).check_trust(setup.repo, setup.env)
+    assert str(caught.value) == (
+        f"Codex does not trust {setup.repo}; the owner trusts it by running "
+        "codex there once and choosing to trust the folder"
+    )
+    assert {
+        p: p.read_bytes() for p in setup.codex_home.rglob("*") if p.is_file()
+    } == before
+
+
+def test_command_accepts_an_explicitly_trusted_worktree(setup: Setup) -> None:
+    _git(setup.repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q",
+         "--allow-empty", "-m", "base")  # fmt: skip
+    worktree = setup.tmp / "worktree"
+    _git(setup.repo, "worktree", "add", "-q", str(worktree))
+    (setup.codex_home / "config.toml").write_text(
+        f'[projects.{json.dumps(str(worktree))}]\ntrust_level = "trusted"\n'
+    )
+    spec = CodexDriver(setup.env).command(_run(setup, worktree=str(worktree)), BRIEF)
+    assert spec.cwd == worktree
+
+
 def test_command_fails_outside_a_repository(setup: Setup) -> None:
     folder = setup.tmp / "plain"
     folder.mkdir()

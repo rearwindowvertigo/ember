@@ -16,7 +16,8 @@ from typing import Any
 import pytest
 
 from ember import branches, choices, paths
-from ember.flows import briefs, lock, plan, record, runner
+from ember.cli import build_parser
+from ember.flows import briefs, command, lock, plan, record, runner
 from ember.runs import record as runs
 from ember.runs.core import Core, StartOptions
 from runs.stub_engine import (  # pyrefly: ignore[missing-import]
@@ -186,6 +187,56 @@ def test_dependencies_and_overlaps_form_two_waves(h: Harness, overlap: bool) -> 
     assert flow["wave"] == 2
     a, b = flow["tasks"]
     assert runs.load(b["writer_run"], h.env).base == a["merge_commit"]
+    folder = record.folder(h.id, h.env) / "briefs"
+    review = next(folder.glob("b-review-*.md")).read_text()
+    assert "## Merged sibling tasks" not in review
+
+
+def test_review_lists_merged_siblings_absent_from_task_branch(h: Harness) -> None:
+    h.scripts_update(**{"Review of task a, round 1,": "@reply " + FIX})
+    h.create([task("a"), task("b"), task("c", after=["a"])], rounds=0, parallel=1)
+    flow = h.run()
+    a, b, c = flow["tasks"]
+    assert [item["status"] for item in (a, b, c)] == ["stopped", "merged", "blocked"]
+    folder = record.folder(h.id, h.env) / "briefs"
+    first = next(folder.glob("a-review-*.md"))
+    assert "## Merged sibling tasks" not in first.read_text()
+    h.scripts_update(**{"Review of task a, round 1,": "@reply " + PASS})
+    h.answer("review")
+    assert h.run()["status"] == "done"
+    review = next(path for path in folder.glob("a-review-*.md") if path != first)
+    text = review.read_text()
+    section = text.split("## Merged sibling tasks\n\n", 1)[1].split("\n\n## ", 1)[0]
+    assert f"    b: {b['subject']}\n    commit: {b['merge_commit']}" in section
+    assert "on the flow branch and absent from the task branch" in section
+    assert f"a: {a['subject']}" not in section
+    assert f"c: {c['subject']}" not in section
+    for path in (flow["worktree"], a["worktree"], str(h.repo)):
+        assert path not in text
+
+
+@pytest.mark.parametrize("commit", [None, "missing"])
+def test_merged_sibling_without_recorded_commit_is_omitted(
+    h: Harness, commit: str | None
+) -> None:
+    h.create([task("a"), task("b")])
+    instance = h.instance()
+    a, b = instance.flow["tasks"]
+    a["head"] = instance.flow["base"]
+    b.update(status="merged", merge_commit=commit)
+    if commit == "missing":
+        del b["merge_commit"]
+    assert instance.merged_siblings(a) == []
+
+
+def test_merged_sibling_unreadable_commit_is_not_reported_absent(h: Harness) -> None:
+    h.create([task("a"), task("b")])
+    instance = h.instance()
+    a, b = instance.flow["tasks"]
+    a["head"] = instance.flow["base"]
+    b.update(status="merged", merge_commit="0" * 40)
+    with pytest.raises(runner.RunnerError, match="git merge-base"):
+        instance.merged_siblings(a)
 
 
 def test_fix_round_has_previous_head_and_real_plan_briefs(h: Harness) -> None:
@@ -251,6 +302,53 @@ def test_review_stops_and_blocks_transitively(
     assert not any(e["kind"] == "end" for e in events)
     stop = next(e for e in events if e["kind"] == "lead_stop")
     assert len(stop["choices"]) == 5
+
+
+@pytest.mark.parametrize("latest_should", [False, True])
+def test_status_distinguishes_two_reviews(h: Harness, latest_should: bool) -> None:
+    retained = [
+        {"severity": "should", "problem": "tidy"},
+        {"severity": "lead", "problem": "choose format"},
+    ]
+    latest = (
+        [{"severity": "should", "problem": "new suggestion"}] if latest_should else []
+    )
+    h.scripts_update(
+        **{
+            "Review of task a, round 1,": "@reply "
+            + json.dumps({"verdict": "fix", "findings": [MUST, *retained]}),
+            "Fix round 1 of task a": "@write a fixed",
+            "Review of task a, round 2,": "@reply "
+            + json.dumps({"verdict": "pass", "findings": latest}),
+        }
+    )
+    h.create(rounds=1)
+    item = h.run()["tasks"][0]
+    assert item["status"] == "merged"
+    assert item["round"] == 1
+    assert [review["round"] for review in item["reviews"]] == [0, 1]
+    first, second = item["reviews"]
+    expected = [(1, first["run"]), (1, first["run"])]
+    if latest_should:
+        expected.append((2, second["run"]))
+    assert [(f["round"], f["run"]) for f in item["findings"]] == expected
+    assert [f["problem"] for f in item["findings"]] == [
+        f["problem"] for f in [*retained, *latest]
+    ]
+    out, err = io.StringIO(), io.StringIO()
+    args = build_parser().parse_args(["flow", "--status", h.id, "--json"])
+    assert command.main(args, h.env, out=out, err=err) == 0, err.getvalue()
+    reported = json.loads(out.getvalue())["tasks"][0]
+    assert reported["findings"] == item["findings"]
+    assert reported["latest_review"] == {
+        "round": 2,
+        "run": second["run"],
+        "verdict": "pass",
+        "findings": {"must": 0, "should": int(latest_should), "lead": 0},
+    }
+    watch = command._task_report(h.id, item)
+    assert watch["latest_review"] == reported["latest_review"]
+    assert watch["findings"] == {"must": 0, "should": 1 + int(latest_should), "lead": 1}
 
 
 def test_exhausted_fix_budget(h: Harness) -> None:
@@ -323,6 +421,50 @@ def test_writer_failure_and_provider_halt(h: Harness, failure: str) -> None:
         assert resumed["tasks"][1]["status"] == "merged"
     else:
         assert flow["tasks"][1]["status"] == "merged"
+
+
+def test_lead_stop_keeps_live_writer_with_flow(
+    h: Harness, capsys: pytest.CaptureFixture[str]
+) -> None:
+    h.scripts_update(**{"Review of task a, round 1,": "@reply " + FIX})
+    h.create(rounds=0)
+    flow = h.run()
+    assert flow["status"] == "stopped"
+    assert flow["reason"] == "waiting for the lead: a"
+    writer = runs.load(flow["tasks"][0]["writer_run"], h.env)
+    assert writer.status == runs.WAITING
+    assert writer.parent is not None
+    # The runner has returned; model its process exiting with a stale start time.
+    writer = runs.update(
+        writer, {"parent": {**writer.parent, "start": writer.parent["start"] + 1}}
+    )
+    assert not runs.orphaned(writer)
+    assert runs.waiting_for_flow(writer) == h.id
+    core = h.factory(h.env)
+    capsys.readouterr()
+    for single in (True, False):
+        for as_json in (True, False):
+            assert core.status(writer.id if single else None, as_json=as_json) == 0
+            out, err = capsys.readouterr()
+            waiting = f"waiting for the lead's answer to flow {h.id}"
+            assert f"WARNING: run {writer.id} is {waiting}" in err
+            assert "next:" not in err and "orphaned" not in err
+            if as_json:
+                data = json.loads(out)
+                if not single:
+                    data = next(item for item in data if item["id"] == writer.id)
+                assert data["status"] == runs.WAITING
+                assert data["session_state"] == "live"
+                assert data["orphaned"] is False
+                assert data["waiting_for_flow"] == h.id
+            else:
+                assert waiting in out
+    assert runs.load(writer.id, h.env) == writer
+    h.scripts_update(**{"Review of task a, round 1,": "@reply " + PASS})
+    h.answer("review")
+    resumed = h.run()
+    assert resumed["status"] == "done"
+    assert resumed["tasks"][0]["writer_run"] == writer.id
 
 
 @pytest.mark.parametrize("role", ["writer", "reviewer"])

@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from ember import __version__, choices, deps, paths, skill
+from ember import __version__, branches, choices, deps, paths, skill
 from ember.cli import main
 from ember.engines import models, status
 
@@ -38,6 +38,34 @@ def test_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
         main(["--help"])
     assert exit_info.value.code == 0
     assert "usage: emb" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("claim", [None, "claim-a"])
+def test_cleanup_passes_claim_and_branch(
+    monkeypatch: pytest.MonkeyPatch, claim: str | None
+) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def cleanup(target: str, **kwargs: Any) -> int:  # noqa: ANN401
+        calls.append((target, kwargs))
+        return 0
+
+    monkeypatch.setattr(branches, "cleanup", cleanup)
+    argv = ["cleanup", "--merged-into", "main", "--branch", "ember/claude/run-000001"]
+    if claim is not None:
+        argv.extend(["--claim", claim])
+    assert main(argv, env={}) == 0
+    [(target, options)] = calls
+    assert target == "main"
+    assert options["claim"] == claim
+    assert options["branch"] == "ember/claude/run-000001"
+
+
+def test_cleanup_help_names_claim(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["cleanup", "--help"])
+    assert exit_info.value.code == 0
+    assert "--claim ID" in capsys.readouterr().out
 
 
 def test_choices_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:

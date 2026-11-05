@@ -224,9 +224,10 @@ omit `provider_kind` and `attempts`; the successful turn's seconds include
 the capacity wait while its attempt seconds exclude it.
 
 `sandbox-denied-paths` generates warnings, owner actions and status with
-`sandbox.hidden_snapshot`, the denial detector, `Core._save_outcome` and
-`Core.status`. An isolated home holds toolchain, credential, configuration
-and protected paths. An earlier capacity attempt reports the toolchain;
+`sandbox.hidden_snapshot`, the denial detector, `Core._save_outcome`,
+`Core._warn_denial_owners` and `Core.status`. An isolated home holds toolchain,
+credential, configuration and protected paths. An earlier capacity attempt
+reports the toolchain;
 the final attempt reports the other paths and exits 0. The turn keeps their
 union. Fixture paths use `/eval`, independently of the owner's home.
 

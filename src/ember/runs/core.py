@@ -32,6 +32,7 @@ from typing import Any, TextIO
 
 from ember import choices, db, engines, paths, processes, sandbox, tmux
 from ember.engines import Driver, LaunchSpec, TurnOutcome, models, status
+from ember.engines.opencode2 import DeliveryUncertainError
 from ember.runs import exits, record, worktrees
 from ember.runs.record import Run
 
@@ -108,7 +109,9 @@ def worktree_removal_reason(run: Run) -> str | None:
     """
     if run.status not in (record.CLOSED, record.FAILED):
         return "not ended"
-    if run.turn_state == record.SENT:
+    if run.turn_state == record.SENT and not (
+        run.status == record.CLOSED and run.read_only and run.detached
+    ):
         return f"turn {run.turn} of {run.id} is sent or delivery is uncertain"
     if run.turn_state == record.COLLECTED and not run.read_only:
         return f"turn {run.turn} of {run.id} is collected but not committed"
@@ -448,7 +451,10 @@ class Core:
             yield
         except engines.DriverError as error:
             raise RunError(
-                exits.ENGINE_FAILED, f"{run.id}: {error}", variant, run=run.id
+                exits.ENGINE_FAILED,
+                f"{run.id}: {error}",
+                None if isinstance(error, DeliveryUncertainError) else variant,
+                run=run.id,
             ) from error
         except paths.RuntimeDirError as error:
             raise RunError(
@@ -862,6 +868,7 @@ class Core:
         if not common_dir:
             raise RunError(exits.NOT_A_CHECKOUT, f"cannot find the git folder of {top}")
         common = Path(common_dir).resolve()
+        self._check_codex_trust(engine, common)
         if options.base is not None and not options.read_only:
             raise RunError(exits.USAGE, "a saved base requires a read-only run")
         base = self._git_out(
@@ -979,6 +986,18 @@ class Core:
                 self._record_exit(run, failure.code, str(failure), status=record.FAILED)
                 raise failure from error
             return self._turn(run, driver, started, window)
+
+    def _check_codex_trust(self, engine: str, common: Path) -> None:
+        """Refuse an untrusted Codex repository before creating launch artifacts."""
+        if engine != "codex":
+            return
+        from ember.engines.codex import CodexDriver
+
+        root = common.parent
+        try:
+            CodexDriver(self.env).check_trust(root, self.env)
+        except engines.DriverError as error:
+            raise RunError(exits.UNAVAILABLE, str(error), "trust", dir=root) from error
 
     def _check_kept(
         self,
@@ -1304,6 +1323,7 @@ class Core:
                 self._record_exit(
                     run, exits.PROVIDER_ERROR, outcome.reason, status=record.FAILED
                 )
+                self._warn_denial_owners(run, exits.PROVIDER_ERROR)
                 raise RunError(
                     exits.PROVIDER_ERROR, outcome.reason or "", "uncertain", run=run.id
                 )
@@ -1622,6 +1642,7 @@ class Core:
                 **({"retry_clock": None} if "retry_clock" in saved else {}),
             },
         )
+        self._warn_denial_owners(run, code)
         self._print_turn(run, code, files, commit, reply, seconds, window)
         if code:
             raise RunError(code, message or "", variant, **context)
@@ -1697,35 +1718,6 @@ class Core:
                     f"WARNING: {run.id} was denied {item['path']}"
                     + (f" ({item['reason']})" if item["reason"] != "hidden" else "")
                 )
-                if item["reason"] == "startup file":
-                    continue
-                problem = sandbox.read_path_problem(item["path"], self.env)
-                if problem:
-                    self._warn(
-                        f"owner: {problem}; it cannot be added to "
-                        "Settings, Sandbox read paths"
-                    )
-                elif item["reason"] == "hidden" and item["allow_path"] is None:
-                    self._warn(
-                        f"owner: {item['path']} is hidden; no folder can be offered "
-                        "because each folder that holds it also holds private files"
-                    )
-                elif item["reason"] != "protected":
-                    reads = [p for p in run.read_effective if p not in run.read]
-                    with contextlib.suppress(db.DatabaseError):
-                        reads = list(
-                            choices.read(env=self.env)["answers"]["sandbox.read"][
-                                "value"
-                            ]
-                        )
-                    reads = list(
-                        dict.fromkeys([*reads, item["allow_path"] or item["path"]])
-                    )
-                    setting = shlex.quote("sandbox.read=" + json.dumps(reads))
-                    self._warn(
-                        "owner: Settings, Sandbox read paths; "
-                        f"emb choices --set {setting}"
-                    )
         data = {
             **saved,
             "denied_paths": denials,
@@ -1739,6 +1731,43 @@ class Core:
             "seconds": seconds,
         }
         self._write_outcome(run, data)
+
+    def _warn_denial_owners(self, run: Run, code: int) -> None:
+        """Print denied-path owner actions after the turn's exit is recorded."""
+        for item in self._saved_outcome(run).get("denied_paths", []):
+            if item["reason"] == "startup file":
+                continue
+            problem = sandbox.read_path_problem(item["path"], self.env)
+            if problem:
+                self._warn(
+                    f"owner: {problem}; it cannot be added to "
+                    "Settings, Sandbox read paths"
+                )
+            elif item["reason"] == "hidden" and item["allow_path"] is None:
+                self._warn(
+                    f"owner: {item['path']} is hidden; no folder can be offered "
+                    "because each folder that holds it also holds private files"
+                )
+            elif item["reason"] != "protected":
+                reads = [p for p in run.read_effective if p not in run.read]
+                with contextlib.suppress(db.DatabaseError):
+                    reads = list(
+                        choices.read(env=self.env)["answers"]["sandbox.read"]["value"]
+                    )
+                reads = list(
+                    dict.fromkeys([*reads, item["allow_path"] or item["path"]])
+                )
+                setting = shlex.quote("sandbox.read=" + json.dumps(reads))
+                qualification = (
+                    "the turn finished (exit 0); read access is needed only if "
+                    "the worker's report says the work needed the path; "
+                    if code == exits.OK
+                    else ""
+                )
+                self._warn(
+                    f"owner: {qualification}Settings, Sandbox read paths; "
+                    f"emb choices --set {setting}"
+                )
 
     def _saved_outcome(self, run: Run) -> dict[str, Any]:
         try:
@@ -1781,6 +1810,7 @@ class Core:
                     "seconds": time.monotonic() - started,
                 },
             )
+            self._warn_denial_owners(run, _outcome_exit(outcome) or result[3])
             return result
 
     def _commit(
@@ -1989,9 +2019,13 @@ class Core:
                 with self._engine_calls(run, "send"):
                     driver.send(run, text)
             except RunError as error:
-                # The message is not known to be delivered: the turn did not
-                # start, and --send can be tried again.
-                self._record_exit(run, error.code, str(error), **previous)
+                # An uncertain prompt keeps the new turn pending for recovery.
+                changes = (
+                    {}
+                    if isinstance(error.__cause__, DeliveryUncertainError)
+                    else previous
+                )
+                self._record_exit(run, error.code, str(error), **changes)
                 error.context.setdefault("run", run_id)
                 raise
             except KeyboardInterrupt as error:
@@ -2163,6 +2197,22 @@ class Core:
                 self._remove_detached(run, command_locked=True)
                 self._say(f"closed {run_id}")
                 return exits.OK
+            if run.status == record.FAILED and run.turn_state == record.SENT:
+                attempts = self._saved_outcome(run).get("attempts", [])
+                uncertain = (
+                    attempts and attempts[-1]["sending"] and not attempts[-1]["sent"]
+                )
+                # The recorded reason also preserves uncertainty when retry
+                # attempt details are unavailable in an older run record.
+                if uncertain or run.last_reason == (
+                    "capacity retry delivery is uncertain; ask the lead"
+                ):
+                    raise RunError(
+                        exits.REFUSED,
+                        f"turn {run.turn} of {run_id} is sent or delivery is uncertain",
+                        "close",
+                        run=run_id,
+                    )
             if run.turn_state == record.COLLECTED and not run.read_only:
                 raise RunError(
                     exits.REFUSED,
@@ -2258,11 +2308,13 @@ class Core:
         """
         if run_id is not None:
             document = self._document(self._load(run_id))
-            self._warn_orphaned([document])
+            self._warn_parent([document])
             if as_json:
                 self._say(json.dumps(document, indent=2))
             else:
                 for key, value in document.items():
+                    if key == "status" and document["waiting_for_flow"]:
+                        value = self._flow_wait(document)
                     shown = value if isinstance(value, str) else json.dumps(value)
                     self._say(f"{key}: {shown}")
             return exits.OK
@@ -2270,31 +2322,48 @@ class Core:
         for error in errors:
             self._warn(f"emb run: skipped {error}")
         documents = [self._document(run) for run in runs]
-        self._warn_orphaned(documents)
+        self._warn_parent(documents)
         if as_json:
             self._say(json.dumps(documents, indent=2))
         else:
             for item in documents:
+                status = (
+                    self._flow_wait(item)
+                    if item["waiting_for_flow"]
+                    else item["status"]
+                )
                 self._say(
-                    f"{item['id']}  {item['status']}  {item['session_state']}  "
+                    f"{item['id']}  {status}  {item['session_state']}  "
                     f"turn {item['turn']}  {item['subject']}"
                 )
         return exits.OK
 
     def _document(self, run: Run) -> dict[str, Any]:
+        waiting = record.waiting_for_flow(run)
         turns, errors = record.turn_results(run)
         for error in errors:
             self._warn(f"WARNING: {error}")
         return {
             **run.to_json(),
             "session_state": self._session_state(run.id),
-            "orphaned": record.orphaned(run),
+            "orphaned": waiting is None and record.orphaned(run),
+            "waiting_for_flow": waiting,
             "turns": turns,
         }
 
-    def _warn_orphaned(self, documents: list[dict[str, Any]]) -> None:
-        """Name each orphaned run and the commands that collect and close it."""
+    @staticmethod
+    def _flow_wait(document: dict[str, Any]) -> str:
+        """Describe the lead answer awaited by a run's parent flow."""
+        return f"waiting for the lead's answer to flow {document['waiting_for_flow']}"
+
+    def _warn_parent(self, documents: list[dict[str, Any]]) -> None:
+        """Name flow waits and orphaned runs, with recovery only for orphans."""
         for document in documents:
+            if document["waiting_for_flow"]:
+                self._warn(
+                    f"WARNING: run {document['id']} is {self._flow_wait(document)}"
+                )
+                continue
             if not document["orphaned"]:
                 continue
             parent = document["parent"]
@@ -2368,10 +2437,20 @@ def _hash(path: Path) -> str | None:
 
 
 def _close_quietly(driver: Driver, run: Run) -> None:
-    """Let the driver clean up after a failed start; its own errors are dropped.
+    """Stop the driver, pane and descendants after a failed start.
 
     The start's failure is the one reported, so a clean-up error must not
     replace it.
     """
+    found: list[processes.Process] = []
+    with contextlib.suppress(Exception):
+        pid = tmux.pane_pid(run.id, env=run.env)
+        if pid is not None:
+            found = processes.tree(pid)
     with contextlib.suppress(Exception):
         driver.close(run)
+    with contextlib.suppress(Exception):
+        if tmux.exists(run.id, env=run.env):
+            tmux.kill(run.id, env=run.env)
+    with contextlib.suppress(Exception):
+        processes.end(found)

@@ -435,6 +435,9 @@ def _add_cleanup(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--branch", metavar="BRANCH", help="only this branch")
     parser.add_argument(
+        "--claim", metavar="ID", help="only records with this exact claim id"
+    )
+    parser.add_argument(
         "--dir", default=".", metavar="DIR", help="a folder in the git checkout"
     )
     parser.add_argument(
@@ -1059,6 +1062,7 @@ def main(
         return branches.cleanup(
             args.merged_into,
             branch=args.branch,
+            claim=args.claim,
             directory=args.dir,
             dry_run=args.dry_run,
             as_json=args.json,

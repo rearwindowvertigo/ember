@@ -24,11 +24,12 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -103,7 +104,7 @@ class GitFailedError(BranchError):
 class _KeepError(Exception):
     """A reason to keep a branch, with the line that resolves it."""
 
-    def __init__(self, reason: str, line: str) -> None:
+    def __init__(self, reason: str, line: str | None) -> None:
         super().__init__(reason)
         self.line = line
 
@@ -128,11 +129,14 @@ class Result:
     """For a keep: the line that resolves it, `next: <command>` or
     `owner: <step>`; `None` otherwise."""
 
+    claim: str | None = None
+    """The recorded claim id, or `None` when none is recorded."""
+
     def to_json(self) -> dict[str, Any]:
         """Return the result as a JSON-ready dict.
 
         Returns:
-            `branch`, `run`, `action`, `reason` and `next`.
+            `branch`, `run`, `action`, `reason`, `next` and `claim`.
         """
         return {
             "branch": self.branch,
@@ -140,15 +144,22 @@ class Result:
             "action": self.action,
             "reason": self.reason,
             "next": self.next,
+            "claim": self.claim,
         }
 
     def text(self) -> str:
         """Return the result's line.
 
         Returns:
-            `<action> <branch>: <reason>`, and for a keep `; ` and its `next`.
+            The action, branch and reason, with the claim and next step for a keep.
         """
         line = f"{self.action} {self.branch or self.run}: {self.reason}"
+        if self.action == KEPT:
+            line += (
+                f"; claim {self.claim}"
+                if self.claim is not None
+                else "; no claim is recorded"
+            )
         return line if self.next is None else f"{line}; {self.next}"
 
 
@@ -718,6 +729,7 @@ class Cleanup:
         target: str,
         *,
         again: str,
+        claim: str | None = None,
         dry_run: bool = False,
         core: CoreFactory | None = None,
         out: TextIO | None = None,
@@ -729,6 +741,7 @@ class Cleanup:
             repo: The repository.
             target: The branch the worker branches were merged into.
             again: The command that repeats this cleanup.
+            claim: Handle only records with this exact claim id.
             dry_run: Report what would be done and change nothing.
             core: Returns the run core; `None` for `Core` with the
                 repository's environment.
@@ -738,6 +751,7 @@ class Cleanup:
         self.repo = repo
         self.target = target
         self.again = again
+        self.claim = claim
         self.dry_run = dry_run
         self.err = err or sys.stderr
         self.out = out
@@ -775,7 +789,7 @@ class Cleanup:
             branches: The branches.
 
         Returns:
-            One result per branch.
+            One result per branch matching the claim filter, if given.
 
         Raises:
             GitFailedError: A git command failed; `results` holds every result
@@ -783,8 +797,22 @@ class Cleanup:
                 done to it and the failed step.
         """
         for branch in branches:
-            self._report(self._one(branch))
+            claim = self._branch_claim(branch)
+            if self.claim is None or claim == self.claim:
+                self._report(self._one(branch, claim))
         return self.results
+
+    def _branch_claim(self, branch: str) -> str | None:
+        """Read the recorded claim, without consulting live choices."""
+        match = WORKER_BRANCH.fullmatch(branch)
+        if match is None:
+            return None
+        try:
+            if FLOW_BRANCH.fullmatch(branch):
+                return flow_record.load(match["run"], self.repo.env).get("claim")
+            return record.load(match["run"], self.repo.env).claim
+        except record.RecordError, flow_record.FlowError, OSError, ValueError:
+            return None
 
     def _report(self, result: Result) -> None:
         self.results.append(result)
@@ -799,6 +827,7 @@ class Cleanup:
         for run in runs:
             if (
                 not run.read_only
+                or (self.claim is not None and run.claim != self.claim)
                 or not run.detached
                 or run.status not in (record.CLOSED, record.FAILED)
                 or not run.common
@@ -819,14 +848,17 @@ class Cleanup:
                             f"{'removes' if self.dry_run else 'removed'} "
                             f"worktree {run.worktree}",
                             None,
+                            run.claim,
                         )
                     )
             except (OSError, record.RecordError, _KeepError) as error:
                 self._report(
-                    Result(None, run.id, KEPT, str(error), f"next: {self.again}")
+                    Result(
+                        None, run.id, KEPT, str(error), f"next: {self.again}", run.claim
+                    )
                 )
 
-    def _one(self, branch: str) -> Result:
+    def _one(self, branch: str, claim: str | None) -> Result:
         """Clean up one branch.
 
         Raises:
@@ -837,12 +869,12 @@ class Cleanup:
         run_id = match["run"] if match else None
         done: list[str] = []
         try:
-            return self._clean(branch, match, done)
+            return replace(self._clean(branch, match, done), claim=claim)
         except _KeepError as keep:
-            return Result(branch, run_id, KEPT, str(keep), keep.line)
+            return Result(branch, run_id, KEPT, str(keep), keep.line, claim)
         except GitFailedError as error:
             reason = "; ".join([*done, str(error)])
-            self._report(Result(branch, run_id, KEPT, reason, error.line))
+            self._report(Result(branch, run_id, KEPT, reason, error.line, claim))
             raise
 
     def _contained(self, tip: str, target_tip: str) -> bool:
@@ -862,7 +894,9 @@ class Cleanup:
                 f"not contained in {self.target}",
                 f"next: emb merge {branch} --into {self.target} --verdict keep "
                 "--note '<verdict line>' --subject '<commit subject>' "
-                "(after a Keep verdict)",
+                "(after a Keep verdict)"
+                if self.claim is not None
+                else None,
             )
         return tip, target_tip
 
@@ -1155,8 +1189,10 @@ def _print_failure(command: str, error: BranchError, err: TextIO) -> int:
     return error.code
 
 
-def _again(target: str, branch: str | None, top: Path) -> str:
+def _again(target: str, branch: str | None, top: Path, claim: str | None = None) -> str:
     scope = f" --branch {branch}" if branch else ""
+    if claim is not None:
+        scope += f" --claim {shlex.quote(claim)}"
     return f"emb cleanup --merged-into {target}{scope} --dir {top}"
 
 
@@ -1164,6 +1200,7 @@ def cleanup(
     target: str,
     *,
     branch: str | None = None,
+    claim: str | None = None,
     directory: str | Path = ".",
     dry_run: bool = False,
     as_json: bool = False,
@@ -1177,6 +1214,7 @@ def cleanup(
     Args:
         target: The branch the worker branches were merged into.
         branch: Clean up only this branch.
+        claim: Handle only records with this exact claim id; no live claim needed.
         directory: A folder in the git checkout.
         dry_run: Report what would be done and change nothing.
         as_json: Print a JSON list of results.
@@ -1195,7 +1233,7 @@ def cleanup(
         repo = open_repository(directory, env, "cleanup", from_main=True)
     except BranchError as error:
         return _print_failure("cleanup", error, err)
-    again = _again(target, branch, repo.top)
+    again = _again(target, branch, repo.top, claim)
     for name in (target, branch):
         if name is not None and not repo.branch_exists(name):
             return _print_failure(
@@ -1211,6 +1249,7 @@ def cleanup(
         repo,
         target,
         again=again,
+        claim=claim,
         dry_run=dry_run,
         core=core,
         out=None if as_json else out,

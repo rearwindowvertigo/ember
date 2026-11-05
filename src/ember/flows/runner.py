@@ -484,6 +484,27 @@ class _Runner:
         """Rebuild the previous review's must findings for fix briefs."""
         return [verdict.Finding(**item) for item in task.get("earlier", [])]
 
+    def merged_siblings(self, task: Mapping[str, Any]) -> list[tuple[str, str, str]]:
+        """List merged siblings whose recorded commits are absent from this head."""
+        with self.mutex:
+            siblings = [
+                (other["id"], other["subject"], other["merge_commit"])
+                for other in self.flow["tasks"]
+                if other["id"] != task["id"]
+                and other["status"] == "merged"
+                and other.get("merge_commit")
+            ]
+        absent = []
+        for sibling in siblings:
+            result = self.git(
+                "merge-base", "--is-ancestor", sibling[2], task["head"], check=False
+            )
+            if result.returncode == 1:
+                absent.append(sibling)
+            elif result.returncode:
+                raise RunnerError(f"git merge-base: {result.stderr.strip()}")
+        return absent
+
     def review(self, task: dict[str, Any], *, recovering: bool = False) -> str:
         """Read one review, close it and durably decide the next operation."""
         earlier = self.earlier(task)
@@ -512,6 +533,7 @@ class _Runner:
                 earlier=earlier,
                 fix_base=task.get("fix_base"),
                 standing=self.standing_read(),
+                merged_siblings=self.merged_siblings(task),
             )
             path = self.artifact(task, "review", text)
             self.change(
@@ -544,7 +566,9 @@ class _Runner:
                 if review_run.reply
                 else ""
             )
-            result = verdict.read(text, len(earlier))
+            result = verdict.read(
+                text, len(earlier), round=task["round"] + 1, run=review_run.id
+            )
         except (OSError, UnicodeError) as error:
             result = verdict.Review(None, (), f"cannot read the reply: {error}")
         warning = self.close(review_run.id)
@@ -557,6 +581,7 @@ class _Runner:
             task["reviews"].append(
                 {
                     "round": task["round"],
+                    "review_round": task["round"] + 1,
                     "run": review_run.id,
                     "verdict": result.verdict or "unreadable",
                     **result.counts(),

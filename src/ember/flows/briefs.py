@@ -133,11 +133,14 @@ def review_brief(
     earlier: Sequence[Finding] = (),
     fix_base: str | None = None,
     standing: Sequence[str] = (),
+    merged_siblings: Sequence[tuple[str, str, str]] = (),
 ) -> str:
     """Build a review brief with indented evidence and the packaged reply schema.
 
     `standing` holds the `sandbox.read` paths, listed as sources before the
     plan's `read`.
+    `merged_siblings` holds task ids, subjects and merge commits absent from
+    the reviewed head.
     """
     parts = [
         REVIEW_FIRST.format(task=task.id, round=round, flow=flow_id),
@@ -146,6 +149,16 @@ def review_brief(
         "## Task\n\n" + indent(task.subject + "\n\n" + task.task, "    "),
         "## Files\n\n" + indent(_files(task.files, wave_files), "    "),
     ]
+    if merged_siblings:
+        parts.append(
+            "## Merged sibling tasks\n\n"
+            "These sibling tasks' changes are on the flow branch and absent "
+            "from the task branch:\n\n"
+            + "\n".join(
+                indent(f"{task_id}: {subject}\ncommit: {commit}", "    ")
+                for task_id, subject, commit in merged_siblings
+            )
+        )
     sources = citations.sources_section(citations.source_files([*standing, *plan.read]))
     if sources:
         parts.append(sources)
@@ -181,7 +194,9 @@ def review_brief(
         )
     parts.extend(
         [
-            "## Review bar\n\n" + REVIEW_BAR,
+            "## Review bar\n\n" + REVIEW_BAR + "\n\n"
+            "For each must, describe the underlying cause and the other places "
+            "it affects in problem. Use the existing text fields; do not add fields.",
             "## Reply\n\nChange, stage, commit or stash nothing. Reply with only "
             "one JSON object matching this JSON Schema, with no other text and "
             "no code fence:\n\n"

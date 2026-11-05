@@ -130,6 +130,10 @@ def text(
             "- why: the reason for the harm, in one line",
             "- default: the behaviour you propose when no one decides otherwise",
             "",
+            "For each gap with harm high, describe the underlying cause and "
+            "the other places it affects in why. Use the existing text fields; "
+            "do not add fields.",
+            "",
             *_sources(sources),
             *_earlier(previous),
             "Do not redesign the plan and do not decide missing behaviour; "

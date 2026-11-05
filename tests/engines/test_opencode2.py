@@ -24,7 +24,7 @@ from ember.runs.record import Run
 # A private HTTP server, launched as a separate process so shutdown tests exercise
 # the same process identity checks as the driver. All replies come from test files.
 STUB_SERVER = r"""
-import base64, json, os, sys
+import base64, json, os, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
@@ -38,6 +38,8 @@ def held(name, default):
 
 if "serve" not in sys.argv:
     (folder / "view.json").write_text(json.dumps(sys.argv[1:]))
+    if held("view-hang", False):
+        threading.Event().wait()
     sys.exit(0)
 
 port = int(sys.argv[sys.argv.index("--port") + 1])
@@ -73,6 +75,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(held("active-code", 200),
                                   {"data": held("active.json", {})})
             if path.endswith("/message"):
+                time.sleep(held("messages-delay", 0))
                 cursor = query.get("cursor", [None])[0]
                 pages = held("pages.json", {})
                 page = pages.get(cursor) if cursor else None
@@ -92,6 +95,26 @@ class Handler(BaseHTTPRequestHandler):
                     (folder / "created.json").write_text(json.dumps(body))
                 return self.reply(code, {"data": {"id": body["id"]}})
             if path.endswith("/prompt"):
+                time.sleep(held("prompt-take-delay", 0))
+                if held("take-prompt", False):
+                    message = {"type": "user", **body}
+                    messages = [
+                        {"type": "idle", "id": "msg_idle", "outcome": "succeeded"},
+                        {"type": "assistant",
+                         "content": [{"type": "text", "text": "ok"}]},
+                        message,
+                    ]
+                    cursor = held("prompt-page", None)
+                    if cursor:
+                        (folder / "next.json").write_text(json.dumps(cursor))
+                        (folder / "pages.json").write_text(json.dumps({
+                            cursor: {"data": messages, "cursor": {"next": None}}
+                        }))
+                    else:
+                        (folder / "messages.json").write_text(json.dumps(messages))
+                if held("prompt-hang", False):
+                    threading.Event().wait()
+                time.sleep(held("prompt-delay", 0))
                 return self.reply(held("prompt-code", 200), {"data": body})
             if path.endswith("/interrupt"):
                 return self.reply(held("interrupt-code", 200), {"interrupted": True})
@@ -765,3 +788,89 @@ def test_routes_full_id_in_session(
         "id": model_id,
         "variant": "high",
     }
+
+
+def test_first_prompt_can_take_three_seconds(
+    driver: OpenCode2Driver, run: Run, server: Server
+) -> None:
+    server.write("prompt-delay", 3)
+    server.write("take-prompt", True)
+    run = started(driver, run, server)
+    assert driver.wait(run).reply == "ok"
+    assert len(server.requests("/prompt")) == 1
+
+
+@pytest.mark.parametrize("page", [None, "older page/2"])
+def test_timed_out_prompt_is_found_without_resending(
+    driver: OpenCode2Driver,
+    run: Run,
+    server: Server,
+    monkeypatch: pytest.MonkeyPatch,
+    page: str | None,
+) -> None:
+    monkeypatch.setattr(opencode2, "PROMPT_TIMEOUT", 0.05)
+    monkeypatch.setattr(opencode2, "DELIVERY_TIMEOUT", 1)
+    server.write("take-prompt", True)
+    server.write("prompt-take-delay", 0.15)
+    server.write("prompt-hang", True)
+    server.write("prompt-page", page)
+    run = started(driver, run, server)
+    assert driver.wait(run).reply == "ok"
+    assert len(server.requests("/prompt")) == 1
+    assert server.state()["turns"]["1"] == prompt(server)["id"]
+
+
+@pytest.mark.parametrize("history", ["absent", "unreadable", "slow", "cycle"])
+def test_uncertain_delivery_is_bounded_and_not_resent(
+    driver: OpenCode2Driver,
+    run: Run,
+    server: Server,
+    monkeypatch: pytest.MonkeyPatch,
+    history: str,
+) -> None:
+    monkeypatch.setattr(opencode2, "PROMPT_TIMEOUT", 0.05)
+    monkeypatch.setattr(opencode2, "DELIVERY_TIMEOUT", 0.15)
+    server.write("prompt-hang", True)
+    if history == "unreadable":
+        server.write("messages-code", 500)
+    elif history == "slow":
+        server.write("messages-delay", 1)
+    elif history == "cycle":
+        server.write("next.json", "same")
+    driver.command(run, "brief")
+    server.start()
+    assert driver.ready(run)
+    run = dataclasses.replace(run, turn=1)
+    before = time.monotonic()
+    with pytest.raises(opencode2.DeliveryUncertainError, match="delivery is uncertain"):
+        driver.send(run, "brief")
+    assert time.monotonic() - before < 0.8
+    assert len(server.requests("/prompt")) == 1
+    assert server.state()["turns"]["1"] == prompt(server)["id"]
+
+
+def test_prompt_timeout_applies_to_followups_and_resends_only(
+    driver: OpenCode2Driver,
+    run: Run,
+    server: Server,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timeouts: list[float | None] = []
+    connection = opencode.http.client.HTTPConnection
+
+    def connect(
+        host: str, port: int, *, timeout: float | None
+    ) -> opencode.http.client.HTTPConnection:
+        timeouts.append(timeout)
+        return connection(host, port, timeout=timeout)
+
+    monkeypatch.setattr(opencode.http.client, "HTTPConnection", connect)
+    run = started(driver, run, server)
+    run = dataclasses.replace(run, turn=2)
+    driver.send(run, "follow-up")
+    driver.send(run, "capacity resend")
+    assert timeouts[-3:] == [120.0, 120.0, 120.0]
+    driver.idle_state(run)
+    assert timeouts[-1] == 2.0
+    assert len(server.requests("/prompt")) == 3
+    assert server.state()["turns"]["2"] == prompt(server)["id"]

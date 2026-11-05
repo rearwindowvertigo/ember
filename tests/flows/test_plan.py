@@ -396,12 +396,52 @@ def test_warnings_at_base(
     assert plan.warnings(parsed(raw, tmp_path), str(repo), env) == []
 
 
-@pytest.mark.parametrize("file", ["test/a.py", "tests/a.py", "test_a.py", "a_test.go"])
+@pytest.mark.parametrize(
+    "file",
+    [
+        "test/a.py",
+        "tests/a.py",
+        "test_a.py",
+        "a_test.go",
+        "a.test.ts",
+        "a.test.tsx",
+        "a.spec.js",
+        "src/__tests__/a.ts",
+        "web/app/queue.test.ts",
+        "Queue.test.tsx",
+        "q.spec.ts",
+        "__tests__/a.ts",
+    ],
+)
 def test_test_file_warning(
     raw: dict[str, Any], tmp_path: Path, env: dict[str, str], file: str
 ) -> None:
     raw["tasks"][0]["files"] = [file]
     assert "a: no test file in its files" not in plan.warnings(
+        parsed(raw, tmp_path), str(tmp_path), env
+    )
+
+
+@pytest.mark.parametrize(
+    "file",
+    [
+        "src/a.ts",
+        "a.testimony.ts",
+        "a.special.js",
+        "a.test",
+        "a.spec",
+        "src/my__tests__/a.ts",
+        "src/__tests__helpers/a.ts",
+        "src/__tests__",
+        "src/a.test.ts/helper.ts",
+        "src/a.spec.js/helper.js",
+    ],
+)
+def test_non_test_file_warning(
+    raw: dict[str, Any], tmp_path: Path, env: dict[str, str], file: str
+) -> None:
+    raw["tasks"][0]["files"] = [file]
+    assert "a: no test file in its files" in plan.warnings(
         parsed(raw, tmp_path), str(tmp_path), env
     )
 
