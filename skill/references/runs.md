@@ -277,7 +277,8 @@ A broken outcome gives null, which is unknown.
 Report every printed `owner:` line. When it offers reading, give the owner
 the `Settings, Sandbox read paths; emb choices --set ...` action.
 At exit 0, say the turn finished. Read access is needed only if the
-worker's report says the work needed the denied path.
+worker's report says the work needed the denied path. When the report shows
+the work did not need it, report the line and go on without waiting.
 The command keeps existing read paths and adds the offered folder, or an
 addable secret location's matched path. Never run it, edit the settings
 database, add a path to `sandbox.read`, or bypass the denial with `--read`
