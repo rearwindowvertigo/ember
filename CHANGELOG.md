@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.15.0](https://github.com/rearwindowvertigo/ember/compare/v0.14.1...v0.15.0) (2026-11-05)
+
+
+### Added
+
+* **app:** collapse and hide the sidebar in narrow windows ([7dbf345](https://github.com/rearwindowvertigo/ember/commit/7dbf34521ee3ffdb6800854d587bc135fe5f5171))
+* **app:** fit every screen to the window width ([205dc94](https://github.com/rearwindowvertigo/ember/commit/205dc946385b8cee615a70c5914a24181f3d9d7d))
+* **cli:** limit emb cleanup to one claim with --claim ([ef81228](https://github.com/rearwindowvertigo/ember/commit/ef812285aa1eef6a3418772ddd6b163cbf488132))
+* **flows:** ask gap checks and reviewers for the cause and other places ([417b5e9](https://github.com/rearwindowvertigo/ember/commit/417b5e9efd27aff4d68ffb8d6588606a1691dac9))
+* **flows:** list merged sibling tasks in a task's reviewer brief ([145a921](https://github.com/rearwindowvertigo/ember/commit/145a921bf921d62438128a71fa85114f7f78bade))
+* **runs:** print the next command at every step of an emb run task ([bb9c576](https://github.com/rearwindowvertigo/ember/commit/bb9c576598a01f1403e28e4f8d43bf0c51790aee))
+* **runs:** qualify the sandbox owner line when the turn exited 0 ([f8385b3](https://github.com/rearwindowvertigo/ember/commit/f8385b3ae78c6e1fea3eea39703db10f43795e42))
+* **skill:** repeat eval runs and count passes per grader ([d85fe1c](https://github.com/rearwindowvertigo/ember/commit/d85fe1cf919d39a11d032d93310e6a2abfedcc75)), closes [#149](https://github.com/rearwindowvertigo/ember/issues/149)
+
+
+### Fixed
+
+* **app:** drop header actions under the title when the screen is narrow ([7367690](https://github.com/rearwindowvertigo/ember/commit/7367690c00055b09288760db5a70832bfb1ea07d))
+* **app:** put the Show sidebar button first in each screen's Tab order ([e1c0cb1](https://github.com/rearwindowvertigo/ember/commit/e1c0cb1cc7418fef412a5df48881d8b174598f5d))
+* **app:** settle the OpenCode table height test under load ([f71e2c6](https://github.com/rearwindowvertigo/ember/commit/f71e2c6dcb7afd5fcd99c6b4262641c57131e1cc))
+* **cli:** refuse an empty read file in emb gapcheck and emb flow ([369d15c](https://github.com/rearwindowvertigo/ember/commit/369d15ccf07345b9e70271b999dfcc20c5d8c113))
+* **engines:** give OpenCode 2 time to take a run's first message ([b40ba2b](https://github.com/rearwindowvertigo/ember/commit/b40ba2bae1c9882d6d50d7d4224f9f99d6809cc3))
+* **flows:** mark which review produced each finding in emb flow --status ([26bc49d](https://github.com/rearwindowvertigo/ember/commit/26bc49d7d12a66a200262716720e712efb1287d3))
+* **flows:** recognise .test., .spec. and __tests__ test files ([ae63673](https://github.com/rearwindowvertigo/ember/commit/ae636735c4919f02ec375b2cb6d88c4eeb5516ce))
+* **runs:** check Codex project trust in emb run --dry-run ([c5f8b8e](https://github.com/rearwindowvertigo/ember/commit/c5f8b8eb76bb5f0eac1cdabdc786de1d3bdebaab))
+* **runs:** do not report flow runs orphaned while the flow waits ([fcd2d48](https://github.com/rearwindowvertigo/ember/commit/fcd2d48d1e989a75994979cc319e527425682bbb))
+* **runs:** finish a closed run whose branch no longer exists ([9c225bd](https://github.com/rearwindowvertigo/ember/commit/9c225bd2f151d244225ba6adf0a8b3280e8f8633))
+* **runs:** name the provider kind in the status line of an exit 73 ([6333327](https://github.com/rearwindowvertigo/ember/commit/63333275c3d2ccd92c20141f6b69e9417216019e))
+
 ## [0.14.1](https://github.com/rearwindowvertigo/ember/compare/v0.14.0...v0.14.1) (2026-11-04)
 
 
