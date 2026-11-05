@@ -302,6 +302,7 @@ def test_review_stops_and_blocks_transitively(
     assert not any(e["kind"] == "end" for e in events)
     stop = next(e for e in events if e["kind"] == "lead_stop")
     assert len(stop["choices"]) == 5
+    assert stop["provider_kind"] is None
 
 
 @pytest.mark.parametrize("latest_should", [False, True])
@@ -1759,8 +1760,9 @@ def test_recover_squash_after_target_edit_with_noncolon_worker_separator(
 
 
 @pytest.mark.parametrize("parallel", [1, 2])
+@pytest.mark.parametrize("role", ["writer", "reviewer"])
 def test_capacity_exhaustion_does_not_halt_other_flow_tasks(
-    h: Harness, monkeypatch: pytest.MonkeyPatch, parallel: int
+    h: Harness, monkeypatch: pytest.MonkeyPatch, parallel: int, role: str
 ) -> None:
     choices.set_settings({"provider.capacity_retries": "0"}, env=h.env)
     original = h.driver.wait
@@ -1774,11 +1776,31 @@ def test_capacity_exhaustion_does_not_halt_other_flow_tasks(
         return outcome
 
     monkeypatch.setattr(h.driver, "wait", wait)
-    h.create([task("a", text="@provider capacity"), task("b")], parallel=parallel)
+    if role == "reviewer":
+        h.scripts_update(**{"Review of task a, round 1,": "@provider capacity"})
+    h.create(
+        [task("a", text="@provider capacity" if role == "writer" else None), task("b")],
+        parallel=parallel,
+    )
     flow = h.run()
     assert flow["halted"] is None
     assert flow["tasks"][0]["status"] == "stopped"
     assert flow["tasks"][1]["status"] == "merged"
+    stops = [
+        event
+        for event in record.read_events(h.id, h.env)
+        if event["kind"] == "lead_stop"
+    ]
+    assert len(stops) == 1
+    assert stops[0]["task"] == "a"
+    assert stops[0]["provider_kind"] == "capacity"
+    for _ in range(2):
+        out, err = io.StringIO(), io.StringIO()
+        args = build_parser().parse_args(["flow", "--watch", h.id, "--json"])
+        assert command.main(args, h.env, out=out, err=err) == 0
+        reports = ["report: capacity on a; recommend only the same-worker retry"]
+        assert json.loads(out.getvalue())["report"] == reports
+        assert err.getvalue().splitlines()[1:] == reports
 
 
 @pytest.mark.parametrize("startup", [False, True])

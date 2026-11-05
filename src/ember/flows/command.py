@@ -959,6 +959,56 @@ def _next(flow: Mapping[str, Any], event: str, code: int | None, live: bool) -> 
     )
 
 
+def _exit_reports(code: int | None) -> list[str]:
+    """Return the settled report lines for a user-facing flow exit."""
+    if code == NOT_MERGED:
+        return [
+            "report: tasks unmerged; report every task's status and reason; "
+            "leave the unmerged work and the flow branch to the owner"
+        ]
+    if code == exits.SESSION_GONE:
+        return ["report: the runner is gone; work may still be running"]
+    return []
+
+
+def _stop_reports(
+    flow: Mapping[str, Any],
+    stops: list[dict[str, Any]],
+    live: bool,
+    env: Mapping[str, str],
+) -> list[str]:
+    """Report each delivered stop, or each currently stopped task on a rewatch."""
+    if not stops:
+        latest = {
+            event.get("task"): event
+            for event in record.read_events(flow["id"], env)
+            if event.get("kind") == "lead_stop"
+        }
+        stops = [
+            latest.get(task["id"], {"task": task["id"]})
+            for task in flow["tasks"]
+            if task["status"] in ("stopped", "conflict")
+        ]
+    reports = []
+    for stop in stops:
+        task = stop.get("task") or flow["id"]
+        if stop.get("provider_kind") == "capacity":
+            reports.append(
+                f"report: capacity on {task}; recommend only the same-worker retry"
+            )
+        else:
+            state = (
+                "the runner is still live for the other tasks"
+                if live
+                else "no runner is live and the owner's answer starts it"
+            )
+            reports.append(
+                f"report: lead stop on {task}; {state}; "
+                "list every printed choice and recommend one"
+            )
+    return reports
+
+
 def _current_events(
     flow: Mapping[str, Any], env: Mapping[str, str]
 ) -> list[dict[str, Any]]:
@@ -1035,6 +1085,12 @@ def _watch_result(
         stops=stops,
         abandoned=flow["abandoned"],
         next=_next(flow, event, code, live),
+        report=(
+            _stop_reports(flow, stops, live, env)
+            if stops or event == "lead_stop"
+            else []
+        )
+        + _exit_reports(code),
     )
     return result, max([cursor, *(item["seq"] for item in fresh)])
 
@@ -1091,6 +1147,8 @@ def _watch(
                 _print_watch(result, as_json, out)
                 out.flush()
                 print(result["next"], file=err)
+                for line in result["report"]:
+                    print(line, file=err)
                 err.flush()
                 record.write_cursor(flow_id, seq, env)
                 return result["exit"] or 0
@@ -1232,6 +1290,8 @@ def main(
     except (CommandError, plan.WorkerError, branches.BranchError) as error:
         print(f"emb flow: {error}", file=err)
         print(error.line, file=err)
+        for line in _exit_reports(error.code):
+            print(line, file=err)
         return error.code
     except (paths.RuntimeDirError, lock.LockError) as error:
         print(f"emb flow: {error}", file=err)

@@ -133,7 +133,13 @@ class _Runner:
             self.env,
         )
 
-    def change(self, task: dict[str, Any], **fields: Any) -> None:  # noqa: ANN401
+    def change(
+        self,
+        task: dict[str, Any],
+        *,
+        stop_provider_kind: str | None = None,
+        **fields: Any,  # noqa: ANN401
+    ) -> None:
         """Persist task changes and emit each status transition."""
         with self.mutex:
             if self.finished:
@@ -151,9 +157,14 @@ class _Runner:
                     warnings=task.get("warnings", []),
                 )
                 if task["status"] in ("stopped", "conflict"):
-                    self._lead(task, task["reason"])
+                    self._lead(task, task["reason"], stop_provider_kind)
 
-    def _lead(self, task: dict[str, Any] | None, reason: str) -> None:
+    def _lead(
+        self,
+        task: dict[str, Any] | None,
+        reason: str,
+        provider_kind: str | None = None,
+    ) -> None:
         """Emit a lead stop with commands under the record mutex."""
         suffix = {"send": " <file>", "worker": " <engine>:<model>"}
         choices = (
@@ -170,6 +181,7 @@ class _Runner:
             status=task["status"] if task else self.flow["status"],
             reason=reason,
             choices=choices,
+            provider_kind=provider_kind,
         )
 
     def finish(self, status: str, reason: str | None = None) -> None:
@@ -354,7 +366,12 @@ class _Runner:
                 self._save()
         if role == "writer" and run_id:
             self.metadata(task)
-        self.change(task, status="stopped", reason=reason or f"the run exited {code}")
+        self.change(
+            task,
+            status="stopped",
+            reason=reason or f"the run exited {code}",
+            stop_provider_kind=provider_kind,
+        )
         return False
 
     def metadata(self, task: dict[str, Any]) -> runs.Run:
