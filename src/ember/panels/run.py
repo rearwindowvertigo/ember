@@ -774,7 +774,9 @@ def close(
             except runs.RecordError as error:
                 targets[run_id] = str(error)
             else:
-                if existing.status not in (runs.CLOSED, runs.FAILED):
+                if existing.status not in (runs.CLOSED, runs.FAILED) or (
+                    existing.status == runs.FAILED and existing.turn_state == runs.SENT
+                ):
                     targets[run_id] = None
                 elif existing.read_only and existing.detached:
                     targets[run_id] = existing

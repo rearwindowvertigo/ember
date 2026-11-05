@@ -32,6 +32,7 @@ from typing import Any, TextIO
 
 from ember import choices, db, engines, paths, processes, sandbox, tmux
 from ember.engines import Driver, LaunchSpec, TurnOutcome, models, status
+from ember.engines.opencode2 import DeliveryUncertainError
 from ember.runs import exits, record, worktrees
 from ember.runs.record import Run
 
@@ -108,7 +109,9 @@ def worktree_removal_reason(run: Run) -> str | None:
     """
     if run.status not in (record.CLOSED, record.FAILED):
         return "not ended"
-    if run.turn_state == record.SENT:
+    if run.turn_state == record.SENT and not (
+        run.status == record.CLOSED and run.read_only and run.detached
+    ):
         return f"turn {run.turn} of {run.id} is sent or delivery is uncertain"
     if run.turn_state == record.COLLECTED and not run.read_only:
         return f"turn {run.turn} of {run.id} is collected but not committed"
@@ -448,7 +451,10 @@ class Core:
             yield
         except engines.DriverError as error:
             raise RunError(
-                exits.ENGINE_FAILED, f"{run.id}: {error}", variant, run=run.id
+                exits.ENGINE_FAILED,
+                f"{run.id}: {error}",
+                None if isinstance(error, DeliveryUncertainError) else variant,
+                run=run.id,
             ) from error
         except paths.RuntimeDirError as error:
             raise RunError(
@@ -2013,9 +2019,13 @@ class Core:
                 with self._engine_calls(run, "send"):
                     driver.send(run, text)
             except RunError as error:
-                # The message is not known to be delivered: the turn did not
-                # start, and --send can be tried again.
-                self._record_exit(run, error.code, str(error), **previous)
+                # An uncertain prompt keeps the new turn pending for recovery.
+                changes = (
+                    {}
+                    if isinstance(error.__cause__, DeliveryUncertainError)
+                    else previous
+                )
+                self._record_exit(run, error.code, str(error), **changes)
                 error.context.setdefault("run", run_id)
                 raise
             except KeyboardInterrupt as error:
@@ -2187,6 +2197,22 @@ class Core:
                 self._remove_detached(run, command_locked=True)
                 self._say(f"closed {run_id}")
                 return exits.OK
+            if run.status == record.FAILED and run.turn_state == record.SENT:
+                attempts = self._saved_outcome(run).get("attempts", [])
+                uncertain = (
+                    attempts and attempts[-1]["sending"] and not attempts[-1]["sent"]
+                )
+                # The recorded reason also preserves uncertainty when retry
+                # attempt details are unavailable in an older run record.
+                if uncertain or run.last_reason == (
+                    "capacity retry delivery is uncertain; ask the lead"
+                ):
+                    raise RunError(
+                        exits.REFUSED,
+                        f"turn {run.turn} of {run_id} is sent or delivery is uncertain",
+                        "close",
+                        run=run_id,
+                    )
             if run.turn_state == record.COLLECTED and not run.read_only:
                 raise RunError(
                     exits.REFUSED,
@@ -2411,10 +2437,20 @@ def _hash(path: Path) -> str | None:
 
 
 def _close_quietly(driver: Driver, run: Run) -> None:
-    """Let the driver clean up after a failed start; its own errors are dropped.
+    """Stop the driver, pane and descendants after a failed start.
 
     The start's failure is the one reported, so a clean-up error must not
     replace it.
     """
+    found: list[processes.Process] = []
+    with contextlib.suppress(Exception):
+        pid = tmux.pane_pid(run.id, env=run.env)
+        if pid is not None:
+            found = processes.tree(pid)
     with contextlib.suppress(Exception):
         driver.close(run)
+    with contextlib.suppress(Exception):
+        if tmux.exists(run.id, env=run.env):
+            tmux.kill(run.id, env=run.env)
+    with contextlib.suppress(Exception):
+        processes.end(found)

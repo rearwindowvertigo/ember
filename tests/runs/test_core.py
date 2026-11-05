@@ -4,6 +4,7 @@ import os
 import shlex
 import stat
 import subprocess
+import sys
 import threading
 import time
 import tomllib
@@ -16,12 +17,13 @@ from typing import Any
 import pytest
 
 from ember import choices, engines, paths, processes, sandbox
-from ember.engines import Driver, LaunchSpec, models, status
+from ember.engines import Driver, LaunchSpec, models, opencode2, status
 from ember.engines.codex import CodexDriver, codex_home
 from ember.engines.opencode import OpenCodeDriver
-from ember.engines.opencode2 import OpenCode2Driver
+from ember.engines.opencode2 import DeliveryUncertainError, OpenCode2Driver
 from ember.runs import core, exits, record
 from ember.runs.core import Core, RunError, StartOptions
+from engines.test_opencode2 import STUB_SERVER  # pyrefly: ignore[missing-import]
 
 from .stub_engine import (  # pyrefly: ignore[missing-import]
     StubDriver,
@@ -3219,6 +3221,12 @@ def test_uncertain_capacity_delivery_is_never_resent_on_recovery(
     saved = record.load_outcome(run, 1)
     assert saved["attempts"][-1]["sending"]
     assert not saved["attempts"][-1]["sent"]
+    core.tmux.kill(run.id, env=env)
+    record.update(run, {"last_reason": None})
+    assert core_.execute(lambda: core_.close(run.id)) == 75
+    assert "delivery is uncertain" in capsys.readouterr().err
+    assert record.load(run.id, env).status == record.FAILED
+    assert core_.close(run.id, force=True) == 0
 
 
 def test_recovery_observes_a_confirmed_retry_without_sending_again(
@@ -3843,3 +3851,119 @@ def test_home_file_denial_is_recorded_without_read_suggestion(
             "no folder can be offered because each folder that holds it "
             "also holds private files" in err
         )
+
+
+@pytest.mark.parametrize("failure", ["refused", "absent", "unreadable"])
+def test_opencode_failed_send_stops_server_and_client_and_keeps_worktree(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    folder = tmp_path / "server"
+    folder.mkdir()
+    (folder / "view-hang").write_text("true")
+    if failure == "refused":
+        (folder / "prompt-code").write_text("400")
+    else:
+        (folder / "prompt-hang").write_text("true")
+    if failure == "unreadable":
+        (folder / "messages-code").write_text("500")
+    binary = Path(env["PATH"].split(os.pathsep)[0]) / "opencode"
+    binary.write_text(f"#!{sys.executable}\n" + STUB_SERVER)
+    binary.chmod(0o755)
+    for name, target in (
+        ("sh", "/bin/sh"),
+        ("python3", sys.executable),
+        ("sleep", "/bin/sleep"),
+    ):
+        (binary.parent / name).symlink_to(target)
+    monkeypatch.setattr(opencode2, "PROMPT_TIMEOUT", 0.05)
+    monkeypatch.setattr(opencode2, "DELIVERY_TIMEOUT", 0.1)
+    children: list[processes.Process] = []
+
+    class FailingStart(OpenCode2Driver):
+        def command(self, run: record.Run, first_message: str) -> LaunchSpec:
+            spec = super().command(run, first_message)
+            return replace(
+                spec,
+                env={
+                    **spec.env,
+                    "STUB_FOLDER": str(folder),
+                    "STUB_STATE": str(run.folder / opencode2.opencode.STATE_NAME),
+                },
+            )
+
+        def ready(self, run: record.Run) -> bool:
+            if not super().ready(run) or not (folder / "view.json").exists():
+                return False
+            pid = core.tmux.pane_pid(run.id, env=env)
+            assert pid is not None
+            children.extend(processes.tree(pid))
+            return True
+
+    driver = FailingStart(env, poll_seconds=0.01, stop_seconds=1)
+    core_ = _core(env, driver)
+    assert (
+        _start(
+            core_,
+            repo,
+            _brief(tmp_path, "Review\n"),
+            engine="opencode",
+            model="openrouter/test",
+            read_only=True,
+        )
+        == 71
+    )
+    out, err = capsys.readouterr()
+    saved = record.load(_run_id(out), env)
+    assert saved.status == record.FAILED
+    assert saved.turn_state == record.SENT
+    assert Path(saved.worktree).is_dir()
+    assert children and not any(processes.running(child) for child in children)
+    assert driver._server_state(saved) == opencode2.DOWN
+    assert not core.tmux.exists(saved.id, env=env)
+    requests = [
+        json.loads(line)
+        for line in (folder / "requests.jsonl").read_text().splitlines()
+    ]
+    assert sum(request["path"].endswith("/prompt") for request in requests) == 1
+    assert driver._state(saved)["turns"]["1"]
+    if failure != "refused":
+        assert "delivery is uncertain" in err
+        assert "message was not resent" in err
+    assert core_.close(saved.id) == 0
+    assert record.load(saved.id, env).status == record.CLOSED
+    assert not Path(saved.worktree).exists()
+
+
+def test_uncertain_followup_keeps_new_turn_pending(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class Uncertain(StubDriver):
+        def send(self, run: record.Run, text: str) -> None:
+            if run.turn > 1:
+                raise DeliveryUncertainError("OpenCode message delivery is uncertain")
+            super().send(run, text)
+
+    driver = Uncertain("opencode", script_path(env))
+    core_ = _core(env, driver)
+    assert (
+        _start(core_, repo, _brief(tmp_path, "Task\n"), engine="opencode", model="a/b")
+        == 0
+    )
+    saved = record.load(_run_id(capsys.readouterr().out), env)
+    message = _brief(tmp_path, "Next\n", "next.md")
+    assert core_.execute(lambda: core_.send(saved.id, message)) == 71
+    err = capsys.readouterr().err
+    assert "delivery is uncertain" in err
+    assert "the message was not sent" not in err
+    saved = record.load(saved.id, env)
+    assert saved.turn == 2 and saved.turn_state == record.SENT
+    assert core_.execute(lambda: core_.send(saved.id, message)) == 75
+    assert Path(saved.worktree).is_dir()

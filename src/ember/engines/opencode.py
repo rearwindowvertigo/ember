@@ -406,7 +406,13 @@ class OpenCodeDriver(Driver):
     # The server's API
 
     def _request(
-        self, run: Run, method: str, path: str, body: object = None
+        self,
+        run: Run,
+        method: str,
+        path: str,
+        body: object = None,
+        *,
+        timeout: float | None = None,
     ) -> tuple[int, Any]:
         """Make one request to the run's server, with no proxy or redirect.
 
@@ -430,7 +436,9 @@ class OpenCodeDriver(Driver):
         if body is not None:
             data = json.dumps(body).encode()
             headers["Content-Type"] = "application/json"
-        connection = http.client.HTTPConnection(HOST, port, timeout=HTTP_TIMEOUT)
+        connection = http.client.HTTPConnection(
+            HOST, port, timeout=HTTP_TIMEOUT if timeout is None else timeout
+        )
         try:
             try:
                 connection.request(method, path, body=data, headers=headers)
@@ -447,10 +455,12 @@ class OpenCodeDriver(Driver):
             value = None
         return code, value
 
-    def _get(self, run: Run, path: str, expected: type) -> Any:  # noqa: ANN401
+    def _get(
+        self, run: Run, path: str, expected: type, *, timeout: float | None = None
+    ) -> Any:  # noqa: ANN401
         """Return a GET reply of the expected type, or `None` when unreadable."""
         try:
-            code, value = self._request(run, "GET", path)
+            code, value = self._request(run, "GET", path, timeout=timeout)
         except _RefusedError, OSError, http.client.HTTPException:
             return None
         if code != 200 or not isinstance(value, expected):
