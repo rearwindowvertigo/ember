@@ -228,6 +228,11 @@ denied parent folder. A read-only run's detached worktree is writable in
 the Codex profile and bubblewrap. The run has no branch or Ember commit
 step and keeps its reviewer brief. Older read-only records that name a
 source checkout keep that checkout protected as read-only.
+
+A new run worktree holds only tracked files, with no installed dependencies.
+Install dependencies before running checks that need them. Use the shared
+caches below; network access follows `worker.network` as described below.
+
 The workers' cache folder,
 `$XDG_CACHE_HOME/ember/worker`, is writable in every
 sandboxed run, including read-only runs, and shared between runs.

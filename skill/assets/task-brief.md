@@ -60,7 +60,9 @@ Read-only worker:
 Read the repository in your own working folder, using relative paths.
 For `emb run --read-only` and panel members, this is a detached worktree
 at the recorded commit; uncommitted source edits are absent.
-Create, edit or delete no file, and change nothing in git.
+You may install dependencies in your own detached worktree to run checks,
+without changing tracked files. Otherwise create, edit or delete no file,
+and change nothing in git.
 Put your whole answer in your final message.
 
 ## Checks and stop condition
