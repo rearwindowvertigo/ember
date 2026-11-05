@@ -1,16 +1,63 @@
+import atexit
 import gc
 import os
+import shutil
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QThreadPool
-from PySide6.QtGui import QFont, QPalette
+from PySide6.QtGui import QFont, QFontInfo, QPalette
 from PySide6.QtWidgets import QApplication, QWidget
 
 from ember.app import main, theme
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+_fontconfig_dir = Path(tempfile.mkdtemp(prefix="ember-test-fonts-"))
+atexit.register(shutil.rmtree, _fontconfig_dir, ignore_errors=True)
+_fontconfig_file = _fontconfig_dir / "fonts.conf"
+_fontconfig_file.write_text(
+    f"""<?xml version="1.0"?>
+<fontconfig>
+  <dir>/usr/share/fonts</dir>
+  <dir>/usr/local/share/fonts</dir>
+  <cachedir>{escape(str(_fontconfig_dir / "cache"))}</cachedir>
+  <alias>
+    <family>sans-serif</family>
+    <prefer><family>DejaVu Sans</family></prefer>
+  </alias>
+  <!-- Qt's offscreen platform requests this spelling of sans-serif. -->
+  <alias>
+    <family>Sans Serif</family>
+    <prefer><family>DejaVu Sans</family></prefer>
+  </alias>
+  <alias>
+    <family>monospace</family>
+    <prefer><family>DejaVu Sans Mono</family></prefer>
+  </alias>
+</fontconfig>
+""",
+    encoding="utf-8",
+)
+os.environ["FONTCONFIG_FILE"] = str(_fontconfig_file)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _require_test_fonts(qapp: QApplication) -> None:
+    """Stop the session if Qt substitutes either pinned test font."""
+    families = (
+        QFontInfo(qapp.font()).family(),
+        QFontInfo(theme.font("code")).family(),
+    )
+    if families != ("DejaVu Sans", "DejaVu Sans Mono"):
+        pytest.exit(
+            "App tests require DejaVu Sans and DejaVu Sans Mono; "
+            "install fonts-dejavu-core. "
+            f"Qt resolved {families!r}.",
+            returncode=1,
+        )
 
 
 @pytest.fixture(autouse=True)
