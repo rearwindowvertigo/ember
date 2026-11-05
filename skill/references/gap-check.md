@@ -7,8 +7,6 @@ task count, or ask) and which gaps reach the owner (Gaps Claude asks you
 about). Ember applies both; do not decide them yourself.
 
 Use the run's claim after its skill-version check (SKILL.md step 2).
-Reload a stale skill before the next step and keep that claim; start no
-reviewer on an unknown installed version.
 
 Write the plan in the session scratchpad with the cases it must handle and
 those it accepts: a nonblank `failure_model` string in a flow plan, or a
@@ -20,9 +18,11 @@ A reviewer reads only the plan, its worktree and its read paths; it cannot
 open an issue tracker. Put the text of each source the plan cites in the
 plan, or export it to a file in the session scratchpad and pass the file
 with `--read` (for a GitHub issue,
-`gh issue view <n> --comments > <scratch>/issue-<n>.md`). `emb gapcheck`
-and `emb flow --dry-run` warn about each citation no read file supplies;
-treat that warning as a missing source.
+`gh issue view <n> --json number,title,state,body,comments --jq '"# #\(.number) \(.title) (\(.state))\n\n\(.body)\n\n## Comments\n\([.comments[].body]|join("\n\n---\n\n"))"' > <scratch>/issue-<n>.md`).
+`emb gapcheck` and `emb flow --dry-run` warn about each citation no read file
+supplies; treat that warning as a missing source. A read file that is empty
+or holds only whitespace is refused with exit 64, for `emb gapcheck --read`
+and for the flow plan's `read` paths; folders are not checked.
 
 ## Decide first
 
@@ -47,8 +47,7 @@ Then:
 
 ## Run and read
 
-Run as a background Bash command, unpiped, and take its exit code. Save
-the JSON result to a numbered scratch file; it is where answers are
+Save the JSON result to a numbered scratch file; it is where answers are
 recorded and what a repeat check reads:
 
 ```bash
@@ -58,9 +57,7 @@ emb gapcheck --plan <file> --dir <repo> --claim <id> --json > <scratch>/gapcheck
 The reviewer reads the repository in its own detached worktree at the
 source checkout's `HEAD`. The brief includes the plan text, including an
 uncommitted plan, and tells it to use its own working folder without
-naming the source checkout. Other uncommitted repository edits are absent;
-report every uncommitted-path warning. A successful close removes the
-clean detached worktree; changes are kept with a discard-command warning.
+naming the source checkout. Other uncommitted repository edits are absent.
 
 Use the run's existing claim. `emb gapcheck` uses the owner's Gap check
 reviewer row (`gapcheck.reviewer`, which follows `single.reviewer` while
@@ -68,7 +65,6 @@ reviewer row (`gapcheck.reviewer`, which follows `single.reviewer` while
 `--engine <e> --model <m> --effort <x>` with the resolved effort when there
 is one. If no reviewer was named and
 the row cannot answer, ask the owner using the skill's worker question.
-Never change settings to make the check run.
 
 For a flow, run the exact `gapcheck` command from the dry run (also printed
 after `gap check:`; it already carries `--json` and `--confirmed` after an
@@ -83,11 +79,9 @@ step leaves the check incomplete. With `--previous`, a missing or unknown
 earlier gap disposition also leaves it incomplete. Empty gap lists and
 zero counts are valid only with coverage of every expected step. Exit 81: follow `next:`
 to obtain a complete reply. On a `WARNING:` about a missing failure model,
-add it and check again. Read every warning and follow `next:` within the
-skill's rules; bring `owner:` lines to the owner. For a CLI reviewer's
-denied paths, inspect its run status and follow `references/runs.md`: name
-each path and reason, give the Settings, Sandbox read paths owner action
-when present, and never add paths to `sandbox.read` yourself.
+add it and check again. Follow printed lines as SKILL.md step 6 says. For a CLI reviewer's
+denied paths, inspect its run status and report them as `references/runs.md`
+(Denied paths) says.
 
 Check for tasks whose `files` overlap only on a shared file, even when
 they edit different sections: a reference document, changelog, index or

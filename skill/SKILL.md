@@ -93,7 +93,7 @@ usage reading.
 |---|---|
 | No worker | A few lines in one or two files already open. |
 | Codex, `emb run --engine codex` | Coding, drafting, tests and research; the default. |
-| OpenCode, `emb run --engine opencode` | A model suited to the task from any integration connected in OpenCode; after a Codex exit 73 with `provider_kind: usage_limit`, or when the owner names it. |
+| OpenCode, `emb run --engine opencode` | A model suited to the task from any integration connected in OpenCode; when the owner names it, or as `references/runs.md` allows after a usage limit. |
 | Claude CLI, `emb run --engine claude` | A requested Claude CLI run. |
 | Claude subagent | Work needing Claude's tools, the browser, connectors, its own workers, or a folder that is not a git checkout. |
 | Claude Workflow | Claude-side fan-out of two or more tasks, with opt-in. |
@@ -106,7 +106,8 @@ For two or more tasks needing workers, read `menu["multi.runs_as"].value`:
 `flow` runs a flow; `workflow` runs a Claude Workflow and supplies opt-in.
 `ask` asks the owner, offering a flow or separate single runs, and a Claude
 Workflow only with opt-in. The owner's words win over the row.
-Read `references/flows.md` before a flow and `references/panels.md` before a panel.
+Read `references/flows.md` before a flow and `references/panels.md` before a
+panel.
 
 For research or search, recommend Codex with `--read-only`, and a Claude
 subagent as the alternative when it needs the browser or connectors.
@@ -119,7 +120,7 @@ engine's gate: recommend a Claude subagent with the reason, whatever the
 row says. Editing workers need a git checkout; work in a folder that is not
 one goes to a read-only subagent, or you do it. Otherwise a `set` row, a
 claimed choice or the owner's request binds, and departing from it needs
-the owner's consent. Do not offer a Claude Workflow without opt-in.
+the owner's consent.
 
 Use `single.writer` for edits and `single.reviewer` for read-only work.
 For a `claude` row, `run_as` picks `cli` (`emb run --engine claude`) or
@@ -129,14 +130,14 @@ options, including its claim, model, effort and read-only options when
 given. On success, copy its standard-output line as the visible announce
 line right before the start, for example:
 `Team, Single tasks Writer: codex gpt-6.1-sol · high (single.writer)`.
-Follow a dry-run refusal as `references/runs.md` describes and start no
-worker. For a Claude subagent, name the row, model and effort yourself.
+A dry-run refusal starts no worker. For a Claude subagent, name the row,
+model and effort yourself.
 
 An explicit worker or model in the owner's request wins over the menu,
 within the gates. Use its named model; otherwise use the job's row when it
 holds the same engine, or ask among that engine's shortlisted models. Say
-model and effort once, with any difference from Team; for `emb run`,
-copy the dry-run line. Do not change the saved menu. With the owner away
+model and effort once, with any difference from Team; for `emb run`, the
+dry-run line says it. Do not change the saved menu. With the owner away
 or rows not `set`, pass named workers
 explicitly: `emb gapcheck --engine <e> --model <m> --effort <x>`,
 `emb flow --writer <e>:<m>@<x> --reviewer <e>:<m>@<x>`, or repeatable
@@ -153,30 +154,18 @@ ask the same question in plain text, as one direct question ending in a
 question mark, and stop until the owner answers.
 
 Resolve two or more separately started tasks one at a time, numbered
-`Task N of M`. Same-worker corrections, recoveries and retries after a
-capacity error, usage limit or outage need no new question; a replacement
-worker or model does. Ember retries capacity errors with the run's saved
-Team limits and keeps its model and effort. Offer OpenCode after a Codex
-provider error only for `usage_limit`, never for `capacity` or `outage`.
-If resend delivery is uncertain, inspect the session and ask the lead
-before sending again, as `next:` says.
+`Task N of M`. A same-worker correction, recovery or retry needs no new
+question; a replacement worker or model does. After a capacity error, offer
+only the same-model retry; see `references/runs.md`.
 
 ### 4. Establish the editing boundary
 
 Run each editing worker in its own worktree and branch, and commit there.
-`emb run` makes the branch `ember/<engine>/<id>` in a worktree outside the
-repository, at the `worktree` path its start output names, cut from the
-`HEAD` of the checkout named by `--dir`. Each `emb run --read-only` and
-panel member also gets its own detached worktree, with no branch. A panel
-pins one commit for all members and retries. Read-only starts warn for each
-uncommitted source path they cannot see; report those warnings. Tell
-reviewers to read their own working folder, using relative paths. Closing
-removes clean detached worktrees and keeps changed ones with their recorded
-paths and an explicit discard command, including with `--force`.
-Ember's run and flow worktrees are in `$XDG_DATA_HOME/ember/worktrees`
-(default
-`~/.local/share/ember/worktrees`); use their reported paths. Merge and
-cleanup read existing paths from the records, including older worktrees.
+`emb run` makes the branch `ember/<engine>/<id>` and its worktree, cut from
+the `HEAD` of the checkout named by `--dir`, as `references/runs.md`
+describes. Each `emb run --read-only` and panel member gets its own detached
+worktree, with no branch. Tell reviewers to read their own working folder,
+using relative paths.
 An editing subagent or Workflow agent uses
 `isolation: "worktree"`; Claude Code bases it on `worktree.baseRef`:
 `head` is the current `HEAD`, `fresh` the remote default branch. Say so
@@ -236,11 +225,7 @@ docstrings or tests the request does not ask for. Do not fan out beyond what
 you can review.
 
 Before a flow or a Claude Workflow of two or more tasks starts, follow the
-gap check in `references/gap-check.md`; Ember applies the owner's gap check
-settings and may skip it. Record answers and defaults with
-`emb gapcheck --answer`. Every repeat check passes the last result with
-`--previous`; follow the reference for filenames and earlier-gap dispositions.
-Only those need it.
+gap check in `references/gap-check.md`.
 
 ### 6. Start and follow the run
 
@@ -248,9 +233,10 @@ Read `references/runs.md` before the session's first `emb run`, and again
 on every non-zero exit. Read `references/claude-agents.md` before a
 subagent or Workflow spawn.
 
-Run `emb run` starts, `--send` and `--recover` as background Bash
-commands, unpiped, and take the exit code: a pipe hides it. Pass the claim
-with `--claim <id>`.
+Run every `emb run` start, `--send` and `--recover`, and every
+`emb flow --start` and `--watch`, `emb gapcheck` and `emb panel`, as a
+background Bash command, unpiped, and take the exit code: a pipe hides it.
+Pass the claim with `--claim <id>`.
 
 | Purpose | Command |
 |---|---|
@@ -258,26 +244,30 @@ with `--claim <id>`.
 | Start | `emb run --engine <engine> --dir <repo> --task-file <brief> --trailer '<trailer>' --claim <id>` |
 | Read-only | Add `--read-only` |
 | Show the owner | Add `--window` at start, or `emb run --attach <run>` later |
-| Correct | `emb run --send <run> --message-file <file>` |
+| Correct | `emb run --send <run> --message-file <file>`; write the correction yourself |
 | Inspect | `emb run --screen <run>` |
 | Stop a turn going wrong | `emb run --interrupt <run>` |
-| Collect | `emb run --recover <run>` |
-| State | `emb run --status <run> --json` |
+| State | `emb run --status <run> [--json]` |
 
-Keep run id, claim, branch, worktree and reply path together.
+Keep the run id from the start's first line with the claim.
 
-Count turn results from each run's `turns` in `emb run --status [<run>]
---json`, including failed turns followed by successful ones. Report unknown
-fields and warnings; `references/runs.md` describes unfinished and older
-results.
+Ember prints one `next:` or `owner:` line on standard error at each step of
+an `emb run` task: at exit 0 after a start, `--send`, `--recover`, `--close`
+or `emb merge`, on every non-zero exit, and in `emb run --status <run>`,
+which also prints the run's `step:`. The line is the next command with its arguments
+filled in. Read standard error after every run, also at exit 0. Run each
+`next:` line's command, within the owner gates below; put an `owner:` line
+to the owner, naming the action, and wait. A line leaves the brief, the
+review bar, the verdict, `--note` and `--subject` to you. After a turn with
+commits the line is the verify command, then the merge command: review and
+report between them. Do not retry a
+refusal: a refusal is Ember or the owner saying no, and repeating it
+changes nothing.
 
-Read standard error after every run, also at exit 0, and report every
-`WARNING:` line. For every denied path, name its run and turn and its
-reason, and give the Settings, Sandbox read paths owner action from
-`references/runs.md`. Never add paths to `sandbox.read` yourself.
-Follow a `next:` line within these rules; put an `owner:`
-line to the owner, naming the action, and wait. Do not retry a refusal: a
-refusal is Ember or the owner saying no, and repeating it changes nothing.
+Report every `WARNING:` line. For every denied path, name its run and turn
+and its reason, and give the owner action from `references/runs.md`
+(Denied paths). Count turn results as `references/runs.md` (Turn results)
+says.
 
 When your check of a worker fails, correct it first with `--send` or
 SendMessage; offer another worker after a correction fails. When the
@@ -291,17 +281,17 @@ Verify in the worker's own worktree and branch, not the session checkout.
 Write scratch output to `/tmp`, never into a worker's worktree. Delete,
 clean or commit nothing there, including files your own checks create;
 run Python checks with `PYTHONDONTWRITEBYTECODE=1`. Cleanup decides from
-what the worktree holds. After every editing worker, run:
+what the worktree holds. After every editing worker, verify its branch. For
+an `emb run` branch, run the `verify_branch.py` command in the `next:` line
+Ember printed after the turn. For a branch with no run record (a flow
+or `worktree-agent-*` branch), run:
 
 ```bash
-python3 scripts/verify_branch.py --repo <repo> --base <session branch> --branch <worker branch> --worktree <worktree> --expect-files <n>
+python3 scripts/verify_branch.py --repo <repo> --base <session branch> --branch <branch> --worktree <worktree>
 ```
 
-Take `<n>` from the summary line of a run with one turn; leave
-`--expect-files` out after a correction turn, since each summary line
-counts only its own turn's files, or when there is no summary line. The script prints the tip, the three-dot numstat, the file
-count and the worktree's status. It decides no verdict. Investigate a
-`MISMATCH:` line.
+The script prints the tip, the three-dot numstat, the file count and the
+worktree's status. It decides no verdict. Investigate a `MISMATCH:` line.
 
 Derive and run one or two checks of your own from the owner's request.
 The worker's tests and acceptance commands are not proof. Before Keep of
@@ -350,12 +340,12 @@ Report a subagent or Claude Workflow in one or two plain sentences, naming
 its branch when it has one. Every worker with a branch gets one of the
 three verdicts, because only Keep work merges.
 
-Park with `emb run --close <run>` only runs this session started, after
-the turn ended, its work was committed and its reply was read and
-reported; a read-only run once its turn ended and its reply was read and
-reported. A 75 refusal leaves the run open. Never `--close --force`
-without the owner's instruction for that run: the session may hold the
-owner's work. Report runs parked and runs left open, with reasons.
+For an editing run with commits the order is verify, review, report, merge,
+then finish as merge's `next:` line says; the merge closes the run. Park a
+run with `emb run --close <run>` when its `next:` line names it: a read-only
+run, a run without commits and a discarded run. Park only a run this session
+started, after its turn ended, its work was committed and its reply was
+read and reported. Report runs parked and runs left open, with reasons.
 
 ### 9. Merge, clean up and finish
 
@@ -365,22 +355,24 @@ it as an `Ember-Verdict` trailer on the landed commit.
 Repeat the same verdict in the step 8 report. Run `emb merge` as its own
 Bash call, with no other command chained before or after it; do the same
 after a correction. Merge only Keep or Keep-with-fix work into the session
-branch. For an Ember run branch, write `--subject` in the repository's
-commit convention, read from `AGENTS.md`, `CONTRIBUTING` or `git log`.
-Describe the reviewed result across all turns. Mark a breaking Conventional
-Commit with `!`.
+branch. For an `emb run` branch, run the `emb merge` line in the `next:`
+line printed after the turn, writing `--note` and `--subject` yourself. Write
+`--subject` in the repository's commit convention, read from `AGENTS.md`,
+`CONTRIBUTING` or `git log`. Describe the reviewed result across all turns.
+Mark a breaking Conventional Commit with `!`. For a branch with no run
+record (a flow or `worktree-agent-*` branch), run:
 
 ```bash
-emb merge <branch> --into <session branch> --verdict keep --note '<verdict line>' --subject '<commit subject>'
+emb merge <branch> --into <session branch> --verdict keep --note '<verdict line>' [--dir <dir>]
 ```
 
-Ember squashes the run's turns into one commit with that subject. It keeps
-each distinct worker trailer once, excluding keys starting with `Ember-`,
-and writes `Ember-Verdict` and `Ember-Task-Tip` with the verdict and worker
-tip. It runs the target repository's `commit-msg` hook and honours
-`commit.gpgsign`; it does not rerun `pre-commit`. A completed flow branch
-and other branches keep their merge commits and do not need `--subject`.
-Report a `WARNING:` about a breaking change whose landed subject has no `!`.
+Ember squashes an Ember run branch's turns into one commit with that
+subject. It keeps each distinct worker trailer once, excluding keys starting
+with `Ember-`, and writes `Ember-Verdict` and `Ember-Task-Tip` with the
+verdict and worker tip. It runs the target repository's `commit-msg` hook
+and honours `commit.gpgsign`; it does not rerun `pre-commit`. A completed
+flow branch and other branches keep their merge commits and need no
+`--subject`.
 
 A Keep verdict needs no question to the owner. Do not merge while the
 session tree holds edits you did not make in this session: give the owner
@@ -393,21 +385,23 @@ Exit 0 proves the merge, not that cleanup removed everything. Report the
 worker branch's tip commit (not the landed commit) and every `kept` line
 with its reason. Leave a kept worktree as
 it is: do not delete, clean or commit its files so that cleanup removes
-it. What happens to it is the owner's decision.
+it. What happens to it is the owner's decision. After a merge or cleanup that
+prints no `next:` line, report each kept line and run
+`emb run --status <run>`; follow the `next:` line it prints.
 
 | Exit of `emb merge` or `emb cleanup` | Response |
 |---|---|
 | 64 | Fix the call; `emb merge` needs `--verdict keep`, a one-line `--note`, a one-line `--subject` for an Ember run branch and two different branches. |
 | 65 | Run it inside the checkout, with branches that exist. |
-| 70 | A git command failed; a merge already made stays. Report the message and the `next:` line. |
+| 70 | A git command failed; a merge already made stays. Report the message; follow `next:`. |
 | 75 | Refused: the target is checked out nowhere, is mid-merge, mid-rebase, mid-cherry-pick or mid-revert, has changes, or the merge conflicted. A squash conflict names the files and leaves the target unchanged. Report it; do not retry or force it. After a conflict, ask the owner: a new run cut from the updated session branch redoes the work, or the owner resolves it. Keep the claim open until then. |
 | 76 | The target or worker branch moved while building the squash. Review both tips before repeating the merge. |
 | 77 | The target's `commit-msg` hook, commit identity or signing configuration refused the squash. Follow `next:`; nothing moved. |
 
 A subagent or Workflow branch (`worktree-agent-*`) gets a merge commit.
-`emb merge` keeps it as `not an Ember run branch`; then remove its
-worktree with `git worktree remove <path>` (never `--force` without
-approval) and delete it with `git branch -d <branch>`.
+`emb merge` keeps it as `not an Ember run branch`; remove its worktree with
+`git worktree remove <path>` (never `--force` without approval), then follow
+the `next: git branch -d <branch>` line.
 
 Before squashing or deleting the session branch, run
 `emb cleanup --merged-into <session branch>` and report the keeps.
@@ -426,12 +420,14 @@ owner says drop it: a finished claim is not approval to delete. Show its
 changes first. On an approved drop, report the tip, then use
 `git worktree remove --force` and `git branch -D`.
 
-Finish with `emb choices --finish <id>`: after merge or discard for
-editing work, after review for read-only work, at once for no worker.
-`status: gone` in the reply means the finish worked; `was` is the status
-before it.
-Failed or cancelled runs still get review and a decision on their partial
-work before the finish.
+Finish with the `emb choices --finish <id>` line that merge, cleanup or
+close printed. Nothing prints it for a Claude subagent, a Claude Workflow, no
+worker, or an `emb run` branch that is discarded, failed or abandoned: its
+closed run keeps the verify-and-merge line while the branch is unmerged. For
+those, run `emb choices --finish <id>` after merge or discard for editing
+work (once the owner's decision on the kept branch is reported), after review
+for read-only work, at once for no worker. Failed or cancelled runs still get
+review and a decision on their partial work before the finish. `references/claims.md` says what its reply means.
 
 ## Owner gates
 

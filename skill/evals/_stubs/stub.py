@@ -32,7 +32,27 @@ reply gives `.out` or a non-zero `.code`. `flow-start` also builds a branch
 when its reply has neither override. `panel-start` writes a summary whenever
 its reply has `.summary`, including with a non-zero `.code`.
 `help` prints the matching section
-of `replies/help.out`. With `EMBER_EVAL_SETUP` set, a call is neither logged
+of `replies/help.out`.
+
+The built routes print the `next:` line the real command prints, derived
+from the stub's own run state and git as `ember.runs.steps.derive` derives
+it, never from a template. `run-start`, `run-send`, `run-recover` and
+`run-close` print it on standard error at exit 0 (a dry run prints none);
+`run-status RUN` prints `step:` on standard output, in JSON `step` and
+`next`, and the line on standard error; the `run-status` list gives each
+record `step` and `next` and prints no line. `merge` prints the newest
+matching run's line on standard error and gives it as `next` in its JSON;
+a kept branch, a branch with no run record and a flow branch give none.
+`cleanup --claim <id>` prints `next: emb choices --finish <id>` once on
+standard error unless a kept result holds that claim or `--dry-run` is set.
+The `verify_branch.py` path comes from `ember.skill.link_path(os.environ)`.
+A run records `base_branch`, the branch checked out in its `--dir` checkout
+at start (null when detached). An exit-0 `choices --finish` records its
+claim as `gone` in `state.json`'s `claims`, and a run whose claim is `gone`
+derives no finish line. Stored `step` and `next` keys in a state document are
+ignored. Canned replies print only what their `.err` holds. No template
+variable carries a `next:` line, and no `.reply` file holds one.
+With `EMBER_EVAL_SETUP` set, a call is neither logged
 nor counted, so a case can start a run while it is set up.
 `run-dry-run` checks the brief and repository and resolves the worker
 without launch artifacts; a non-zero `.code` overrides it. Its default
@@ -64,7 +84,7 @@ from typing import Any
 
 # The installer copies these production modules beside the isolated stub.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ember import branches  # noqa: E402
+from ember import branches, skill  # noqa: E402
 from ember.flows import plan as flow_plan  # noqa: E402
 from ember.gapcheck import brief as gap_brief  # noqa: E402
 from ember.gapcheck import plan as gap_plan  # noqa: E402
@@ -348,7 +368,8 @@ def load_state() -> dict[str, Any]:
     """Read the stub's state.
 
     Returns:
-        `counters` by route and `runs`, `flows` and `panels` by id.
+        `counters` by route and `runs`, `flows`, `panels` and `claims` by id;
+        `claims` maps a claim id to `gone` once `emb choices --finish` ran.
     """
     try:
         state = json.loads(STATE.read_text())
@@ -358,6 +379,7 @@ def load_state() -> dict[str, Any]:
     state.setdefault("runs", {})
     state.setdefault("flows", {})
     state.setdefault("panels", {})
+    state.setdefault("claims", {})
     return state
 
 
@@ -738,6 +760,179 @@ def do_turn(
     return turn_block(run, files, commit)
 
 
+def run_merged(run: dict[str, Any]) -> bool:
+    """Return whether the run's last commit is contained in its base branch.
+
+    Args:
+        run: The run's record.
+
+    Returns:
+        The check `emb cleanup` uses; a missing base branch or a failed
+        check counts as not contained.
+    """
+    try:
+        return bool(
+            run.get("commits")
+            and run.get("base_branch")
+            and branches.is_contained(
+                run.get("main") or run["repo"],
+                run["commits"][-1],
+                run["base_branch"],
+                os.environ,
+                scratch=True,
+            )
+        )
+    except OSError, subprocess.SubprocessError, branches.BranchError:
+        return False
+
+
+def run_branch_left(run: dict[str, Any]) -> bool:
+    """Return whether a run's branch is still in its checkout.
+
+    Args:
+        run: The run's record.
+
+    Returns:
+        `False` for no branch, or for a branch or checkout git reports gone.
+    """
+    if not run.get("branch"):
+        return False
+    result = git(
+        run.get("main") or run["repo"],
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        f"refs/heads/{run['branch']}",
+        check=False,
+    )
+    return result.returncode not in (1, 128)
+
+
+def finish_line(run: dict[str, Any], state: dict[str, Any]) -> str | None:
+    """Return the claim-finish line, or `None` without a live claim.
+
+    Args:
+        run: The run's record.
+        state: The stub's state, whose `claims` hold the finished ids.
+
+    Returns:
+        `next: emb choices --finish <claim>`; `None` when the run has no
+        claim or its claim is `gone`.
+    """
+    claim = run.get("claim")
+    if claim is None or state["claims"].get(claim) == "gone":
+        return None
+    return f"next: emb choices --finish {shlex.quote(claim)}"
+
+
+def verify_line(run: dict[str, Any]) -> str:
+    """Return the verify and merge line for a run with commits to land.
+
+    Args:
+        run: The run's record.
+
+    Returns:
+        `next: python3 <skill>/scripts/verify_branch.py ..., then emb merge
+        ...`, with the arguments filled in from the record and git.
+    """
+    base_branch = (
+        shlex.quote(run["base_branch"])
+        if run.get("base_branch")
+        else "<session branch>"
+    )
+    branch = shlex.quote(run["branch"]) if run.get("branch") else "<branch>"
+    directory = run.get("main") or run["repo"]
+    script = skill.link_path(os.environ) / "scripts" / "verify_branch.py"
+    line = (
+        f"next: python3 {shlex.quote(str(script))} --repo {shlex.quote(directory)} "
+        f"--base {base_branch} --branch {branch} "
+        f"--worktree {shlex.quote(run['worktree'])}"
+    )
+    if run["turn"] == 1 and run.get("base") is not None:
+        result = git(
+            directory,
+            "diff",
+            "--name-only",
+            "-z",
+            run["base"],
+            run["commits"][-1],
+            check=False,
+        )
+        if result.returncode == 0:
+            count = len([name for name in result.stdout.split("\0") if name])
+            line += f" --expect-files {count}"
+    return (
+        f"{line}, then emb merge {branch} --into {base_branch} "
+        "--verdict keep --note '<verdict>' --subject '<subject>'"
+    )
+
+
+def derive_next(run: dict[str, Any], state: dict[str, Any]) -> tuple[str, str | None]:
+    """Return a run's step and next line from its record and git.
+
+    The order is the one `ember.runs.steps.derive` uses. Every stub turn
+    exits 0, every stub session is live and no stub run has a parent, so the
+    `parent` and `failed` steps never apply.
+
+    Args:
+        run: The run's record; stored `step` and `next` keys are ignored.
+        state: The stub's state.
+
+    Returns:
+        The step name and its line, or `None` when none applies.
+    """
+    if run["status"] == "closed":
+        if (
+            run["read_only"]
+            or not run.get("commits")
+            or run_merged(run)
+            or not run_branch_left(run)
+        ):
+            return "finish", finish_line(run, state)
+        return "merge", verify_line(run)
+    if run["status"] == "starting" or run["turn"] == 0:
+        return "starting", f"next: emb run --status {run['id']}"
+    if run["turn_state"] == "sent":
+        return "running", f"next: emb run --status {run['id']}"
+    if run["turn_state"] == "collected":
+        return "recover", f"next: emb run --recover {run['id']}"
+    if not run["read_only"] and run.get("commits") and not run_merged(run):
+        return "merge", verify_line(run)
+    return "close", f"next: emb run --close {run['id']}"
+
+
+def with_step(run: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    """Return a run's status document with `step` and `next` derived fresh.
+
+    Args:
+        run: The run's record.
+        state: The stub's state.
+
+    Returns:
+        The record with `session_state`, `step` and `next`; any stored `step`
+        or `next` is replaced.
+    """
+    step, line = derive_next(run, state)
+    return {**run, "session_state": "live", "step": step, "next": line}
+
+
+def add_next(reply: Reply, run: dict[str, Any], state: dict[str, Any]) -> Reply:
+    """Append the run's next line to a reply's standard error.
+
+    Args:
+        reply: The exit-0 reply of `emb run`.
+        run: The run's record.
+        state: The stub's state.
+
+    Returns:
+        The reply, with the line last on standard error when there is one.
+    """
+    line = derive_next(run, state)[1]
+    if line is not None:
+        reply.err += line + "\n"
+    return reply
+
+
 def run_start(
     args: list[str], state: dict[str, Any], base: Path | None, variables: dict[str, str]
 ) -> Reply:
@@ -860,6 +1055,7 @@ def run_start(
         "worktree": str(worktree),
         "branch": branch,
         "base": head,
+        "base_branch": out(directory, "branch", "--show-current") or None,
         "trailers": options(args, "--trailer"),
         "claim": option(args, "--claim"),
         "status": "running",
@@ -876,10 +1072,14 @@ def run_start(
     variables.update(RUN=run_id, BRANCH=branch or "-", WORKTREE=str(worktree))
     block = do_turn(run, base, variables, warnings)
     state["runs"][run_id] = run
-    return Reply(
-        0,
-        f"run {run_id}\n{block}",
-        "".join(warnings) + read_part(base, ".err", variables),
+    return add_next(
+        Reply(
+            0,
+            f"run {run_id}\n{block}",
+            "".join(warnings) + read_part(base, ".err", variables),
+        ),
+        run,
+        state,
     )
 
 
@@ -935,7 +1135,7 @@ def run_other(
     if mode == "status" and not run_id:
         runs = sorted(state["runs"].values(), key=lambda item: item["started_at"])
         if has(args, "--json"):
-            listing = [{**run, "session_state": "live"} for run in runs]
+            listing = [with_step(run, state) for run in runs]
             return Reply(0, json.dumps(listing, indent=2) + "\n")
         lines = [
             f"{run['id']}  {run['status']}  live  turn {run['turn']}  {run['subject']}"
@@ -948,15 +1148,18 @@ def run_other(
         return canned_reply(base, variables, has(args, "--json"))
     run = known_run(state, run_id, variables)
     if mode == "status":
-        document = {**run, "session_state": "live"}
+        document = with_step(run, state)
+        line = document["next"]
+        errors = f"{line}\n" if line else ""
         if has(args, "--json"):
-            return Reply(0, json.dumps(document, indent=2) + "\n")
-        return Reply(0, "".join(f"{key}: {value}\n" for key, value in document.items()))
+            return Reply(0, json.dumps(document, indent=2) + "\n", errors)
+        shown = (item for item in document.items() if item[0] != "next")
+        return Reply(0, "".join(f"{key}: {value}\n" for key, value in shown), errors)
     if mode == "close":
         run["status"] = "closed"
         _, warning = remove_detached(run)
         errors = f"WARNING: read-only run {run['id']}: {warning}\n" if warning else ""
-        return Reply(0, f"closed {run['id']}\n", errors)
+        return add_next(Reply(0, f"closed {run['id']}\n", errors), run, state)
     if run["status"] == "closed":
         return refuse(72, f"the run {run['id']} is closed", "next: a new start")
     if mode == "send":
@@ -971,9 +1174,15 @@ def run_other(
             )
         warnings = []
         block = do_turn(run, base, variables, warnings)
-        return Reply(0, block, "".join(warnings) + read_part(base, ".err", variables))
+        return add_next(
+            Reply(0, block, "".join(warnings) + read_part(base, ".err", variables)),
+            run,
+            state,
+        )
     commits = run["commits"]
-    return Reply(0, turn_block(run, 0, commits[-1] if commits else None))
+    return add_next(
+        Reply(0, turn_block(run, 0, commits[-1] if commits else None)), run, state
+    )
 
 
 # emb flow and emb panel ----------------------------------------------------
@@ -1135,6 +1344,22 @@ def cleanup_branch(repo: Path, branch: str, state: dict[str, Any]) -> str:
     return f"removed {branch}: {'; '.join(parts)}"
 
 
+def branch_claim(branch: str, state: dict[str, Any]) -> str | None:
+    """Return the claim a run branch's record holds.
+
+    Args:
+        branch: The branch.
+        state: The stub's state.
+
+    Returns:
+        The recorded claim id, or `None` for a branch with no run record or
+        no claim.
+    """
+    match = branches.WORKER_BRANCH.fullmatch(branch)
+    run = state["runs"].get(match["run"]) if match else None
+    return run.get("claim") if run else None
+
+
 def contained(repo: Path, branch: str, target: str) -> bool:
     """Return whether Ember considers the branch contained in the target.
 
@@ -1242,12 +1467,17 @@ def merge(args: list[str], state: dict[str, Any], variables: dict[str, str]) -> 
     except branches.BranchError as error:
         return merge_failure(error.code, str(error), error.line)
     cleaned = cleanup_branch(repo, branch, state)
+    run_match = branches.WORKER_BRANCH.fullmatch(branch)
+    run = None
+    if run_match and not branches.FLOW_BRANCH.fullmatch(branch):
+        run = state["runs"].get(run_match["run"])
+    if cleaned.startswith("kept"):
+        run = None
+    next_line = derive_next(run, state)[1] if run is not None else None
     err = "".join(f"{warning}\n" for warning in warnings)
     if has(args, "--json"):
         action, _, reason = cleaned.partition(": ")
         reason, separator, next_action = reason.partition("; next: ")
-        run_match = branches.WORKER_BRANCH.fullmatch(branch)
-        run = run_match["run"] if run_match else None
         result = {
             "branch": branch,
             "target": target,
@@ -1258,15 +1488,18 @@ def merge(args: list[str], state: dict[str, Any], variables: dict[str, str]) -> 
             "cleanup": [
                 {
                     "branch": branch,
-                    "run": run,
+                    "run": run_match["run"] if run_match else None,
                     "action": action.split()[0],
                     "reason": reason,
                     "next": f"next: {next_action}" if separator else None,
                 }
             ],
+            "next": next_line,
         }
+        err += f"{next_line}\n" if next_line else ""
         return Reply(0, json.dumps(result, indent=2) + "\n", err)
     lines = [f"Verdict: {note}", first, cleaned]
+    err += f"{next_line}\n" if next_line else ""
     return Reply(0, "\n".join(lines) + "\n", err)
 
 
@@ -1295,6 +1528,7 @@ def cleanup(args: list[str], state: dict[str, Any], variables: dict[str, str]) -
             65, err=f"emb cleanup: no local branch {target}\nnext: git branch --list\n"
         )
     only = option(args, "--branch")
+    claim = option(args, "--claim")
     names = (
         [only]
         if only
@@ -1303,9 +1537,13 @@ def cleanup(args: list[str], state: dict[str, Any], variables: dict[str, str]) -
         ).splitlines()
     )
     lines = []
+    kept_claims: set[str | None] = set()
     for name in names:
         if not name or not branch_exists(repo, name):
             continue
+        if claim is not None and branch_claim(name, state) != claim:
+            continue
+        before = len(lines)
         if not contained(repo, name, target):
             lines.append(
                 f"kept {name}: not contained in {target}; next: emb merge {name} "
@@ -1316,6 +1554,8 @@ def cleanup(args: list[str], state: dict[str, Any], variables: dict[str, str]) -
             lines.append(f"would remove {name}: deletes {name}")
         else:
             lines.append(cleanup_branch(repo, name, state))
+        if lines[-1].startswith("kept") and len(lines) > before:
+            kept_claims.add(branch_claim(name, state))
     if only is None:
         common = Path(
             out(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -1327,8 +1567,11 @@ def cleanup(args: list[str], state: dict[str, Any], variables: dict[str, str]) -
                 or Path(run["common"]).resolve() != common.resolve()
             ):
                 continue
+            if claim is not None and run.get("claim") != claim:
+                continue
             removed, warning = remove_detached(run, dry_run=has(args, "--dry-run"))
             if warning:
+                kept_claims.add(run.get("claim"))
                 lines.append(
                     f"kept {run['id']}: {warning}; next: emb cleanup "
                     f"--merged-into {target} --dir {repo}"
@@ -1337,9 +1580,12 @@ def cleanup(args: list[str], state: dict[str, Any], variables: dict[str, str]) -
                 action = "would remove" if has(args, "--dry-run") else "removed"
                 verb = "removes" if has(args, "--dry-run") else "removed"
                 lines.append(f"{action} {run['id']}: {verb} worktree {run['worktree']}")
-    if not lines:
-        return Reply(0, err=f"emb cleanup: no Ember run branch against {target}\n")
-    return Reply(0, "\n".join(lines) + "\n")
+    err = "" if lines else f"emb cleanup: no Ember run branch against {target}\n"
+    # The claim-finish line: after exit 0 with --claim, unless a kept result
+    # holds that claim; never with --dry-run.
+    if claim is not None and not has(args, "--dry-run") and claim not in kept_claims:
+        err += f"next: emb choices --finish {shlex.quote(claim)}\n"
+    return Reply(0, "".join(line + "\n" for line in lines), err)
 
 
 # emb ground ----------------------------------------------------------------
@@ -1778,6 +2024,9 @@ def dispatch(
     if name == "panel-start" and part(base, ".summary") is not None:
         return panel_start(state, base, variables, as_json)
     response = canned_reply(base, variables, as_json)
+    if name == "choices-finish" and response.code == 0:
+        # A finished claim reads `gone`, so a status derives no finish line.
+        state["claims"][option(rest, "--finish") or ""] = "gone"
     if name == "choices-claim" and response.code == 0 and not has(rest, "--skill"):
         document = json.loads(response.out)
         for key in ("skill", "loaded_skill_version", "installed_skill_version"):

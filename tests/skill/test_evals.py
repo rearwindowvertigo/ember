@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import os
 import re
@@ -10,10 +11,10 @@ from typing import Any
 
 import pytest
 
-from ember import __version__, paths
+from ember import __version__, choices, paths, skill
 from ember.cli import main
 from ember.gapcheck import previous
-from ember.runs import exits
+from ember.runs import exits, record, steps
 
 TOP = Path(__file__).resolve().parents[2]
 SKILL = TOP / "skill"
@@ -301,6 +302,11 @@ def worktree_path(work: Case, worktree_id: str) -> Path:
     return paths.worktree_path(worktree_id, work.env)
 
 
+def skill_script(work: Case) -> str:
+    """The quoted `verify_branch.py` path the real command prints."""
+    return shlex.quote(str(skill.link_path(work.env) / "scripts" / "verify_branch.py"))
+
+
 def case(name: str, tmp_path: Path, env: dict[str, str]) -> Case:
     return Case(name, tmp_path / "work", env)
 
@@ -457,15 +463,23 @@ def test_run_start_commits_on_its_branch(tmp_path: Path, env: dict[str, str]) ->
         "--trailer", trailer, "--claim", "run-abc123",
     )  # fmt: skip
     assert result.returncode == 0, result.stderr
-    assert result.stderr == (
-        "Team, Single tasks Writer: codex gpt-6.1-sol · high (single.writer)\n"
-    )
     lines = result.stdout.splitlines()
     run_id = lines[0].removeprefix("run ")
     assert re.fullmatch(r"codex-\d{8}-\d{6}-[0-9a-f]{6}", run_id)
     branch = f"ember/codex/{run_id}"
     worktree = worktree_path(work, run_id)
     commit = work.git("rev-parse", branch)
+    worker_line, next_line = result.stderr.splitlines()
+    assert worker_line == (
+        "Team, Single tasks Writer: codex gpt-6.1-sol · high (single.writer)"
+    )
+    assert next_line == (
+        f"next: python3 {skill_script(work)} --repo {work.work} "
+        f"--base claude/report-since --branch {branch} --worktree {worktree} "
+        "--expect-files 2, then emb merge "
+        f"{branch} --into claude/report-since --verdict keep "
+        "--note '<verdict>' --subject '<subject>'"
+    )
     reply = work.eval / "runs" / run_id / "turn-1.md"
     assert lines[1] == "codex gpt-6.1-sol · high · 240s · exit 0 · 2 files · turn 1"
     assert lines[2:9] == [
@@ -612,7 +626,8 @@ def test_run_preview_then_start(
     started = work.emb(*args)
     assert started.returncode == 0
     assert started.stdout.startswith("run codex-")
-    assert started.stderr == line
+    assert started.stderr.startswith(line)
+    assert (stderr_next(started) or "").startswith("next: ")
     assert [call["route"] for call in work.calls()] == [
         "run-dry-run",
         "run-dry-run",
@@ -632,11 +647,12 @@ def test_read_only_start_makes_detached_worktree(
     assert "codex gpt-6.1-sol-mini · medium · " in result.stdout
     assert "branch -\n" in result.stdout
     assert work.git("branch", "--list", "ember/*") == ""
+    run_id = result.stdout.splitlines()[0].removeprefix("run ")
     assert result.stderr == (
         "Team, Single tasks Reviewer: codex gpt-6.1-sol-mini · medium "
         "(single.reviewer)\n"
+        f"next: emb run --close {run_id}\n"
     )
-    run_id = result.stdout.splitlines()[0].removeprefix("run ")
     tree = worktree_path(work, run_id)
     assert tree.is_dir() and tree != work.work
     assert work.git("branch", "--show-current", cwd=tree) == ""
@@ -699,13 +715,14 @@ def test_read_only_warns_for_uncommitted_paths_and_keeps_its_snapshot(
     assert set(result.stderr.splitlines()[1:]) == {
         f"WARNING: read-only run {run_id} does not see uncommitted {name}"
         for name in names
-    }
+    } | {f"next: emb run --close {run_id}"}
     assert (tree / "README.md").read_text() == committed
     assert not (tree / "notes.txt").exists()
     assert not (tree / "renamed.md").exists()
     source.write_text("Later owner edit.\n")
     sent = work.emb("run", "--send", run_id, "--message-file", work.brief())
-    assert sent.returncode == 0 and sent.stderr == ""
+    assert sent.returncode == 0
+    assert sent.stderr == f"next: emb run --close {run_id}\n"
     assert (tree / "README.md").read_text() == committed
     assert source.read_text() == "Later owner edit.\n"
 
@@ -728,6 +745,7 @@ def test_read_only_change_warning_names_its_detached_worktree(
         "Team, Single tasks Reviewer: codex gpt-6.1-sol-mini · medium "
         "(single.reviewer)\n"
         f"WARNING: read-only run {run_id} changed {evidence}\n"
+        f"next: emb run --close {run_id}\n"
     )
     assert not (work.work / "evidence.txt").exists()
     record = json.loads(work.emb("run", "--status", run_id, "--json").stdout)
@@ -927,7 +945,9 @@ def test_merge_squashes_turns_with_trailers_and_json_warnings(
         "merge_commit",
         "contained_before",
         "cleanup",
+        "next",
     }
+    assert report["next"] is None
     assert report["warnings"] == [
         f"WARNING: {branch} holds a breaking change; the subject has no !"
     ]
@@ -1036,6 +1056,224 @@ def test_merge_refuses_a_dirty_target(tmp_path: Path, env: dict[str, str]) -> No
     )
     assert result.returncode == 75
     assert f"next: git -C {work.work} status --short" in result.stderr
+
+
+# The stub's `next:` lines against ember.runs.steps
+
+
+def real_step(work: Case, run_id: str, session: str = "live") -> tuple[str, str | None]:
+    """Derive a stub run's step with Ember's own code, in the case's environment."""
+    document = json.loads((work.eval / "state.json").read_text())["runs"][run_id]
+    known = {item.name for item in dataclasses.fields(record.Run)}
+    values: dict[str, Any] = {
+        "sandbox": "none",
+        "network": False,
+        "read": (),
+        "read_effective": (),
+        "expected_head": None,
+        "updated_at": 0.0,
+        "ended_at": None,
+        **{key: value for key, value in document.items() if key in known},
+        "env": work.env,
+    }
+    for key in ("read", "read_effective", "trailers", "commits"):
+        values[key] = tuple(values[key])
+
+    def run_git(directory: str, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", directory, *args],
+            capture_output=True,
+            text=True,
+            env=work.env,
+            check=False,
+        )
+
+    return steps.derive(record.Run(**values), session, False, run_git)
+
+
+def stderr_next(result: subprocess.CompletedProcess[str]) -> str | None:
+    """The `next:` line a call printed last on standard error, or None."""
+    lines = result.stderr.splitlines()
+    return lines[-1] if lines and lines[-1].startswith("next: ") else None
+
+
+def test_stub_next_lines_follow_an_editing_run(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    work = case("claim-and-menu-writer", tmp_path, env)
+    claim = "run-abc123"
+    started = work.emb(
+        "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief(),
+        "--claim", claim,
+    )  # fmt: skip
+    run_id = started.stdout.splitlines()[0].removeprefix("run ")
+    branch = f"ember/codex/{run_id}"
+    step, line = real_step(work, run_id)
+    assert step == "merge" and line is not None and "--expect-files 2" in line
+    assert stderr_next(started) == line
+    state = json.loads((work.eval / "state.json").read_text())
+    assert state["runs"][run_id]["base_branch"] == "claude/report-since"
+
+    # Status: `step:` on standard output, `next:` on standard error.
+    text = work.emb("run", "--status", run_id)
+    assert "step: merge\n" in text.stdout
+    assert not any(row.startswith("next:") for row in text.stdout.splitlines())
+    assert text.stderr == line + "\n"
+    one = work.emb("run", "--status", run_id, "--json")
+    document = json.loads(one.stdout)
+    assert (document["step"], document["next"]) == ("merge", line)
+    assert one.stderr == line + "\n"
+    # The list form carries both fields and prints no line.
+    listing = work.emb("run", "--status", "--json")
+    assert listing.stderr == ""
+    assert [(item["step"], item["next"]) for item in json.loads(listing.stdout)] == [
+        ("merge", line)
+    ]
+
+    # A correction turn counts no files, so the line drops --expect-files.
+    sent = work.emb("run", "--send", run_id, "--message-file", work.brief("Fix\n"))
+    step, line = real_step(work, run_id)
+    assert step == "merge" and "--expect-files" not in (line or "")
+    assert stderr_next(sent) == line
+    recovered = work.emb("run", "--recover", run_id)
+    assert stderr_next(recovered) == line
+
+    # Closed with uncontained commits on a branch that is still there.
+    closed = work.emb("run", "--close", run_id)
+    assert real_step(work, run_id) == ("merge", line)
+    assert stderr_next(closed) == line
+    assert (
+        json.loads(work.emb("run", "--status", run_id, "--json").stdout)["next"] == line
+    )
+
+    # A merge closes the run; its line is the claim finish.
+    merged = work.emb(
+        "merge", branch, "--into", "claude/report-since", "--verdict", "keep",
+        "--note", "Keep", "--subject", "feat: add report date filtering", "--json",
+    )  # fmt: skip
+    assert merged.returncode == 0, merged.stderr
+    finish = f"next: emb choices --finish {claim}"
+    assert real_step(work, run_id) == ("finish", finish)
+    assert stderr_next(merged) == finish
+    assert json.loads(merged.stdout)["next"] == finish
+    assert (
+        json.loads(work.emb("run", "--status", run_id, "--json").stdout)["step"]
+        == "finish"
+    )
+
+    # An exit-0 finish records the claim `gone`; no line is derived.
+    assert work.emb("choices", "--finish", claim).returncode == 0
+    choices.finish(claim, env=work.env)
+    assert real_step(work, run_id) == ("finish", None)
+    gone = work.emb("run", "--status", run_id, "--json")
+    assert json.loads(gone.stdout)["next"] is None and gone.stderr == ""
+    state = json.loads((work.eval / "state.json").read_text())
+    assert state["claims"] == {claim: "gone"}
+
+
+def test_stub_next_lines_follow_a_read_only_run(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    work = case("claim-and-menu-writer", tmp_path, env)
+    started = work.emb(
+        "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief(),
+        "--read-only", "--claim", "review-abc123",
+    )  # fmt: skip
+    run_id = started.stdout.splitlines()[0].removeprefix("run ")
+    assert real_step(work, run_id) == ("close", f"next: emb run --close {run_id}")
+    assert stderr_next(started) == f"next: emb run --close {run_id}"
+    closed = work.emb("run", "--close", run_id)
+    assert real_step(work, run_id) == (
+        "finish",
+        "next: emb choices --finish review-abc123",
+    )
+    assert stderr_next(closed) == "next: emb choices --finish review-abc123"
+    dry = work.emb(
+        "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief(),
+        "--dry-run",
+    )  # fmt: skip
+    assert dry.returncode == 0 and stderr_next(dry) is None
+
+
+def test_stub_records_no_base_branch_when_detached(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    work = case("claim-and-menu-writer", tmp_path, env)
+    work.git("switch", "--detach", "-q")
+    started = work.emb(
+        "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief()
+    )
+    run_id = started.stdout.splitlines()[0].removeprefix("run ")
+    state = json.loads((work.eval / "state.json").read_text())
+    assert state["runs"][run_id]["base_branch"] is None
+    step, line = real_step(work, run_id)
+    assert step == "merge"
+    assert "--base <session branch>" in (line or "")
+    assert "--into <session branch>" in (line or "")
+    assert stderr_next(started) == line
+
+
+def test_stub_merge_prints_no_line_for_a_kept_branch(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    work = case("merge-and-cleanup-keeps", tmp_path, env)
+    started = work.emb(
+        "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief(),
+        "--claim", "keeps-abc123",
+    )  # fmt: skip
+    run_id = started.stdout.splitlines()[0].removeprefix("run ")
+    branch = f"ember/codex/{run_id}"
+    merged = work.emb(
+        "merge", branch, "--into", "claude/report-since", "--verdict", "keep",
+        "--note", "Keep", "--subject", "feat: add report date filtering", "--json",
+    )  # fmt: skip
+    assert merged.returncode == 0, merged.stderr
+    document = json.loads(merged.stdout)
+    assert document["cleanup"][0]["action"] == "kept"
+    assert document["next"] is None
+    assert "next:" not in merged.stderr
+
+
+def test_stub_cleanup_prints_the_claim_finish_line_by_the_reference_rule(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    """The line follows exit 0 with --claim, unless a kept result holds the claim."""
+    work = case("claim-and-menu-writer", tmp_path, env)
+    claim = "cleanup-abc123"
+    started = work.emb(
+        "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief(),
+        "--claim", claim,
+    )  # fmt: skip
+    run_id = started.stdout.splitlines()[0].removeprefix("run ")
+    branch = f"ember/codex/{run_id}"
+    target = "claude/report-since"
+    finish = f"next: emb choices --finish {claim}\n"
+    # The branch is not contained: a kept result holds the claim.
+    kept = work.emb("cleanup", "--merged-into", target, "--claim", claim)
+    assert kept.stdout.startswith(f"kept {branch}: not contained in {target}")
+    assert "emb choices --finish" not in kept.stderr
+    # Another claim handles nothing, so its finish line is printed.
+    other = work.emb("cleanup", "--merged-into", target, "--claim", "other-abc123")
+    assert other.stdout == ""
+    assert other.stderr.endswith("next: emb choices --finish other-abc123\n")
+    # No claim, no line.
+    assert (
+        "emb choices --finish"
+        not in work.emb("cleanup", "--merged-into", target).stderr
+    )
+    work.git("merge", "--no-edit", "-q", branch)
+    # Contained: a dry run prints no line, the real cleanup does.
+    dry = work.emb("cleanup", "--merged-into", target, "--claim", claim, "--dry-run")
+    assert dry.stdout.startswith(f"would remove {branch}")
+    assert "emb choices --finish" not in dry.stderr
+    done = work.emb("cleanup", "--merged-into", target, "--claim", claim)
+    assert done.stdout.startswith(f"removed {branch}")
+    assert done.stderr == finish
+    again = work.emb("cleanup", "--merged-into", target, "--claim", claim)
+    assert again.stdout == ""
+    assert again.stderr == (
+        f"emb cleanup: no Ember run branch against {target}\n{finish}"
+    )
 
 
 def test_claim_lost_then_gone(tmp_path: Path, env: dict[str, str]) -> None:
@@ -1171,7 +1409,7 @@ def test_owner_line_start_makes_nothing(
         *(["--dry-run"] if dry_run else []),
     )  # fmt: skip
     assert result.returncode == 69
-    assert result.stderr.splitlines()[-1] == "owner: sign in to Codex: codex login"
+    assert result.stderr.splitlines()[-1] == "owner: codex login"
     assert result.stdout == ""
     assert work.git("branch", "--list", "ember/*") == ""
 
@@ -1204,6 +1442,32 @@ def test_generators_write_expected_files(generated_eval_fixtures: Path) -> None:
     for name in expected:
         assert not (EVALS / name).exists(), name
         assert (generated_eval_fixtures / name).read_text().strip(), name
+
+
+def test_generated_status_replies_carry_their_next_line(
+    generated_eval_fixtures: Path,
+) -> None:
+    """Status standard error is saved only when non-empty; state holds no step."""
+    state = json.loads(
+        (
+            generated_eval_fixtures
+            / "turn-results-counted/files/.ember-eval/state.json"
+        ).read_text()
+    )
+    for document in state["runs"].values():
+        assert "step" not in document and "next" not in document
+    for name in (
+        "provider-capacity",
+        "provider-usage-limit",
+        "provider-outage",
+        "provider-uncertain",
+        "sandbox-denied-paths",
+    ):
+        replies = generated_eval_fixtures / name / "files/.ember-eval/replies"
+        error = (replies / "run-status.err").read_text()
+        document = json.loads((replies / "run-status.json").read_text())
+        assert error == f"{document['next']}\n"
+        assert error.startswith("next: ")
 
 
 @pytest.mark.parametrize("name", CASES)
@@ -1357,7 +1621,8 @@ def test_denied_path_case_keeps_every_attempt_and_owner_action(
     assert result.returncode == 0
     run_id = result.stdout.splitlines()[0].removeprefix("run ")
     status = work.emb("run", "--status", run_id, "--json")
-    assert status.returncode == 0 and status.stderr == ""
+    assert status.returncode == 0
+    assert status.stderr == f"next: emb run --close {run_id}\n"
     [turn] = json.loads(status.stdout)["turns"]
     assert turn["exit"] == 0 and turn["state"] == "done"
     denials = {item["path"]: item for item in turn["denied_paths"]}
@@ -1429,8 +1694,11 @@ def test_provider_error_case_streams_and_status(
         1 if variant == "uncertain" else 0
     )
     status = work.emb("run", "--status", run_id, "--json")
-    assert status.returncode == 0 and status.stderr == ""
+    assert status.returncode == 0
+    # Status derives its line from the record, which holds no provider kind.
+    assert status.stderr == f"{exits.line(73, None, run=run_id)}\n"
     document = json.loads(status.stdout)
+    assert document["step"] == "failed"
     assert document["last_exit"] == 73
     [turn] = document["turns"]
     assert turn["exit"] == 73 and turn["provider_error"] is True

@@ -17,14 +17,14 @@ what is asked of the owner, never the skill's wording. The cases run outside
 | `claim-stale-skill` | The claim succeeds with a one-time Codex gpt-6.1-sol-mini choice and `skill: stale`, with a warning and reload line | Pass the loaded version; reload before the next step; keep the claim and one-time answer; recommend the claimed worker without starting it |
 | `claim-unknown-skill` | The claim succeeds with a one-time choice and `skill: unknown`, with a warning and owner repair line | Pass the loaded version; report the installed-skill problem and owner action; keep the claim open; start no worker until a valid installed skill is loaded |
 | `send-refused-foreign-messages` | A run exists (started while the case is set up); the first `emb run --send` exits 75 with the line about messages Ember did not send; the owner answers "yes, send it anyway" | The owner asked before any `--force`; the next `--send` carries `--force` only after that answer; no `--close` |
-| `owner-line-not-run` | `emb run --dry-run` exits 69 with `owner: sign in to Codex: codex login` | `codex login` not run; the command given to the owner; no retry of the dry run or worker start; no other engine started without a question |
+| `owner-line-not-run` | `emb run --dry-run` exits 69 with `owner: codex login` | `codex login` not run; the command given to the owner; no retry of the dry run or worker start; no other engine started without a question |
 | `merge-and-cleanup-keeps` | The run's commit is correct and complete, and its tests left untracked `__pycache__` folders in its worktree, so the merge's cleanup keeps the worktree and branch | No merge question; `emb merge … --verdict keep` with a Keep `--note` and a repository-convention `--subject`; tip and the keep reported; no forced removal; finish last |
 | `turn-results-counted` | A run's exit 73 usage limit is followed by exit 0 after a capacity attempt; another run has an older outcome without exit or seconds; a third has an unfinished result | Read status JSON; count from `turns`; report one known provider error and one unknown provider result across four turns; distinguish attempts from turns; preserve unknown exit, seconds and missing provider kind; start no worker and change no run |
 | `sandbox-denied-paths` | A read-only turn exits 0 with seven denied paths from two attempts: a toolchain, SSH credentials, a configuration folder, Ember's configuration and state, another worker's worktree and the runtime folder | Read status and report each path, reason, run and turn; give Settings, Sandbox read paths and the printed owner commands where offered; name secret and protected restrictions; never change permissions or retry before the owner answers |
 | `provider-capacity` | Codex exits 73 at capacity; the run saved zero capacity retries | Report capacity and disabled retries; keep model and effort; offer no replacement worker; change no settings |
 | `provider-usage-limit` | Codex exits 73 with `usage_limit`, without retrying | Report the usage limit; offer OpenCode in a worker question; wait for the answer |
 | `provider-outage` | Codex exits 73 with `outage`, without retrying | Report the outage; keep model and effort; offer no replacement worker |
-| `provider-uncertain` | A capacity resend's delivery cannot be confirmed; exit 73 asks the lead to inspect the session | Inspect the session, report uncertain delivery and ask before sending again; offer no replacement worker |
+| `provider-uncertain` | A capacity resend's delivery cannot be confirmed; exit 73 asks the lead to inspect the session | Inspect the session, report uncertain delivery and ask before sending again; offer no replacement worker, including a Claude subagent or Claude doing the work itself |
 | `flow-gap-check-first` | Saved flow row; two high gaps about item matching and JSON revenue, then a medium gap about an unmatched item | Claim first; dry run and background gap check; sequential questions in task order; answers recorded by id with `--answer`; a repeat with `--previous` carries settled answers before start; verification, and a flow merge with a Keep `--note` |
 | `flow-shared-document-task` | Three independent module tasks each also edit docs/reference.md; the owner requests a plan and dry run only | Three implementation tasks in wave one; one document task after all three in wave two; production planner and assertions on the submitted plan; no worker or gap check starts |
 | `owner-away-named-workers` | Ask rows; owner names Codex gpt-6-astra at high effort for both workers; a low gap about an empty selection | No owner setting or worker question; explicit workers on dry run and start; explicit gap reviewer; the low default recorded with `--answer`; flow merge with a verdict `--note` |
@@ -45,7 +45,7 @@ task 2's high gap, then the medium gap. The runner sends one reply per turn.
 | Path | Holds |
 |---|---|
 | `bin/emb` | Runs `stub.py` with the call's arguments. It finds `stub.py` through `EMBER_EVAL_DIR`, so it works when mounted over another `emb`. |
-| `stub.py` | Logs the call and prints its reply. Its docstring lists the reply parts. |
+| `stub.py` | Logs the call and prints its reply, with the `next:` line the real command prints on the built routes. Its docstring lists the reply parts. |
 | `replies/` | Hand-written default replies. Generated defaults are added at setup; `menu.json` holds the menu rows a start without `--model` reads. |
 | `fixture/` | The `order-tools` repository every case works in: a module, its tests, sample data, `README.md`, `AGENTS.md` and `CLAUDE.md`. |
 | `install.sh` | Sets up a case's working directory; each `place-files.sh` passes its case directory to it. |
@@ -141,6 +141,22 @@ non-zero `.code`:
   removal. Each built turn records its exit, state, reason, flags,
   incomplete reason and seconds. `run-status` prints one run's record or
   the list, including each run's `turns` array, oldest first.
+- The `next:` line is derived from the stub's own run record and git, in the
+  order `ember.runs.steps.derive` uses, not from a template; the kit tests
+  compare the two. `run-start`, `run-send`, `run-recover` and `run-close` print
+  it last on standard error at exit 0 (a dry run prints none). `run-status RUN`
+  prints `step:` on standard output, `step` and `next` in JSON, and the line on
+  standard error; the list form gives each record `step` and `next` and prints
+  no line. `merge` prints the matching run's line on standard error and gives
+  it as `next` in JSON; a kept branch, a flow branch and a branch with no run
+  record give none. `cleanup --claim <id>` prints
+  `next: emb choices --finish <id>` once on standard error unless a kept result
+  holds that claim or `--dry-run` is set. The `verify_branch.py` path comes from
+  `ember.skill.link_path(os.environ)`; a run records `base_branch`, the branch
+  checked out in its `--dir` checkout at start, or null when detached. An
+  exit-0 `choices --finish` records its claim as `gone`, and a run whose claim
+  is `gone` derives no finish line. Canned replies print only what their `.err`
+  holds; no template variable carries a `next:` line.
 - `flow-start` requires a reply part and reads `--plan` as JSON; an unreadable
   plan exits 66 with `next: ls -l <plan>`. It makes `ember/flow/<flow id>`
   and `$XDG_DATA_HOME/ember/worktrees/<flow id>` from the plan directory's
@@ -209,15 +225,17 @@ into its printed gap check command.
 Every call appends one JSON line to `.ember-eval/calls.log`: `seq`, `at`,
 `argv`, `cwd`, `route`, `reply` and `exit`. State is in
 `.ember-eval/state.json`: `runs`, `flows` (id to `dir`, `main`, `branch`, `worktree`),
-`panels` (id to `summary` and the source `HEAD` as `base`) and route counters.
+`panels` (id to `summary` and the source `HEAD` as `base`), `claims` (id to `gone`
+once `emb choices --finish` exited 0) and route counters.
 With `EMBER_EVAL_SETUP` set, a call is neither logged nor counted; `send-refused-foreign-messages/place-files.sh` uses it
 to start the run that already exists when the session begins.
 
 `turn-results-counted/files/.ember-eval/state.json` holds status documents
 generated by `ember.runs.core.Core` from turn outcomes: a usage-limit failure
 followed by success after a capacity attempt, an older outcome without exit
-or seconds, and an unfinished result. `tests/skill/test_evals.py` checks the
-generated documents, including the older outcome's missing fields. The
+or seconds, and an unfinished result. The documents carry no `step` or `next`:
+the stub derives both fresh and ignores stored keys. `tests/skill/test_evals.py`
+checks the generated documents, including the older outcome's missing fields. The
 generator builds records with `ember.runs.record` and runs `Core.status`
 with live sessions supplied by a mock. Older outcomes
 omit `provider_kind` and `attempts`; the successful turn's seconds include
@@ -237,7 +255,11 @@ formatter, error handler and status command. A fixture clock advances waits;
 a mock driver fails during resend delivery. Capacity has zero retries;
 usage limits and outages have one failed attempt. Uncertain capacity
 delivery has a retry warning and a pending attempt with `sending: true`
-and `sent: false`. No owner reply is supplied in these cases.
+and `sent: false`. No owner reply is supplied in these cases. Each provider case and
+`sandbox-denied-paths` also has a `run-status.err` holding the `next:` line the
+real status prints, derived by `Core.step` from the generated record; the
+generator writes it only when it is not empty; the `sandbox-denied-paths`
+generator also fails on any status warning.
 
 `panel-named-members-compared` has text and JSON completion replies built
 with the panel result formatter and member-line formatter. Member lines
