@@ -255,9 +255,11 @@ Ember prints one `next:` or `owner:` line on standard error at each step of
 an `emb run` task: at exit 0 after a start, `--send`, `--recover`, `--close`
 or `emb merge`, on every non-zero exit, and in `emb run --status <run>`,
 which also prints the run's `step:`. The line is the next command with its arguments
-filled in. Read standard error after every run, also at exit 0. Follow a
-`next:` line within these rules and the owner gates below; put an `owner:` line
-to the owner, naming the action, and wait. A line leaves the brief, the
+filled in. Read standard error after every run, also at exit 0. An
+`owner:` line comes first: give it to the owner, naming the action, and
+wait for the answer before running any `next:` line, correction or retry
+that depends on what it names. Otherwise follow a `next:` line within these
+rules and the owner gates below. A line leaves the brief, the
 review bar, the verdict, `--note` and `--subject` to you. After a turn with
 commits the line is the verify command, then the merge command: review and
 report between them. Do not retry a
@@ -267,8 +269,8 @@ changes nothing.
 Report every `WARNING:` line. For every denied path, name its run and turn
 and its reason, and give the Settings, Sandbox read paths owner action from
 `references/runs.md` (Denied paths). Never add paths to `sandbox.read`
-yourself, and send no correction or retry that needs a denied path before
-the owner answers. Count turn results from each run's `turns` in
+yourself. A denied path counts as an `owner:` line, also when Ember prints
+none for it. Count turn results from each run's `turns` in
 `emb run --status [<run>] --json`, including failed turns followed by
 successful ones, and report unknown fields as unknown; `references/runs.md`
 (Turn results) describes unfinished and older results.
