@@ -270,13 +270,15 @@ Report every `WARNING:` line. For every denied path, name its run and turn
 and its reason, and give the Settings, Sandbox read paths owner action from
 `references/runs.md` (Denied paths). Never add paths to `sandbox.read`
 yourself. A denied path counts as an `owner:` line, also when Ember prints
-none for it. Count turn results from each run's `turns` in
+none for it: until the owner answers, send the run nothing, not even a
+correction that avoids the denied paths. Count turn results from each run's `turns` in
 `emb run --status [<run>] --json`, including failed turns followed by
 successful ones, and report unknown fields as unknown; `references/runs.md`
 (Turn results) describes unfinished and older results.
 
 When your check of a worker fails, correct it first with `--send` or
-SendMessage; offer another worker after a correction fails. When the
+SendMessage, unless an `owner:` line or a denied path still waits for the
+owner's answer; offer another worker after a correction fails. When the
 owner named the workers or said they will not answer worker questions,
 do not offer one: give the verdict and say what is missing. Do not discard
 stalled partial edits without the owner's approval.
