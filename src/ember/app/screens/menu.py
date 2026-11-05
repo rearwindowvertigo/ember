@@ -364,7 +364,6 @@ class _Role:
         self.key = f"single.{role}"
         self.picker = widgets.Picker()
         self.picker.setAccessibleName(name)
-        self.picker.setMinimumWidth(280)
         self.warning = ToneLine("warning")
         self.run_as = widgets.Segmented(RUN_AS)
         self.run_as.setAccessibleName(f"Claude {role} runs as")
@@ -379,7 +378,6 @@ class _Derived:
         self.same = same
         self.picker = widgets.Picker()
         self.picker.setAccessibleName(name)
-        self.picker.setMinimumWidth(280)
         self.warning = ToneLine("warning")
 
 
@@ -457,7 +455,6 @@ class MenuScreen(QWidget):
         planning.addWidget(self.derived["gapcheck.reviewer"].warning)
         self.when = widgets.Picker()
         self.when.setAccessibleName("Run the gap check")
-        self.when.setMinimumWidth(180)
         for value, text in WHEN:
             self.when.add_option(text, value, when_hint(value))
         self.when.activated.connect(self._when_picked)
@@ -514,7 +511,6 @@ class MenuScreen(QWidget):
         for key, name, tip, low, high in CAPACITY:
             picker = widgets.Picker()
             picker.setAccessibleName(name)
-            picker.setMinimumWidth(180)
             for number in range(low, high + 1):
                 text = (
                     ("Off" if number == 0 else f"Up to {number}")
@@ -549,7 +545,6 @@ class MenuScreen(QWidget):
         panel_layout.addWidget(self.full)
         self.add_member = widgets.Picker()
         self.add_member.setAccessibleName("Add panel member")
-        self.add_member.setMinimumWidth(280)
         self.add_member.activated.connect(self._add_member)
         panel_layout.addWidget(self.add_member, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(panel_card)

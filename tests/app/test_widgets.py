@@ -8,10 +8,11 @@ from unittest.mock import Mock
 
 import pytest
 from PySide6 import QtGui
-from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import (
     QClipboard,
     QContextMenuEvent,
+    QEnterEvent,
     QFocusEvent,
     QGuiApplication,
     QHelpEvent,
@@ -772,7 +773,7 @@ def _popup_shows(owner: QWidget) -> bool:
     return popup.isVisible() and popup.owner is owner
 
 
-def test_tip_wrapper_lets_only_an_info_icon_show_a_tooltip(
+def test_tip_wrapper_suppresses_qt_tooltips_and_info_uses_hover(
     qapp: QApplication, qtbot: QtBot
 ) -> None:
     widgets.install_tooltips(qapp)
@@ -791,6 +792,8 @@ def test_tip_wrapper_lets_only_an_info_icon_show_a_tooltip(
         assert not widgets.tip_popup().isVisible()
         event = QHelpEvent(QEvent.Type.ToolTip, point, info.mapToGlobal(point))
         QApplication.sendEvent(info, event)
+        assert not widgets.tip_popup().isVisible()
+        QApplication.sendEvent(info, QEnterEvent(QPointF(), QPointF(), QPointF()))
         assert _popup_shows(info)
         assert widgets.tip_popup().text() == widgets.tip_text(LONG_TIP)
         assert not QToolTip.isVisible()
@@ -918,3 +921,146 @@ def test_tip_popup_stays_on_the_screen(qapp: QApplication, qtbot: QtBot) -> None
         assert popup.geometry().bottom() < host.mapToGlobal(QPoint(0, 0)).y()
     finally:
         popup.hide_for(host)
+
+
+def test_picker_elides_closed_value_without_tooltip(qtbot: QtBot) -> None:
+    picker = widgets.Picker()
+    qtbot.addWidget(picker)
+    closed = "Same as Reviewer · Codex · a-model-with-a-long-name · high"
+    picker.add_option("A model", "long", closed=closed)
+    picker.add_option("Short", "short")
+    picker.resize(theme.PICKER_MIN_WIDTH, 36)
+    picker.show()
+    picker.repaint()
+    assert picker.toolTip() == ""
+    assert picker.elided_text().endswith("…")
+    assert picker.elided_text() != closed
+    picker.set_value("short")
+    picker.repaint()
+    assert picker.toolTip() == ""
+    picker.set_value("long")
+    picker.repaint()
+    assert picker.toolTip() == ""
+    picker.resize(picker.sizeHint())
+    picker.repaint()
+    assert picker.toolTip() == ""
+    assert picker.elided_text() == closed
+
+
+def test_standalone_picker_shrinks_to_floor_and_stops_at_hint(qtbot: QtBot) -> None:
+    host = QWidget()
+    qtbot.addWidget(host)
+    layout = QVBoxLayout(host)
+    picker = widgets.Picker()
+    picker.add_option("A long model name " * 5, "long")
+    layout.addWidget(picker)
+    host.resize(250, 100)
+    host.show()
+    qtbot.wait(20)
+    assert theme.PICKER_MIN_WIDTH <= picker.width() < picker.sizeHint().width()
+    host.resize(1400, 100)
+    qtbot.wait(20)
+    assert picker.width() == picker.sizeHint().width()
+
+
+def test_icon_button_has_accessible_tooltip_and_follows_theme(
+    qapp: QApplication, qtbot: QtBot
+) -> None:
+    button = widgets.IconButton("panel-left", "Show sidebar")
+    qtbot.addWidget(button)
+    assert button.accessibleName() == button.toolTip() == "Show sidebar"
+    assert button.property("kind") == "ghost"
+    assert button.focusPolicy() == Qt.FocusPolicy.StrongFocus
+    assert button.width() == button.height() == theme.CONTROL_SM
+    before = button.icon().cacheKey()
+    theme.apply(qapp, "dark" if theme.current_mode() == "light" else "light")
+    assert button.icon().cacheKey() != before
+
+
+def test_tooltip_filter_drops_even_opted_in_qt_tooltip_events(qtbot: QtBot) -> None:
+    label = QLabel("Mark")
+    qtbot.addWidget(label)
+    wrapper = widgets.TipWrapper()
+    event = QHelpEvent(QEvent.Type.ToolTip, QPoint(0, 0), QPoint(0, 0))
+    assert wrapper.eventFilter(label, event)
+    label.setProperty("show-tooltip", True)
+    assert wrapper.eventFilter(label, event)
+    button = widgets.IconButton("panel-left", "Hide sidebar")
+    qtbot.addWidget(button)
+    assert wrapper.eventFilter(button, event)
+
+
+@pytest.mark.parametrize("kind", ["icon", "row", "mark"])
+def test_opted_in_control_uses_ember_tip_on_hover_and_focus(
+    qapp: QApplication, qtbot: QtBot, kind: str
+) -> None:
+    widgets.install_tooltips(qapp)
+    host = QWidget()
+    qtbot.addWidget(host)
+    layout = QVBoxLayout(host)
+    other = QPushButton("Other")
+    if kind == "icon":
+        control = widgets.IconButton("panel-left", "Show sidebar")
+    else:
+        control = QLabel() if kind == "mark" else QPushButton()
+        control.setProperty("show-tooltip", True)
+        control.setToolTip("Ember 1.0.0" if kind == "mark" else "Overview · 2 live")
+        control.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    layout.addWidget(other)
+    layout.addWidget(control)
+    host.show()
+    qtbot.waitExposed(host)
+    with qtbot.waitActive(host):
+        host.activateWindow()
+    other.setFocus()
+    popup = widgets.tip_popup()
+    popup.hide()
+    try:
+        event = QHelpEvent(QEvent.Type.ToolTip, QPoint(), QPoint())
+        QApplication.sendEvent(control, event)
+        assert not QToolTip.isVisible()
+        assert not popup.isVisible()
+        QApplication.sendEvent(control, QEnterEvent(QPointF(), QPointF(), QPointF()))
+        assert _popup_shows(control)
+        assert popup.text() == control.toolTip()
+        assert not QToolTip.isVisible()
+        QApplication.sendEvent(control, QEvent(QEvent.Type.Leave))
+        assert not popup.isVisible()
+        control.setFocus(Qt.FocusReason.MouseFocusReason)
+        assert not popup.isVisible()
+        other.setFocus()
+        qtbot.keyClick(other, Qt.Key.Key_Tab)
+        assert control.hasFocus()
+        assert _popup_shows(control)
+        QApplication.sendEvent(control, QEvent(QEvent.Type.Leave))
+        assert _popup_shows(control)
+        qtbot.keyClick(control, Qt.Key.Key_Tab)
+        assert not popup.isVisible()
+        QApplication.sendEvent(control, QEnterEvent(QPointF(), QPointF(), QPointF()))
+        assert _popup_shows(control)
+        qtbot.keyClick(other, Qt.Key.Key_Escape)
+        assert not popup.isVisible()
+        QApplication.sendEvent(control, QEnterEvent(QPointF(), QPointF(), QPointF()))
+        control.hide()
+        assert not popup.isVisible()
+    finally:
+        popup.hide_for(control)
+
+
+def test_ember_tip_updates_and_hides_when_control_text_clears(
+    qapp: QApplication, qtbot: QtBot
+) -> None:
+    widgets.install_tooltips(qapp)
+    control = widgets.IconButton("panel-left", "Show sidebar")
+    qtbot.addWidget(control)
+    control.show()
+    try:
+        QApplication.sendEvent(control, QEnterEvent(QPointF(), QPointF(), QPointF()))
+        control.setToolTip("Hide sidebar")
+        assert widgets.tip_popup().text() == "Hide sidebar"
+        control.setToolTip("")
+        assert not widgets.tip_popup().isVisible()
+        QApplication.sendEvent(control, QEnterEvent(QPointF(), QPointF(), QPointF()))
+        assert not widgets.tip_popup().isVisible()
+    finally:
+        widgets.tip_popup().hide_for(control)

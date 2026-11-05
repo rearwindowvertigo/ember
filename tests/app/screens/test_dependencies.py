@@ -354,7 +354,14 @@ def test_first_report_in_a_wide_window_uses_three_columns(
     widget, _context, _calls = _screen(env, qtbot, monkeypatch, None)
     widget.resize(1400, 600)
     qtbot.wait(100)
-    widget.context.deps_changed.emit(_report(*SAMPLE))
+    widget.context.deps_changed.emit(
+        _report(
+            *(
+                _component(str(i), deps.CURRENT, label="System component")
+                for i in range(6)
+            )
+        )
+    )
     qtbot.waitUntil(lambda: bool(widget.tiles), timeout=2000)
     qtbot.waitUntil(lambda: widget.columns == 3, timeout=2000)
 
@@ -362,7 +369,17 @@ def test_first_report_in_a_wide_window_uses_three_columns(
 def test_columns_drop_when_three_do_not_fit(
     env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    widget, _context, _calls = _screen(env, qtbot, monkeypatch, _report(*SAMPLE))
+    widget, _context, _calls = _screen(
+        env,
+        qtbot,
+        monkeypatch,
+        _report(
+            *(
+                _component(str(i), deps.CURRENT, label="System component")
+                for i in range(6)
+            )
+        ),
+    )
     widget.resize(1400, 600)
     qtbot.waitUntil(lambda: widget.columns == 3, timeout=2000)
     widget.resize(500, 600)
@@ -655,3 +672,30 @@ def test_resolved_path_shown_only_with_update_command(
     )
     widget, _context, _calls = _screen(env, qtbot, monkeypatch, _report(item))
     assert widget.tiles["codex"].resolved_path.isVisible() is shown
+
+
+@pytest.mark.parametrize("width", [576, 1400])
+def test_screen_fits_width(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, width: int
+) -> None:
+    from .test_common import assert_screen_fits  # pyrefly: ignore[missing-import]
+
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    theme.apply(app, "light")
+    screen, _context, _calls = _screen(env, qtbot, monkeypatch, _report(*SAMPLE))
+    screen.resize(width, 480)
+    qtbot.wait(50)
+    assert screen.width() == width
+    assert_screen_fits(screen)
+    content = screen.scroll_area.widget()
+    assert content is not None
+    assert screen.fixed.width() == content.width()
+    assert screen.fixed.x() == content.x()
+    screen._set_checking(True)
+    qtbot.wait(20)
+    assert screen.width() == width
+    for child in screen.fixed.findChildren(QWidget):
+        if child.isVisible():
+            left = child.mapTo(screen, child.rect().topLeft()).x()
+            assert 0 <= left <= left + child.width() <= width

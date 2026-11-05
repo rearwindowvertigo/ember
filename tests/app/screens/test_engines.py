@@ -415,7 +415,8 @@ def test_model_rows_share_columns_and_centres(
     missing = panel.missing[0]
     assert first.note.isHidden() and second.note.isHidden()
     assert first.height() == second.height() == missing.height()
-    assert panel.name_width == 320
+    # The column fits the room the 960 px content cap leaves, up to 320 px.
+    assert 140 <= panel.name_width <= 320
     assert panel.name_header.width() == first.name.width() == missing.name.width()
     assert first.name.display_text().endswith("…")
     assert first.name.text() == long_id
@@ -1616,17 +1617,14 @@ def test_opencode_filters_fit_the_default_window(
     assert names <= {label.text() for label in panel.findChildren(QLabel)}
     tips = {tip.accessibleName() for tip in panel.findChildren(InfoTip)}
     assert {f"About {name}" for name in names} <= tips
-    rows = [
-        item.layout()
-        for item in (panel.layout().itemAt(i) for i in range(panel.layout().count()))
-        if item.layout() is not None
-        and any(
-            item.layout().indexOf(widget) >= 0
-            for widget in (panel.provider_picker, panel.price_picker)
-        )
-    ]
+    from ember.app.screens.common import FittingRow
+
+    rows = panel.findChildren(FittingRow)
     assert len(rows) == 2
-    assert all(row.minimumSize().width() <= 880 - 2 * 24 for row in rows)
+    screen.resize(880, 720)
+    screen.show()
+    qtbot.wait(20)
+    assert all(row.width() <= 880 - 2 * 24 for row in rows)
 
 
 @pytest.mark.parametrize(("width", "scrolls"), [(880, False), (680, True)])
@@ -1695,3 +1693,24 @@ def test_opencode_table_height_follows_its_scroll_bar(
             ),
             timeout=2000,
         )
+
+
+@pytest.mark.parametrize("width", [576, 1400])
+def test_screen_fits_width(
+    env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any], width: int
+) -> None:
+    from .test_common import assert_screen_fits  # pyrefly: ignore[missing-import]
+
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    theme.apply(app, "light")
+    stubs["lists"] = {"codex": _codex_list(), "opencode": _integrations_list()}
+    screen, context = _screen(env, qtbot)
+    screen.resize(width, 480)
+    screen.show()
+    _shown(screen, context, qtbot)
+    for engine in ("codex", "opencode"):
+        _open(screen, context, qtbot, engine)
+        qtbot.wait(50)
+        assert screen.width() == width
+        assert_screen_fits(screen)

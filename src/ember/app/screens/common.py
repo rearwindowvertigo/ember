@@ -9,7 +9,8 @@ import datetime
 import time
 from collections.abc import Iterable, Sequence
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QBoxLayout,
     QComboBox,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLayout,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -194,6 +196,7 @@ def fitting_columns(
         - area.verticalScrollBar().sizeHint().width()
         - margins
     )
+    width = min(width, theme.CONTENT_MAX_WIDTH)
     for count in range(most, 1, -1):
         if count * tile + (count - 1) * gap <= width:
             return count
@@ -204,6 +207,8 @@ def scroll_area() -> QScrollArea:
     """Return a frameless scroll area that resizes its widget to fit."""
     area = QScrollArea()
     area.setWidgetResizable(True)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    area.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
     area.setFrameShape(QFrame.Shape.NoFrame)
     return area
 
@@ -220,15 +225,59 @@ def scrolled(screen: QWidget) -> QVBoxLayout:
     outer = QVBoxLayout(screen)
     outer.setContentsMargins(0, 0, 0, 0)
     area = scroll_area()
-    content = QWidget()
-    area.setWidget(content)
     outer.addWidget(area)
+    return scroll_column(area)
+
+
+def scroll_column(area: QScrollArea) -> QVBoxLayout:
+    """Install a centred content column, capped at the content width plus padding."""
+    content = QWidget()
+    content.setMaximumWidth(theme.CONTENT_MAX_WIDTH + 2 * SCREEN_MARGIN)
+    area.setWidget(content)
     layout = QVBoxLayout(content)
     layout.setContentsMargins(
         SCREEN_MARGIN, SCREEN_MARGIN, SCREEN_MARGIN, SCREEN_MARGIN
     )
     layout.setSpacing(SCREEN_SPACING)
     return layout
+
+
+class FittingRow(QWidget):
+    """A row of controls that moves into a column when their minimums do not fit."""
+
+    def __init__(self, controls: Iterable[QWidget]) -> None:
+        """Keep each control whole, with screen spacing between them."""
+        super().__init__()
+        self.controls = list(controls)
+        self.box = QBoxLayout(QBoxLayout.Direction.LeftToRight, self)
+        self.box.setContentsMargins(0, 0, 0, 0)
+        self.box.setSpacing(SCREEN_SPACING)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        for control in self.controls:
+            self.box.addWidget(control)
+
+    def _fit(self) -> None:
+        controls = [control for control in self.controls if not control.isHidden()]
+        needed = sum(
+            max(control.minimumWidth(), control.minimumSizeHint().width())
+            for control in controls
+        ) + self.box.spacing() * max(0, len(controls) - 1)
+        self.box.setDirection(
+            QBoxLayout.Direction.TopToBottom
+            if needed > self.width()
+            else QBoxLayout.Direction.LeftToRight
+        )
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        """Fit the controls to the row's available width."""
+        self._fit()
+        super().resizeEvent(event)
+
+    def event(self, event: QEvent) -> bool:
+        """Refit when a control changes its minimum size or visibility."""
+        if event.type() == QEvent.Type.LayoutRequest:
+            self._fit()
+        return super().event(event)
 
 
 def screen_header(
@@ -238,6 +287,9 @@ def screen_header(
     trailing: Iterable[QWidget] = (),
 ) -> QLabel:
     """Add a screen's header: its title, a subtitle, and widgets on the right.
+
+    A Show sidebar button is built hidden before the title. The window
+    connects it and sets its visibility from the sidebar's hidden state.
 
     Args:
         layout: The screen's content layout.
@@ -249,24 +301,47 @@ def screen_header(
     Returns:
         The subtitle label, for screens that change it.
     """
-    row = QHBoxLayout()
-    row.setSpacing(12)
-    titles = QVBoxLayout()
+    trailing = tuple(trailing)
+    titles_box = QWidget()
+    titles_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+    titles = QVBoxLayout(titles_box)
+    titles.setContentsMargins(0, 0, 0, 0)
     titles.setSpacing(4)
     heading = QLabel(title)
     heading.setFont(theme.font("display"))
-    titles.addWidget(heading)
+    title_row = QHBoxLayout()
+    title_row.setSpacing(theme.SPACE[2])
+    show_sidebar = widgets.IconButton("panel-left", "Show sidebar")
+    show_sidebar.setProperty("role", "show-sidebar")
+    show_sidebar.hide()
+    title_row.addWidget(show_sidebar, 0, Qt.AlignmentFlag.AlignVCenter)
+    title_row.addWidget(heading, 1)
+    titles.addLayout(title_row)
     line = label(subtitle, "secondary")
     titles.addWidget(line)
-    row.addLayout(titles, 1)
+    if trailing:
+        # The trailing widgets drop under the titles when both do not fit.
+        actions = QWidget()
+        actions_row = QHBoxLayout(actions)
+        actions_row.setContentsMargins(0, 0, 0, 0)
+        actions_row.setSpacing(12)
+        for widget in trailing:
+            actions_row.addWidget(widget, 0, Qt.AlignmentFlag.AlignVCenter)
+        row = FittingRow((titles_box, actions))
+        row.box.setSpacing(12)
+        row.box.setAlignment(actions, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(row)
+    else:
+        layout.addWidget(titles_box)
     for widget in trailing:
-        row.addWidget(widget, 0, Qt.AlignmentFlag.AlignVCenter)
-    layout.addLayout(row)
+        if widget.focusPolicy() != Qt.FocusPolicy.NoFocus:
+            QWidget.setTabOrder(show_sidebar, widget)
+            break
     return line
 
 
 CONTROL_COLUMN = 280
-"""The narrowest control column; a wider control widens it."""
+"""The preferred control column width; a wider control widens it."""
 
 
 class TooltipRow(QWidget):
@@ -287,41 +362,163 @@ class TooltipRow(QWidget):
         """
         super().__init__()
         self.control = control
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(16)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.stacked = False
+        self.box = QBoxLayout(QBoxLayout.Direction.LeftToRight, self)
+        self.box.setContentsMargins(0, 0, 0, 0)
+        self.box.setSpacing(16)
+        self.name = QWidget()
+        names = QHBoxLayout(self.name)
+        names.setContentsMargins(0, 0, 0, 0)
+        names.setSpacing(16)
         self.heading = QLabel(name)
         self.heading.setFont(theme.font("label"))
         self.info = widgets.InfoTip(name, tooltip)
-        row.addWidget(self.heading)
-        row.addWidget(self.info, 0, Qt.AlignmentFlag.AlignVCenter)
-        row.addStretch(1)
+        names.addWidget(self.heading)
+        names.addWidget(self.info, 0, Qt.AlignmentFlag.AlignVCenter)
+        names.addStretch(1)
+        self.box.addWidget(self.name, 1)
         self.slot = QWidget()
         slot = QHBoxLayout(self.slot)
         slot.setContentsMargins(0, 0, 0, 0)
-        if not isinstance(control, QComboBox):
-            slot.addStretch(1)
         slot.addWidget(control, 0, Qt.AlignmentFlag.AlignVCenter)
-        row.addWidget(self.slot, 0, Qt.AlignmentFlag.AlignVCenter)
+        if isinstance(control, QComboBox):
+            control.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
+        else:
+            control.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            slot.setAlignment(control, Qt.AlignmentFlag.AlignRight)
+        self.box.addWidget(self.slot, 0, Qt.AlignmentFlag.AlignVCenter)
         if control.focusPolicy() != Qt.FocusPolicy.NoFocus:
-            # The control was made first; Tab reaches the icon before it.
             QWidget.setTabOrder(self.info, control)
+
+    def fit(self, width: int, stacked: bool) -> None:
+        """Set the common column width and put the control beside or below its name."""
+        self.stacked = stacked
+        self.box.setDirection(
+            QBoxLayout.Direction.TopToBottom
+            if stacked
+            else QBoxLayout.Direction.LeftToRight
+        )
+        self.box.setSpacing(theme.SPACE[1] if stacked else 16)
+        self.box.setStretch(0, 0 if stacked else 1)
+        self.box.setAlignment(
+            self.slot,
+            Qt.AlignmentFlag.AlignLeft if stacked else Qt.AlignmentFlag.AlignVCenter,
+        )
+        slot = self.slot.layout()
+        assert slot is not None
+        if not isinstance(self.control, QComboBox):
+            slot.setAlignment(
+                self.control,
+                Qt.AlignmentFlag.AlignLeft if stacked else Qt.AlignmentFlag.AlignRight,
+            )
+        self.slot.setFixedWidth(width)
+
+
+class _ControlFit(QObject):
+    """Keep one screen's visible setting rows in a shared responsive layout."""
+
+    def __init__(self, parent: QWidget, area: QScrollArea | None) -> None:
+        super().__init__(parent)
+        self.area = area
+        self.rows: list[TooltipRow] = []
+        self.last_width = CONTROL_COLUMN
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.fit)
+        parent.installEventFilter(self)
+
+    def replace(self, rows: list[TooltipRow]) -> int:
+        for row in self.rows:
+            row.removeEventFilter(self)
+        self.rows = rows
+        for row in rows:
+            row.installEventFilter(self)
+        width = max([CONTROL_COLUMN, *(r.control.sizeHint().width() for r in rows)])
+        if not any(r.isVisible() for r in rows):
+            self.last_width = width
+            for row in rows:
+                row.fit(width, False)
+        self.timer.start(0)
+        return width
+
+    def fit(self) -> None:
+        rows = [row for row in self.rows if row.isVisible()]
+        if not rows:
+            return
+        preferred = max(
+            CONTROL_COLUMN, *(row.control.sizeHint().width() for row in rows)
+        )
+        floor = max(
+            [
+                theme.PICKER_MIN_WIDTH,
+                *(
+                    row.control.sizeHint().width()
+                    for row in rows
+                    if not isinstance(row.control, QComboBox)
+                ),
+            ]
+        )
+        correction = 0
+        if self.area is not None:
+            column = self.area.widget()
+            assert column is not None
+            target = min(
+                theme.CONTENT_MAX_WIDTH + 2 * SCREEN_MARGIN,
+                self.area.contentsRect().width()
+                - self.area.verticalScrollBar().sizeHint().width(),
+            )
+            correction = max(0, column.width() - target)
+        available = min(
+            row.width() - correction - row.name.minimumSizeHint().width() - 16
+            for row in rows
+        )
+        stacked = available < floor
+        if not stacked:
+            self.last_width = min(preferred, available)
+        for row in self.rows:
+            width = (
+                min(
+                    max(theme.PICKER_MIN_WIDTH, self.last_width),
+                    row.width() - correction,
+                )
+                if stacked and row.isVisible()
+                else self.last_width
+            )
+            row.fit(width, stacked)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        """Refit after viewport resizing or a row's visibility changes."""
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.Hide):
+            self.timer.start(0)
+        return super().eventFilter(watched, event)
 
 
 def align_controls(rows: Iterable[TooltipRow]) -> int:
-    """Give every row's control the same column, as wide as the widest control.
-
-    Pickers fill the column; segmented controls, switches and buttons sit at
-    its right edge.
+    """Replace a screen's aligned rows and fit them whenever its viewport resizes.
 
     Returns:
-        The column's width.
+        The preferred column width, before fitting the visible rows.
     """
     rows = list(rows)
-    width = max([CONTROL_COLUMN, *(row.control.sizeHint().width() for row in rows)])
-    for row in rows:
-        row.slot.setFixedWidth(width)
-    return width
+    if not rows:
+        return CONTROL_COLUMN
+    parent = rows[0].parentWidget()
+    area = None
+    while parent is not None:
+        if isinstance(parent, QScrollArea):
+            area = parent
+            break
+        parent = parent.parentWidget()
+    host = area.viewport() if area is not None else rows[0].window()
+    controller = host.findChild(
+        _ControlFit, options=Qt.FindChildOption.FindDirectChildrenOnly
+    )
+    if controller is None:
+        controller = _ControlFit(host, area)
+    return controller.replace(rows)
 
 
 def titled_card(

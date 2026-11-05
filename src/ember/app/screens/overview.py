@@ -34,6 +34,7 @@ from ember.app import icons, state, theme
 from ember.app.flows import FlowItem, PanelItem, plan_wave
 from ember.app.runs import DONE, FINISHED_LIMIT, LIVE
 from ember.app.screens.common import (
+    FittingRow,
     ToneLine,
     chain_tab_order,
     discard,
@@ -1101,9 +1102,6 @@ class OverviewScreen(QWidget):
         header.addWidget(self.finished_toggle)
         finished_layout.insertLayout(0, header)
         self.finished_open = state.load(context.env).finished_open
-        self.filter_bar = QWidget()
-        filters = QHBoxLayout(self.filter_bar)
-        filters.setContentsMargins(0, 0, 0, 0)
         self.type_filter = Picker()
         self.status_filter = Picker()
         self.engine_filter = Picker()
@@ -1127,19 +1125,25 @@ class OverviewScreen(QWidget):
             combo.add_option(every, "all")
             for value in values:
                 combo.add_option(value, value)
-            filters.addWidget(combo)
             combo.currentTextChanged.connect(self.refresh)
         self.finished_cap = QLabel(
             f"Filters cover the newest {FINISHED_LIMIT} records."
         )
         self.finished_cap.setProperty("role", "secondary")
         self.finished_cap.hide()
-        filters.addWidget(self.finished_cap)
-        filters.addStretch(1)
         self.clear_button = button("Clear", "danger-outline", size="sm")
         self.clear_button.clicked.connect(self.clear_finished)
         self.clear_button.setAccessibleDescription(CLEAR_TIP)
-        filters.addWidget(self.clear_button)
+        actions = QWidget()
+        action_layout = QHBoxLayout(actions)
+        action_layout.setContentsMargins(0, 0, 0, 0)
+        self.finished_cap.setWordWrap(True)
+        action_layout.addWidget(self.finished_cap)
+        action_layout.addStretch(1)
+        action_layout.addWidget(self.clear_button)
+        self.filter_bar = FittingRow(
+            (self.type_filter, self.status_filter, self.engine_filter, actions)
+        )
         finished_layout.insertWidget(1, self.filter_bar)
         self._draw_clear_icon()
         theme.signals.changed.connect(self._draw_clear_icon)

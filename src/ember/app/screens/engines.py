@@ -38,6 +38,7 @@ from ember import choices, sandbox
 from ember.app import icons, theme
 from ember.app.screens.common import (
     CARD_MARGIN,
+    FittingRow,
     chain_tab_order,
     clear_layout,
     discard,
@@ -826,7 +827,9 @@ class _ModelPanel(Card):
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self.apply_filters)
         layout.addWidget(self.search)
-        row = QHBoxLayout()
+        first = QWidget()
+        row = QHBoxLayout(first)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(12)
         row.addWidget(QLabel("Provider"))
         self.provider_info = InfoTip(
@@ -842,7 +845,10 @@ class _ModelPanel(Card):
             lambda _i: self.apply_filters()
         )
         row.addWidget(self.provider_picker)
-        row.addSpacing(12)
+        second = QWidget()
+        row = QHBoxLayout(second)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(12)
         row.addWidget(QLabel("Tools"))
         row.addWidget(
             InfoTip(
@@ -859,8 +865,10 @@ class _ModelPanel(Card):
         row.addStretch(1)
         self.count_label = label(role="secondary")
         row.addWidget(self.count_label)
-        layout.addLayout(row)
-        row = QHBoxLayout()
+        layout.addWidget(FittingRow((first, second)))
+        first = QWidget()
+        row = QHBoxLayout(first)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(12)
         row.addWidget(QLabel("Max price"))
         row.addWidget(
@@ -877,7 +885,10 @@ class _ModelPanel(Card):
         self.price_picker.setCurrentIndex(0)
         self.price_picker.currentIndexChanged.connect(lambda _i: self.apply_filters())
         row.addWidget(self.price_picker)
-        row.addSpacing(12)
+        second = QWidget()
+        row = QHBoxLayout(second)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(12)
         row.addWidget(QLabel("Min context"))
         row.addWidget(
             InfoTip(
@@ -894,7 +905,7 @@ class _ModelPanel(Card):
         self.context_picker.currentIndexChanged.connect(lambda _i: self.apply_filters())
         row.addWidget(self.context_picker)
         row.addStretch(1)
-        layout.addLayout(row)
+        layout.addWidget(FittingRow((first, second)))
 
     def load(self, refresh: bool = False) -> None:
         """Read the model list in a task.
