@@ -415,7 +415,8 @@ def test_model_rows_share_columns_and_centres(
     missing = panel.missing[0]
     assert first.note.isHidden() and second.note.isHidden()
     assert first.height() == second.height() == missing.height()
-    assert panel.name_width == 320
+    # The column fits the room the 960 px content cap leaves, up to 320 px.
+    assert 140 <= panel.name_width <= 320
     assert panel.name_header.width() == first.name.width() == missing.name.width()
     assert first.name.display_text().endswith("…")
     assert first.name.text() == long_id

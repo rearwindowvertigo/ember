@@ -302,9 +302,10 @@ def screen_header(
         The subtitle label, for screens that change it.
     """
     trailing = tuple(trailing)
-    row = QHBoxLayout()
-    row.setSpacing(12)
-    titles = QVBoxLayout()
+    titles_box = QWidget()
+    titles_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+    titles = QVBoxLayout(titles_box)
+    titles.setContentsMargins(0, 0, 0, 0)
     titles.setSpacing(4)
     heading = QLabel(title)
     heading.setFont(theme.font("display"))
@@ -318,10 +319,20 @@ def screen_header(
     titles.addLayout(title_row)
     line = label(subtitle, "secondary")
     titles.addWidget(line)
-    row.addLayout(titles, 1)
-    for widget in trailing:
-        row.addWidget(widget, 0, Qt.AlignmentFlag.AlignVCenter)
-    layout.addLayout(row)
+    if trailing:
+        # The trailing widgets drop under the titles when both do not fit.
+        actions = QWidget()
+        actions_row = QHBoxLayout(actions)
+        actions_row.setContentsMargins(0, 0, 0, 0)
+        actions_row.setSpacing(12)
+        for widget in trailing:
+            actions_row.addWidget(widget, 0, Qt.AlignmentFlag.AlignVCenter)
+        row = FittingRow((titles_box, actions))
+        row.box.setSpacing(12)
+        row.box.setAlignment(actions, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(row)
+    else:
+        layout.addWidget(titles_box)
     for widget in trailing:
         if widget.focusPolicy() != Qt.FocusPolicy.NoFocus:
             QWidget.setTabOrder(show_sidebar, widget)
