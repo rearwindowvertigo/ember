@@ -38,19 +38,38 @@ Write a JSON plan in the session scratchpad:
   why before the dry run. `parallel`: leave it out; the flow then uses the
 owner's Max tasks at once row (`flow.parallel`). The stall time comes from
 Stall after (`flow.stall`) unless you pass `--stall`.
-- `check`: an argv list for the repository's full check.
+- `check`: an argv list for the repository's full check. It runs on the
+  lead's machine in the flow worktree, outside any worker sandbox, with
+  the runner's environment. Its timeout is `check_timeout`, an integer
+  number of seconds, at least 1, default `1800`. Tests that need a local
+  service, such as a database, can go in this check.
 - `failure_model`: the cases that must work and those accepted.
 - `context`: only settled decisions and the rules tasks need.
 - `read`: the files that hold each source the plan cites, such as an
   exported issue (`gh issue view <n> --comments > <scratch>/issue-<n>.md`);
   workers cannot open an issue tracker. Writers and reviewers see them
   listed under "Sources to read".
-- `tasks`: each has `id`, `subject`, `task`, `files`, `after` and `review`.
-  Every new task requires a nonblank one-line `subject`, at most 72
-  characters. Write it in the repository's commit convention, read from
-  `AGENTS.md`, `CONTRIBUTING` or `git log`, with `!` for a breaking
-  Conventional Commit. It is the task's squash subject and the writer
-  brief's first line. Recorded flows keep their resolved subjects.
+- `tasks`: a non-empty list of task objects with these fields. See the
+  task-field table under Plan in `docs/reference.md` for the full rules.
+
+| Task field | Type and rule | Example |
+|---|---|---|
+| `id` | Required unique string matching `[a-z0-9][a-z0-9-]{0,39}` | `"totals"` |
+| `subject` | Required nonblank one-line string, at most 72 characters | `"feat: add order totals"` |
+| `task` | Required nonblank string describing the work | `"Implement and test order totals."` |
+| `files` | Required non-empty list of unique exact relative POSIX file paths, with no trailing `/` | `["src/totals.py", "tests/test_totals.py"]` |
+| `after` | List of other task ids as strings; default `[]`; every id exists, no self dependency or cycle | `["schema"]` |
+| `review` | String giving the reviewer's focus; default `""` | `"Check empty orders and rounding."` |
+
+Write `subject` in the repository's commit convention, read from
+`AGENTS.md`, `CONTRIBUTING` or `git log`, with `!` for a breaking
+Conventional Commit. It is the task's squash subject and the writer
+brief's first line. Recorded flows keep their resolved subjects.
+
+`files` refuses a leading slash, an empty path component, `.` or `..`
+components, or NUL with exit 64. A trailing `/` is an empty component.
+A path that is a folder at `base` gets the warning
+`<id>: <path> is a folder; list the files the task changes`.
 
 List exact files, including shared tests that a change would break.
 Declared overlap serializes tasks, even when edits affect different sections.
@@ -209,6 +228,10 @@ owner, then follow `next: emb flow --resume <id>`. Other exits follow the
 `owner:` lines; a refusal is not permission to force an action.
 
 ## Verify, merge and report
+
+Before accepting a flow, fetch the remote default branch and compare it
+with the flow's recorded base. If the default branch has moved, merge it
+into the flow branch and run the plan `check` again in the flow worktree.
 
 At `end`, exit 0 with every task merged, verify in the flow worktree:
 

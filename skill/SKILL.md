@@ -112,7 +112,8 @@ For research or search, recommend Codex with `--read-only`, and a Claude
 subagent as the alternative when it needs the browser or connectors.
 
 A small edit (a few lines in one or two files already open) defaults to no
-worker even when `single.writer` is `set`; say so in one line. Work a CLI
+worker even when `single.writer` is `set`; say so in one line. The run still
+claims, and finishes at once. Work a CLI
 engine cannot do (connectors, the browser, Claude's tools) fails that
 engine's gate: recommend a Claude subagent with the reason, whatever the
 row says. Editing workers need a git checkout; work in a folder that is not
@@ -410,6 +411,11 @@ approval) and delete it with `git branch -d <branch>`.
 
 Before squashing or deleting the session branch, run
 `emb cleanup --merged-into <session branch>` and report the keeps.
+Without a limiting option, `emb cleanup` covers every Ember run branch of
+the repository, including other sessions' runs. Report a kept line for a
+run this session did not start as another session's; do not follow its
+`next:` line. Use `--branch <branch>` to limit cleanup to one branch, or
+`--claim <id>` to limit it to the session's own claim.
 Cleanup treats a branch as contained when it is an ancestor of the target,
 when a reachable commit records its tip in `Ember-Task-Tip`, or when merging
 it into the target gives no conflict and the target's own tree. The trailer
@@ -422,6 +428,8 @@ changes first. On an approved drop, report the tip, then use
 
 Finish with `emb choices --finish <id>`: after merge or discard for
 editing work, after review for read-only work, at once for no worker.
+`status: gone` in the reply means the finish worked; `was` is the status
+before it.
 Failed or cancelled runs still get review and a decision on their partial
 work before the finish.
 

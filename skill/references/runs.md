@@ -147,7 +147,11 @@ Only with their go-ahead for that run repeat the command
 with `--force`, which records the messages as accepted.
 
 A run started by `emb gapcheck`, `emb panel` or a flow records that command
-as its `parent`. When the command ends without collecting the run, the run
+as its `parent`. A flow task run is not orphaned while its flow waits for
+the lead. Its status line, `WARNING:` and Overview say it waits for the
+lead's answer to the flow, with no recover-and-close `next:` line. Answer
+the flow; do not recover and close the task run.
+Otherwise, when the command ends without collecting the run, the run
 shows `orphaned: true` in `emb run --status --json`, with a `WARNING:` and a
 `next:` line. Report each orphaned run to the owner, then
 `emb run --recover <run>` and `emb run --close <run>` it when this session
@@ -228,6 +232,11 @@ denied parent folder. A read-only run's detached worktree is writable in
 the Codex profile and bubblewrap. The run has no branch or Ember commit
 step and keeps its reviewer brief. Older read-only records that name a
 source checkout keep that checkout protected as read-only.
+
+A new run worktree holds only tracked files, with no installed dependencies.
+Install dependencies before running checks that need them. Use the shared
+caches below; network access follows `worker.network` as described below.
+
 The workers' cache folder,
 `$XDG_CACHE_HOME/ember/worker`, is writable in every
 sandboxed run, including read-only runs, and shared between runs.
@@ -267,6 +276,10 @@ A broken outcome gives null, which is unknown.
 
 Report every printed `owner:` line. When it offers reading, give the owner
 the `Settings, Sandbox read paths; emb choices --set ...` action.
+At exit 0, say the turn finished. Read access is needed only if the
+worker's report says the work needed the denied path. When the report shows
+the work did not need it, still give the printed action, say the work did not
+need the path, and go on without waiting.
 The command keeps existing read paths and adds the offered folder, or an
 addable secret location's matched path. Never run it, edit the settings
 database, add a path to `sandbox.read`, or bypass the denial with `--read`
@@ -312,7 +325,7 @@ rules; put `owner:` to the owner and wait. Do not retry a refusal.
 | 64 | Usage error, unanswerable menu row, switched-off engine or invalid claim | Fix the call, or ask the named row live. Never edit settings. A `gone` or `unknown` claim stops the run (claims reference). |
 | 65 | Not a git checkout | Use a git checkout, or a read-only Claude subagent. |
 | 66 | Missing file or path | Check `--dir`, the brief and `--read` paths. |
-| 69 | Engine, driver, `git` or `tmux` missing, not signed in, a sandbox conflict, a kept path in a hidden Ember folder outside its own worktree, a worktree folder inside any Git working tree or the source repository's git folder, no working `bwrap`, or no runtime folder | Give the owner the `owner:` command and wait. Do not run it; do not retry the start or start another engine without a question. |
+| 69 | Engine, driver, `git` or `tmux` missing, not signed in, Codex does not trust the repository, a sandbox conflict, a kept path in a hidden Ember folder outside its own worktree, a worktree folder inside any Git working tree or the source repository's git folder, no working `bwrap`, or no runtime folder | Give the owner the `owner:` command and wait. Do not run it; do not retry the start or start another engine without a question. Codex trust refusal in a dry run or start creates nothing, including no worktree. It prints the trust message and an `owner:` line asking the owner to run `codex` in the repository once, with no `next:` line. Do not follow close-and-restart for this refusal. |
 | 70 | Worktree creation failed, or no main checkout or commit | Follow `next:`; never force-remove a worktree. |
 | 71 | Engine or session failed | Run `--status <run>`; report; follow `next:`. |
 | 72 | Session or window unavailable, or the run was closed | Run `--status <run>`; a new start is a new run. |
