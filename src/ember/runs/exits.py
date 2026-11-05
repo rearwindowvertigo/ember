@@ -51,6 +51,7 @@ LINES: dict[int, str | Mapping[str, str]] = {
     UNAVAILABLE: {
         "*": "owner: install or connect {engine}; emb engines shows what is missing",
         "fix": "owner: {fix}",
+        "trust": "owner: run codex in {dir} once and choose to trust the folder",
         "sandbox": "owner: remove the sandbox_mode key from {files}, "
         "or set sandbox.codex to off",
         "bwrap": "owner: install bubblewrap (the bwrap command) or make it work, "

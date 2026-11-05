@@ -862,6 +862,7 @@ class Core:
         if not common_dir:
             raise RunError(exits.NOT_A_CHECKOUT, f"cannot find the git folder of {top}")
         common = Path(common_dir).resolve()
+        self._check_codex_trust(engine, common)
         if options.base is not None and not options.read_only:
             raise RunError(exits.USAGE, "a saved base requires a read-only run")
         base = self._git_out(
@@ -979,6 +980,18 @@ class Core:
                 self._record_exit(run, failure.code, str(failure), status=record.FAILED)
                 raise failure from error
             return self._turn(run, driver, started, window)
+
+    def _check_codex_trust(self, engine: str, common: Path) -> None:
+        """Refuse an untrusted Codex repository before creating launch artifacts."""
+        if engine != "codex":
+            return
+        from ember.engines.codex import CodexDriver
+
+        root = common.parent
+        try:
+            CodexDriver(self.env).check_trust(root, self.env)
+        except engines.DriverError as error:
+            raise RunError(exits.UNAVAILABLE, str(error), "trust", dir=root) from error
 
     def _check_kept(
         self,

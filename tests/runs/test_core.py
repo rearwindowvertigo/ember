@@ -17,7 +17,7 @@ import pytest
 
 from ember import choices, engines, paths, processes, sandbox
 from ember.engines import Driver, LaunchSpec, models, status
-from ember.engines.codex import CodexDriver
+from ember.engines.codex import CodexDriver, codex_home
 from ember.engines.opencode import OpenCodeDriver
 from ember.engines.opencode2 import OpenCode2Driver
 from ember.runs import core, exits, record
@@ -111,6 +111,83 @@ def _events(tmp_path: Path, run_id: str) -> list[dict[str, str]]:
 
 
 # Starting an editing run
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize("linked", [False, True])
+def test_codex_trust_refusal_precedes_launch_setup(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    dry_run: bool,
+    read_only: bool,
+    linked: bool,
+) -> None:
+    (codex_home(env) / "config.toml").unlink()
+    checkout = repo
+    if linked:
+        checkout = tmp_path / "linked"
+        git(repo, "worktree", "add", "-q", "--detach", str(checkout), env=env)
+        # Trusting the source checkout does not trust a new worker worktree.
+        (codex_home(env) / "config.toml").write_text(
+            f'[projects.{json.dumps(str(checkout))}]\ntrust_level = "trusted"\n'
+        )
+    folder = checkout / "subfolder"
+    folder.mkdir()
+    brief = _brief(tmp_path, "Task\n")
+    branches = git(repo, "branch", "--list", env=env)
+    worktrees = git(repo, "worktree", "list", "--porcelain", env=env)
+    before = set(tmp_path.rglob("*"))
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("untrusted repository reached launch setup")
+
+    monkeypatch.setattr(record, "new_id", forbidden)
+    monkeypatch.setattr(sandbox, "require", forbidden)
+    monkeypatch.setattr(paths, "ensure_worker_cache_dir", forbidden)
+    assert _start(
+        _core(env, CodexDriver(env)), folder, brief,
+        engine="codex", model="gpt-5", effort="high",
+        dry_run=dry_run, read_only=read_only,
+    ) == 69  # fmt: skip
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert err.splitlines() == [
+        f"emb run: Codex does not trust {repo}; the owner trusts it by running "
+        "codex there once and choosing to trust the folder",
+        f"owner: run codex in {repo} once and choose to trust the folder",
+    ]
+    assert "next:" not in err
+    assert not paths.runs_dir(env).exists()
+    assert not paths.worktrees_dir(env).exists()
+    assert git(repo, "branch", "--list", env=env) == branches
+    assert git(repo, "worktree", "list", "--porcelain", env=env) == worktrees
+    assert set(tmp_path.rglob("*")) - before <= {
+        paths.settings_db_path(env).with_suffix(".db-wal"),
+        paths.settings_db_path(env).with_suffix(".db-shm"),
+    }
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("read_only", [False, True])
+def test_codex_repository_trust_allows_a_linked_checkout(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    dry_run: bool,
+    read_only: bool,
+) -> None:
+    linked = tmp_path / "linked"
+    git(repo, "worktree", "add", "-q", "--detach", str(linked), env=env)
+    assert _start(
+        _core(env, _driver(env, "codex")), linked, _brief(tmp_path, "Task\n"),
+        engine="codex", model="gpt-5", effort="high",
+        dry_run=dry_run, read_only=read_only,
+    ) == 0, capsys.readouterr().err  # fmt: skip
 
 
 @pytest.mark.parametrize("read_only", [False, True])
