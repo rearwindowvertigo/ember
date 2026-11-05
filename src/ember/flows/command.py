@@ -293,6 +293,16 @@ def _prepare(
 ) -> tuple[plan.Plan, Path, Path, str, plan.Worker, plan.Worker, dict[str, Any]]:
     """Validate a plan, checkout, claim and both workers before creating state."""
     document = plan.load(args.plan)
+    problems = []
+    for item in document.read:
+        path = Path(item).expanduser().absolute()
+        try:
+            if path.is_file() and not path.read_text(encoding="utf-8").strip():
+                problems.append(f"the read file {item} is empty")
+        except OSError, UnicodeError:
+            continue
+    if problems:
+        raise plan.PlanError(64, problems)
     if not Path(document.dir).is_dir():
         raise CommandError(
             66,
