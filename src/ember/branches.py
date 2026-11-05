@@ -84,17 +84,21 @@ TASK_TIP_TRAILER = "Ember-Task-Tip"
 class BranchError(Exception):
     """A branch operation's exit, with its message and follow-up line."""
 
-    def __init__(self, code: int, message: str, line: str) -> None:
+    def __init__(
+        self, code: int, message: str, line: str, variant: str | None = None
+    ) -> None:
         """Keep the exit code and the `next:` or `owner:` line.
 
         Args:
             code: The exit code.
             message: What happened.
             line: The line printed after the message.
+            variant: The failure variant for CLI reporting.
         """
         super().__init__(message)
         self.code = code
         self.line = line
+        self.variant = variant
 
 
 class GitFailedError(BranchError):
@@ -1183,7 +1187,15 @@ def _check_closable(run: Run) -> None:
     raise _KeepError(reason, exits.line(exits.REFUSED, variant, run=run.id) or "")
 
 
-def _print_failure(command: str, error: BranchError, err: TextIO) -> int:
+def _print_failure(
+    command: str,
+    error: BranchError,
+    err: TextIO,
+    failures: list[BranchError] | None = None,
+) -> int:
+    """Print a branch failure and expose its variant to the CLI."""
+    if failures is not None:
+        failures.append(error)
     print(f"emb {command}: {error}", file=err)
     print(error.line, file=err)
     return error.code
@@ -1208,6 +1220,7 @@ def cleanup(
     core: CoreFactory | None = None,
     out: TextIO | None = None,
     err: TextIO | None = None,
+    failures: list[BranchError] | None = None,
 ) -> int:
     """Run `emb cleanup`.
 
@@ -1222,6 +1235,7 @@ def cleanup(
         core: Returns the run core that closes sessions.
         out: Standard output; `None` for `sys.stdout`.
         err: Standard error; `None` for `sys.stderr`.
+        failures: Receives failures for CLI report lines.
 
     Returns:
         The exit code.
@@ -1232,7 +1246,7 @@ def cleanup(
     try:
         repo = open_repository(directory, env, "cleanup", from_main=True)
     except BranchError as error:
-        return _print_failure("cleanup", error, err)
+        return _print_failure("cleanup", error, err, failures)
     again = _again(target, branch, repo.top, claim)
     for name in (target, branch):
         if name is not None and not repo.branch_exists(name):
@@ -1267,7 +1281,7 @@ def cleanup(
     elif not job.results and failure is None:
         print(f"emb cleanup: no Ember run branch against {target}", file=err)
     if failure is not None:
-        return _print_failure("cleanup", failure, err)
+        return _print_failure("cleanup", failure, err, failures)
     if (
         claim is not None
         and not dry_run
@@ -1435,8 +1449,9 @@ def _squash(
                 exits.REFUSED,
                 f"conflict in {', '.join(conflicts) or _git_message(tree)}; "
                 f"{target} unchanged at {head}",
-                f"next: resolve the conflicts on {branch}, review, then repeat "
-                "emb merge with --subject",
+                f"owner: resolve the conflict on {branch}, or ask for a new run "
+                "cut from the updated target",
+                "conflict",
             )
         raise GitFailedError(
             exits.WORKTREE_FAILED,
@@ -1599,8 +1614,9 @@ def _merge(
             exits.REFUSED,
             f"conflict in {', '.join(conflicts)}; merge aborted, {target} "
             f"unchanged at {head}",
-            f"next: git -C {worktree} merge --no-ff --no-edit {branch}, resolve "
-            f"the conflicts and commit, then {_again(target, branch, repo.top)}",
+            f"owner: resolve the conflict on {branch}, or ask for a new run "
+            "cut from the updated target",
+            "conflict",
         )
     raise GitFailedError(
         exits.WORKTREE_FAILED,
@@ -1640,6 +1656,7 @@ def merge(
     core: CoreFactory | None = None,
     out: TextIO | None = None,
     err: TextIO | None = None,
+    failures: list[BranchError] | None = None,
 ) -> int:
     """Run `emb merge`: merge a reviewed branch, then clean it up.
 
@@ -1656,6 +1673,7 @@ def merge(
         core: Returns the run core that closes sessions.
         out: Standard output; `None` for `sys.stdout`.
         err: Standard error; `None` for `sys.stderr`.
+        failures: Receives failures for CLI report lines.
 
     Returns:
         The exit code.
@@ -1718,7 +1736,7 @@ def merge(
             warnings=warnings,
         )
     except BranchError as error:
-        return _print_failure("merge", error, err)
+        return _print_failure("merge", error, err, failures)
     for warning in warnings:
         print(warning, file=err)
     contained_before = commit is None
@@ -1753,7 +1771,7 @@ def merge(
         }
         print(json.dumps(document, indent=2), file=out)
     if failure is not None:
-        return _print_failure("merge", failure, err)
+        return _print_failure("merge", failure, err, failures)
     if next_line is not None:
         print(next_line, file=err)
     return exits.OK

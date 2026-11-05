@@ -1464,10 +1464,15 @@ def test_generated_status_replies_carry_their_next_line(
         "sandbox-denied-paths",
     ):
         replies = generated_eval_fixtures / name / "files/.ember-eval/replies"
-        error = (replies / "run-status.err").read_text()
         document = json.loads((replies / "run-status.json").read_text())
-        assert error == f"{document['next']}\n"
-        assert error.startswith("next: ")
+        if document["step"] == "owner":
+            assert document["next"] is None
+            assert document["owner_wait"]
+            assert not (replies / "run-status.err").exists()
+        else:
+            error = (replies / "run-status.err").read_text()
+            assert error == f"{document['next']}\n"
+            assert error.startswith("next: ")
 
 
 @pytest.mark.parametrize("name", CASES)
@@ -1622,8 +1627,11 @@ def test_denied_path_case_keeps_every_attempt_and_owner_action(
     run_id = result.stdout.splitlines()[0].removeprefix("run ")
     status = work.emb("run", "--status", run_id, "--json")
     assert status.returncode == 0
-    assert status.stderr == f"next: emb run --close {run_id}\n"
-    [turn] = json.loads(status.stdout)["turns"]
+    assert status.stderr == ""
+    document = json.loads(status.stdout)
+    assert document["step"] == "owner" and document["next"] is None
+    assert document["owner_wait"]
+    [turn] = document["turns"]
     assert turn["exit"] == 0 and turn["state"] == "done"
     denials = {item["path"]: item for item in turn["denied_paths"]}
     expected = {
@@ -1695,10 +1703,7 @@ def test_provider_error_case_streams_and_status(
     )
     status = work.emb("run", "--status", run_id, "--json")
     assert status.returncode == 0
-    # Status derives its line from the last turn's provider kind; an
-    # uncertain resend is a capacity error.
-    kind = "capacity" if variant == "uncertain" else variant
-    assert status.stderr == f"{exits.line(73, kind, run=run_id)}\n"
+    assert status.stderr == f"{exits.line(73, variant, run=run_id)}\n"
     document = json.loads(status.stdout)
     assert document["step"] == "failed"
     assert document["last_exit"] == 73

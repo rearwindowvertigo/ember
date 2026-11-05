@@ -29,6 +29,7 @@ from typing import Any, NoReturn
 from ember import __version__, branches, choices, db, deps, ground, skill
 from ember.engines import models, status
 from ember.runs import core as run_core
+from ember.runs import exits, record, steps
 
 EX_OK = 0
 EX_USAGE = 64
@@ -132,7 +133,16 @@ def _positive_minutes(text: str) -> float:
     return value
 
 
-_RUN_MODES = ("send", "screen", "interrupt", "attach", "close", "recover", "status")
+_RUN_MODES = (
+    "send",
+    "screen",
+    "interrupt",
+    "attach",
+    "close",
+    "recover",
+    "status",
+    "answered",
+)
 _ALL_RUNS = ""
 
 
@@ -199,6 +209,11 @@ def _add_run(parser: argparse.ArgumentParser) -> None:
     )
     existing.add_argument(
         "--recover", metavar="RUN", help="collect a turn that ended unwatched"
+    )
+    existing.add_argument(
+        "--answered",
+        metavar="RUN",
+        help="record the owner's reply, end the owner wait and print the next step",
     )
     existing.add_argument(
         "--status",
@@ -914,21 +929,44 @@ def _run_run(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
         "close": lambda: core.close(args.close, force=args.force),
         "recover": lambda: core.recover(args.recover),
         "status": lambda: core.status(args.status or None, as_json=args.json),
+        "answered": lambda: core.answered(args.answered),
     }
     code = core.execute(actions[mode])
     if code == EX_OK and not args.dry_run:
         next_line = None
         if mode == "status":
+            for text in core.status_owner:
+                print(text, file=sys.stderr)
             next_line = core.status_next
-        elif mode in ("start", "send", "recover", "close"):
+        elif mode in ("start", "send", "recover", "close", "answered"):
             run_id = core.last_run_id if mode == "start" else getattr(args, mode)
             if run_id is not None:
-                from ember.runs import record
-
                 with contextlib.suppress(record.RecordError):
                     _, next_line = core.step(record.load(run_id, env))
         if next_line is not None:
             print(next_line, file=sys.stderr)
+    if mode == "status" and code == EX_OK:
+        runs = (
+            [record.load(args.status, env)] if args.status else record.list_runs(env)[0]
+        )
+        for run in runs:
+            step, _ = core.step(run)
+            if step in ("failed", "owner"):
+                text = exits.report(
+                    run.last_exit or 0, steps.exit_variant(run), **run.to_json()
+                )
+                if text:
+                    print(text, file=sys.stderr)
+    elif core.last_error is not None:
+        error = core.last_error
+        context = dict(error.context)
+        run_id = context.get("run") or core.last_run_id
+        if isinstance(run_id, str):
+            with contextlib.suppress(record.RecordError):
+                context = {**record.load(run_id, env).to_json(), **context}
+        text = exits.report(error.code, error.variant, **context)
+        if text:
+            print(text, file=sys.stderr)
     return code
 
 
@@ -1057,7 +1095,8 @@ def main(
     if args.command == "skill":
         return _run_skill(args, env)
     if args.command == "merge":
-        return branches.merge(
+        failures: list[branches.BranchError] = []
+        code = branches.merge(
             args.branch,
             args.into,
             args.verdict,
@@ -1066,7 +1105,17 @@ def main(
             directory=args.dir,
             as_json=args.json,
             env=env,
+            failures=failures,
         )
+        for failure in failures:
+            text = (
+                exits.report(failure.code, failure.variant)
+                if failure.code == exits.REFUSED and failure.variant == "conflict"
+                else None
+            )
+            if text:
+                print(text, file=sys.stderr)
+        return code
     if args.command == "prune":
         from ember import prune
 
@@ -1074,7 +1123,8 @@ def main(
             args.older_than, dry_run=args.dry_run, as_json=args.json, env=env
         )
     if args.command == "cleanup":
-        return branches.cleanup(
+        failures = []
+        code = branches.cleanup(
             args.merged_into,
             branch=args.branch,
             claim=args.claim,
@@ -1082,7 +1132,17 @@ def main(
             dry_run=args.dry_run,
             as_json=args.json,
             env=env,
+            failures=failures,
         )
+        for failure in failures:
+            text = (
+                exits.report(failure.code, failure.variant)
+                if failure.code == exits.REFUSED and failure.variant == "conflict"
+                else None
+            )
+            if text:
+                print(text, file=sys.stderr)
+        return code
     return EX_OK
 
 

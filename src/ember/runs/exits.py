@@ -165,3 +165,67 @@ def emit(
     if text:
         print(text, file=stream or sys.stderr)
     return text
+
+
+def report(code: int, variant: str | None = None, **context: object) -> str | None:
+    """Return the settled report line for a run exit or merge conflict.
+
+    Args:
+        code: The exit code.
+        variant: The recorded exit variant.
+        **context: Placeholder values, plus turn and read_only when known.
+
+    Returns:
+        The report line, or None when this exit carries no report.
+    """
+    text = None
+    if code == UNAVAILABLE and (
+        context.get("turn", 0) == 0 or context.get("last_start_failure", False)
+    ):
+        text = (
+            "no worker started; do not retry the start or start another engine "
+            "before the owner answers"
+        )
+    elif code in (PROVIDER_ERROR, INTERRUPTED) and variant == "uncertain":
+        text = (
+            "retry delivery is uncertain; do not send again before inspecting the "
+            "session"
+        )
+    elif code == PROVIDER_ERROR:
+        text = {
+            "capacity": "capacity; retries exhausted; offer only a retry with the "
+            "same model and effort once capacity returns; offer no other model, "
+            "engine, Claude subagent or Claude's own work",
+            "outage": "outage; offer only a retry with the same model and effort "
+            "once it clears; offer no other model, engine, Claude subagent or "
+            "Claude's own work",
+            "usage_limit": "usage_limit; a retry on the same worker needs no "
+            "question; another worker or model needs the owner's answer; "
+            "OpenCode may be offered",
+        }.get(variant or "outage")
+    elif (
+        code == INTERRUPTED
+        and variant in (None, "*", "retry", "complete")
+        and not context.get("read_only", False)
+    ):
+        text = "interrupted; partial edits may be committed on {branch}"
+    elif code == REFUSED and variant == "conflict":
+        text = (
+            "merge conflict; do not retry or force it; ask the owner: a new run "
+            "cut from the updated target, or the owner resolves it"
+        )
+    elif code == MOVED:
+        text = (
+            "branch or HEAD moved; nothing committed; recover only when the "
+            "branch and HEAD are as recorded, otherwise leave the work to the owner"
+        )
+    elif code == HOOK_REFUSED and variant in (None, "*"):
+        text = "the commit hook refused; the work is uncommitted in {worktree}"
+    elif code == NO_REPLY:
+        text = "the turn ended with no reply"
+    if text is None:
+        return None
+    values = _Blanks(
+        {key: str(value) for key, value in context.items() if value not in (None, "")}
+    )
+    return "report: " + string.Formatter().vformat(text, (), values)

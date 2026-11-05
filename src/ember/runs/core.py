@@ -317,6 +317,8 @@ class Core:
         self.err = err
         self.last_run_id: str | None = None
         self.status_next: str | None = None
+        self.status_owner: list[str] = []
+        self.last_error: RunError | None = None
 
     # Output
 
@@ -338,16 +340,35 @@ class Core:
         Returns:
             The exit code.
         """
+        self.last_error = None
+        self.last_run_id = None
         try:
             return action()
         except RunError as error:
+            self.last_error = error
             self._warn(f"emb run: {error}")
-            exits.emit(
-                error.code,
-                error.variant,
-                stream=self.err or sys.stderr,
-                **error.context,
-            )
+            text = exits.line(error.code, error.variant, **error.context)
+            run_id = error.context.get("run") or self.last_run_id
+            run = None
+            if isinstance(run_id, str):
+                with contextlib.suppress(record.RecordError):
+                    run = record.load(run_id, self.env)
+            if run is not None:
+                if run.last_exit == error.code or (text and text.startswith("owner:")):
+                    run = self._record_exit(
+                        run,
+                        error.code,
+                        str(error),
+                        last_variant=error.variant,
+                        last_start_failure=run.last_start_failure,
+                    )
+                if text and text.startswith("owner:"):
+                    run = self._wait_owner(run, text)
+                run = self._owner_state(run)
+            if text and not (
+                text.startswith("next:") and run is not None and run.owner_wait
+            ):
+                self._warn(text)
             return error.code
         except KeyboardInterrupt:
             self._warn("emb run: interrupted")
@@ -432,7 +453,9 @@ class Core:
 
     def _load(self, run_id: str) -> Run:
         try:
-            return record.load(run_id, self.env)
+            run = record.load(run_id, self.env)
+            self.last_run_id = run.id
+            return run
         except record.RecordMissingError as error:
             raise RunError(exits.USAGE, f"no run {run_id}", "no_run") from error
         except record.RecordError as error:
@@ -481,7 +504,14 @@ class Core:
         """Record an exit; a closed run keeps its record."""
         try:
             return record.update(
-                run, {**changes, "last_exit": code, "last_reason": message}
+                run,
+                {
+                    "last_variant": None,
+                    "last_start_failure": False,
+                    **changes,
+                    "last_exit": code,
+                    "last_reason": message,
+                },
             )
         except record.RunClosedError, record.RecordError:
             return run
@@ -971,12 +1001,24 @@ class Core:
                 )
             except RunError as error:
                 _close_quietly(driver, run)
-                self._record_exit(run, error.code, str(error), status=record.FAILED)
+                self._record_exit(
+                    run,
+                    error.code,
+                    str(error),
+                    last_variant=error.variant,
+                    status=record.FAILED,
+                    last_start_failure=True,
+                )
                 raise
             except KeyboardInterrupt as error:
                 _close_quietly(driver, run)
                 self._record_exit(
-                    run, exits.INTERRUPTED, "interrupted", status=record.FAILED
+                    run,
+                    exits.INTERRUPTED,
+                    "interrupted",
+                    status=record.FAILED,
+                    last_start_failure=True,
+                    last_variant="starting",
                 )
                 raise RunError(
                     exits.INTERRUPTED,
@@ -987,7 +1029,14 @@ class Core:
             except Exception as error:
                 _close_quietly(driver, run)
                 failure = _start_failure(run, error)
-                self._record_exit(run, failure.code, str(failure), status=record.FAILED)
+                self._record_exit(
+                    run,
+                    failure.code,
+                    str(failure),
+                    last_variant=failure.variant,
+                    status=record.FAILED,
+                    last_start_failure=True,
+                )
                 raise failure from error
             return self._turn(run, driver, started, window)
 
@@ -1147,6 +1196,9 @@ class Core:
             status=record.RUNNING,
             turn=turn,
             turn_state=record.SENT,
+            owner_wait=(),
+            owner_read=(),
+            answered_at=None,
             reply=None,
             expected_head=None
             if run.read_only
@@ -1293,7 +1345,10 @@ class Core:
                 ):
                     record.write_private(self._retry_cancel_path(run), "cancelled")
                     self._record_exit(
-                        run, exits.INTERRUPTED, "capacity resend cancelled"
+                        run,
+                        exits.INTERRUPTED,
+                        "capacity resend cancelled",
+                        last_variant="retry",
                     )
                     raise RunError(
                         exits.INTERRUPTED,
@@ -1303,7 +1358,9 @@ class Core:
                     ) from error
                 if attempts and attempts[-1]["sending"] and not attempts[-1]["sent"]:
                     message = "capacity retry delivery is uncertain; ask the lead"
-                    self._record_exit(run, exits.INTERRUPTED, message)
+                    self._record_exit(
+                        run, exits.INTERRUPTED, message, last_variant="uncertain"
+                    )
                     raise RunError(
                         exits.INTERRUPTED, message, "uncertain", run=run.id
                     ) from error
@@ -1325,7 +1382,14 @@ class Core:
                     {**self._saved_outcome(run), "exit": exits.PROVIDER_ERROR},
                 )
                 self._record_exit(
-                    run, exits.PROVIDER_ERROR, outcome.reason, status=record.FAILED
+                    run,
+                    exits.PROVIDER_ERROR,
+                    outcome.reason,
+                    status=record.FAILED,
+                    last_variant="uncertain",
+                    owner_wait=(),
+                    owner_read=(),
+                    answered_at=None,
                 )
                 self._warn_denial_owners(run, exits.PROVIDER_ERROR)
                 raise RunError(
@@ -1487,7 +1551,7 @@ class Core:
                 f"interrupted while collecting turn {run.turn} of {run.id}; "
                 "its saved state is kept"
             )
-            self._record_exit(run, exits.INTERRUPTED, message)
+            self._record_exit(run, exits.INTERRUPTED, message, last_variant="complete")
             raise RunError(
                 exits.INTERRUPTED, message, "complete", run=run.id
             ) from error
@@ -1507,7 +1571,13 @@ class Core:
                 return driver.wait(run)
         except RunError as error:
             self._stop_if_closed(run)
-            self._record_exit(run, error.code, str(error), status=record.FAILED)
+            self._record_exit(
+                run,
+                error.code,
+                str(error),
+                last_variant=error.variant,
+                status=record.FAILED,
+            )
             raise
 
     def _wait_turn(self, run: Run, driver: Driver) -> TurnOutcome:
@@ -1634,7 +1704,15 @@ class Core:
             elif commit_code:
                 code, message = commit_code, commit_message
                 variant = commit_variant
-        run = self._record_exit(run, code, message)
+        run = self._record_exit(
+            run,
+            code,
+            message,
+            last_variant=variant,
+            owner_wait=(),
+            owner_read=(),
+            answered_at=None,
+        )
         saved = self._saved_outcome(run)
         seconds = time.monotonic() - started
         self._write_outcome(
@@ -1646,6 +1724,9 @@ class Core:
                 **({"retry_clock": None} if "retry_clock" in saved else {}),
             },
         )
+        text = exits.line(code, variant, **context)
+        if text and text.startswith("owner:"):
+            run = self._wait_owner(run, text)
         self._warn_denial_owners(run, code)
         self._print_turn(run, code, files, commit, reply, seconds, window)
         if code:
@@ -1741,14 +1822,16 @@ class Core:
         for item in self._saved_outcome(run).get("denied_paths", []):
             if item["reason"] == "startup file":
                 continue
+            text = None
+            read = None
             problem = sandbox.read_path_problem(item["path"], self.env)
             if problem:
-                self._warn(
+                text = (
                     f"owner: {problem}; it cannot be added to "
                     "Settings, Sandbox read paths"
                 )
             elif item["reason"] == "hidden" and item["allow_path"] is None:
-                self._warn(
+                text = (
                     f"owner: {item['path']} is hidden; no folder can be offered "
                     "because each folder that holds it also holds private files"
                 )
@@ -1761,6 +1844,7 @@ class Core:
                 reads = list(
                     dict.fromkeys([*reads, item["allow_path"] or item["path"]])
                 )
+                read = item["allow_path"] or item["path"]
                 setting = shlex.quote("sandbox.read=" + json.dumps(reads))
                 qualification = (
                     "the turn finished (exit 0); read access is needed only if "
@@ -1768,10 +1852,57 @@ class Core:
                     if code == exits.OK
                     else ""
                 )
-                self._warn(
+                text = (
                     f"owner: {qualification}Settings, Sandbox read paths; "
                     f"emb choices --set {setting}"
                 )
+            if text is not None:
+                self._warn(text)
+                run = self._wait_owner(run, text, read)
+
+    def _wait_owner(self, run: Run, text: str, read: str | None = None) -> Run:
+        """Store a printed owner action for an unparented run."""
+        if run.parent is not None:
+            return run
+        current = record.load(run.id, self.env)
+        if text in current.owner_wait:
+            return current
+        return record.update(
+            current,
+            {
+                "owner_wait": (*current.owner_wait, text),
+                "owner_read": (*current.owner_read, read or ""),
+                "answered_at": None,
+            },
+            allow_closed=True,
+        )
+
+    def _owner_state(self, run: Run) -> Run:
+        """End a denial wait once every suggested read value is configured."""
+        if run.parent is not None or not run.owner_wait or not run.owner_read:
+            return run
+        if len(run.owner_read) != len(run.owner_wait) or not all(run.owner_read):
+            return run
+        try:
+            reads = choices.read(env=self.env)["answers"]["sandbox.read"]["value"]
+        except db.DatabaseError:
+            return run
+        if all(path in reads for path in run.owner_read):
+            return record.update(
+                run, {"owner_wait": (), "owner_read": ()}, allow_closed=True
+            )
+        return run
+
+    def answered(self, run_id: str) -> int:
+        """Record the owner's reply and end this run's pending owner wait."""
+        run = self._load(run_id)
+        if run.parent is None and run.owner_wait:
+            record.update(
+                run,
+                {"owner_wait": (), "owner_read": (), "answered_at": time.time()},
+                allow_closed=True,
+            )
+        return exits.OK
 
     def _saved_outcome(self, run: Run) -> dict[str, Any]:
         try:
@@ -1992,7 +2123,7 @@ class Core:
             if self._needs_collection(run):
                 run, _, _, code, message, variant = self._retry_commit(run)
                 if code and not (code == exits.HOOK_REFUSED and variant != "add"):
-                    self._record_exit(run, code, message)
+                    self._record_exit(run, code, message, last_variant=variant)
                     raise RunError(
                         code, message or "", variant, run=run_id, worktree=run.worktree
                     )
@@ -2017,6 +2148,9 @@ class Core:
                 "turn_state": run.turn_state,
                 "reply": run.reply,
                 "expected_head": run.expected_head,
+                "owner_wait": run.owner_wait,
+                "owner_read": run.owner_read,
+                "answered_at": run.answered_at,
             }
             run = self._turn_sent(run, turn, text)
             try:
@@ -2029,12 +2163,16 @@ class Core:
                     if isinstance(error.__cause__, DeliveryUncertainError)
                     else previous
                 )
-                self._record_exit(run, error.code, str(error), **changes)
+                self._record_exit(
+                    run, error.code, str(error), last_variant=error.variant, **changes
+                )
                 error.context.setdefault("run", run_id)
                 raise
             except KeyboardInterrupt as error:
                 message = f"interrupted while sending to {run_id}"
-                self._record_exit(run, exits.INTERRUPTED, message, **previous)
+                self._record_exit(
+                    run, exits.INTERRUPTED, message, last_variant="send", **previous
+                )
                 raise RunError(
                     exits.INTERRUPTED, message, "send", run=run_id
                 ) from error
@@ -2311,10 +2449,13 @@ class Core:
             The exit code.
         """
         self.status_next = None
+        self.status_owner = []
         if run_id is not None:
             document = self._document(self._load(run_id))
             self.status_next = document["next"]
             self._warn_parent([document])
+            if document["step"] == "owner":
+                self.status_owner.extend(document["owner_wait"])
             if as_json:
                 self._say(json.dumps(document, indent=2))
             else:
@@ -2331,6 +2472,9 @@ class Core:
             self._warn(f"emb run: skipped {error}")
         documents = [self._document(run) for run in runs]
         self._warn_parent(documents)
+        for document in documents:
+            if document["step"] == "owner":
+                self.status_owner.extend(document["owner_wait"])
         if as_json:
             self._say(json.dumps(documents, indent=2))
         else:
@@ -2347,6 +2491,7 @@ class Core:
         return exits.OK
 
     def _document(self, run: Run) -> dict[str, Any]:
+        run = self._owner_state(run)
         waiting = record.waiting_for_flow(run)
         turns, errors = record.turn_results(run)
         for error in errors:
@@ -2380,7 +2525,7 @@ class Core:
         except RunError:
             needs_collection = True
         return steps.derive(
-            run,
+            self._owner_state(run),
             session_state if session_state is not None else self._session_state(run.id),
             needs_collection,
             self._git,

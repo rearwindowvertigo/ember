@@ -750,6 +750,7 @@ def test_run_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
         "--engine",
         "--task-file",
         "--recover",
+        "--answered",
         "--stall",
         "--trailer",
         "--dry-run",
@@ -1047,7 +1048,7 @@ def test_run_without_driver_exits_69(
     assert code == 69
     assert captured.out == ""
     assert "emb run: Ember has no driver for codex\n" in captured.err
-    assert captured.err.splitlines()[-1] == (
+    assert captured.err.splitlines()[-2] == (
         "owner: this Ember build has no driver for codex; update Ember"
     )
 
@@ -1486,3 +1487,315 @@ def test_deps_failed_check_hides_path(
     item = json.loads(capsys.readouterr().out)["components"][0]
     assert item["resolved_path"] == f"{env['PATH']}/codex"
     assert item["method"] is None
+
+
+@pytest.mark.parametrize(
+    ("code", "variant"),
+    [
+        (69, None),
+        (69, "tmux"),
+        (73, "capacity"),
+        (73, "outage"),
+        (73, "usage_limit"),
+        (73, "uncertain"),
+        (74, "uncertain"),
+        (74, None),
+        (74, "retry"),
+        (74, "complete"),
+        (74, "starting"),
+        (74, "send"),
+        (76, None),
+        (77, None),
+        (77, "add"),
+        (80, None),
+    ],
+)
+def test_run_cli_reports_after_exit_line(
+    run_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    code: int,
+    variant: str | None,
+) -> None:
+    from ember.runs import core, exits
+
+    def fail(self: core.Core, options: core.StartOptions) -> int:
+        raise core.RunError(
+            code, "failed", variant, branch="worker", worktree="/worktree"
+        )
+
+    monkeypatch.setattr(core.Core, "start", fail)
+    assert (
+        main(
+            ["run", "--engine", "claude", "--dir", ".", "--task-file", "brief"],
+            env=run_env,
+        )
+        == code
+    )
+    captured = capsys.readouterr()
+    expected = [
+        "emb run: failed",
+        exits.line(code, variant, branch="worker", worktree="/worktree"),
+    ]
+    report = exits.report(code, variant, branch="worker", worktree="/worktree")
+    if report:
+        expected.append(report)
+    assert captured.err.splitlines() == expected
+    assert captured.out == ""
+
+
+@pytest.fixture
+def finished_cli_run(
+    tmp_path: Path,
+    run_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> str:
+    from ember import engines
+    from ember.runs import core
+
+    stub = _stub_engine()
+    monkeypatch.setattr(core, "POLL_SECONDS", 0.02)
+    monkeypatch.setattr(
+        engines,
+        "load_driver",
+        lambda name, env=None: stub.StubDriver(name, stub.script_path(run_env)),
+    )
+    repo = stub.make_repo(tmp_path, run_env)
+    brief = tmp_path / "brief.md"
+    brief.write_text("Task\n")
+    assert (
+        main(
+            [
+                "run",
+                "--engine",
+                "claude",
+                "--dir",
+                str(repo),
+                "--task-file",
+                str(brief),
+            ],
+            env=run_env,
+        )
+        == 0
+    )
+    return capsys.readouterr().out.splitlines()[0].removeprefix("run ")
+
+
+def test_run_owner_status_and_answered(
+    finished_cli_run: str,
+    run_env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ember.runs import record
+
+    run = record.load(finished_cli_run, run_env)
+    record.update(
+        run,
+        {
+            "owner_wait": ("owner: install tmux",),
+            "last_exit": 69,
+            "last_variant": "tmux",
+            "turn": 0,
+            "status": record.FAILED,
+        },
+    )
+    assert main(["run", "--status", run.id, "--json"], env=run_env) == 0
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["step"] == "owner" and data["next"] is None
+    assert captured.err.splitlines() == [
+        "owner: install tmux",
+        "report: no worker started; do not retry the start or start another "
+        "engine before the owner answers",
+    ]
+    assert main(["run", "--answered", run.id], env=run_env) == 0
+    captured = capsys.readouterr()
+    assert captured.err.startswith("next: emb run --engine")
+    assert "owner:" not in captured.err
+    answered = record.load(run.id, run_env)
+    assert answered.owner_wait == () and answered.answered_at is not None
+    assert main(["run", "--answered", run.id], env=run_env) == 0
+    assert capsys.readouterr().err == captured.err
+    assert record.load(run.id, run_env).answered_at == answered.answered_at
+
+
+@pytest.mark.parametrize(
+    ("code", "variant"),
+    [
+        (73, "capacity"),
+        (73, "uncertain"),
+        (74, "uncertain"),
+        (74, "retry"),
+        (74, "complete"),
+        (77, "add"),
+        (69, "fix"),
+    ],
+)
+def test_failed_status_report_uses_saved_variant(
+    finished_cli_run: str,
+    run_env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    code: int,
+    variant: str,
+) -> None:
+    from ember.runs import exits, record
+
+    run = record.load(finished_cli_run, run_env)
+    record.update(
+        run, {"last_exit": code, "last_variant": variant, "status": record.FAILED}
+    )
+    assert main(["run", "--status", run.id], env=run_env) == 0
+    captured = capsys.readouterr()
+    assert "step: failed" in captured.out
+    report = exits.report(code, variant, **run.to_json())
+    if report:
+        assert captured.err.splitlines()[-1] == report
+    else:
+        assert "report:" not in captured.err
+    assert captured.err.splitlines()[0] == exits.line(
+        code, variant, run=run.id, worktree=run.worktree, engine=run.engine
+    )
+
+
+def test_answered_unknown_run(
+    run_env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["run", "--answered", "missing-run"], env=run_env) == 64
+    assert (
+        capsys.readouterr().err
+        == "emb run: no run missing-run\nnext: emb run --status\n"
+    )
+
+
+@pytest.mark.parametrize("command", ["merge", "cleanup"])
+@pytest.mark.parametrize("variant", [None, "conflict"])
+def test_branch_cli_reports_only_conflict(
+    run_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    variant: str | None,
+) -> None:
+    from ember.runs import exits
+
+    def fail(*args: object, **kwargs: Any) -> int:  # noqa: ANN401
+        error = branches.BranchError(
+            75,
+            "conflict",
+            "owner: resolve the conflict on worker, or ask for a new run cut from "
+            "the updated target",
+            variant,
+        )
+        return branches._print_failure(command, error, sys.stderr, kwargs["failures"])
+
+    monkeypatch.setattr(branches, command, fail)
+    argv = (
+        ["merge", "worker", "--into", "main", "--verdict", "keep", "--note", "Keep"]
+        if command == "merge"
+        else ["cleanup", "--merged-into", "main"]
+    )
+    assert main(argv, env=run_env) == 75
+    captured = capsys.readouterr()
+    assert "next:" not in captured.err
+    if variant:
+        assert captured.err.splitlines()[-1] == exits.report(75, "conflict")
+    else:
+        assert "report:" not in captured.err
+
+
+@pytest.mark.parametrize("resolution", ["answered", "read"])
+def test_successful_denial_waits_before_carry_on(
+    finished_cli_run: str,
+    run_env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    resolution: str,
+) -> None:
+    from ember import sandbox
+    from ember.runs import record
+
+    previous = record.load(finished_cli_run, run_env)
+    hidden = Path(run_env["HOME"]) / "private-toolchain"
+    hidden.mkdir()
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    choices.set_settings({"sandbox.claude": "on"}, env=run_env)
+    brief = tmp_path / "denied.md"
+    brief.write_text(f"Task\n@reply Permission denied: '{hidden}/python'\n")
+    assert (
+        main(
+            [
+                "run",
+                "--engine",
+                "claude",
+                "--dir",
+                previous.repo,
+                "--task-file",
+                str(brief),
+            ],
+            env=run_env,
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    run_id = captured.out.splitlines()[0].removeprefix("run ")
+    assert "next:" not in captured.err
+    [owner] = [line for line in captured.err.splitlines() if line.startswith("owner:")]
+    assert main(["run", "--status", run_id, "--json"], env=run_env) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["step"] == "owner"
+    assert json.loads(captured.out)["next"] is None
+    assert captured.err == owner + "\n"
+    if resolution == "answered":
+        assert main(["run", "--answered", run_id], env=run_env) == 0
+    else:
+        choices.set_settings({"sandbox.read": [str(hidden)]}, env=run_env)
+        assert main(["run", "--status", run_id], env=run_env) == 0
+    assert capsys.readouterr().err == f"next: emb run --close {run_id}\n"
+    assert record.load(run_id, run_env).owner_wait == ()
+
+
+def test_failed_launch_keeps_no_worker_report_in_status(
+    finished_cli_run: str,
+    run_env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ember.runs import core, exits, record
+
+    previous = record.load(finished_cli_run, run_env)
+
+    def fail(
+        self: core.Core, run: record.Run, *args: object
+    ) -> tuple[record.Run, str | None]:
+        record.update(run, {"turn": 1, "turn_state": record.SENT})
+        raise core.RunError(69, "cannot launch", "runtime", run=run.id)
+
+    monkeypatch.setattr(core.Core, "_launch", fail)
+    brief = tmp_path / "launch.md"
+    brief.write_text("Task\n")
+    assert (
+        main(
+            [
+                "run",
+                "--engine",
+                "claude",
+                "--dir",
+                previous.repo,
+                "--task-file",
+                str(brief),
+            ],
+            env=run_env,
+        )
+        == 69
+    )
+    captured = capsys.readouterr()
+    run_id = captured.out.splitlines()[0].removeprefix("run ")
+    assert captured.err.splitlines()[-1] == exits.report(69)
+    assert record.load(run_id, run_env).last_start_failure
+    assert main(["run", "--status", run_id, "--json"], env=run_env) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["step"] == "owner"
+    assert captured.err.splitlines()[-1] == exits.report(69)

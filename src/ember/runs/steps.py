@@ -29,6 +29,8 @@ def derive(
     """
     if run.parent is not None:
         return "parent", None
+    if run.owner_wait:
+        return "owner", None
     if run.status == record.CLOSED:
         if (
             run.read_only
@@ -41,13 +43,20 @@ def derive(
     if run.status == record.FAILED or (
         run.turn_state != record.SENT and run.last_exit not in (None, 0)
     ):
-        return "failed", exits.line(
+        text = exits.line(
             run.last_exit or 0,
-            _provider_kind(run),
+            exit_variant(run),
             run=run.id,
             worktree=run.worktree,
             engine=run.engine,
         )
+        if run.answered_at is not None and text and text.startswith("owner:"):
+            text = "next: " + (
+                exits.SEND.format(run=run.id)
+                if run.turn and not run.last_start_failure
+                else exits.START
+            )
+        return "failed", text
     if run.status == record.STARTING or run.turn == 0:
         return "starting", f"next: emb run --status {run.id}"
     if run.turn_state == record.SENT and session_state == "live":
@@ -59,12 +68,14 @@ def derive(
     return "close", f"next: emb run --close {run.id}"
 
 
-def _provider_kind(run: Run) -> str | None:
-    """Return the last turn's provider kind for a provider error, else None.
+def exit_variant(run: Run) -> str | None:
+    """Return the saved variant, falling back to older records' provider kind.
 
     The kind picks the exit line's variant, so a usage limit is not reported
     as an outage.
     """
+    if run.last_variant is not None:
+        return run.last_variant
     if run.last_exit != exits.PROVIDER_ERROR:
         return None
     try:
