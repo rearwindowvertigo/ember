@@ -2091,6 +2091,40 @@ def test_orphaned_badge(env: dict[str, str], context: AppContext, qtbot: QtBot) 
     assert (row.badge.text(), row.badge.tone()) == ("Orphaned", "warning")
 
 
+def test_flow_wait_badge(
+    env: dict[str, str], context: AppContext, qtbot: QtBot
+) -> None:
+    flow = make_flow(env, status="stopped")
+    parent = record.parent("flow", FLOW)
+    assert parent is not None
+    write_run(make_run(env, LIVE_A, parent={**parent, "start": parent["start"] + 1}))
+    flow["tasks"][0].update(status="stopped", writer_run=LIVE_A)
+    flow_record.save(flow, env)
+    context.runs.reload()
+    qtbot.waitUntil(lambda: len(context.runs.live()) == 1)
+    screen = screen_for(context, qtbot)
+    row = screen.live_rows[LIVE_A]
+    assert (row.badge.text(), row.badge.tone()) == (
+        "Waiting for Claude",
+        "warning",
+    )
+    qtbot.waitUntil(row.isVisible)
+    chip_column = row.badge.parentWidget()
+    assert chip_column is not None
+    assert chip_column.width() == overview._chip_width()
+    assert row.badge.sizeHint().width() <= row.badge.width() <= chip_column.width()
+    waiting = f"Waiting for Claude's answer to flow {FLOW}"
+    assert row.detail_label.text().startswith(waiting)
+    screen.resize(1600, 900)
+    qtbot.waitUntil(lambda: waiting in row.detail_label.display_text())
+    assert row.detail_label.isVisible()
+    flow["status"] = "failed"
+    flow_record.save(flow, env)
+    screen.refresh()
+    assert (row.badge.text(), row.badge.tone()) == ("Orphaned", "warning")
+    assert waiting not in row.detail_label.text()
+
+
 @pytest.mark.parametrize("parent", ["run", "flow", "panel"])
 @pytest.mark.parametrize(
     "name, reason",

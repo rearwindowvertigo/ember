@@ -2282,11 +2282,13 @@ class Core:
         """
         if run_id is not None:
             document = self._document(self._load(run_id))
-            self._warn_orphaned([document])
+            self._warn_parent([document])
             if as_json:
                 self._say(json.dumps(document, indent=2))
             else:
                 for key, value in document.items():
+                    if key == "status" and document["waiting_for_flow"]:
+                        value = self._flow_wait(document)
                     shown = value if isinstance(value, str) else json.dumps(value)
                     self._say(f"{key}: {shown}")
             return exits.OK
@@ -2294,31 +2296,48 @@ class Core:
         for error in errors:
             self._warn(f"emb run: skipped {error}")
         documents = [self._document(run) for run in runs]
-        self._warn_orphaned(documents)
+        self._warn_parent(documents)
         if as_json:
             self._say(json.dumps(documents, indent=2))
         else:
             for item in documents:
+                status = (
+                    self._flow_wait(item)
+                    if item["waiting_for_flow"]
+                    else item["status"]
+                )
                 self._say(
-                    f"{item['id']}  {item['status']}  {item['session_state']}  "
+                    f"{item['id']}  {status}  {item['session_state']}  "
                     f"turn {item['turn']}  {item['subject']}"
                 )
         return exits.OK
 
     def _document(self, run: Run) -> dict[str, Any]:
+        waiting = record.waiting_for_flow(run)
         turns, errors = record.turn_results(run)
         for error in errors:
             self._warn(f"WARNING: {error}")
         return {
             **run.to_json(),
             "session_state": self._session_state(run.id),
-            "orphaned": record.orphaned(run),
+            "orphaned": waiting is None and record.orphaned(run),
+            "waiting_for_flow": waiting,
             "turns": turns,
         }
 
-    def _warn_orphaned(self, documents: list[dict[str, Any]]) -> None:
-        """Name each orphaned run and the commands that collect and close it."""
+    @staticmethod
+    def _flow_wait(document: dict[str, Any]) -> str:
+        """Describe the lead answer awaited by a run's parent flow."""
+        return f"waiting for the lead's answer to flow {document['waiting_for_flow']}"
+
+    def _warn_parent(self, documents: list[dict[str, Any]]) -> None:
+        """Name flow waits and orphaned runs, with recovery only for orphans."""
         for document in documents:
+            if document["waiting_for_flow"]:
+                self._warn(
+                    f"WARNING: run {document['id']} is {self._flow_wait(document)}"
+                )
+                continue
             if not document["orphaned"]:
                 continue
             parent = document["parent"]

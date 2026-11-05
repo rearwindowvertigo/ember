@@ -423,6 +423,50 @@ def test_writer_failure_and_provider_halt(h: Harness, failure: str) -> None:
         assert flow["tasks"][1]["status"] == "merged"
 
 
+def test_lead_stop_keeps_live_writer_with_flow(
+    h: Harness, capsys: pytest.CaptureFixture[str]
+) -> None:
+    h.scripts_update(**{"Review of task a, round 1,": "@reply " + FIX})
+    h.create(rounds=0)
+    flow = h.run()
+    assert flow["status"] == "stopped"
+    assert flow["reason"] == "waiting for the lead: a"
+    writer = runs.load(flow["tasks"][0]["writer_run"], h.env)
+    assert writer.status == runs.WAITING
+    assert writer.parent is not None
+    # The runner has returned; model its process exiting with a stale start time.
+    writer = runs.update(
+        writer, {"parent": {**writer.parent, "start": writer.parent["start"] + 1}}
+    )
+    assert not runs.orphaned(writer)
+    assert runs.waiting_for_flow(writer) == h.id
+    core = h.factory(h.env)
+    capsys.readouterr()
+    for single in (True, False):
+        for as_json in (True, False):
+            assert core.status(writer.id if single else None, as_json=as_json) == 0
+            out, err = capsys.readouterr()
+            waiting = f"waiting for the lead's answer to flow {h.id}"
+            assert f"WARNING: run {writer.id} is {waiting}" in err
+            assert "next:" not in err and "orphaned" not in err
+            if as_json:
+                data = json.loads(out)
+                if not single:
+                    data = next(item for item in data if item["id"] == writer.id)
+                assert data["status"] == runs.WAITING
+                assert data["session_state"] == "live"
+                assert data["orphaned"] is False
+                assert data["waiting_for_flow"] == h.id
+            else:
+                assert waiting in out
+    assert runs.load(writer.id, h.env) == writer
+    h.scripts_update(**{"Review of task a, round 1,": "@reply " + PASS})
+    h.answer("review")
+    resumed = h.run()
+    assert resumed["status"] == "done"
+    assert resumed["tasks"][0]["writer_run"] == writer.id
+
+
 @pytest.mark.parametrize("role", ["writer", "reviewer"])
 @pytest.mark.parametrize(
     ("error_output", "reason"),

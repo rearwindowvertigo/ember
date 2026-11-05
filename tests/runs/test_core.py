@@ -3762,10 +3762,15 @@ def test_forced_close_keeps_detached_worktree_while_command_holds_lock(
     assert not Path(saved.worktree).exists()
 
 
+@pytest.mark.parametrize("command", ["gapcheck", "panel"])
 def test_start_records_the_parent_and_status_reports_an_orphan(
-    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
 ) -> None:
-    parent = record.parent("gapcheck")
+    parent = record.parent(command)
     assert parent is not None
     code = _start(_core(env), repo, _brief(tmp_path, "Task\n"), parent=parent)
     assert code == 0
@@ -3778,7 +3783,8 @@ def test_start_records_the_parent_and_status_reports_an_orphan(
     assert core_.execute(lambda: core_.status(run_id, as_json=True)) == 0
     out, err = capsys.readouterr()
     assert json.loads(out)["orphaned"] is True
-    assert f"WARNING: run {run_id} is orphaned: emb gapcheck ended" in err
+    assert json.loads(out)["waiting_for_flow"] is None
+    assert f"WARNING: run {run_id} is orphaned: emb {command} ended" in err
     assert err.splitlines()[-1] == (
         f"next: emb run --recover {run_id}, then emb run --close {run_id}"
     )
