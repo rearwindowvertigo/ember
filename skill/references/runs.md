@@ -186,13 +186,13 @@ Codex recognizes capacity and usage-limit messages; Claude and both
 OpenCode drivers classify provider errors as `outage`. Unmatched provider
 errors are `outage`.
 
-After a capacity error (exit 73 with `provider_kind: capacity`), offer the
-owner only a retry with the same model and effort once the error clears.
-Offer no other model of the same engine, no other engine, no Claude subagent
-and no Claude doing the work itself. A same-worker retry after a usage limit
-or outage needs no new question; a replacement worker or model does. After a
-Codex `usage_limit` only, OpenCode may be offered in the next worker
-question; never switch silently.
+After a capacity error or an outage (exit 73 with `provider_kind:
+capacity` or `outage`), offer the owner only a retry with the same model
+and effort once the error clears. Offer no other model of the same engine,
+no other engine, no Claude subagent and no Claude doing the work itself.
+A same-worker retry after a usage limit needs no new question; a
+replacement worker or model does. After a Codex `usage_limit` only,
+OpenCode may be offered in the next worker question; never switch silently.
 
 Recovery keeps the retry budget and pending resend. `--interrupt` cancels
 a pending resend. If delivery is uncertain, inspect the session and ask
