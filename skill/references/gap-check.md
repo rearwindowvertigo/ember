@@ -125,8 +125,9 @@ Claude asks you about. Take the default of every gap whose `ask_owner` is
 false: write it into the failure model, ask nothing, and list each one in
 your report. For the rest,
 ask each `high` gap as its own question, in task order, waiting for its
-answer before the next question. Give the gap, its scenario and its
-proposed default as the recommended answer. Then offer the remaining
+answer before the next question. Give the gap, its scenario, its underlying
+cause and the other places it affects. Offer the fix at that cause first
+as the recommended answer. Then offer the remaining
 `medium` and `low` gaps together as one question whose recommended answer
 accepts their defaults into the failure model. An empty gap list needs no
 question.
