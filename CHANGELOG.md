@@ -17,8 +17,6 @@
 
 ### Fixed
 
-* **app:** drop header actions under the title when the screen is narrow ([7367690](https://github.com/rearwindowvertigo/ember/commit/7367690c00055b09288760db5a70832bfb1ea07d))
-* **app:** put the Show sidebar button first in each screen's Tab order ([e1c0cb1](https://github.com/rearwindowvertigo/ember/commit/e1c0cb1cc7418fef412a5df48881d8b174598f5d))
 * **app:** settle the OpenCode table height test under load ([f71e2c6](https://github.com/rearwindowvertigo/ember/commit/f71e2c6dcb7afd5fcd99c6b4262641c57131e1cc))
 * **cli:** refuse an empty read file in emb gapcheck and emb flow ([369d15c](https://github.com/rearwindowvertigo/ember/commit/369d15ccf07345b9e70271b999dfcc20c5d8c113))
 * **engines:** give OpenCode 2 time to take a run's first message ([b40ba2b](https://github.com/rearwindowvertigo/ember/commit/b40ba2bae1c9882d6d50d7d4224f9f99d6809cc3))
@@ -26,8 +24,6 @@
 * **flows:** recognise .test., .spec. and __tests__ test files ([ae63673](https://github.com/rearwindowvertigo/ember/commit/ae636735c4919f02ec375b2cb6d88c4eeb5516ce))
 * **runs:** check Codex project trust in emb run --dry-run ([c5f8b8e](https://github.com/rearwindowvertigo/ember/commit/c5f8b8eb76bb5f0eac1cdabdc786de1d3bdebaab))
 * **runs:** do not report flow runs orphaned while the flow waits ([fcd2d48](https://github.com/rearwindowvertigo/ember/commit/fcd2d48d1e989a75994979cc319e527425682bbb))
-* **runs:** finish a closed run whose branch no longer exists ([9c225bd](https://github.com/rearwindowvertigo/ember/commit/9c225bd2f151d244225ba6adf0a8b3280e8f8633))
-* **runs:** name the provider kind in the status line of an exit 73 ([6333327](https://github.com/rearwindowvertigo/ember/commit/63333275c3d2ccd92c20141f6b69e9417216019e))
 
 ## [0.14.1](https://github.com/rearwindowvertigo/ember/compare/v0.14.0...v0.14.1) (2026-11-04)
 
