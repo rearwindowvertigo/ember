@@ -490,7 +490,10 @@ def test_collapsed_count_pill_and_tooltip(env: dict[str, str], qtbot: QtBot) -> 
 
 def test_restart_offer_updates_both_controls(env: dict[str, str], qtbot: QtBot) -> None:
     window, _context, _quit = _window(env, qtbot)
+    window.show()
+    qtbot.waitExposed(window)
     window.resize(959, 600)
+    qtbot.waitUntil(lambda: window.sidebar.width() == theme.SIDEBAR_COLLAPSED_WIDTH)
     first = Mock()
     second = Mock()
     window.show_restart("1.0.0", first)
@@ -673,3 +676,27 @@ def test_sidebar_only_refits_when_resize_crosses_breakpoint(
     window.resize(960, 720)
     QCoreApplication.processEvents()
     fit.assert_called_once_with()
+
+
+def test_put_first_in_tab_order_keeps_the_other_stops_in_order(
+    qtbot: QtBot,
+) -> None:
+    from PySide6.QtWidgets import QPushButton, QVBoxLayout
+
+    container = QWidget()
+    qtbot.addWidget(container)
+    layout = QVBoxLayout(container)
+    earlier = [QPushButton(f"b{index}") for index in range(3)]
+    for item in earlier:
+        layout.addWidget(item)
+    button = QPushButton("show")
+    layout.addWidget(button)
+    later = QPushButton("after")
+    layout.addWidget(later)
+    window_module.put_first_in_tab_order(container, button)
+    order = []
+    item = container.nextInFocusChain()
+    while item is not None and item is not container:
+        order.append(item)
+        item = item.nextInFocusChain()
+    assert order == [button, *earlier, later]

@@ -285,6 +285,29 @@ class UpdateBox(QFrame):
         self.restart_button.setAccessibleDescription(text)
 
 
+def put_first_in_tab_order(container: QWidget, button: QWidget) -> None:
+    """Make a button the first Tab stop inside a container.
+
+    The Tab stops that come before the button keep their order after it.
+
+    Args:
+        container: The widget whose Tab stops are reordered.
+        button: A focusable descendant of `container`.
+    """
+    before: list[QWidget] = []
+    item = container.nextInFocusChain()
+    while item is not None and item is not container and item is not button:
+        if container.isAncestorOf(item) and item.focusPolicy() & (
+            Qt.FocusPolicy.TabFocus
+        ):
+            before.append(item)
+        item = item.nextInFocusChain()
+    if item is not button:
+        return
+    for widget in reversed(before):
+        QWidget.setTabOrder(button, widget)
+
+
 class MainWindow(QMainWindow):
     """The window: sidebar, notices and the current screen."""
 
@@ -513,16 +536,7 @@ class MainWindow(QMainWindow):
                 if button.property("role") == "show-sidebar":
                     button.clicked.connect(self._toggle_sidebar)
                     self._show_sidebar_buttons.append(button)
-                    first = widget.nextInFocusChain()
-                    while first is not None and first is not widget:
-                        if (
-                            widget.isAncestorOf(first)
-                            and first.focusPolicy() & Qt.FocusPolicy.TabFocus
-                        ):
-                            if first is not button:
-                                QWidget.setTabOrder(button, first)
-                            break
-                        first = first.nextInFocusChain()
+                    put_first_in_tab_order(widget, button)
         self.stack.setCurrentWidget(widget)
         self._sync_sidebar()
         self._save_state()
