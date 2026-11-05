@@ -410,6 +410,11 @@ approval) and delete it with `git branch -d <branch>`.
 
 Before squashing or deleting the session branch, run
 `emb cleanup --merged-into <session branch>` and report the keeps.
+Without a limiting option, `emb cleanup` covers every Ember run branch of
+the repository, including other sessions' runs. Report a kept line for a
+run this session did not start as another session's; do not follow its
+`next:` line. Use `--branch <branch>` to limit cleanup to one branch, or
+`--claim <id>` to limit it to the session's own claim.
 Cleanup treats a branch as contained when it is an ancestor of the target,
 when a reachable commit records its tip in `Ember-Task-Tip`, or when merging
 it into the target gives no conflict and the target's own tree. The trailer
