@@ -66,6 +66,9 @@ Put your whole answer in your final message.
 ## Checks and stop condition
 
 Run <checks for this task>.
+Run the repository's full test suite, or name why not.
+Search for other tests that reference what this task changes.
+Report failures in files outside the allowed set without editing them.
 Stop when <observable completion condition>.
 If a needed decision or change is outside your authority, report it
 rather than deciding or making it.
