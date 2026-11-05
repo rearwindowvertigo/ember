@@ -1,7 +1,7 @@
 """Read flow review replies and decide whether a task needs another turn."""
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from importlib import resources
 from typing import Any
 
@@ -24,6 +24,8 @@ class Finding:
     scenario: str
     earlier: int | None
     note: str
+    round: int | None = None
+    run: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         """Return the finding's fields as a JSON-ready object."""
@@ -102,8 +104,14 @@ def _finding(value: object, earlier_count: int) -> Finding:
     )
 
 
-def read(text: str, earlier_count: int = 0) -> Review:
-    """Extract a review object and normalize each of its findings."""
+def read(
+    text: str,
+    earlier_count: int = 0,
+    *,
+    round: int | None = None,
+    run: str | None = None,
+) -> Review:
+    """Normalize findings and attach the caller's review round and run."""
     document = extract_json(text)
     if document is None:
         return Review(None, (), "the reply is not a JSON object")
@@ -114,5 +122,10 @@ def read(text: str, earlier_count: int = 0) -> Review:
     if not isinstance(findings, list):
         return Review(None, (), "the reply's findings is not a list")
     return Review(
-        verdict, tuple(_finding(item, earlier_count) for item in findings), None
+        verdict,
+        tuple(
+            replace(_finding(item, earlier_count), round=round, run=run)
+            for item in findings
+        ),
+        None,
     )

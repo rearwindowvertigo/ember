@@ -544,7 +544,9 @@ class _Runner:
                 if review_run.reply
                 else ""
             )
-            result = verdict.read(text, len(earlier))
+            result = verdict.read(
+                text, len(earlier), round=task["round"] + 1, run=review_run.id
+            )
         except (OSError, UnicodeError) as error:
             result = verdict.Review(None, (), f"cannot read the reply: {error}")
         warning = self.close(review_run.id)
@@ -557,6 +559,7 @@ class _Runner:
             task["reviews"].append(
                 {
                     "round": task["round"],
+                    "review_round": task["round"] + 1,
                     "run": review_run.id,
                     "verdict": result.verdict or "unreadable",
                     **result.counts(),

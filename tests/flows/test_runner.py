@@ -16,7 +16,8 @@ from typing import Any
 import pytest
 
 from ember import branches, choices, paths
-from ember.flows import briefs, lock, plan, record, runner
+from ember.cli import build_parser
+from ember.flows import briefs, command, lock, plan, record, runner
 from ember.runs import record as runs
 from ember.runs.core import Core, StartOptions
 from runs.stub_engine import (  # pyrefly: ignore[missing-import]
@@ -251,6 +252,53 @@ def test_review_stops_and_blocks_transitively(
     assert not any(e["kind"] == "end" for e in events)
     stop = next(e for e in events if e["kind"] == "lead_stop")
     assert len(stop["choices"]) == 5
+
+
+@pytest.mark.parametrize("latest_should", [False, True])
+def test_status_distinguishes_two_reviews(h: Harness, latest_should: bool) -> None:
+    retained = [
+        {"severity": "should", "problem": "tidy"},
+        {"severity": "lead", "problem": "choose format"},
+    ]
+    latest = (
+        [{"severity": "should", "problem": "new suggestion"}] if latest_should else []
+    )
+    h.scripts_update(
+        **{
+            "Review of task a, round 1,": "@reply "
+            + json.dumps({"verdict": "fix", "findings": [MUST, *retained]}),
+            "Fix round 1 of task a": "@write a fixed",
+            "Review of task a, round 2,": "@reply "
+            + json.dumps({"verdict": "pass", "findings": latest}),
+        }
+    )
+    h.create(rounds=1)
+    item = h.run()["tasks"][0]
+    assert item["status"] == "merged"
+    assert item["round"] == 1
+    assert [review["round"] for review in item["reviews"]] == [0, 1]
+    first, second = item["reviews"]
+    expected = [(1, first["run"]), (1, first["run"])]
+    if latest_should:
+        expected.append((2, second["run"]))
+    assert [(f["round"], f["run"]) for f in item["findings"]] == expected
+    assert [f["problem"] for f in item["findings"]] == [
+        f["problem"] for f in [*retained, *latest]
+    ]
+    out, err = io.StringIO(), io.StringIO()
+    args = build_parser().parse_args(["flow", "--status", h.id, "--json"])
+    assert command.main(args, h.env, out=out, err=err) == 0, err.getvalue()
+    reported = json.loads(out.getvalue())["tasks"][0]
+    assert reported["findings"] == item["findings"]
+    assert reported["latest_review"] == {
+        "round": 2,
+        "run": second["run"],
+        "verdict": "pass",
+        "findings": {"must": 0, "should": int(latest_should), "lead": 0},
+    }
+    watch = command._task_report(h.id, item)
+    assert watch["latest_review"] == reported["latest_review"]
+    assert watch["findings"] == {"must": 0, "should": 1 + int(latest_should), "lead": 1}
 
 
 def test_exhausted_fix_budget(h: Harness) -> None:
