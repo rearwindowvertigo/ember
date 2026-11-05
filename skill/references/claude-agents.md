@@ -10,8 +10,7 @@ corrected or resumed.
 
 Do not set a model on spawn unless the owner named one or a `set` Claude
 row with run-as `subagent` supplies it; otherwise use Claude Code's
-default. Keep judgment with the lead: a draft can inform a design choice
-but cannot settle it.
+default.
 
 To narrow tools or turns, use an existing agent definition in
 `~/.claude/agents/`; otherwise the agent inherits this session's tools and
@@ -41,13 +40,11 @@ Progress is in
 For Explore or Plan, read the newest `agent-*.jsonl` made after the spawn.
 
 The runtime allows 20 concurrent subagents and three levels of nesting.
-Do not fan out beyond what you can review.
 
 ## Claude Workflow
 
-Opt-in comes from `/ember`, the owner's words asking for a Workflow, or
-saved `multi.runs_as=workflow` for multi-task work. Loading the skill is
-not opt-in. A Workflow is one run and one claim, whatever its agent count.
+A Workflow needs the opt-in SKILL.md (Role) describes. It is one run and one
+claim, whatever its agent count.
 
 Do not set a model or effort on `agent()`: agents use this session's.
 Give each editing agent `isolation: 'worktree'` and a schema that returns
@@ -67,10 +64,6 @@ agent and every later one run again.
 
 Verify, review and merge every editing result as the skill says, one
 branch at a time.
-
-A Claude Workflow of two or more tasks starts only after following
-`references/gap-check.md`, which may skip the check by the owner's
-settings.
 
 ## Deadlines
 

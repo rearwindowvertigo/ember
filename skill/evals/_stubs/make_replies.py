@@ -180,7 +180,32 @@ def turn_results_state() -> dict[str, Any]:
         if code != 0 or err.getvalue():
             raise RuntimeError(f"status exited {code}: {err.getvalue()}")
         documents = json.loads(out.getvalue())
-    return {"runs": {document["id"]: document for document in documents}}
+    # The stub derives `step` and `next` fresh and ignores any stored keys.
+    return {
+        "runs": {
+            document["id"]: {
+                key: value
+                for key, value in document.items()
+                if key not in ("step", "next")
+            }
+            for document in documents
+        }
+    }
+
+
+def status_stderr(core: Core, warnings: str) -> str:
+    """Return what `emb run --status RUN` prints on standard error.
+
+    Args:
+        core: The core that ran the status.
+        warnings: The standard error the core itself wrote.
+
+    Returns:
+        The warnings, then the `next:` line the command prints after a
+        status when there is one.
+    """
+    line = core.status_next
+    return warnings + (f"{line}\n" if line else "")
 
 
 @dataclass
@@ -287,6 +312,9 @@ def provider_replies() -> dict[str, str]:
                 replies[prefix + "run-status" + (".json" if as_json else ".out")] = (
                     out.getvalue()
                 )
+                shown = status_stderr(core, err.getvalue())
+                if shown:
+                    replies[prefix + "run-status.err"] = shown
     return replies
 
 
@@ -378,11 +406,15 @@ def denied_path_replies() -> dict[str, str]:
             err.truncate()
             with patch.object(Core, "_session_state", return_value="live"):
                 code = core.status(run.id, as_json=as_json)
+            # No warning may follow a status; the `next:` line is the command's.
             if code != 0 or err.getvalue():
                 raise RuntimeError(f"status exited {code}: {err.getvalue()}")
             replies[prefix + "run-status" + (".json" if as_json else ".out")] = (
                 out.getvalue()
             )
+            shown = status_stderr(core, err.getvalue())
+            if shown:
+                replies[prefix + "run-status.err"] = shown
         # All paths describe the fixture home, never the generator's home.
         return {
             name: text.replace(str(root), "/eval") for name, text in replies.items()

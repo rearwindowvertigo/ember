@@ -20,7 +20,7 @@ Status: answered · exit 0 · 32s · run claude-20261102-120000-aaaaa2 · 282 by
 
 totals sums floats and rounds once at the end. Money should use decimal.Decimal. I recommend ROUND_HALF_UP to match the stated customer-facing convention, but confirm that convention. Update compute_totals to quantize cents. Decide whether to round each order or only the final sum.
 
-## Member 3: opencode:deepseek/deepseek-v4.1-flash-1017 · default
+## Member 3: opencode:openrouter/deepseek/deepseek-v4.1-flash-1017 · default
 
 Status: failed · exit 80 · 33s · run opencode-20261102-120000-aaaaa3 · 0 bytes
 Reason: the turn ended with no reply

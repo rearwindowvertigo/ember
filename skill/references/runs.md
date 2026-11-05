@@ -2,15 +2,7 @@
 
 ## Start and quote
 
-Complete the skill-version check at the claim (SKILL.md step 2) before
-choosing or starting a worker. A stale skill is reloaded with the same
-claim; an unknown installed version stops worker starts.
-
-```bash
-emb run --engine <codex|opencode|claude> --dir <repo> --task-file <brief> --trailer '<trailer>' --claim <id>
-```
-
-Start options: `--model`, `--effort`, `--read-only`, `--read <path>`
+The start command is in SKILL.md step 6. Start options: `--model`, `--effort`, `--read-only`, `--read <path>`
 (repeatable), `--trailer <line>` (repeatable; none by default), `--claim`,
 `--window`, `--dry-run` (`--json` for an object). Do not call `codex`,
 `opencode` or `claude` directly: Ember owns the worktree, the sandbox, the
@@ -24,9 +16,6 @@ Write every brief and correction to a file in the session's scratchpad
 and pass it with `--task-file` or `--message-file`; there is no inline
 option. Single-quote trailers so the shell cannot change them; for a
 trailer with an apostrophe, join single-quoted pieces with `'\''`.
-
-Run starts, `--send` and `--recover` as background Bash commands; take
-the exit code and do not pipe the output.
 
 ## Model and effort
 
@@ -42,14 +31,9 @@ the exit code and do not pipe the output.
   same engine and model, else the driver's default, which may be none.
   Pass the resolved effort when the choice has one.
 
-Before starting, add `--dry-run` to the start's exact options, including
-`--claim`, and copy its standard-output line as the visible announce line:
-
-```text
-Team, Single tasks Writer: codex gpt-6.1-sol · high (single.writer)
-```
-
-With `--read-only`, the row is `Single tasks Reviewer`. Sources are the
+The dry-run line (SKILL.md step 3) reads like
+`Team, Single tasks Writer: codex gpt-6.1-sol · high (single.writer)`. With
+`--read-only`, the row is `Single tasks Reviewer`. Sources are the
 Team row key, `--model` or `--effort`. When they differ, the suffix is
 `(model: single.writer, effort: --effort)`, for example. A driver's default
 effort has the model's source; an unset effort prints as `default`.
@@ -59,8 +43,7 @@ effort has the model's source; an unset effort prints as `default`.
 A dry run checks inputs, the repository, the claim and worker selection,
 through the commit and main-checkout checks below. It creates no cache
 folder, worktree, branch, run record or session and runs no sandbox probe.
-It exits 0 on success or with the failed check's exit code. Follow its
-`next:` or `owner:` line on failure and start no worker. A later start
+It exits 0 on success or with the failed check's exit code. A later start
 reads the settings again.
 
 ## What a start checks
@@ -95,8 +78,7 @@ Ember never commits from it. The source checkout is separate.
 It does not see uncommitted edits or later source-checkout changes. For
 each uncommitted source path, start prints
 `WARNING: read-only run <id> does not see uncommitted <path>` on standard
-error. A successful run still exits 0; report the warnings. Tell a reviewer
-to read its own working folder, using relative paths.
+error. A successful run still exits 0.
 The run records the resolved worktree path, main checkout and common git
 folder at start. Merge, cleanup and prune use the recorded paths, including
 paths from runs created under the old layout. Do not construct a path from
@@ -143,8 +125,7 @@ non-Ember trailers and records the verdict and worker tip. Run records live in
 `--send` refuses with 75 when the session holds messages Ember did not
 send, with `Claude asks the owner` in the message. Ask the owner about
 those messages with one direct question, such as whether to send anyway.
-Only with their go-ahead for that run repeat the command
-with `--force`, which records the messages as accepted.
+`--force` records the messages as accepted.
 
 A run started by `emb gapcheck`, `emb panel` or a flow records that command
 as its `parent`. A flow task run is not orphaned while its flow waits for
@@ -153,9 +134,8 @@ lead's answer to the flow, with no recover-and-close `next:` line. Answer
 the flow; do not recover and close the task run.
 Otherwise, when the command ends without collecting the run, the run
 shows `orphaned: true` in `emb run --status --json`, with a `WARNING:` and a
-`next:` line. Report each orphaned run to the owner, then
-`emb run --recover <run>` and `emb run --close <run>` it when this session
-started its parent command.
+`next:` line. Report each orphaned run to the owner; follow `next:` only when
+this session started its parent command.
 
 The run record's `last_screen_change_at` is the epoch time when a wait
 loop last observed a changed screen. `emb run --status <run> --json`
@@ -205,6 +185,14 @@ end at exit 73. `usage_limit` and `outage` exit 73 without retrying.
 Codex recognizes capacity and usage-limit messages; Claude and both
 OpenCode drivers classify provider errors as `outage`. Unmatched provider
 errors are `outage`.
+
+After a capacity error (exit 73 with `provider_kind: capacity`), offer the
+owner only a retry with the same model and effort once the error clears.
+Offer no other model of the same engine, no other engine, no Claude subagent
+and no Claude doing the work itself. A same-worker retry after a usage limit
+or outage needs no new question; a replacement worker or model does. After a
+Codex `usage_limit` only, OpenCode may be offered in the next worker
+question; never switch silently.
 
 Recovery keeps the retry budget and pending resend. `--interrupt` cancels
 a pending resend. If delivery is uncertain, inspect the session and ask
@@ -314,39 +302,34 @@ path, is not detected.
 
 ## Exits
 
-Read standard error after every run, also at exit 0. Every non-zero exit
-prints one `next:` or `owner:` line. Follow `next:` within the skill's
-rules; put `owner:` to the owner and wait. Do not retry a refusal.
+Every non-zero exit prints one `next:` or `owner:` line; follow it as
+SKILL.md step 6 says.
 
 | Exit | Meaning | Response |
 |---|---|---|
-| 0 | Success | Read the reply and every `WARNING:`. |
-| 1 | Unexpected error, or the settings database cannot be read | Show the error; run `emb run --status`; an `owner:` line goes to the owner. |
+| 0 | Success | Read the reply and every `WARNING:`; follow `next:`. |
+| 1 | Unexpected error, or the settings database cannot be read | Show the error; follow `next:`; an `owner:` line goes to the owner. |
 | 64 | Usage error, unanswerable menu row, switched-off engine or invalid claim | Fix the call, or ask the named row live. Never edit settings. A `gone` or `unknown` claim stops the run (claims reference). |
-| 65 | Not a git checkout | Use a git checkout, or a read-only Claude subagent. |
-| 66 | Missing file or path | Check `--dir`, the brief and `--read` paths. |
+| 65 | Not a git checkout | Follow `next:`, or use a read-only Claude subagent for a folder that is not a checkout. |
+| 66 | Missing file or path | Follow `next:`. |
 | 69 | Engine, driver, `git` or `tmux` missing, not signed in, Codex does not trust the repository, a sandbox conflict, a kept path in a hidden Ember folder outside its own worktree, a worktree folder inside any Git working tree or the source repository's git folder, no working `bwrap`, or no runtime folder | Give the owner the `owner:` command and wait. Do not run it; do not retry the start or start another engine without a question. Codex trust refusal in a dry run or start creates nothing, including no worktree. It prints the trust message and an `owner:` line asking the owner to run `codex` in the repository once, with no `next:` line. Do not follow close-and-restart for this refusal. |
 | 70 | Worktree creation failed, or no main checkout or commit | Follow `next:`; never force-remove a worktree. |
-| 71 | Engine or session failed | Run `--status <run>`; report; follow `next:`. |
-| 72 | Session or window unavailable, or the run was closed | Run `--status <run>`; a new start is a new run. |
-| 73 | Capacity retries exhausted or disabled, usage limit or outage | Tell the owner the kind from `next:` or `provider_kind`. After it clears, follow `next:`. Only for Codex `usage_limit`, offer OpenCode in the next worker question; never switch silently. For uncertain resend delivery, inspect the session and ask the lead before sending again. |
-| 74 | Interrupted; partial edits may be committed; a pending capacity resend is cancelled | Tell the owner; `--recover <run>`, unless `next:` says delivery is uncertain: inspect the session and ask the lead before sending again. |
-| 75 | Refused: a turn runs or is collected, a busy session, another command on the run, or messages Ember did not send | Do not retry. Recover or check status as `next:` says; for foreign messages, ask the owner. |
-| 76 | Branch or `HEAD` moved; nothing committed | Tell the owner. Read the record's branch, then `HEAD` and `git status` of the worktree. Recover only when both are as recorded; otherwise leave the work for the owner. |
+| 71 | Engine or session failed | Report; follow `next:`. |
+| 72 | Session or window unavailable, or the run was closed | Follow `next:`; a new start is a new run. |
+| 73 | Capacity retries exhausted or disabled, usage limit or outage | Tell the owner the kind (`provider_kind`) and every retry warning. After it clears, follow `next:`; Provider errors says what may be offered. |
+| 74 | Interrupted; partial edits may be committed; a pending capacity resend is cancelled | Tell the owner; follow `next:`. |
+| 75 | Refused: a turn runs or is collected, a busy session, another command on the run, or messages Ember did not send | Do not retry. Follow `next:`; for foreign messages, ask the owner. |
+| 76 | Branch or `HEAD` moved; nothing committed | Tell the owner; follow `next:`. Recover only when the record's branch and the worktree's `HEAD` are as recorded; otherwise leave the work for the owner. |
 | 77 | A hook refused the commit | Inspect the uncommitted work with `git -C <worktree> status`; tell the owner. |
-| 80 | The turn ended with no reply | Tell the owner; `--screen <run>`, then `--recover` or a `--send`. |
-| 124 | Stall; the turn may still run | `--recover <run>`. |
+| 80 | The turn ended with no reply | Tell the owner; follow `next:`. |
+| 124 | Stall; the turn may still run | Follow `next:`. |
 
-Run `--recover` after 124, 74 (except uncertain delivery), 76 (with the
-check above) or 80 as a background command. Tell the owner about 73, 74, 76 and 80, and about
-every `WARNING:`. A stalled run's partial edits need the owner's approval
-before discard.
+Tell the owner about 73, 74, 76 and 80, and about every `WARNING:`. A
+stalled run's partial edits need the owner's approval before discard.
 
 ## Closing
 
-Park with `emb run --close <run>` only runs this session started, after
-the turn ended, its work was committed and its reply was read and
-reported. Closing ends the session and keeps an editing worktree and
+Closing ends the session and keeps an editing worktree and
 branch. It removes a clean read-only detached worktree and its git
 registration, including when its only new files are git-ignored. A detached
 worktree with tracked changes, untracked non-ignored files or a moved
@@ -361,7 +344,6 @@ checkouts.
 
 `--close` refuses with 75 while a turn runs or another command waits, for
 an editing turn collected but not committed (`--recover`, then close), or
-for a session with messages Ember did not send. Leave such a run open and
-say why. Do not interrupt a turn to close it. Never pass `--force` without
-the owner's instruction for that run, and never close a run another
-session started: it may hold the owner's work.
+for a session with messages Ember did not send. A 75 refusal leaves the run
+open: say why. Do not interrupt a turn to close it. Never close a run
+another session started: it may hold the owner's work.
