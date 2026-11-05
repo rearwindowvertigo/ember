@@ -181,7 +181,9 @@ def review_brief(
         )
     parts.extend(
         [
-            "## Review bar\n\n" + REVIEW_BAR,
+            "## Review bar\n\n" + REVIEW_BAR + "\n\n"
+            "For each must, describe the underlying cause and the other places "
+            "it affects in problem. Use the existing text fields; do not add fields.",
             "## Reply\n\nChange, stage, commit or stash nothing. Reply with only "
             "one JSON object matching this JSON Schema, with no other text and "
             "no code fence:\n\n"

@@ -127,6 +127,10 @@ def test_review(plan: Plan, task: Task, round: int) -> None:
     assert report[: briefs.REPORT_LIMIT].replace("\n", "\n    ") in text
     assert verdict.schema_text() in text
     assert briefs.REVIEW_BAR in text
+    assert (
+        "For each must, describe the underlying cause and the other places "
+        "it affects in problem. Use the existing text fields; do not add fields."
+    ) in text
     assert ("## Earlier findings" in text) == (round > 1)
     assert ("git diff fix789 head456" in text) == (round > 1)
     assert not any(line.startswith("@") for line in text.splitlines())
