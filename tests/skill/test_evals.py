@@ -1377,7 +1377,12 @@ def test_denied_path_case_keeps_every_attempt_and_owner_action(
         if reason != "hidden":
             warning += f" ({reason})"
         assert result.stderr.splitlines().count(warning) == 1
-    assert result.stderr.count("owner: Settings, Sandbox read paths;") == 2
+    owner_prefix = (
+        "owner: the turn finished (exit 0); read access is needed only if "
+        "the worker's report says the work needed the path; "
+        "Settings, Sandbox read paths;"
+    )
+    assert result.stderr.count(owner_prefix) == 2
     assert (
         "owner: /eval/home/.config/tool is hidden; no folder can be offered "
         "because each folder that holds it also holds private files"
@@ -1387,9 +1392,9 @@ def test_denied_path_case_keeps_every_attempt_and_owner_action(
     )
     additions = []
     for line in result.stderr.splitlines():
-        if not line.startswith("owner: Settings, Sandbox read paths;"):
+        if not line.startswith(owner_prefix):
             continue
-        command = shlex.split(line.split("; ", 1)[1])
+        command = shlex.split(line.rsplit("; ", 1)[1])
         assert command[:3] == ["emb", "choices", "--set"]
         key, value = command[3].split("=", 1)
         assert key == "sandbox.read"
