@@ -112,7 +112,8 @@ For research or search, recommend Codex with `--read-only`, and a Claude
 subagent as the alternative when it needs the browser or connectors.
 
 A small edit (a few lines in one or two files already open) defaults to no
-worker even when `single.writer` is `set`; say so in one line. Work a CLI
+worker even when `single.writer` is `set`; say so in one line. The run still
+claims, and finishes at once. Work a CLI
 engine cannot do (connectors, the browser, Claude's tools) fails that
 engine's gate: recommend a Claude subagent with the reason, whatever the
 row says. Editing workers need a git checkout; work in a folder that is not
@@ -427,6 +428,8 @@ changes first. On an approved drop, report the tip, then use
 
 Finish with `emb choices --finish <id>`: after merge or discard for
 editing work, after review for read-only work, at once for no worker.
+`status: gone` in the reply means the finish worked; `was` is the status
+before it.
 Failed or cancelled runs still get review and a decision on their partial
 work before the finish.
 
