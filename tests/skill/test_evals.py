@@ -1695,8 +1695,10 @@ def test_provider_error_case_streams_and_status(
     )
     status = work.emb("run", "--status", run_id, "--json")
     assert status.returncode == 0
-    # Status derives its line from the record, which holds no provider kind.
-    assert status.stderr == f"{exits.line(73, None, run=run_id)}\n"
+    # Status derives its line from the last turn's provider kind; an
+    # uncertain resend is a capacity error.
+    kind = "capacity" if variant == "uncertain" else variant
+    assert status.stderr == f"{exits.line(73, kind, run=run_id)}\n"
     document = json.loads(status.stdout)
     assert document["step"] == "failed"
     assert document["last_exit"] == 73

@@ -43,7 +43,7 @@ def derive(
     ):
         return "failed", exits.line(
             run.last_exit or 0,
-            None,
+            _provider_kind(run),
             run=run.id,
             worktree=run.worktree,
             engine=run.engine,
@@ -57,6 +57,22 @@ def derive(
     if not run.read_only and run.commits and not _merged(run):
         return "merge", _verify(run, git)
     return "close", f"next: emb run --close {run.id}"
+
+
+def _provider_kind(run: Run) -> str | None:
+    """Return the last turn's provider kind for a provider error, else None.
+
+    The kind picks the exit line's variant, so a usage limit is not reported
+    as an outage.
+    """
+    if run.last_exit != exits.PROVIDER_ERROR:
+        return None
+    try:
+        turns, _ = record.turn_results(run)
+    except OSError, record.RecordError:
+        return None
+    kind = turns[-1].get("provider_kind") if turns else None
+    return kind if isinstance(kind, str) else None
 
 
 def _merged(run: Run) -> bool:

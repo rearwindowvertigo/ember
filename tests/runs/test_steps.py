@@ -286,3 +286,26 @@ def test_closed_run_with_its_branch_keeps_the_merge_line(
     )
     step, line = steps.derive(run, core.MISSING, False, core.Core(run.env)._git)
     assert step == "merge" and line is not None
+
+
+@pytest.mark.parametrize("kind", ["capacity", "usage_limit", "outage", None])
+def test_provider_error_line_names_the_last_turn_kind(
+    run: record.Run, monkeypatch: pytest.MonkeyPatch, kind: str | None
+) -> None:
+    monkeypatch.setattr(
+        record,
+        "turn_results",
+        lambda _run: ([{"turn": 1, "provider_kind": kind}], []),
+    )
+    run = replace(run, status=record.FAILED, last_exit=exits.PROVIDER_ERROR)
+    step, line = steps.derive(run, core.MISSING, False, _git)
+    assert step == "failed"
+    assert line == exits.line(
+        exits.PROVIDER_ERROR,
+        kind,
+        run=run.id,
+        worktree=run.worktree,
+        engine=run.engine,
+    )
+    if kind == "usage_limit":
+        assert line is not None and "usage_limit resets" in line
