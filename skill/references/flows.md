@@ -2,9 +2,8 @@
 
 Ember runs each task's editing writer, read-only reviewers and fix rounds.
 Each reviewer reads its own detached worktree at the writer's committed
-`HEAD`; it does not read uncommitted edits in the writer's worktree.
-Closing the review removes the clean detached worktree; changes are kept
-with a warning naming the explicit discard command.
+`HEAD`; it does not read uncommitted edits in the writer's worktree
+(`references/runs.md` says what closing does to it).
 Accepted tasks squash into `ember/flow/<id>`, one commit per task under its
 plan `subject`, with the accepted review's recorded verdict in
 `Ember-Verdict` and the worker tip in `Ember-Task-Tip`. Recovery and cleanup
@@ -14,8 +13,7 @@ merging it into the session branch. Keep one claim for the flow through
 its gap check, owner answers, verification and merge.
 
 Complete the skill-version check at the claim (SKILL.md step 2) before
-choosing workers or running the gap check. Reload a stale skill with the
-same claim; start no worker on an unknown installed version.
+choosing workers or running the gap check.
 
 ## Workers and plan
 
@@ -26,7 +24,7 @@ Otherwise resolution uses the plan's `writer` and `reviewer`, then the
 reviewer, which follow `single.writer` and `single.reviewer` while `same`). Normally leave workers out of
 the plan. Team rows must be `set`; a Claude subagent row exits 64. Ask the
 owner for a CLI worker when the row cannot answer and none was named;
-pass the answer explicitly. Never set a row yourself. Say both resolved
+pass the answer explicitly. Say both resolved
 workers and their efforts in one line before the dry run.
 
 Write a JSON plan in the session scratchpad:
@@ -46,9 +44,10 @@ Stall after (`flow.stall`) unless you pass `--stall`.
 - `failure_model`: the cases that must work and those accepted.
 - `context`: only settled decisions and the rules tasks need.
 - `read`: the files that hold each source the plan cites, such as an
-  exported issue (`gh issue view <n> --comments > <scratch>/issue-<n>.md`);
+  exported issue (`gh issue view <n> --json number,title,state,body,comments --jq '"# #\(.number) \(.title) (\(.state))\n\n\(.body)\n\n## Comments\n\([.comments[].body]|join("\n\n---\n\n"))"' > <scratch>/issue-<n>.md`);
   workers cannot open an issue tracker. Writers and reviewers see them
-  listed under "Sources to read".
+  listed under "Sources to read". Read file rules are in
+  `references/gap-check.md`.
 - `tasks`: a non-empty list of task objects with these fields. See the
   task-field table under Plan in `docs/reference.md` for the full rules.
 
@@ -96,16 +95,12 @@ emb flow --plan <file> --dry-run --claim <id> [--writer W] [--reviewer W] --json
 ```
 
 Read `waves`, `warnings` and `gapcheck`. Clear or explain every warning.
-Run the printed gap check command as `references/gap-check.md` says, record
-the owner's answers in its saved result, and write them into the plan before
-starting. A material change to task scope or ordering requires another dry
-run with `--previous <last result>` and its printed gap check command.
-The command includes `--json` and forwards `--previous`; save it as
-`gapcheck-<plan stem>-<n>.json`. Use `emb gapcheck --answer` for each
-answer or default. `emb flow --previous` is accepted only with `--dry-run`,
-not with `--start`.
+Run the printed gap check command as `references/gap-check.md` says, which
+also covers recording the owner's answers and repeat checks; write the answers
+into the plan before starting. `emb flow --previous` is accepted only with
+`--dry-run`, not with `--start`.
 
-Run these as background Bash commands, unpiped, taking each exit code:
+Start and watch the flow:
 
 ```bash
 emb flow --plan <file> --start --claim <id> [--writer W] [--reviewer W]
@@ -114,8 +109,8 @@ emb flow --watch <id> --json
 
 Start with the same worker options used for the dry run. Keep the flow id,
 branch and worktree from the start output before watching. Do not poll
-`--status` while a watch runs. Read standard error even at exit 0, report
-warnings and follow `next:` within these rules; bring `owner:` to the owner.
+`--status` while a watch runs. Follow the printed `next:` and `owner:` lines
+as SKILL.md step 6 says.
 
 Ember creates the flow worktree at `worktrees/<id>` in its data folder,
 `$XDG_DATA_HOME/ember` (default `~/.local/share/ember`), outside every
@@ -132,7 +127,10 @@ send the owner one message naming the task, status, reason, open `lead`
 and `must` findings, and the tasks it blocks (or none). List every choice
 in its `choices`, each with its flags (an optional flag such as
 `--accept --commit <commit>` is its own choice), what each does, and your
-recommendation among them. End the message with one direct question
+recommendation among them. Say that no runner is live and that the owner's
+answer starts it, when the stop's `next:` line names no live runner;
+otherwise say the runner is still live for the other tasks, and keep
+watching as `next:` says. End the message with one direct question
 ending in a question mark. Use the report's available choices, not an
 assumed list:
 
@@ -155,9 +153,8 @@ Do not settle a flow stop yourself, edit to choose its answer, or merge a
 task branch into the session branch. Call `emb flow --lead` only after the
 owner's answer. A `--send` file carries that decision, not your own choice.
 For a refused answer, report the refusal and the choices now available.
-Watch again only when `next:` says a runner is live; otherwise wait for
-the owner's answer, which starts the runner when queued. After the answer,
-follow its printed watch command in the background.
+Watch again only when `next:` names a live runner; otherwise wait for
+the owner's answer. After the answer, follow its printed watch command.
 
 If the stop says `git commit was refused` (exit 77), offer `--send <file>`
 first. It retries the commit; if the hook refuses again, the writer receives
@@ -168,7 +165,7 @@ This send counts as a fix round in the existing budget, even when all
 rounds are used. Alternatives are to fix the files named by the hook in the
 task's worktree, run `emb run --recover <writer run>`, then answer with
 `--review`; or use `--worker W`; or `--drop`. Perform the chosen repair only
-after the owner answers, and run recovery in the background. Exit 77 also
+after the owner answers. Exit 77 also
 covers `git add failed`: repair that failure and use `--recover`; the hook
 output send applies only when `git commit was refused`.
 
@@ -192,16 +189,16 @@ follow `next: emb flow --status <id>`.
 
 ## Provider errors
 
-Each task's run retries `capacity` using the capacity settings it saved at
-start (runs reference). Its model and effort stay the same; other tasks
-keep running. If retries are exhausted or disabled, exit 73 stops that
-task without halting new runs. A `usage_limit` or `outage` exit 73, or a
-provider error without a recorded kind, halts new runs with
+Each task's run retries `capacity` as `references/runs.md` (Provider errors)
+says; other tasks keep running. If retries are exhausted or disabled, exit 73
+stops that task without halting new runs. A `usage_limit` or `outage` exit 73,
+or a provider error without a recorded kind, halts new runs with
 `provider error on <engine>; new runs halted`; active jobs finish and
 queued writers stay pending. Resume clears the halt, but the failed task
-still needs a lead answer. Report the kind and retry warnings. Offer
-OpenCode after a Codex provider error only for `usage_limit`; a replacement
-worker needs the owner's answer.
+still needs a lead answer. Report the kind and retry warnings. List every
+printed choice for the stop, but after a capacity error recommend only the
+same-worker retry and name no other worker as an option; the capacity rule
+is in `references/runs.md` (Provider errors).
 
 ## Denied paths
 
@@ -210,11 +207,10 @@ Each task's status and watch report includes `denied_paths` with `path`,
 with a `task` id on each entry. The runner adds new denials to its
 `denied_paths` events with the task and worker role. Empty lists mean no
 recorded denials. Report each path with its task, run, turn and reason,
-even when the task succeeds. This includes `startup file` denials, which
-have no Overview notice or read-path suggestion. Older records keep their
-stored reasons, including `hidden` for a startup file. Report printed owner
-actions and hidden-path restrictions as described in `references/runs.md`;
-never change `sandbox.read` yourself.
+even when the task succeeds. Startup-file denials and older records are
+handled as `references/runs.md` (Denied paths) says. Report printed owner
+actions and hidden-path restrictions as `references/runs.md` (Denied paths)
+describes.
 
 ## Exits
 
@@ -233,14 +229,10 @@ Before accepting a flow, fetch the remote default branch and compare it
 with the flow's recorded base. If the default branch has moved, merge it
 into the flow branch and run the plan `check` again in the flow worktree.
 
-At `end`, exit 0 with every task merged, verify in the flow worktree:
-
-```bash
-python3 scripts/verify_branch.py --repo <repo> --base <session branch> --branch ember/flow/<id> --worktree <flow worktree>
-```
-
-Omit `--expect-files`. Run your own checks and apply the skill's exact
-review bar to the whole flow diff.
+At `end`, exit 0 with every task merged, verify in the flow worktree with the
+`verify_branch.py` command in SKILL.md step 7 for a branch with no run record:
+`--branch ember/flow/<id>` and `--worktree <flow worktree>`. Run your own
+checks and apply the skill's exact review bar to the whole flow diff.
 
 When the dry run's and the flow record's `whole_review` is true (Team's
 Review the whole flow), also run one read-only review of the whole flow
@@ -252,8 +244,7 @@ any review's, and close the run after reading its reply. When
 `whole_review` is false, run no such review. Inspect each task's `outside_files`,
 every retained `should` and `lead` finding, and every retained branch.
 Give one verdict for the flow branch as the `--note` of the `emb merge`
-call, such as `--note 'Keep.'`. Run that call on its own, with no other
-command chained before or after it.
+call, such as `--note 'Keep.'`.
 
 If verification rejects the result, keep the flow branch and claim open,
 name the failed check, and make a separately reviewed correction on the
@@ -268,15 +259,14 @@ Discard unmerged. Merge a `Keep, with <fix>` at once, then make and check
 the fix yourself on the session branch; it needs no question to the owner.
 
 For a Keep or a Keep, with <fix>, merge under the skill's merge and
-cleanup rules. The completed flow branch gets a merge commit, preserving
-its task squash commits; this call does not require `--subject`:
-
-```bash
-emb merge ember/flow/<id> --into <session branch> --verdict keep --note '<verdict line>' --dir <dir>
-```
+cleanup rules, with the `emb merge` command in SKILL.md step 9 for a branch
+with no run record: `ember/flow/<id>` and `--dir <dir>`. The completed flow
+branch gets a merge commit, preserving its task squash commits; this call does
+not require `--subject`.
 
 Report `flow <id> · <writer> / <reviewer> · exit <n> · <merged> of
 <tasks> merged · ember/flow/<id>`, one line per task with id, status,
 rounds and reason, then the verdict given as the merge's note.
-Include the verified tip and cleanup keeps. Finish with `emb choices --finish <id>` after the merge or the
-owner's decision on unmerged work, using the claim id, not the flow id.
+Include the verified tip and cleanup keeps. Finish the claim as SKILL.md
+step 9 says, after the merge or the owner's decision on unmerged work, with
+the claim id, not the flow id.

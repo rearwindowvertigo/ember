@@ -5,8 +5,7 @@ answers improve a design choice, review or gap check. It is not a routine
 research step. A panel has one question, one claim, and no branch or verdict.
 
 Complete the skill-version check at the claim (SKILL.md step 2) before
-choosing members. Reload a stale skill with the same claim; start no
-member on an unknown installed version.
+choosing members.
 
 ## Members
 
@@ -17,8 +16,7 @@ such as `opencode:openrouter/deepseek/deepseek-v4.1-flash-1017` or
 `opencode:anthropic/claude-sonnet-4`. Ember uses the id unchanged.
 Without named models, use
 saved `panel.members` by omitting `--member`. If none are saved, ask the
-owner in plain text and pass the answer as explicit members. Never set
-`panel.members` yourself. A panel accepts one to eight distinct
+owner in plain text and pass the answer as explicit members. A panel accepts one to eight distinct
 engine/model pairs; different efforts do not make a repeated pair valid.
 
 Engines must be on and connected. Saved members that cannot run are left
@@ -41,24 +39,21 @@ the text `emb gapcheck --plan <file> --brief` prints, adding
 parsing the reply with `emb gapcheck --reply`. Members must not
 edit the reviewed source; their answers belong in their final messages.
 Tell them to read the repository in their own working folder, using relative
-paths. Each member gets its own detached worktree at one recorded source
-`HEAD`; retries use that same commit. The worktree is writable in both
-sandboxes so builds and tests can create project files. Members have no
-branch and Ember never commits their changes. Uncommitted edits and later source-checkout
-changes are absent. Start warnings name each uncommitted source path;
-report them even at exit 0.
+paths. A panel pins one source `HEAD` for all members and retries; each
+member gets its own detached worktree there (`references/runs.md`). Members
+have no branch and Ember never commits their changes. Uncommitted edits and
+later source-checkout changes are absent.
 
-Run as a background Bash command, unpiped, and take its exit code:
+Start the panel:
 
 ```bash
 emb panel --question-file <file> --dir <repo> --claim <id> [--member W]...
 ```
 
-Keep the panel id from the first line with the claim id. Read standard
-error, including warnings, member completion lines and action lines, even
-at exit 0. Each member's line arrives there when it ends, while other
-members may still be running; `--json` keeps standard output as one final
-JSON object. Follow `next:` within the skill's rules; bring `owner:` to the owner and wait.
+Keep the panel id from the first line with the claim id. Each member's
+completion line arrives on standard error when it ends, while other members
+may still be running; `--json` keeps standard output as one final JSON
+object. Follow printed lines as SKILL.md step 6 says.
 
 ## Progress
 
@@ -83,11 +78,9 @@ attempts, with `path`, `reason`, `allow_path`, `run` and `turn`. Panel status
 also gives their union with the `member` number. Empty lists mean no
 recorded denials. Panels have no denial event stream. Report every denied
 path with its member, run, turn and reason, including for answered members.
-This includes `startup file` denials, which have no Overview notice or
-read-path suggestion. Older records keep their stored reasons, including
-`hidden` for a startup file. Report printed owner actions and hidden-path
-restrictions as described in `references/runs.md`; never change
-`sandbox.read` yourself.
+Startup-file denials and older records are handled as
+`references/runs.md` (Denied paths) says. Report printed owner actions and hidden-path
+restrictions as `references/runs.md` (Denied paths) describes.
 
 ## Read and compare
 
@@ -133,5 +126,5 @@ Tracked changes and untracked non-ignored files keep the worktree and its
 recorded path with a
 warning naming `git worktree remove --force <path>`, including after a
 forced session close. Report it and leave discard to the owner's
-instruction. Finish the claim after the report with
-`emb choices --finish <id>`, using the claim id, not the panel id.
+instruction. Finish the claim after the report as SKILL.md
+step 9 says, with the claim id, not the panel id.

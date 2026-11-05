@@ -2,7 +2,6 @@
 
 ## Read the reply
 
-Read the reply of `emb choices` directly; do not write a parser or helper.
 Each key in `answers` is `{"value", "layer"}`, with `layer` one of
 `request`, `one-time`, `setting` or `default`: the first layer that holds
 the key wins, and an `ask` in a higher layer wins too.
@@ -53,26 +52,23 @@ question that replaces it.
 
 ## Claim outcomes
 
-Keep the id in the run's notes before calling
-`emb choices --claim --id <id> --skill <version>`, with the version from
-the loaded skill's `Skill version:` line, including on retries.
+The call and its retries are in SKILL.md step 2.
 
 ### Skill version
 
 The claim reply has `skill`, `loaded_skill_version` and
 `installed_skill_version`. Ember reads the installed skill link's target
-on each claim, including a repeated claim of the same id:
+on each claim, including a repeated claim of the same id. SKILL.md step 2
+says what to do for each `skill` value:
 
-- `current`: the versions match; continue.
+- `current`: the versions match.
 - `stale`: the versions differ, whether the installed version is newer or
   older. Standard error has `WARNING: the loaded ember skill is <x>; the
-  installed skill is <y>` and `next: reload the ember skill before the next
-  step`. Reload before the next step and keep the same claim id.
+  installed skill is <y>` and a `next:` line.
 - `unknown`: the installed link or its Ember skill is missing or
   unreadable, or its version line is missing, duplicated or malformed.
-  `installed_skill_version` is `null`. Keep the claim, report the warning
-  and the `owner:` repair or reinstall line to the owner, and start no
-  worker until a valid installed skill is loaded.
+  `installed_skill_version` is `null`, with a warning and an `owner:`
+  repair or reinstall line.
 
 All three outcomes exit 0; they do not change `claim.status`. A malformed
 `--skill` exits 64 before claiming and leaves a pending one-time choice
@@ -92,34 +88,25 @@ fields. Edits between releases with the same version are not detected.
   values are not used.
 
 After `gone` or `unknown`, treat every picker as `ask` for the rest of the
-run. Do not fall back to standing settings, mint another id to recover the
-answer, or read a preview to replace it. `emb run --claim` refuses such a
-claim (exit 64): keep and finish the id, tell the owner no worker started
-and why, and mint no other id for the same task. A Claude subagent or no
-worker may still go ahead after a live question.
+run. Do not fall back to standing settings or read a preview to replace it.
+`emb run --claim` refuses such a claim (exit 64); SKILL.md step 2 says what
+to do.
 
 A lost reply (exit 75 for a busy database, or no output at all) may still
 have recorded the claim. Call again with the same id; never mint a new
 one for the same run.
 
-Before each later picker, read `emb choices --json --id <id>`.
-
 ## Run identity
 
-A Claude Workflow shares one claim across its agents. Separately started
-tasks claim independently and are resolved in order; only the first
-consumes the pending one-time choice. A correction or `--recover` of an
-open run keeps its claim. A new worker claims anew.
+A Claude Workflow shares one claim across its agents. A new worker claims
+anew. SKILL.md step 2 says what else is one run.
 
 ## Finish
 
-Finish with `emb choices --finish <id>`: after merge or discard for
-editing work, after review for read-only work, at once for no worker.
-For failed or cancelled work, review the partial results and settle merge
-or discard before the finish. `--finish` records the id `gone`, also when
-it was not known; `gone` in its reply means the finish worked. The reply's
-`was` is the status before the finish. A failed finish is retried with the
-same id.
+`--finish` records the id `gone`, also when it was not known; `gone` in its
+reply means the finish worked. The reply's `was` is the status before the
+finish. A failed finish is retried with the same id. SKILL.md step 9 says when
+to finish.
 
 ## Exit codes
 
@@ -129,19 +116,15 @@ same id.
 | 64 | Usage error, unknown key, invalid value or invalid id | Fix the call: check the id pattern `[a-z0-9][a-z0-9-]{5,63}` and the options. |
 | 74 | The settings database cannot be opened or read | Give the owner the `owner:` line. `emb run` cannot start until it is repaired; meanwhile offer only a Claude subagent or no worker. |
 | 75 | Stale generation, or the database stayed busy for 5 seconds | Retry the same call once with the same id. If it fails again, tell the owner; `emb run` waits, and only a Claude subagent or no worker can be offered meanwhile. |
-| 77 | An owner option without a terminal | An owner option was run; it should not have been. Give the owner the command instead. |
+| 77 | An owner option without a terminal | An owner option was run; it should not have been (SKILL.md, Owner gates). |
 | 78 | The settings database has an unsupported schema | Give the owner the `owner:` line. `emb run` cannot start until it is repaired; meanwhile offer only a Claude subagent or no worker. |
 
 ## Owner options
 
-Do not run `--set`, `--clear`, `--once` or `--clear-once`. Standing
+SKILL.md (Owner gates) says what to run and what to give the owner. Standing
 settings change in Ember's Team or Settings screen (`emb app`) or at the
-owner's terminal; one-time choices only at the terminal. Give the owner
-the exact command: `emb choices --set <key>=<value>` or
-`emb choices --once <key>=<value>`.
+owner's terminal; one-time choices only at the terminal.
 
-For a denied worker path, report the Settings, Sandbox read paths row and
-the printed owner command; do not add it to `sandbox.read` yourself.
 Ember's configuration and state folders, their descendants and symlink
 aliases are refused by Settings and `emb choices`; report that reason.
 Other secret locations can be added by the owner by hand, even when
