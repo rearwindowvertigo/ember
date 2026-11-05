@@ -7,9 +7,9 @@ description: >-
   Load it to run a flow, ask a few models, run a panel, or do a gap check;
   to review, merge or clean up a worker branch (`ember/<engine>/<id>`,
   `ember/flow/<id>`, `worktree-agent-*`); or to handle an `emb`
-  exit or a `next:` or `owner:` line. Use it even when the owner only says
-  hand this off, have Codex or GPT do it, farm this out, use a workflow, or
-  names a model, and for /ember.
+  exit or a `report:`, `next:` or `owner:` line. Use it even when the owner
+  only says hand this off, have Codex or GPT do it, farm this out, use a
+  workflow, or names a model, and for /ember.
 ---
 
 # Ember
@@ -93,7 +93,7 @@ usage reading.
 |---|---|
 | No worker | A few lines in one or two files already open. |
 | Codex, `emb run --engine codex` | Coding, drafting, tests and research; the default. |
-| OpenCode, `emb run --engine opencode` | A model suited to the task from any integration connected in OpenCode; when the owner names it, or as `references/runs.md` allows after a usage limit. |
+| OpenCode, `emb run --engine opencode` | A model suited to the task from any integration connected in OpenCode; when the owner names it, or as the `report:` line allows after a usage limit. |
 | Claude CLI, `emb run --engine claude` | A requested Claude CLI run. |
 | Claude subagent | Work needing Claude's tools, the browser, connectors, its own workers, or a folder that is not a git checkout. |
 | Claude Workflow | Claude-side fan-out of two or more tasks, with opt-in. |
@@ -153,10 +153,16 @@ text before the picker is hidden. Without the picker tool (print mode),
 ask the same question in plain text, as one direct question ending in a
 question mark, and stop until the owner answers.
 
+Open every owner question with what the owner would see and what each
+answer makes happen. Before asking an owner question that offers a fix,
+find the problem's cause. After the opening, state the cause, the other
+cases it affects and the fix that covers all of them. Say when a design or
+decision change would serve better than a patch.
+Use Ember's terms last, each with a plain explanation.
+
 Resolve two or more separately started tasks one at a time, numbered
 `Task N of M`. A same-worker correction, recovery or retry needs no new
-question; a replacement worker or model does. After a capacity error, offer
-only the same-model retry; see `references/runs.md`.
+question; a replacement worker or model does.
 
 ### 4. Establish the editing boundary
 
@@ -251,13 +257,14 @@ Pass the claim with `--claim <id>`.
 
 Keep the run id from the start's first line with the claim.
 
-Ember prints one `next:` or `owner:` line on standard error at each step of
+Ember prints `next:` or `owner:` lines on standard error at each step of
 an `emb run` task: at exit 0 after a start, `--send`, `--recover`, `--close`
 or `emb merge`, on every non-zero exit, and in `emb run --status <run>`,
-which also prints the run's `step:`. The line is the next command with its arguments
-filled in. Read standard error after every run, also at exit 0. An
-`owner:` line comes first: give it to the owner, naming the action, and
-wait for the answer before running any `next:` line, correction or retry
+which also prints the run's `step:`. A `next:` line is the next command with
+its arguments filled in. Read standard error after every run, also at exit 0.
+Report every `WARNING:` and `report:` line. Give an `owner:` line to the
+owner first, naming the action, and wait for the answer before running
+any `next:` line, correction or retry
 that depends on what it names. Otherwise follow a `next:` line within these
 rules and the owner gates below. A line leaves the brief, the
 review bar, the verdict, `--note` and `--subject` to you. After a turn with
@@ -266,8 +273,8 @@ report between them. Do not retry a
 refusal: a refusal is Ember or the owner saying no, and repeating it
 changes nothing.
 
-Report every `WARNING:` line. For every denied path, name its run and turn
-and its reason, and give the Settings, Sandbox read paths owner action from
+For every denied path, name its run and turn and its reason, and give the
+Settings, Sandbox read paths owner action from
 `references/runs.md` (Denied paths). Never add paths to `sandbox.read`
 yourself. A denied path counts as an `owner:` line, also when Ember prints
 none for it: until the owner answers, send the run nothing, not even a
@@ -404,7 +411,7 @@ prints no `next:` line, report each kept line and run
 | 64 | Fix the call; `emb merge` needs `--verdict keep`, a one-line `--note`, a one-line `--subject` for an Ember run branch and two different branches. |
 | 65 | Run it inside the checkout, with branches that exist. |
 | 70 | A git command failed; a merge already made stays. Report the message; follow `next:`. |
-| 75 | Refused: the target is checked out nowhere, is mid-merge, mid-rebase, mid-cherry-pick or mid-revert, has changes, or the merge conflicted. A squash conflict names the files and leaves the target unchanged. Report it; do not retry or force it. After a conflict, ask the owner: a new run cut from the updated session branch redoes the work, or the owner resolves it. Keep the claim open until then. |
+| 75 | Refused: the target is checked out nowhere, is mid-merge, mid-rebase, mid-cherry-pick or mid-revert, has changes, or the merge conflicted. A squash conflict names the files and leaves the target unchanged. Report it. Keep the claim open until the owner settles a conflict. |
 | 76 | The target or worker branch moved while building the squash. Review both tips before repeating the merge. |
 | 77 | The target's `commit-msg` hook, commit identity or signing configuration refused the squash. Follow `next:`; nothing moved. |
 
@@ -474,7 +481,7 @@ finding gets at most one closing sentence, or is left out.
 | Bundled file | Read when |
 |---|---|
 | `references/claims.md` | A claim or read reply other than a clean `claimed` or `none`, a lost reply, an `emb choices` exit, or an owner question about one-time choices. |
-| `references/runs.md` | Before the session's first `emb run`; on every non-zero `emb run` exit; before closing a run. |
+| `references/runs.md` | Before the session's first `emb run`; on every non-zero `emb run` exit; before closing a run; when handing the owner a test build from any worker branch, including a flow branch. |
 | `references/claude-agents.md` | Before a Claude subagent or Claude Workflow spawn. |
 | `references/gap-check.md` | Before a flow or a multi-task Claude Workflow starts. |
 | `references/flows.md` | Before `emb flow`; at every flow report. |
