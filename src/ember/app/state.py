@@ -1,7 +1,8 @@
-"""The window's size and last screen, kept between starts.
+"""The window's size, sidebar visibility and last screen, kept between starts.
 
 The file is `$XDG_STATE_HOME/ember/app.json`, mode 600 in a mode 700 folder:
-`{"width", "height", "screen", "finished_open", "denied_dismissals"}`.
+`{"width", "height", "screen", "finished_open", "denied_dismissals",
+"sidebar_hidden"}`.
 Content that cannot be read or is not valid gives the defaults; a write that
 fails is ignored.
 """
@@ -41,6 +42,9 @@ class AppState:
     denied_dismissals: dict[str, list[str]] = field(default_factory=dict)
     """Denied folders dismissed with the run-and-turn occurrences seen then."""
 
+    sidebar_hidden: bool = False
+    """Whether the sidebar is hidden when a screen is shown."""
+
     def to_json(self) -> dict[str, object]:
         """Return the state as a JSON-ready dict."""
         return {
@@ -49,6 +53,7 @@ class AppState:
             "screen": self.screen,
             "finished_open": self.finished_open,
             "denied_dismissals": self.denied_dismissals,
+            "sidebar_hidden": self.sidebar_hidden,
         }
 
 
@@ -103,6 +108,7 @@ def load(env: Mapping[str, str] | None = None) -> AppState:
         height=_size(value.get("height"), DEFAULT_HEIGHT),
         screen=screen if isinstance(screen, str) and screen else DEFAULT_SCREEN,
         finished_open=value.get("finished_open") is True,
+        sidebar_hidden=value.get("sidebar_hidden") is True,
     )
 
 

@@ -72,6 +72,7 @@ def test_default_size_and_minimum(env: dict[str, str], qtbot: QtBot) -> None:
     assert (window.width(), window.height()) == (1100, 720)
     assert window.minimumSize().width() == MINIMUM_WIDTH
     assert window.minimumSize().height() == MINIMUM_HEIGHT
+    assert (MINIMUM_WIDTH, MINIMUM_HEIGHT) == (640, 480)
     assert window.current_key() == "overview"
     assert window.version_label.text() == f"Ember {app_version()}"
 
@@ -420,3 +421,255 @@ def test_quit_uses_a_tray_token_without_showing_the_main_window(
         ]
     else:
         assert calls.mock_calls == [call.quit()]
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_sidebar_collapses_below_960_and_expands_at_960(
+    env: dict[str, str], qtbot: QtBot, qapp: QApplication, mode: str
+) -> None:
+    theme.apply(qapp, mode)
+    window, _context, _quit = _window(env, qtbot)
+    window.show()
+    for width, collapsed in [(959, True), (960, False), (640, True), (1100, False)]:
+        window.resize(width, 480)
+        qtbot.waitUntil(lambda width=width: window.width() == width)
+        QCoreApplication.processEvents()
+        assert window.height() == 480
+        assert window.sidebar.width() == (
+            theme.SIDEBAR_COLLAPSED_WIDTH if collapsed else theme.SIDEBAR_WIDTH
+        )
+        assert window.brand_name.isVisible() is not collapsed
+        assert window.version_label.isVisible() is not collapsed
+        assert window.mark.toolTip() == (f"Ember {app_version()}" if collapsed else "")
+        for item in window.nav.values():
+            assert item.text_label.isVisible() is not collapsed
+            assert item.accessibleName() == item.title
+            assert item.toolTip() == (item.title if collapsed else "")
+            if collapsed:
+                assert (item.width(), item.height()) == (40, 36)
+        mark = window.mark.mapTo(window.sidebar, window.mark.rect().center())
+        hide = window.hide_sidebar_button.mapTo(
+            window.sidebar, window.hide_sidebar_button.rect().center()
+        )
+        if collapsed:
+            assert abs(mark.x() - hide.x()) <= 1
+            assert hide.y() > mark.y()
+        else:
+            assert abs(mark.y() - hide.y()) <= 1
+            assert hide.x() > mark.x()
+
+
+def test_collapsed_count_pill_and_tooltip(env: dict[str, str], qtbot: QtBot) -> None:
+    window, _context, _quit = _window(env, qtbot)
+    window.resize(959, 600)
+    window.show()
+    item = window.nav["overview"]
+    QCoreApplication.processEvents()
+    for count in (2, 0, -1, 12):
+        item.set_count(count, f"{count} live")
+        assert item.count_label.isVisible() is (count > 0)
+        assert item.toolTip() == (
+            f"Overview · {count} live" if count > 0 else "Overview"
+        )
+        assert item.accessibleName() == "Overview"
+        if count > 0:
+            assert item.count_label.property("role") == "nav-count"
+            assert item.count_label.font() == theme.font("caption")
+            icon = item.icon_label.geometry()
+            pill = item.count_label.geometry()
+            assert pill.x() == min(
+                icon.right() + 1 - pill.width() // 2, item.width() - pill.width()
+            )
+            assert pill.y() == max(0, icon.top() - pill.height() // 2)
+            assert item.rect().contains(pill)
+    window.resize(960, 600)
+    assert item.count() == 12
+    assert item.count_label.property("role") == "badge"
+    assert item.toolTip() == ""
+
+
+def test_restart_offer_updates_both_controls(env: dict[str, str], qtbot: QtBot) -> None:
+    window, _context, _quit = _window(env, qtbot)
+    window.resize(959, 600)
+    first = Mock()
+    second = Mock()
+    window.show_restart("1.0.0", first)
+    compact = window.update_button
+    box = window.update_box
+    assert compact is not None and box is not None
+    assert compact.isVisible()
+    assert box.isHidden()
+    assert compact.toolTip() == "Ember 1.0.0 is installed. Restart"
+    assert compact.accessibleName() == compact.toolTip()
+    assert compact.width() == compact.height() == theme.CONTROL_SM
+    assert not compact.icon().isNull()
+    compact.click()
+    first.assert_called_once_with()
+    window.show_restart("1.1.0", second)
+    assert compact.toolTip() == "Ember 1.1.0 is installed. Restart"
+    assert box.label.text() == "Ember 1.1.0 is installed."
+    compact.click()
+    window.resize(960, 600)
+    assert box.isVisible()
+    assert compact.isHidden()
+    box.restart_button.click()
+    assert second.call_count == 2
+
+
+@pytest.mark.parametrize("width", [640, 959, 960, 1100])
+def test_hide_and_show_from_sidebar_and_each_screen(
+    env: dict[str, str], qtbot: QtBot, width: int
+) -> None:
+    from ember.app import widgets
+
+    window, _context, _quit = _window(env, qtbot)
+    window.resize(width, 600)
+    window.show()
+    qtbot.waitExposed(window)
+    with qtbot.waitActive(window):
+        window.activateWindow()
+    hide = window.hide_sidebar_button
+    assert hide.toolTip() == hide.accessibleName() == "Hide sidebar"
+    assert not hide.icon().isNull()
+    hide.setFocus()
+    qtbot.keyClick(hide, Qt.Key.Key_Tab)
+    assert window.nav["overview"].hasFocus()
+    for key in KEYS:
+        hide.click()
+        assert window.sidebar.isHidden()
+        assert state.load(env).sidebar_hidden is True
+        window.show_screen(key)
+        screen = window.screen_widget(key)
+        assert screen is not None
+        show = next(
+            button
+            for button in screen.findChildren(widgets.IconButton)
+            if button.property("role") == "show-sidebar"
+        )
+        assert show.isVisible()
+        assert show.toolTip() == show.accessibleName() == "Show sidebar"
+        first = screen.nextInFocusChain()
+        assert first is not None
+        while not (
+            screen.isAncestorOf(first)
+            and first.isVisible()
+            and first.focusPolicy() & Qt.FocusPolicy.TabFocus
+        ):
+            first = first.nextInFocusChain()
+            assert first is not None
+            assert first is not screen
+        assert first is show
+        show.setFocus()
+        qtbot.keyClick(show, Qt.Key.Key_Tab)
+        assert QApplication.focusWidget() is not show
+        qtbot.keyClick(QApplication.focusWidget(), Qt.Key.Key_Backtab)
+        assert show.hasFocus()
+        qtbot.keyClick(show, Qt.Key.Key_Space)
+        assert not window.sidebar.isHidden()
+        assert state.load(env).sidebar_hidden is False
+        assert show.isHidden()
+        assert hide.hasFocus()
+        assert window.sidebar.width() == (
+            theme.SIDEBAR_COLLAPSED_WIDTH if width < 960 else theme.SIDEBAR_WIDTH
+        )
+
+
+def test_hidden_sidebar_restored_in_new_window(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    window, _context, _quit = _window(env, qtbot)
+    window.resize(800, 600)
+    window.show()
+    window.hide_sidebar_button.click()
+    saved = state.load(env)
+    assert (saved.width, saved.height, saved.sidebar_hidden) == (800, 600, True)
+    restored, _context, _quit = _window(env, qtbot)
+    restored.show()
+    assert restored.sidebar.isHidden()
+    assert restored.sidebar_collapsed
+    assert restored.width() == 800
+
+
+def test_saved_hidden_sidebar_shown_until_settings_succeed(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    state.save(state.AppState(sidebar_hidden=True), env)
+    config = Path(env["XDG_CONFIG_HOME"]) / "ember"
+    config.mkdir(parents=True)
+    database = config / "settings.db"
+    database.write_text("not a database")
+    window, context, _quit = _window(env, qtbot, ready=False)
+    window.show()
+    assert window.sidebar.isVisible()
+    assert not window.hide_sidebar_button.isEnabled()
+    window.hide_sidebar_button.click()
+    assert window.sidebar.isVisible()
+    with qtbot.waitSignal(context.settings_failed, timeout=5000):
+        context.reload_settings()
+    assert window.sidebar.isVisible()
+    assert not window.hide_sidebar_button.isEnabled()
+    assert window.stack.currentWidget() is window.state_view
+    assert state.load(env).sidebar_hidden is True
+    database.unlink()
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        window.state_view.retry_button.click()
+    assert window.sidebar.isHidden()
+    assert window.hide_sidebar_button.isEnabled()
+    assert window.stack.currentWidget() is window.screen_widget("overview")
+
+
+@pytest.mark.parametrize("hidden", [False, True])
+@pytest.mark.parametrize("width", [640, 1800])
+def test_notices_use_capped_column_beside_scrollbar(
+    env: dict[str, str], qtbot: QtBot, hidden: bool, width: int
+) -> None:
+    from PySide6.QtWidgets import QScrollArea
+
+    from ember.app.screens.common import SCREEN_MARGIN
+
+    window, _context, _quit = _window(env, qtbot)
+    window.resize(width, 600)
+    window.show()
+    if hidden:
+        window.hide_sidebar_button.click()
+    window.show_notice("info", "Settings changed", "Read them again.")
+    QCoreApplication.processEvents()
+    screen = window.stack.currentWidget()
+    assert screen is not None
+    area = screen.findChild(QScrollArea)
+    assert area is not None
+    available = window.content.width() - area.verticalScrollBar().sizeHint().width()
+    assert window.notice_column.width() == min(
+        available, theme.CONTENT_MAX_WIDTH + 2 * SCREEN_MARGIN
+    )
+    assert (
+        abs(2 * window.notice_column.x() + window.notice_column.width() - available)
+        <= 1
+    )
+    assert window.notice is not None
+    assert window.notice.width() <= theme.CONTENT_MAX_WIDTH
+
+
+def test_sidebar_only_refits_when_resize_crosses_breakpoint(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window, _context, _quit = _window(env, qtbot)
+    window.show()
+    qtbot.waitExposed(window)
+    fit = Mock(wraps=window._fit_sidebar)
+    monkeypatch.setattr(window, "_fit_sidebar", fit)
+    for width, height in ((1000, 720), (960, 600)):
+        window.resize(width, height)
+        QCoreApplication.processEvents()
+    fit.assert_not_called()
+    window.resize(959, 600)
+    QCoreApplication.processEvents()
+    fit.assert_called_once_with()
+    fit.reset_mock()
+    for width, height in ((800, 600), (640, 480), (959, 720)):
+        window.resize(width, height)
+        QCoreApplication.processEvents()
+    fit.assert_not_called()
+    window.resize(960, 720)
+    QCoreApplication.processEvents()
+    fit.assert_called_once_with()

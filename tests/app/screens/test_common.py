@@ -319,3 +319,36 @@ def test_picker_column_reaches_floor_before_stacking(qtbot: QtBot) -> None:
     screen.resize(800, 400)
     qtbot.waitUntil(lambda: not row.stacked)
     assert picker.width() > theme.PICKER_MIN_WIDTH
+
+
+def test_screen_header_sidebar_button_precedes_title_and_actions(qtbot: QtBot) -> None:
+    from PySide6.QtCore import Qt
+
+    from ember.app import widgets
+
+    screen = QWidget()
+    qtbot.addWidget(screen)
+    layout = common.scrolled(screen)
+    check = QPushButton("Check now")
+    common.screen_header(layout, "Engines", "Checked", iter((check,)))
+    show = next(
+        button
+        for button in screen.findChildren(widgets.IconButton)
+        if button.property("role") == "show-sidebar"
+    )
+    assert show.isHidden()
+    assert show.toolTip() == show.accessibleName() == "Show sidebar"
+    assert not show.icon().isNull()
+    screen.show()
+    show.show()
+    qtbot.waitExposed(screen)
+    with qtbot.waitActive(screen):
+        screen.activateWindow()
+    show.setFocus()
+    qtbot.keyClick(show, Qt.Key.Key_Tab)
+    assert check.hasFocus()
+    heading = next(
+        label for label in screen.findChildren(QLabel) if label.text() == "Engines"
+    )
+    assert show.geometry().right() < heading.geometry().left()
+    assert abs(show.geometry().center().y() - heading.geometry().center().y()) <= 1

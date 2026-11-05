@@ -288,6 +288,9 @@ def screen_header(
 ) -> QLabel:
     """Add a screen's header: its title, a subtitle, and widgets on the right.
 
+    A Show sidebar button is built hidden before the title. The window
+    connects it and sets its visibility from the sidebar's hidden state.
+
     Args:
         layout: The screen's content layout.
         title: The screen's name, in the display type.
@@ -298,19 +301,31 @@ def screen_header(
     Returns:
         The subtitle label, for screens that change it.
     """
+    trailing = tuple(trailing)
     row = QHBoxLayout()
     row.setSpacing(12)
     titles = QVBoxLayout()
     titles.setSpacing(4)
     heading = QLabel(title)
     heading.setFont(theme.font("display"))
-    titles.addWidget(heading)
+    title_row = QHBoxLayout()
+    title_row.setSpacing(theme.SPACE[2])
+    show_sidebar = widgets.IconButton("panel-left", "Show sidebar")
+    show_sidebar.setProperty("role", "show-sidebar")
+    show_sidebar.hide()
+    title_row.addWidget(show_sidebar, 0, Qt.AlignmentFlag.AlignVCenter)
+    title_row.addWidget(heading, 1)
+    titles.addLayout(title_row)
     line = label(subtitle, "secondary")
     titles.addWidget(line)
     row.addLayout(titles, 1)
     for widget in trailing:
         row.addWidget(widget, 0, Qt.AlignmentFlag.AlignVCenter)
     layout.addLayout(row)
+    for widget in trailing:
+        if widget.focusPolicy() != Qt.FocusPolicy.NoFocus:
+            QWidget.setTabOrder(show_sidebar, widget)
+            break
     return line
 
 
