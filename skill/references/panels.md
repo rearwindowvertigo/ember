@@ -78,9 +78,8 @@ attempts, with `path`, `reason`, `allow_path`, `run` and `turn`. Panel status
 also gives their union with the `member` number. Empty lists mean no
 recorded denials. Panels have no denial event stream. Report every denied
 path with its member, run, turn and reason, including for answered members.
-This includes `startup file` denials, which have no Overview notice or
-read-path suggestion. Older records keep their stored reasons, including
-`hidden` for a startup file. Report printed owner actions and hidden-path
+Startup-file denials and older records are handled as
+`references/runs.md` (Denied paths) says. Report printed owner actions and hidden-path
 restrictions as `references/runs.md` (Denied paths) describes.
 
 ## Read and compare

@@ -342,8 +342,10 @@ three verdicts, because only Keep work merges.
 
 For an editing run with commits the order is verify, review, report, merge,
 then finish as merge's `next:` line says; the merge closes the run. Park a
-run with `emb run --close <run>` when its `next:` line names it: a read-only
-run, a run without commits and a discarded run. Park only a run this session
+read-only run or a run without commits with `emb run --close <run>` when its
+`next:` line names it. Park a discarded run with `emb run --close <run>`
+although its `next:` line names verify and merge: do not follow that line,
+because Discard work is not merged (step 9). Park only a run this session
 started, after its turn ended, its work was committed and its reply was
 read and reported. Report runs parked and runs left open, with reasons.
 

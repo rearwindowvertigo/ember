@@ -84,16 +84,10 @@ denied paths, inspect its run status and report them as `references/runs.md`
 (Denied paths) says.
 
 Check for tasks whose `files` overlap only on a shared file, even when
-they edit different sections: a reference document, changelog, index or
-registration point such as a command-line parser. Raise that overlap as a
-gap when the shared edits can be separated from the tasks' own checks.
-The default is a separate shared-file task with `after` on every
-implementation task whose results it describes or registers; remove the
-shared file from those implementation tasks' `files` and name the boundary
-in their briefs. The lead may instead make those edits while merging.
-When a task's own checks need the shared edit, keep it with that task and
-serialize the overlap. A parser option exercised by the task's tests is
-such a case. Keep the one-file rule; section scopes do not remove overlap.
+they edit different sections, and raise that overlap as a gap when the
+shared edits can be separated from the tasks' own checks. The default
+answer follows the shared-file rule in `references/flows.md` (Workers and
+plan).
 
 ## Claude subagent reviewer
 
