@@ -3602,8 +3602,11 @@ installed `ember-app` metadata (`ember_app-<version>.dist-info`) last
 changed, the running app reads the installed version from disk and compares
 it with the version it started as. An upgrade installed while Ember runs
 therefore shows the offer without another start. When they differ, the
-window shows a small info box in the sidebar, directly above the version
+window shows a small info box in the full sidebar, directly above the version
 line: `Ember <version> is installed.` with a Restart button and no Dismiss.
+In the collapsed sidebar, a round 32-pixel button with `refresh-cw` in
+`text-accent` on `bg-accent` replaces the box, has the tooltip
+`Ember <version> is installed. Restart` and restarts Ember when clicked.
 The box stays until Ember restarts; a later installed version replaces its
 text. No alert shows above the screen for it. Restart closes the socket, starts the installed app
 with the running interpreter (`python -I -m ember.cli app`) and quits. Runs
@@ -3626,10 +3629,17 @@ they cannot be read it shows the reason and Try again.
 
 ### Window
 
-The window opens at 1100 by 720 pixels and is never smaller than 900 by 600.
-Its size and last screen are kept between starts. The sidebar shows the Ember
-mark and name, one row per screen (Overview, Team, Engines, Dependencies,
-Settings) and `Ember <version>` at the bottom. Overview's row counts
+The window opens at 1100 by 720 pixels and is never smaller than 640 by 480.
+Its size, last screen and whether the sidebar is hidden are kept between
+starts. Each screen's content is at most 960 pixels wide, padding excluded,
+centred in the space beside the sidebar; narrower windows fill the available
+space. No screen scrolls sideways; a table on Engines may scroll sideways
+inside its own frame.
+
+At window widths of 960 pixels and above, the sidebar is 220 pixels wide
+and shows the Ember mark and name, one row per screen (Overview, Team,
+Engines, Dependencies, Settings) and `Ember <version>` at the bottom.
+Overview's row counts
 top-level live items: standalone live runs plus every flow and panel in
 Live, including stopped flows waiting for Claude and gone runners or panel
 processes. Workers nested under a Live parent add nothing. A live worker
@@ -3640,6 +3650,24 @@ The count updates from the shared run, flow and panel models on every screen.
 
 Dependencies' row shows the number of components with an update available
 or missing, only above zero. A screen is created the first time it is shown.
+
+Below a window width of 960 pixels, the sidebar collapses to 64 pixels wide:
+the Ember mark without its name, followed by centred 40 by 36 pixel rows
+showing only each screen's icon. Each row's tooltip and accessible name are
+the screen's name; a count above zero appears as a pill at the icon's top
+right, in `type-caption` with `text-primary` on `bg-subtle`, and is added to
+the tooltip, such as `Overview · 2 live`. The version line is hidden and the
+mark's tooltip is `Ember <version>`.
+
+A ghost button with the `panel-left` icon and tooltip `Hide sidebar` sits
+at the top right of the full sidebar, on the line of the mark and name, or
+under the mark when collapsed. Clicking it hides the whole sidebar. A button
+with the same icon and tooltip `Show sidebar` then appears before the current
+screen's title, on the same line; clicking it shows the sidebar. Tab reaches
+both buttons. The hidden state is saved with the window size as
+`sidebar_hidden` in `app.json`; a missing field means shown. A shown sidebar
+still collapses below 960 pixels. Until settings load and a screen is
+created, the sidebar stays shown and its hide button is disabled.
 
 Saves run one at a time: a change made while a save is in flight is sent
 after it, with the settings generation that save produced. Choosing the
@@ -3678,11 +3706,24 @@ icon after it, and no line under the name; the icon's tooltip holds what
 the setting does. Hovering the icon, focusing it from the keyboard or
 clicking it shows the tooltip under it, in Ember's own window with 6-pixel
 rounded corners; it hides when the pointer leaves an unfocused icon, focus
-moves on, or Escape is pressed. A screen's setting controls share one
-column as wide as its widest control: pickers fill it, and segmented
-controls, switches and buttons sit at its right edge. Nothing else in the window opens a tooltip: not cut-off
-text, icon-only buttons (their accessible names stay), model names, file
-buttons or picker items. The tray icon's tooltip is drawn by the desktop.
+moves on, or Escape is pressed. The collapsed sidebar's rows, mark and
+restart button, and the hide and show sidebar buttons, also use Ember's
+tooltip window on hover or keyboard focus. Other controls, cut-off text,
+model names, file buttons and picker items do not open tooltips. Qt's own
+tooltip window is never used. The tray icon's tooltip is drawn by the desktop.
+
+While the widest visible setting row fits, a screen's setting controls
+share one column as wide as its widest control, at least 280 pixels:
+pickers fill it, and segmented controls, switches and buttons sit at its
+right edge. When a card cannot fit a name, its info icon and the column,
+the column narrows: pickers shrink to a minimum of 200 pixels, and a closed
+picker that cannot show its whole value ends it with `…`, without a tooltip.
+Segmented controls, switches and buttons never shrink. When the column
+cannot narrow further, every setting row on that screen stacks together:
+the name and info icon on the first line, the control 8 pixels below at the
+left edge. A stacked picker keeps the column's last width, limited to the
+available width inside its card. The rows return to one shared column when
+the window widens enough.
 
 ### Tray
 
@@ -4130,7 +4171,7 @@ to `emb choices --set sandbox.read=...`.
 
 | File | Holds |
 |---|---|
-| `$XDG_STATE_HOME/ember/app.json` | The window's `width`, `height` and last `screen`, and Overview's `finished_open` and `denied_dismissals` (resolved paths to dismissed run-and-turn occurrences), mode 600; content that cannot be read gives the defaults |
+| `$XDG_STATE_HOME/ember/app.json` | The window's `width`, `height`, last `screen` and `sidebar_hidden` (defaults to `false`), and Overview's `finished_open` and `denied_dismissals` (resolved paths to dismissed run-and-turn occurrences), mode 600; content that cannot be read gives the defaults |
 | `$XDG_RUNTIME_DIR/ember/app.sock` | The single-instance socket |
 | `$XDG_CONFIG_HOME/autostart/io.github.rearwindowvertigo.Ember.desktop` | The autostart entry while `app.autostart` is on, mode 600: `Exec=<absolute path of emb> app --hidden`. When `emb` is not on `PATH` nothing is written, and the app prints the reason to standard error and shows it in Settings |
 

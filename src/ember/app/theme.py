@@ -77,6 +77,15 @@ CONTROL_SM = 32
 SIDEBAR_WIDTH = 220
 """The width of the sidebar, in pixels."""
 
+CONTENT_MAX_WIDTH = 960
+"""The maximum screen content width, excluding padding, in pixels."""
+
+PICKER_MIN_WIDTH = 200
+"""The minimum picker width, in pixels."""
+
+SIDEBAR_COLLAPSED_WIDTH = 64
+"""The collapsed sidebar width, in pixels."""
+
 RADIUS = {"xs": 6, "sm": 10, "md": 16, "lg": 24}
 """Corner radii, in pixels. A pill's radius is half its control's height."""
 

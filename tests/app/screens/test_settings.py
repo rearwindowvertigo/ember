@@ -395,3 +395,28 @@ def test_add_folder_refuses_ember_private_paths(
     assert _stored(env, "sandbox.read") == []
     assert "Ember's configuration or state" in screen.paths_line.text()
     assert context.tasks.pending() == 0
+
+
+@pytest.mark.parametrize("width", [576, 1400])
+def test_screen_fits_width(env: dict[str, str], qtbot: QtBot, width: int) -> None:
+    from .test_common import assert_screen_fits  # pyrefly: ignore[missing-import]
+
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    theme.apply(app, "light")
+    _context, screen = _screen(env, qtbot)
+    screen.resize(width, 480)
+    screen.show()
+    qtbot.wait(50)
+    assert screen.width() == width
+    assert_screen_fits(screen)
+
+
+def test_rows_shrink_stack_and_return(env: dict[str, str], qtbot: QtBot) -> None:
+    from .test_common import assert_rows_reflow  # pyrefly: ignore[missing-import]
+
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    theme.apply(app, "light")
+    _context, screen = _screen(env, qtbot)
+    assert_rows_reflow(screen, list(screen.tip_rows.values()), qtbot)

@@ -1100,3 +1100,36 @@ def test_capacity_rows_show_ranges_and_save(env: dict[str, str], qtbot: QtBot) -
     qtbot.addWidget(other)
     assert other.capacity["provider.capacity_retries"].value() == "0"
     assert other.capacity["provider.capacity_wait"].value() == "600"
+
+
+@pytest.mark.parametrize("width", [576, 1400])
+def test_screen_fits_width(env: dict[str, str], qtbot: QtBot, width: int) -> None:
+    from ember.app import theme
+
+    from .test_common import assert_screen_fits  # pyrefly: ignore[missing-import]
+
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    theme.apply(app, "light")
+    choices.set_settings(SHORTLISTS, env=env)
+    _context, screen = _screen(env, qtbot)
+    screen.resize(width, 480)
+    screen.show()
+    qtbot.wait(50)
+    assert screen.width() == width
+    assert_screen_fits(screen)
+    for row in screen.tip_rows.values():
+        if row.isVisible() and isinstance(row.control, widgets.Segmented):
+            assert row.control.width() >= row.control.sizeHint().width()
+
+
+def test_rows_shrink_stack_and_return(env: dict[str, str], qtbot: QtBot) -> None:
+    from ember.app import theme
+
+    from .test_common import assert_rows_reflow  # pyrefly: ignore[missing-import]
+
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    theme.apply(app, "light")
+    _context, screen = _screen(env, qtbot)
+    assert_rows_reflow(screen, list(screen.tip_rows.values()), qtbot)

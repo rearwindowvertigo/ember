@@ -305,3 +305,9 @@ def test_disabled_danger_outline_looks_disabled(
     finally:
         theme.apply(qapp, previous)
         qapp.setStyleSheet("")
+
+
+def test_screen_size_tokens() -> None:
+    assert theme.CONTENT_MAX_WIDTH == 960
+    assert theme.PICKER_MIN_WIDTH == 200
+    assert theme.SIDEBAR_COLLAPSED_WIDTH == 64

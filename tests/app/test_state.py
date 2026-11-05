@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from ember import paths
 from ember.app import state
 
@@ -22,6 +24,7 @@ def test_round_trip_is_private(env: dict[str, str]) -> None:
         "screen": "engines",
         "finished_open": False,
         "denied_dismissals": {},
+        "sidebar_hidden": False,
     }
 
 
@@ -31,6 +34,28 @@ def test_finished_open_round_trips_and_needs_true(env: dict[str, str]) -> None:
     path = state.state_path(env)
     path.write_text(json.dumps({"finished_open": "yes"}))
     assert state.load(env).finished_open is False
+
+
+def test_sidebar_hidden_round_trips(env: dict[str, str]) -> None:
+    saved = state.AppState(959, 480, "settings", sidebar_hidden=True)
+    state.save(saved, env)
+    assert state.load(env) == saved
+    assert json.loads(state.state_path(env).read_text())["sidebar_hidden"] is True
+
+
+@pytest.mark.parametrize("value", [False, 1, 0, "true", "yes", None, [], {}])
+def test_sidebar_hidden_needs_true(env: dict[str, str], value: object) -> None:
+    path = state.state_path(env)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"sidebar_hidden": value}))
+    assert state.load(env).sidebar_hidden is False
+
+
+def test_old_state_reads_sidebar_as_shown(env: dict[str, str]) -> None:
+    path = state.state_path(env)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"width": 1200, "height": 800, "screen": "menu"}))
+    assert state.load(env) == state.AppState(1200, 800, "menu", sidebar_hidden=False)
 
 
 def test_corrupt_file_gives_defaults(env: dict[str, str]) -> None:

@@ -224,8 +224,8 @@ def _breakable(word: str, metrics: QFontMetrics) -> str:
 class TipPopup(QWidget):
     """Ember's tooltip window: `fill-primary` with `on-primary`, rounded corners.
 
-    Qt's own tooltip window cannot draw see-through corners, so the info
-    icon shows this one. It wraps text wider than `TIP_WIDTH` at that width.
+    Info icons and opted-in icon-only controls use this window. Qt's own
+    tooltip window is suppressed. Text wider than `TIP_WIDTH` wraps at that width.
     """
 
     RADIUS = 6
@@ -317,15 +317,18 @@ def tip_popup() -> TipPopup:
 
 
 class TipWrapper(QObject):
-    """Drops every tooltip event except an info icon's, and closes on Escape.
+    """Show Ember tips for info icons and opted-in controls, suppressing Qt tips.
 
-    Nothing without an info icon opens a tooltip; the icon shows its own in
-    `TipPopup`. Escape closes an open tooltip wherever focus is.
+    Widgets with `show-tooltip` show `TipPopup` on hover or keyboard focus.
+    Escape closes an open tip wherever focus is.
     """
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: D102
+        kind = event.type()
+        if kind == QEvent.Type.ToolTip:
+            return True
         if (
-            event.type() == QEvent.Type.KeyPress
+            kind == QEvent.Type.KeyPress
             and cast(QKeyEvent, event).key() == Qt.Key.Key_Escape
             and _popup is not None
             and shiboken6.isValid(_popup)
@@ -334,9 +337,27 @@ class TipWrapper(QObject):
             # Escape closes an open tooltip wherever focus is, then goes on.
             _popup.hide()
             return False
-        if event.type() != QEvent.Type.ToolTip or not isinstance(watched, QWidget):
+        if not isinstance(watched, QWidget) or not (
+            isinstance(watched, InfoTip) or watched.property("show-tooltip") is True
+        ):
             return False
-        return not isinstance(watched, InfoTip)
+        show = kind == QEvent.Type.Enter or (
+            kind == QEvent.Type.FocusIn
+            and cast(QFocusEvent, event).reason() in KEYBOARD_REASONS
+        )
+        if show and watched.isEnabled() and watched.toolTip():
+            tip_popup().show_for(watched, watched.toolTip())
+        elif _popup is not None and shiboken6.isValid(_popup):
+            if kind in (QEvent.Type.FocusOut, QEvent.Type.Hide) or (
+                kind == QEvent.Type.Leave and not watched.hasFocus()
+            ):
+                _popup.hide_for(watched)
+            elif kind == QEvent.Type.ToolTipChange and _popup.owner is watched:
+                if watched.toolTip() and _popup.isVisible():
+                    _popup.show_for(watched, watched.toolTip())
+                else:
+                    _popup.hide_for(watched)
+        return False
 
 
 def install_tooltips(app: QApplication) -> TipWrapper:
@@ -456,6 +477,32 @@ def button(
     result.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
     result.setCursor(Qt.CursorShape.PointingHandCursor)
     return result
+
+
+class IconButton(QPushButton):
+    """A small ghost icon button with a tooltip and an accessible name."""
+
+    def __init__(self, name: str, title: str, *, color: str = "text-secondary") -> None:
+        """Build a button whose icon follows the theme's colour token."""
+        super().__init__()
+        self._icon_name = name
+        self._icon_color = color
+        self.setProperty("kind", "ghost")
+        self.setProperty("scale", "sm")
+        self.setProperty("icon-only", True)
+        self.setProperty("show-tooltip", True)
+        self.setStyleSheet('QPushButton[icon-only="true"] { padding: 0; }')
+        self.setFixedSize(theme.CONTROL_SM, theme.CONTROL_SM)
+        self.setIconSize(QSize(16, 16))
+        self.setToolTip(title)
+        self.setAccessibleName(title)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._draw_icon()
+        theme.signals.changed.connect(self._draw_icon)
+
+    def _draw_icon(self, *_args: object) -> None:
+        self.setIcon(icons.icon(self._icon_name, theme.color(self._icon_color), 16))
 
 
 ICON_GAP = "  "
@@ -795,6 +842,8 @@ class Picker(QComboBox):
     def __init__(self, parent: QWidget | None = None) -> None:
         """Create an empty picker."""
         super().__init__(parent)
+        self.setMinimumWidth(theme.PICKER_MIN_WIDTH)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._model = QStandardItemModel(self)
         self.setModel(self._model)
         self.setItemDelegate(_PickerDelegate(self))
@@ -860,12 +909,31 @@ class Picker(QComboBox):
         )
         return QSize(max(hint.width(), size.width()), hint.height())
 
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        """Allow the closed value to shrink to the picker floor."""
+        return QSize(theme.PICKER_MIN_WIDTH, self.sizeHint().height())
+
+    def elided_text(self) -> str:
+        """Return the closed value fitted to the label rectangle."""
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        rect = self.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox,
+            option,
+            QStyle.SubControl.SC_ComboBoxEditField,
+            self,
+        )
+        return self.fontMetrics().elidedText(
+            self.closed_text(), Qt.TextElideMode.ElideRight, max(0, rect.width() - 4)
+        )
+
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: D102, N802
         painter = QStylePainter(self)
         option = QStyleOptionComboBox()
         self.initStyleOption(option)
+        text = self.elided_text()
         # PySide's stubs type this attribute wrongly; it holds the label text.
-        option.currentText = self.closed_text()  # pyrefly: ignore[bad-assignment]
+        option.currentText = text  # pyrefly: ignore[bad-assignment]
         painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
         painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, option)
 
