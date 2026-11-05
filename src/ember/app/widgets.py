@@ -795,6 +795,8 @@ class Picker(QComboBox):
     def __init__(self, parent: QWidget | None = None) -> None:
         """Create an empty picker."""
         super().__init__(parent)
+        self.setMinimumWidth(theme.PICKER_MIN_WIDTH)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._model = QStandardItemModel(self)
         self.setModel(self._model)
         self.setItemDelegate(_PickerDelegate(self))
@@ -860,12 +862,32 @@ class Picker(QComboBox):
         )
         return QSize(max(hint.width(), size.width()), hint.height())
 
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        """Allow the closed value to shrink to the picker floor."""
+        return QSize(theme.PICKER_MIN_WIDTH, self.sizeHint().height())
+
+    def elided_text(self) -> str:
+        """Return the closed value fitted to the label rectangle."""
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        rect = self.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox,
+            option,
+            QStyle.SubControl.SC_ComboBoxEditField,
+            self,
+        )
+        return self.fontMetrics().elidedText(
+            self.closed_text(), Qt.TextElideMode.ElideRight, max(0, rect.width() - 4)
+        )
+
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: D102, N802
         painter = QStylePainter(self)
         option = QStyleOptionComboBox()
         self.initStyleOption(option)
+        text = self.elided_text()
+        self.setToolTip(self.closed_text() if text != self.closed_text() else "")
         # PySide's stubs type this attribute wrongly; it holds the label text.
-        option.currentText = self.closed_text()  # pyrefly: ignore[bad-assignment]
+        option.currentText = text  # pyrefly: ignore[bad-assignment]
         painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
         painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, option)
 

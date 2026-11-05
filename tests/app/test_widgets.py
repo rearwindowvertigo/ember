@@ -918,3 +918,39 @@ def test_tip_popup_stays_on_the_screen(qapp: QApplication, qtbot: QtBot) -> None
         assert popup.geometry().bottom() < host.mapToGlobal(QPoint(0, 0)).y()
     finally:
         popup.hide_for(host)
+
+
+def test_picker_elides_closed_value_and_updates_tooltip(qtbot: QtBot) -> None:
+    picker = widgets.Picker()
+    qtbot.addWidget(picker)
+    closed = "Same as Reviewer · Codex · a-model-with-a-long-name · high"
+    picker.add_option("A model", "long", closed=closed)
+    picker.add_option("Short", "short")
+    picker.resize(theme.PICKER_MIN_WIDTH, 36)
+    picker.show()
+    qtbot.waitUntil(lambda: picker.toolTip() == closed)
+    assert picker.elided_text().endswith("…")
+    assert picker.elided_text() != closed
+    picker.set_value("short")
+    qtbot.waitUntil(lambda: picker.toolTip() == "")
+    picker.set_value("long")
+    qtbot.waitUntil(lambda: picker.toolTip() == closed)
+    picker.resize(picker.sizeHint())
+    qtbot.waitUntil(lambda: picker.toolTip() == "")
+    assert picker.elided_text() == closed
+
+
+def test_standalone_picker_shrinks_to_floor_and_stops_at_hint(qtbot: QtBot) -> None:
+    host = QWidget()
+    qtbot.addWidget(host)
+    layout = QVBoxLayout(host)
+    picker = widgets.Picker()
+    picker.add_option("A long model name " * 5, "long")
+    layout.addWidget(picker)
+    host.resize(250, 100)
+    host.show()
+    qtbot.wait(20)
+    assert theme.PICKER_MIN_WIDTH <= picker.width() < picker.sizeHint().width()
+    host.resize(1400, 100)
+    qtbot.wait(20)
+    assert picker.width() == picker.sizeHint().width()

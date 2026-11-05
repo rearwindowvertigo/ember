@@ -2171,3 +2171,29 @@ def test_home_file_denial_notice_uses_recorded_reason(
         )
         assert "Add a folder by hand" not in notice.text_label.text()
         assert [button.text() for button in notice.buttons] == ["Dismiss"]
+
+
+@pytest.mark.parametrize("width", [576, 1400])
+def test_screen_fits_width(context: AppContext, qtbot: QtBot, width: int) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    from ember.app import theme
+
+    from .test_common import assert_screen_fits  # pyrefly: ignore[missing-import]
+
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    theme.apply(app, "light")
+    write_mix(dict(context.env))
+    context.runs.reload()
+    screen = screen_for(context, qtbot)
+    screen.resize(width, 480)
+    if not screen.finished_open:
+        screen.toggle_finished_list()
+    qtbot.wait(50)
+    assert screen.width() == width
+    assert_screen_fits(screen)
+    for row in (*screen.live_rows.values(), *screen.finished_rows.values()):
+        row.show_details(True)
+    qtbot.wait(30)
+    assert_screen_fits(screen)

@@ -129,3 +129,193 @@ def test_align_controls_gives_rows_one_column(qtbot: QtBot) -> None:
     assert picker.width() == width
     right = {row.control.mapTo(host, row.control.rect().topRight()).x() for row in rows}
     assert len(right) == 1
+
+
+def assert_screen_fits(screen: QWidget) -> None:
+    """Check the content cap, centring, and every visible child's horizontal bounds."""
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QScrollArea
+
+    from ember.app import theme, widgets
+
+    area = screen.findChild(QScrollArea)
+    assert area is not None
+    content = area.widget()
+    assert content is not None
+    viewport = area.viewport()
+    assert not area.horizontalScrollBar().isVisible()
+    assert area.horizontalScrollBar().maximum() == 0
+    assert content.width() <= theme.CONTENT_MAX_WIDTH + 2 * common.SCREEN_MARGIN
+    assert abs(content.x() * 2 + content.width() - viewport.width()) <= 1
+    for child in content.findChildren(QWidget):
+        if not child.isVisible() or child.isWindow():
+            continue
+        ancestor = child.parentWidget()
+        table_child = False
+        while ancestor is not None and ancestor is not content:
+            if isinstance(ancestor, QScrollArea):
+                table_child = True
+                break
+            ancestor = ancestor.parentWidget()
+        if table_child:
+            continue
+        left = child.mapTo(viewport, QPoint()).x()
+        right = left + child.width()
+        detail = (
+            type(child).__name__,
+            child.accessibleName(),
+            left,
+            right,
+            viewport.width(),
+        )
+        assert 0 <= left <= right <= viewport.width(), detail
+        ancestor = child.parentWidget()
+        while ancestor is not None and ancestor is not content:
+            if isinstance(ancestor, widgets.Card):
+                x = child.mapTo(ancestor, QPoint()).x()
+                assert 0 <= x <= x + child.width() <= ancestor.width(), detail
+            ancestor = ancestor.parentWidget()
+
+
+def assert_rows_reflow(
+    screen: QWidget, rows: list[common.TooltipRow], qtbot: QtBot
+) -> None:
+    """Check shrinking, a shared stack, its saved width, and widening again."""
+    from ember.app import theme, widgets
+
+    picker = next(
+        row.control for row in rows if isinstance(row.control, widgets.Picker)
+    )
+    picker.add_option("A long closed model value " * 3, "long")
+    picker.set_value("long")
+    common.align_controls(rows)
+    screen.resize(1400, 480)
+    screen.show()
+    qtbot.wait(30)
+    visible = [row for row in rows if row.isVisible()]
+    wide = visible[0].slot.width()
+    assert not any(row.stacked for row in visible)
+    last = wide
+    shrank = False
+    for width in range(1000, 399, -8):
+        screen.resize(width, 480)
+        qtbot.wait(5)
+        states = {row.stacked for row in visible}
+        assert len(states) == 1
+        if True in states:
+            for row in visible:
+                assert row.slot.width() == min(last, row.width())
+                assert row.control.x() == 0
+                assert row.slot.x() == 0
+                assert row.slot.y() - row.name.geometry().bottom() - 1 == theme.SPACE[1]
+            break
+        current = visible[0].slot.width()
+        assert {row.slot.width() for row in visible} == {current}
+        assert current >= theme.PICKER_MIN_WIDTH
+        shrank |= current < wide
+        last = current
+    else:
+        raise AssertionError("Rows never stacked")
+    assert shrank
+    screen.resize(1400, 480)
+    qtbot.wait(30)
+    assert not any(row.stacked for row in visible)
+    assert {row.slot.width() for row in visible} == {wide}
+
+
+def test_hidden_rows_and_replaced_row_sets_refit(qtbot: QtBot) -> None:
+    from ember.app import widgets
+
+    screen = QWidget()
+    qtbot.addWidget(screen)
+    layout = common.scrolled(screen)
+    card, column = common.titled_card("Settings")
+    layout.addWidget(card)
+    short = common.TooltipRow("Short", "Tip", widgets.Picker())
+    long = common.TooltipRow("A much longer setting name", "Tip", widgets.Picker())
+    column.addWidget(short)
+    column.addWidget(long)
+    common.align_controls([short, long])
+    screen.resize(500, 400)
+    screen.show()
+    qtbot.waitUntil(lambda: short.stacked and long.stacked)
+    long.hide()
+    qtbot.waitUntil(lambda: not short.stacked)
+    long.show()
+    qtbot.waitUntil(lambda: short.stacked and long.stacked)
+    common.align_controls([short])
+    qtbot.waitUntil(lambda: not short.stacked)
+    long.hide()
+    long.show()
+    qtbot.wait(20)
+    assert not short.stacked
+
+
+def test_scroll_bar_does_not_change_row_fit(qtbot: QtBot) -> None:
+    from PySide6.QtWidgets import QScrollArea
+
+    from ember.app import widgets
+
+    screen = QWidget()
+    qtbot.addWidget(screen)
+    layout = common.scrolled(screen)
+    card, column = common.titled_card("Settings")
+    layout.addWidget(card)
+    row = common.TooltipRow("A setting name", "Tip", widgets.Picker())
+    column.addWidget(row)
+    extra = QWidget()
+    extra.setFixedHeight(800)
+    layout.addWidget(extra)
+    extra.hide()
+    common.align_controls([row])
+    screen.resize(500, 400)
+    screen.show()
+    qtbot.wait(20)
+    before = (row.stacked, row.slot.width())
+    area = screen.findChild(QScrollArea)
+    assert area is not None
+    assert not area.verticalScrollBar().isVisible()
+    extra.show()
+    qtbot.waitUntil(lambda: area.verticalScrollBar().isVisible())
+    qtbot.wait(20)
+    assert (row.stacked, row.slot.width()) == before
+
+
+def test_picker_column_reaches_floor_before_stacking(qtbot: QtBot) -> None:
+    from PySide6.QtWidgets import QScrollArea
+
+    from ember.app import theme, widgets
+
+    screen = QWidget()
+    qtbot.addWidget(screen)
+    layout = common.scrolled(screen)
+    card, column = common.titled_card("Settings")
+    layout.addWidget(card)
+    picker = widgets.Picker()
+    picker.add_option("A model with a long name " * 3, "long")
+    row = common.TooltipRow("Name", "Tip", picker)
+    column.addWidget(row)
+    common.align_controls([row])
+    screen.resize(800, 400)
+    screen.show()
+    qtbot.wait(20)
+    area = screen.findChild(QScrollArea)
+    assert area is not None
+    threshold = (
+        screen.width()
+        - row.width()
+        + area.verticalScrollBar().sizeHint().width()
+        + row.name.minimumSizeHint().width()
+        + 16
+        + theme.PICKER_MIN_WIDTH
+    )
+    screen.resize(threshold, 400)
+    qtbot.wait(20)
+    assert not row.stacked
+    assert picker.width() == theme.PICKER_MIN_WIDTH
+    screen.resize(threshold - 1, 400)
+    qtbot.waitUntil(lambda: row.stacked)
+    assert picker.width() == theme.PICKER_MIN_WIDTH
+    screen.resize(800, 400)
+    qtbot.waitUntil(lambda: not row.stacked)
+    assert picker.width() > theme.PICKER_MIN_WIDTH

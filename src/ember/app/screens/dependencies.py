@@ -25,6 +25,7 @@ from ember.app.screens.common import (
     plural,
     screen_header,
     scroll_area,
+    scroll_column,
     when,
 )
 
@@ -233,12 +234,19 @@ class DependenciesScreen(QWidget):
         self._checking = False
         self._dirty = True
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(SCREEN_MARGIN, SCREEN_MARGIN, 0, SCREEN_MARGIN)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(SCREEN_SPACING)
-        fixed = QVBoxLayout()
-        fixed.setContentsMargins(0, 0, SCREEN_MARGIN, 0)
+        self.fixed_box = QHBoxLayout()
+        self.fixed_box.setContentsMargins(0, 0, 0, 0)
+        self.fixed = QWidget()
+        self.fixed.setMaximumWidth(theme.CONTENT_MAX_WIDTH + 2 * SCREEN_MARGIN)
+        self.fixed_box.addStretch(0)
+        self.fixed_box.addWidget(self.fixed, 1)
+        self.fixed_box.addStretch(0)
+        fixed = QVBoxLayout(self.fixed)
+        fixed.setContentsMargins(SCREEN_MARGIN, SCREEN_MARGIN, SCREEN_MARGIN, 0)
         fixed.setSpacing(SCREEN_SPACING)
-        layout.addLayout(fixed)
+        layout.addLayout(self.fixed_box)
 
         self.spinner = widgets.Spinner(16)
         self.checking_label = label("Checking versions", "secondary", wrap=False)
@@ -270,6 +278,7 @@ class DependenciesScreen(QWidget):
         # The column count follows the scroll area's own size, which changes
         # when it is first shown as well as when the window resizes.
         self.scroll_area.installEventFilter(self)
+        self.scroll_area.viewport().installEventFilter(self)
         layout.addWidget(self.scroll_area, 1)
         self.groups: list[tuple[str, QLabel]] = []
 
@@ -378,9 +387,9 @@ class DependenciesScreen(QWidget):
             return
         self.state_view.clear()
         self.state_view.hide()
-        content = QWidget()
-        column = QVBoxLayout(content)
-        column.setContentsMargins(0, 0, SCREEN_MARGIN, 0)
+        discard(self.scroll_area.takeWidget())
+        column = scroll_column(self.scroll_area)
+        column.setContentsMargins(SCREEN_MARGIN, 0, SCREEN_MARGIN, SCREEN_MARGIN)
         column.setSpacing(16)
         for key, title, items in groups:
             heading = QLabel(title)
@@ -400,8 +409,6 @@ class DependenciesScreen(QWidget):
         column.addStretch(1)
         self.columns = self.fitting_columns()
         self._place()
-        discard(self.scroll_area.takeWidget())
-        self.scroll_area.setWidget(content)
         self.scroll_area.show()
 
     def fitting_columns(self) -> int:
@@ -415,7 +422,7 @@ class DependenciesScreen(QWidget):
             return COLUMNS
         tile = max(t.minimumSizeHint().width() for t in self.tiles.values())
         return fitting_columns(
-            tile, self.scroll_area, COLUMNS, GAP, margins=SCREEN_MARGIN
+            tile, self.scroll_area, COLUMNS, GAP, margins=2 * SCREEN_MARGIN
         )
 
     def _place(self) -> None:
@@ -428,6 +435,13 @@ class DependenciesScreen(QWidget):
                 grid.addWidget(tile, index // self.columns, index % self.columns)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: D102, N802
+        if (
+            watched is self.scroll_area.viewport()
+            and event.type() == QEvent.Type.Resize
+        ):
+            self.fixed_box.setContentsMargins(
+                0, 0, self.width() - self.scroll_area.viewport().width(), 0
+            )
         if watched is self.scroll_area and event.type() == QEvent.Type.Resize:
             columns = self.fitting_columns()
             if columns != self.columns:
