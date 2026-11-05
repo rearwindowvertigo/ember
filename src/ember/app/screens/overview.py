@@ -87,7 +87,9 @@ BADGES = {
 
 
 def run_badge(run: Run) -> tuple[str, str]:
-    """Return a run's badge word and tone; an orphaned run shows Orphaned."""
+    """Return a run's badge, including flow waits and orphaned parents."""
+    if record.waiting_for_flow(run) is not None:
+        return BADGES[record.WAITING]
     key = ORPHANED if record.orphaned(run) else run.status
     return BADGES.get(key, (run.status, "neutral"))
 
@@ -302,12 +304,17 @@ def run_result(run: Run) -> str:
 def run_detail(run: Run, now: float | None = None) -> str:
     """Return "<worker> · <repository folder> · <result> · <times>".
 
-    The worker leads the line when the title holds the run's subject.
+    Flow waits name the awaited answer first. Otherwise the worker leads
+    the line when the title holds the run's subject.
     """
     folder = PurePosixPath(run.repo).name or run.repo
     times = span_text(run.started_at, run_ended(run), now)
     worker = f"{worker_line(run)} · " if run.subject.strip() else ""
-    return f"{worker}{folder} · {run_result(run)} · {times}"
+    detail = f"{worker}{folder} · {run_result(run)} · {times}"
+    waiting = record.waiting_for_flow(run)
+    if waiting is not None:
+        return f"Waiting for Claude's answer to flow {waiting} · {detail}"
+    return detail
 
 
 def parent_label(parent: FlowItem | PanelItem) -> str:

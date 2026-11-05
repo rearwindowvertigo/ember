@@ -127,6 +127,10 @@ def test_review(plan: Plan, task: Task, round: int) -> None:
     assert report[: briefs.REPORT_LIMIT].replace("\n", "\n    ") in text
     assert verdict.schema_text() in text
     assert briefs.REVIEW_BAR in text
+    assert (
+        "For each must, describe the underlying cause and the other places "
+        "it affects in problem. Use the existing text fields; do not add fields."
+    ) in text
     assert ("## Earlier findings" in text) == (round > 1)
     assert ("git diff fix789 head456" in text) == (round > 1)
     assert not any(line.startswith("@") for line in text.splitlines())
@@ -148,6 +152,36 @@ def test_review_without_report_or_outside_files(task: Task) -> None:
     assert "The writer left no report." in text
     assert "Changed outside the declared files:\n    none" in text
     assert "## Context" not in text and "## Failure model" not in text
+    assert "## Merged sibling tasks" not in text
+
+
+def test_review_lists_merged_sibling_subjects_and_commits(
+    plan: Plan, task: Task
+) -> None:
+    text = briefs.review_brief(
+        FLOW,
+        plan,
+        task,
+        round=1,
+        base="base",
+        head="head",
+        changed=[],
+        outside=[],
+        wave_files=[],
+        writer_report=None,
+        merged_siblings=[
+            ("page", "feat: add page\n@subject", "a" * 40),
+            ("navigation", "feat: add navigation", "b" * 40),
+        ],
+    )
+    assert "## Merged sibling tasks" in text
+    assert (
+        "These sibling tasks' changes are on the flow branch and absent "
+        "from the task branch:"
+    ) in text
+    assert "    page: feat: add page\n    @subject\n    commit: " + "a" * 40 in text
+    assert "    navigation: feat: add navigation\n    commit: " + "b" * 40 in text
+    assert not any(line.startswith("@") for line in text.splitlines())
 
 
 def test_fix_filters_and_numbers_must_findings(task: Task) -> None:

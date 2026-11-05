@@ -591,23 +591,48 @@ def parent(command: str, parent_id: str | None = None) -> dict[str, Any] | None:
     return {"command": command, "id": parent_id, "pid": found[0], "start": found[1]}
 
 
+def waiting_for_flow(run: Run) -> str | None:
+    """Return the parent flow id when an open run awaits the lead's flow answer.
+
+    Missing or unreadable flow records do not establish a lead stop.
+    """
+    if (
+        run.status not in (STARTING, RUNNING, WAITING)
+        or run.parent is None
+        or run.parent["command"] != "flow"
+        or run.parent["id"] is None
+    ):
+        return None
+    from ember.flows import record as flows
+
+    try:
+        flow = flows.load(run.parent["id"], run.env)
+    except flows.FlowError:
+        return None
+    return flow["id"] if flow["status"] == "stopped" else None
+
+
 def orphaned(run: Run) -> bool:
     """Return whether a run's parent command ended and left the run uncollected.
 
     A run started by `emb run` has no parent and is never orphaned. A process
     id reused by another process does not count as the parent, because the
-    start time is compared too.
+    start time is compared too. A flow stopped for the lead retains its runs.
 
     Args:
         run: The run.
 
     Returns:
         True when the run is starting, running or waiting, it records a
-        parent, and that parent process is no longer running.
+        parent, and that parent process is no longer running, unless its flow
+        is stopped for the lead.
     """
     if run.parent is None or run.status not in (STARTING, RUNNING, WAITING):
         return False
-    return not processes.running((run.parent["pid"], run.parent["start"]))
+    return (
+        not processes.running((run.parent["pid"], run.parent["start"]))
+        and waiting_for_flow(run) is None
+    )
 
 
 def load(run_id: str, env: Mapping[str, str] | None = None) -> Run:

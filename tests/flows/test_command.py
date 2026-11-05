@@ -565,6 +565,7 @@ def test_status(env: dict[str, str], flow: dict[str, Any]) -> None:
     with lock.hold(flow["id"], env):
         code, out, _ = invoke(env, "--status", flow["id"], "--json")
         assert code == 0 and json.loads(out)["runner_live"]
+        assert json.loads(out)["tasks"][0]["latest_review"] is None
     code, out, _ = invoke(env, "--status", flow["id"])
     assert code == 0 and "runner_live: False" in out and "a pending" in out
     broken = record.folder(record.new_id(), env)
@@ -575,6 +576,65 @@ def test_status(env: dict[str, str], flow: dict[str, Any]) -> None:
     assert "emb flow: skipped" in err
     code, out, _ = invoke(env, "--status")
     assert code == 0 and f"{flow['id']}  starting  0/2 merged" in out
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_status_review_provenance(
+    env: dict[str, str], flow: dict[str, Any], legacy: bool
+) -> None:
+    task = flow["tasks"][0]
+    task["reviews"] = [
+        {
+            "round": 0,
+            "run": "first",
+            "verdict": "fix",
+            "must": 0,
+            "should": 1,
+            "lead": 0,
+        },
+        {
+            "round": 0,
+            "run": "second",
+            "verdict": "pass",
+            "must": 0,
+            "should": 0,
+            "lead": 0,
+        },
+    ]
+    task["findings"] = [{"severity": "should", "problem": "retained suggestion"}]
+    if not legacy:
+        for review in task["reviews"]:
+            review["review_round"] = 1
+        task["findings"][0].update(round=1, run="first")
+    record.save(flow, env)
+    path = record.folder(flow["id"], env) / record.FLOW_NAME
+    before = path.read_bytes()
+    code, out, err = invoke(env, "--status", flow["id"], "--json")
+    assert code == 0, err
+    report = json.loads(out)["tasks"][0]
+    expected_finding = {
+        **task["findings"][0],
+        "round": None if legacy else 1,
+        "run": None if legacy else "first",
+    }
+    assert report["findings"] == [expected_finding]
+    assert report["reviews"] == task["reviews"]
+    assert report["latest_review"] == {
+        "round": None if legacy else 1,
+        "run": "second",
+        "verdict": "pass",
+        "findings": {"must": 0, "should": 0, "lead": 0},
+    }
+    code, out, err = invoke(env, "--status", flow["id"])
+    assert code == 0, err
+    assert f"latest review: {json.dumps(report['latest_review'])}" in out
+    # Field order is not part of the status contract.
+    printed = next(line.strip() for line in out.splitlines() if "finding:" in line)
+    assert json.loads(printed.removeprefix("finding: ")) == expected_finding
+    watch = command._task_report(flow["id"], task)
+    assert watch["finding_details"] == [expected_finding]
+    assert watch["latest_review"] == report["latest_review"]
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize("kind", record.ANSWER_KINDS)

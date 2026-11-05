@@ -8,6 +8,8 @@ from typing import Any
 import pytest
 
 from ember import paths
+from ember.flows import plan
+from ember.flows import record as flows
 from ember.runs import record
 from ember.runs.record import Run
 
@@ -487,6 +489,65 @@ def test_orphaned(
 def test_run_without_parent_is_never_orphaned(env: dict[str, str]) -> None:
     run = replace(_run(env), status=record.RUNNING, parent=None)
     assert not record.orphaned(run)
+    assert record.waiting_for_flow(run) is None
+
+
+@pytest.mark.parametrize("status", record.STATUSES)
+@pytest.mark.parametrize("flow_status", flows.FLOW_STATUSES)
+def test_flow_parent_state(
+    env: dict[str, str], tmp_path: Path, status: str, flow_status: str
+) -> None:
+    flow_id = flows.new_id()
+    source = plan.from_json(
+        {
+            "dir": str(tmp_path),
+            "tasks": [
+                {"id": "a", "subject": "feat: a", "task": "Task", "files": ["a"]}
+            ],
+        },
+        tmp_path / "plan.json",
+    )
+    worker = plan.Worker("codex", "model", None, "option")
+    flow = flows.new_flow(
+        flow_id,
+        source,
+        top=str(tmp_path),
+        main=str(tmp_path),
+        worktree=str(tmp_path / "flow"),
+        base="a" * 40,
+        writer=worker,
+        reviewer=worker,
+        stall_minutes=10,
+        claim=None,
+    )
+    flow["status"] = flow_status
+    flows.create(flow, source.text, env)
+    run = replace(
+        _run(env),
+        status=status,
+        parent={**_dead_parent(), "command": "flow", "id": flow_id},
+    )
+    active = status in (record.STARTING, record.RUNNING, record.WAITING)
+    waiting = active and flow_status == "stopped"
+    assert record.waiting_for_flow(run) == (flow_id if waiting else None)
+    assert record.orphaned(run) is (active and not waiting)
+
+
+@pytest.mark.parametrize("state", ["missing", "broken", "invalid", "no-id"])
+def test_unreadable_flow_does_not_exempt_orphan(
+    env: dict[str, str], state: str
+) -> None:
+    flow_id = flows.new_id()
+    if state == "broken":
+        folder = record.make_run_dir(flow_id, env)
+        (folder / flows.FLOW_NAME).write_text('{"status": "stopped"}')
+    parent_id = {"invalid": "../flow", "no-id": None}.get(state, flow_id)
+    run = replace(
+        _run(env),
+        parent={**_dead_parent(), "command": "flow", "id": parent_id},
+    )
+    assert record.waiting_for_flow(run) is None
+    assert record.orphaned(run)
 
 
 @pytest.mark.parametrize(

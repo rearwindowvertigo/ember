@@ -50,6 +50,11 @@ def test_brief_contains_steps_schema_and_numbered_plan(
     assert "missing order between dependent tasks" in rendered
     assert "missing check" in rendered
     assert "Do not redesign the plan" in rendered
+    assert (
+        "For each gap with harm high, describe the underlying cause and "
+        "the other places it affects in why. Use the existing text fields; "
+        "do not add fields."
+    ) in rendered
 
 
 @pytest.mark.parametrize(

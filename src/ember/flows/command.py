@@ -871,6 +871,26 @@ def answer_choices(flow_id: str, task: Mapping[str, Any]) -> list[str]:
     ]
 
 
+def _finding_details(task: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Report missing provenance explicitly without inferring older origins."""
+    return [{"round": None, "run": None, **item} for item in task["findings"]]
+
+
+def _latest_review(task: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Report the latest recorded review's own counts and one-based round."""
+    if not task["reviews"]:
+        return None
+    latest = task["reviews"][-1]
+    return {
+        "round": latest.get("review_round"),
+        "run": latest.get("run"),
+        "verdict": latest.get("verdict"),
+        "findings": {
+            severity: latest.get(severity) for severity in ("must", "should", "lead")
+        },
+    }
+
+
 def _task_report(flow_id: str, task: Mapping[str, Any]) -> dict[str, Any]:
     """Keep finding objects and retained cleanup details beside summary counts."""
     result = {
@@ -893,7 +913,8 @@ def _task_report(flow_id: str, task: Mapping[str, Any]) -> dict[str, Any]:
         for severity in ("must", "should", "lead")
     }
     result["denied_paths"] = task.get("denied_paths", [])
-    result["finding_details"] = task["findings"]
+    result["finding_details"] = _finding_details(task)
+    result["latest_review"] = _latest_review(task)
     result["choices"] = answer_choices(flow_id, task)
     return result
 
@@ -1027,6 +1048,7 @@ def _print_watch(result: dict[str, Any], as_json: bool, out: TextIO) -> None:
     )
     for task in result["tasks"]:
         print(_task_line(task), file=out)
+        print(f"  latest review: {json.dumps(task['latest_review'])}", file=out)
         for finding in task["finding_details"]:
             print(f"  finding: {json.dumps(finding)}", file=out)
         for choice in task["choices"]:
@@ -1090,6 +1112,9 @@ def _status(
         flow = _load(flow_id, env)
         flow["runner_live"] = lock.live(flow_id, env)
         _denial_status(flow, env)
+        for task in flow["tasks"]:
+            task["findings"] = _finding_details(task)
+            task["latest_review"] = _latest_review(task)
         if as_json:
             print(json.dumps(flow, indent=2), file=out)
         else:
@@ -1098,6 +1123,9 @@ def _status(
                     print(f"{key}: {value}", file=out)
             for task in flow["tasks"]:
                 print(_task_line(task), file=out)
+                print(f"  latest review: {json.dumps(task['latest_review'])}", file=out)
+                for finding in task["findings"]:
+                    print(f"  finding: {json.dumps(finding)}", file=out)
                 for item in task["denied_paths"]:
                     print(
                         f"  denied {item['path']} ({item['reason']}) "

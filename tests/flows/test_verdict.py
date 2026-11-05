@@ -96,6 +96,8 @@ def test_findings_are_normalized_independently() -> None:
         "scenario": "a caller loses work",
         "earlier": 1,
         "note": "",
+        "round": None,
+        "run": None,
     }
     assert c.severity == "should" and c.note == "demoted: no scenario"
     assert c.line is None and c.file is None
@@ -162,6 +164,26 @@ def test_decision(
     assert review.decision(left) == expected
 
 
+def test_finding_provenance_comes_from_the_caller() -> None:
+    review = verdict.read(
+        json.dumps(
+            {
+                "verdict": "pass",
+                "findings": [{"severity": "should", "round": 99, "run": "invented"}],
+            }
+        ),
+        round=2,
+        run="reviewer-run",
+    )
+    finding = review.findings[0]
+    assert finding.round == 2 and finding.run == "reviewer-run"
+    assert verdict.Finding(**finding.to_json()) == finding
+    old = finding.to_json()
+    del old["round"], old["run"]
+    restored = verdict.Finding(**old)
+    assert restored.round is None and restored.run is None
+
+
 def test_schema_agrees_with_module() -> None:
     schema = json.loads(verdict.schema_text())
     assert schema["$id"] == "ember/review-reply/1"
@@ -170,6 +192,8 @@ def test_schema_agrees_with_module() -> None:
     assert schema["properties"]["verdict"]["enum"] == list(verdict.VERDICTS)
     finding = schema["$defs"]["finding"]
     assert finding["properties"]["severity"]["enum"] == list(verdict.SEVERITIES)
-    assert set(finding["properties"]) == {item.name for item in fields(verdict.Finding)}
+    assert set(finding["properties"]) == {
+        item.name for item in fields(verdict.Finding)
+    } - {"round", "run"}
     assert set(finding["required"]) == set(finding["properties"]) - {"note"}
     assert finding["additionalProperties"] is False

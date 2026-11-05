@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from ember import choices, paths
+from ember import choices, paths, tmux
 from ember.cli import build_parser
 from ember.panels import brief, command, members, record
 from ember.runs import record as runs
@@ -902,3 +902,55 @@ def test_status_preserves_legacy_hidden_startup_denial(h: Harness) -> None:
     code, out, _ = h.invoke("--status", panel_id)
     assert code == 0
     assert f"denied {item['path']} (hidden) run {item['run']} turn 1" in out
+
+
+@pytest.mark.parametrize("already_closed", [False, True])
+def test_close_after_forced_member_close_with_sent_turn(
+    h: Harness, already_closed: bool
+) -> None:
+    h.script("opencode", "@hang")
+    code, out, err = h.start("--member", "opencode:a/b", "--stall", "0.002", "--json")
+    assert code == 83, err
+    panel_id = json.loads(out)["panel"]
+    h.join()
+    saved = runs.load(record.load(panel_id, h.env)["members"][0]["run"], h.env)
+    assert saved.turn_state == runs.SENT
+    assert Path(saved.worktree).is_dir()
+    core_ = h.factory(h.env)
+    if already_closed:
+        # Older Ember versions closed the session but retained the sent worktree.
+        tmux.kill(saved.id, env=h.env)
+        runs.update(saved, {"status": runs.CLOSED})
+    else:
+        assert core_.close(saved.id, force=True) == 0
+        assert not Path(saved.worktree).exists()
+    code, _, err = h.invoke("--close", panel_id, "--json")
+    assert code == 0, err
+    saved = runs.load(saved.id, h.env)
+    assert saved.status == runs.CLOSED and saved.turn_state == runs.SENT
+    assert not Path(saved.worktree).exists()
+    assert saved.worktree not in git(h.repo, "worktree", "list", env=h.env)
+    assert record.load(panel_id, h.env)["members"][0]["closed"]
+
+
+@pytest.mark.parametrize("last_exit", [71, 73])
+@pytest.mark.parametrize("engine", ["opencode", "codex"])
+@pytest.mark.parametrize("turn", [1, 2])
+def test_panel_close_handles_failed_send_with_no_live_session(
+    h: Harness, last_exit: int, engine: str, turn: int
+) -> None:
+    h.script(engine, "@hang")
+    code, out, err = h.start("--member", f"{engine}:a/b", "--stall", "0.002", "--json")
+    assert code == 83, err
+    panel_id = json.loads(out)["panel"]
+    h.join()
+    saved = runs.load(record.load(panel_id, h.env)["members"][0]["run"], h.env)
+    tmux.kill(saved.id, env=h.env)
+    assert saved.turn_state == runs.SENT
+    runs.update(saved, {"status": runs.FAILED, "last_exit": last_exit, "turn": turn})
+    assert Path(saved.worktree).is_dir()
+    code, out, err = h.invoke("--close", panel_id, "--json")
+    assert code == 0, err
+    assert json.loads(out)["members"][0]["closed"]
+    assert runs.load(saved.id, h.env).status == runs.CLOSED
+    assert not Path(saved.worktree).exists()

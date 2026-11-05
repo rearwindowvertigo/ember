@@ -102,6 +102,22 @@ def flow(env: dict[str, str], **changes: Any) -> dict[str, Any]:  # noqa: ANN401
     return record
 
 
+def test_stopped_flow_keeps_its_open_run(env: dict[str, str]) -> None:
+    parent = flow(env, status="stopped", ended_at=None)
+    child = run(
+        env,
+        status=runs.WAITING,
+        ended_at=None,
+        parent={"command": "flow", "id": parent["id"], "pid": 0, "start": 0},
+    )
+    parent["tasks"][0].update(status="stopped", writer_run=child.id)
+    flows.save(parent, env)
+    result = prune.remove(0, env=env)
+    assert result.removed == []
+    assert flows.load(parent["id"], env)["status"] == "stopped"
+    assert runs.load(child.id, env) == child
+
+
 def panel(env: dict[str, str], *members: runs.Run, **changes: Any) -> dict[str, Any]:  # noqa: ANN401
     entries = [
         dict(
