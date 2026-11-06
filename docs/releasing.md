@@ -6,6 +6,11 @@
   `main`, keeps a release pull request open with the next version and its
   changelog section, and on merge tags the release `v<version>` and creates
   the GitHub release.
+- The `check` workflow runs `dev/release_only.py` first. When a pull request
+  changes only `CHANGELOG.md`, `.release-please-manifest.json` and the
+  project version (in `pyproject.toml`, in the `ember-app` entry of
+  `uv.lock` and on the `Skill version:` line of `skill/SKILL.md`), the job
+  passes without the full check. Any other change runs `make check`.
 - `feat` commits raise the minor version, `fix` and `perf` the patch version,
   and a breaking change the major version. Before 1.0.0, a breaking change
   raises the minor version.
