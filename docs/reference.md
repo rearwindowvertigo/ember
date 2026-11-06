@@ -1255,6 +1255,9 @@ The shell allows these command prefixes with arguments:
 one `Bash(<command>:*)` rule per listed prefix. Other commands have no
 allow rule, including `git -C <dir> ...`. Claude Code checks the commands
 of a compound shell command separately. Permission prompts are disabled.
+Claude Code runs its own read-only commands, such as `ls`, `cat` and
+`echo`, without an allow rule. Commands that create or change a file,
+such as `touch`, are refused.
 The git write verbs remain refused as for editing runs: `add`, `commit`,
 `push`, `merge`, `rebase`, `reset`, `checkout`, `switch`, `branch`,
 `cherry-pick`, `tag`, `stash`, `restore`, `rm`, `mv`, `am`, `apply`, `pull`

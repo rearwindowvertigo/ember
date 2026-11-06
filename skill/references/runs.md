@@ -219,7 +219,9 @@ source checkout keep that checkout protected as read-only.
 A read-only Claude CLI worker has `Bash` limited to these commands, each
 with any arguments: `git diff`, `git log`, `git show`, `git status`,
 `git blame`, `git grep`, `git ls-files`, `git rev-parse`, `make check`,
-`make test`, `pytest` and `uv run pytest`. Every other command is refused.
+`make test`, `pytest` and `uv run pytest`. Claude Code also runs its own
+read-only commands, such as `ls`, `cat` and `echo`, without a rule. Every
+other command, including any that creates or changes a file, is refused.
 The git write verbs stay refused as for editing runs.
 
 A new run worktree holds only tracked files, with no installed dependencies.
