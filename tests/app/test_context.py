@@ -704,3 +704,101 @@ def test_flows_default_inactive_and_injectable(
     with qtbot.assertNotEmitted(context.flows.changed, wait=50):
         context.flows.reload()
     assert context.tasks.pending() == 0
+
+
+def test_defaults_and_changed_compare_saved_values_even_with_invalid_panel(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    """Defaults accompany each read; invalid answers do not mask saved changes."""
+    choices.set_settings({"app.theme": "dark"}, env=env)
+    with db.open_write(env=env) as conn:
+        assert conn is not None
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            ("panel.members", '"invalid"'),
+        )
+    context = _ready(env, qtbot)
+    assert context.settings()["errors"]
+    assert context.setting_changed("app.theme")
+    assert not context.setting_changed("worker.network")
+    assert context.settings()["defaults"] == {
+        key: spec.default(env) for key, spec in choices.KEYS.items()
+    }
+
+
+def test_clear_shares_save_queue_and_waits_for_confirmed_snapshot(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Interleaved saves and clears use each preceding generation and callbacks."""
+    choices.set_settings({"app.theme": "dark"}, env=env)
+    context = _ready(env, qtbot)
+    tasks = _hold_tasks(context, monkeypatch)
+    results: list[dict[str, Any] | Exception] = []
+    order: list[str] = []
+    context.settings_changed.connect(lambda _s: order.append("settings"))
+
+    def done(_snapshot: dict[str, Any]) -> None:
+        """Record completion after the snapshot is published."""
+        order.append("done")
+
+    context.save_settings({"worker.network": "on"})
+    context.clear_settings(["app.theme"], done, result=results.append)
+    context.clear_settings(["app.theme"])
+    context.save_settings({"app.theme": "light"})
+    assert len(tasks) == 1
+    assert context.setting_changed("app.theme")
+    work, saved, _ = tasks.pop(0)
+    saved(work())
+    assert context.setting_changed("app.theme")
+    work, saved, _ = tasks.pop(0)
+    snapshot = work()
+    assert context.setting_changed("app.theme")
+    saved(snapshot)
+    assert not context.setting_changed("app.theme")
+    assert "app.theme" not in context.settings()["settings"]
+    assert order == ["settings", "settings", "done"]
+    assert results == [snapshot]
+    while tasks:
+        work, saved, _ = tasks.pop(0)
+        saved(work())
+    assert context.setting("app.theme") == "light"
+    assert context.setting("worker.network") == "on"
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_clear_failure_keeps_marker_and_reports_existing_signals(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, stale: bool
+) -> None:
+    """A refused clear preserves the saved value and uses the save failure path."""
+    choices.set_settings({"app.theme": "dark"}, env=env)
+    context = _ready(env, qtbot)
+    tasks = _hold_tasks(context, monkeypatch)
+    results: list[dict[str, Any] | Exception] = []
+    messages: list[str] = []
+    context.error.connect(messages.append)
+    context.stale.connect(lambda: messages.append("stale"))
+    context.clear_settings(["app.theme"], result=results.append)
+    context.save_settings({"worker.network": "on"}, result=results.append)
+    work, _, failed = tasks.pop(0)
+    if stale:
+        choices.set_settings({"app.theme": "light"}, env=env)
+        with pytest.raises(db.StaleGenerationError) as caught:
+            work()
+        error = caught.value
+    else:
+        error = db.DatabaseBusyError("busy")
+    failed(error)
+    assert context.setting_changed("app.theme")
+    while tasks:
+        work, loaded, _ = tasks.pop(0)
+        loaded(work())
+    assert context.setting_changed("app.theme")
+    assert results[0] is error
+    assert len(messages) == 1
+    if stale:
+        assert results == [error, error]
+        assert messages == ["stale"]
+        assert context.setting("app.theme") == "light"
+    else:
+        assert context.setting("worker.network") == "on"
+        assert "busy" in messages[0]

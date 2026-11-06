@@ -45,6 +45,14 @@ SUBTITLE = "How Ember starts and looks, and how workers run."
 THEMES = (("system", "System"), ("light", "Light"), ("dark", "Dark"))
 """The `app.theme` choices."""
 
+SETTING_KEYS = {
+    "Start at login": "app.autostart",
+    "Theme": "app.theme",
+    "Worker network": "worker.network",
+    "Terminal": "terminal",
+}
+"""The single-value rows and their standing setting keys."""
+
 OTHER = ""
 """The terminal picker's value for Other command; never a valid setting."""
 
@@ -197,6 +205,8 @@ class SettingsScreen(QWidget):
     ) -> None:
         """Add a setting row to a card and keep it for `align_controls`."""
         row = TooltipRow(name, tooltip, control)
+        if name in SETTING_KEYS:
+            row.enable_reset(lambda: self._reset(SETTING_KEYS[name]))
         self.tip_rows[name] = row
         column.addWidget(row)
 
@@ -221,6 +231,8 @@ class SettingsScreen(QWidget):
             self.theme.blockSignals(False)
         self._draw_terminal(str(answers["terminal"]["value"]))
         self._draw_paths(list(answers["sandbox.read"]["value"]))
+        for name, key in SETTING_KEYS.items():
+            self.tip_rows[name].set_changed(self.context.setting_changed(key))
 
     def _draw_terminal(self, value: str) -> None:
         env = self.context.env
@@ -282,6 +294,27 @@ class SettingsScreen(QWidget):
 
     # Saving
 
+    def _reset(self, key: str) -> None:
+        """Clear a saved setting and apply its confirmed default."""
+
+        def cleared(_snapshot: dict[str, Any]) -> None:
+            """Close Other command and apply the default theme after a reset."""
+            if key == "terminal":
+                self._other_open = False
+                self._redraw()
+            elif key == "app.theme":
+                self._apply_theme(str(self.context.setting(key)))
+
+        self.context.clear_settings([key], cleared)
+
+    def _apply_theme(self, value: str) -> None:
+        """Apply the confirmed theme setting to the application."""
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            mode = theme.resolve_mode(value, app)
+            if mode != theme.current_mode():
+                theme.apply(app, mode)
+
     def _save(
         self,
         values: dict[str, object],
@@ -294,11 +327,7 @@ class SettingsScreen(QWidget):
             return
 
         def applied(_snapshot: dict[str, Any]) -> None:
-            app = QApplication.instance()
-            if isinstance(app, QApplication):
-                mode = theme.resolve_mode(value, app)
-                if mode != theme.current_mode():
-                    theme.apply(app, mode)
+            self._apply_theme(value)
 
         self._save({"app.theme": value}, applied)
 

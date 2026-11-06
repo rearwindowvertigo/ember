@@ -124,7 +124,7 @@ class AppContext(QObject):
         self._autostart_reason: str | None = None
         self._save_queue: deque[
             tuple[
-                dict[str, object],
+                dict[str, object] | list[str],
                 Callable[[dict[str, Any]], None] | None,
                 Callable[[dict[str, Any] | Exception], None] | None,
             ]
@@ -138,7 +138,7 @@ class AppContext(QObject):
         return self._settings is not None
 
     def settings(self) -> dict[str, Any]:
-        """Return the last `choices.snapshot` result; empty before the first."""
+        """Return the last snapshot with key defaults; empty before the first."""
         return {} if self._settings is None else self._settings
 
     def setting(self, name: str) -> Any:  # noqa: ANN401 - settings are typed per key
@@ -167,7 +167,6 @@ class AppContext(QObject):
         after: Callable[[bool], None] | None,
     ) -> None:
         """Read settings; `after` receives whether the read succeeded."""
-        env = self.env
 
         def loaded(snapshot: dict[str, Any]) -> None:
             """Publish the snapshot and notify the read's callbacks."""
@@ -190,7 +189,40 @@ class AppContext(QObject):
             if after is not None:
                 after(False)
 
-        self.tasks.run(lambda: choices.snapshot(env=env), loaded, failed)
+        self.tasks.run(self._settings_snapshot, loaded, failed)
+
+    def _settings_snapshot(self) -> dict[str, Any]:
+        """Read the snapshot and each key's environment-dependent default."""
+        snapshot = choices.snapshot(env=self.env)
+        snapshot["defaults"] = {
+            key: spec.default(self.env) for key, spec in choices.KEYS.items()
+        }
+        return snapshot
+
+    def setting_changed(self, key: str) -> bool:
+        """Compare the saved value with its default from the same read task."""
+        snapshot = self.settings()
+        saved = snapshot.get("settings", {})
+        defaults = snapshot.get("defaults", {})
+        return key in saved and key in defaults and saved[key] != defaults[key]
+
+    def clear_settings(
+        self,
+        keys: list[str],
+        done: Callable[[dict[str, Any]], None] | None = None,
+        *,
+        result: Callable[[dict[str, Any] | Exception], None] | None = None,
+    ) -> None:
+        """Clear saved keys through the save queue, with save_settings callbacks.
+
+        Args:
+            keys: Standing settings to return to their defaults.
+            done: Called with the new snapshot after the clear succeeds.
+            result: Called once with the new snapshot or the clear's exception.
+        """
+        self._save_queue.append((list(keys), done, result))
+        if not self._saving:
+            self._next_save()
 
     def save_settings(
         self,
@@ -233,8 +265,11 @@ class AppContext(QObject):
 
         def save() -> dict[str, Any]:
             """Write this save and read its new snapshot."""
-            choices.set_settings(values, expect_generation=expect, env=env)
-            return choices.snapshot(env=env)
+            if isinstance(values, list):
+                choices.clear_settings(values, expect_generation=expect, env=env)
+            else:
+                choices.set_settings(values, expect_generation=expect, env=env)
+            return self._settings_snapshot()
 
         def saved(snapshot: dict[str, Any]) -> None:
             """Publish the snapshot and call both success callbacks."""

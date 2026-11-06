@@ -549,6 +549,8 @@ class MenuScreen(QWidget):
         panel_layout.addWidget(self.add_member, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(panel_card)
         layout.addStretch(1)
+        for key, row in rows.items():
+            row.enable_reset(lambda key=key: context.clear_settings([key]))
         align_controls(rows.values())
 
         context.settings_changed.connect(self._settings_changed)
@@ -601,6 +603,8 @@ class MenuScreen(QWidget):
             picker.blockSignals(False)
         self.whole.setChecked(answers["flow.whole_review"]["value"] == "on")
         self._fill_panel(answers, panel)
+        for key, row in self.tip_rows.items():
+            row.set_changed(self.context.setting_changed(key))
         align_controls(self.tip_rows.values())
         self._chain_focus()
 
@@ -713,6 +717,14 @@ class MenuScreen(QWidget):
             order.append(self.panel_info)
         order.extend(self.member_removes.values())
         order.extend((self.remove_all, self.add_member))
+        for row in tips.values():
+            last = (
+                row.control.buttons()[-1]
+                if isinstance(row.control, widgets.Segmented)
+                else row.control
+            )
+            if row.reset is not None:
+                order.insert(order.index(last) + 1, row.reset)
         chain_tab_order(order)
 
     def _settings_changed(self, *_args: object) -> None:
