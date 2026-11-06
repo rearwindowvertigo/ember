@@ -994,7 +994,8 @@ complete `next:` or `owner:` line, or null. The first matching row applies:
 |---|---|---|
 | The run has a `parent` | `parent` | null |
 | Pending owner actions recorded | `owner` | null |
-| Closed and either read-only, without commits, with its last commit contained in its base branch, or with no branch left in its checkout | `finish` | `next: emb choices --finish <claim>`; null without a claim or when its status is `gone` |
+| Closed and either read-only, without commits, with its last commit contained in its base branch, or with no branch left in its checkout; claim status is `gone` | `done` | null |
+| Closed under the same conditions, with an open or unknown claim status, or no claim | `finish` | `next: emb choices --finish <claim>`; null without a claim |
 | Closed with uncontained editing commits on a branch that still exists | `merge` | Verify and merge line below |
 | Status `failed`, or a turn not `sent` whose `last_exit` is nonzero | `failed` | The exit line for `last_exit` and its saved variant; older records fall back to the provider kind; null for 0 or null, and the exit-1 line for an unknown code |
 | Status `starting`, or turn 0 | `starting` | `next: emb run --status <run>` |
@@ -1002,6 +1003,10 @@ complete `next:` or `owner:` line, or null. The first matching row applies:
 | Turn `sent`, or result collection remains unfinished | `recover` | `next: emb run --recover <run>` |
 | Editing run with commits whose last commit is not contained in its base branch | `merge` | Verify and merge line below |
 | Otherwise | `close` | `next: emb run --close <run>` |
+
+The `done` step appears in text and JSON status with no `next:` line.
+`session_state` still reports the tmux session's state. Runs without claim
+data keep `finish`.
 
 A run without a parent records a wait for printed `owner:` actions,
 including failures and denied paths that print an owner line. Denials
@@ -1119,7 +1124,14 @@ evidence that no provider error occurred.
 | 76 | Branch or `HEAD` moved; nothing committed | `next: git -C <worktree> log --oneline -3` |
 | 77 | `git commit was refused`, or `git add failed` | `next: emb run --send <run> --message-file <file>` sends hook output with the correction for a refused commit; a failed `git add` points to `next: emb run --recover <run>` |
 | 80 | The turn ended with no reply | `next: emb run --screen <run>, then emb run --send <run> ...` |
+| 84 | A start, `--send` or `--recover` otherwise succeeded but ends with a pending owner wait | Each pending `owner:` line on standard error, once per invocation |
 | 124 | Stall; the turn may still be running | `next: emb run --recover <run>` |
+
+Exit 84 (`OWNER_WAIT`) also applies to `--recover` with nothing left to
+collect when an owner wait remains. Other nonzero exits keep their codes
+and take precedence. The turn's recorded result, including `last_exit` and
+the turn result's `exit`, is unchanged. Internal run calls by flows, gap
+checks and panels do not return 84.
 
 These `emb run` exits also print the following exact report lines.
 Placeholders name the run's branch or worktree. Other exits and variants
@@ -3074,6 +3086,12 @@ the run, so a contained, closed run with an unfinished claim gives
 `next: emb choices --finish <claim>`. A kept branch, a cleanup failure, or
 no readable matching run without a parent gives no derived next line.
 
+When the newest matching run without a parent has a pending owner wait,
+the command prints each complete pending `owner:` line in recorded order
+on standard error, including with `--json`. It prints no derived `next:`
+line for that run. The wait does not refuse the merge or change a successful
+exit from 0, including when cleanup keeps the branch.
+
 A flow branch `ember/flow/<flow id>` follows the run-branch cleanup path
 without a run record, with the worktree its flow record names. Cleanup keeps it while the flow's runner is live, with
 `the flow <id> is running` and `next: emb flow --status <id>`. A task branch
@@ -3092,6 +3110,7 @@ the same rules.
 | `contained_before` | Whether the branch was already contained |
 | `cleanup` | The cleanup's list, as `emb cleanup --json` prints it |
 | `next` | The derived next line printed on standard error, or null |
+| `owner_wait` | Ordered array of complete pending `owner:` lines, also printed on standard error; present only when nonempty |
 
 The merge JSON object has no `step` field.
 
@@ -3825,9 +3844,14 @@ Below a window width of 960 pixels, the sidebar collapses to 64 pixels wide:
 the Ember mark without its name, followed by centred 40 by 36 pixel rows
 showing only each screen's icon. Each row's tooltip and accessible name are
 the screen's name; a count above zero appears as a pill at the icon's top
-right, in `type-caption` with `text-primary` on `bg-subtle`, and is added to
-the tooltip, such as `Overview · 2 live`. The version line is hidden and the
-mark's tooltip is `Ember <version>`.
+right, in `type-caption` with `on-accent` text (`#ffffff` in both themes)
+on `accent`. The pill is 14 pixels tall and at least 14 pixels wide, with
+its left edge 4 pixels left of the icon's right edge and its top 7 pixels
+above the icon's top, clamped inside the row. A 2-pixel ring matches the
+row's current background: sidebar, hover or selected. The count is added
+to the tooltip, such as `Overview · 2 live`, and keeps the row's accessible
+description. Full sidebar counts use a 22-pixel-tall badge. The version
+line is hidden and the mark's tooltip is `Ember <version>`.
 
 A ghost button with the `panel-left` icon and tooltip `Hide sidebar` sits
 at the top right of the full sidebar, on the line of the mark and name, or
