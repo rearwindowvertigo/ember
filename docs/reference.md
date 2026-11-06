@@ -3828,6 +3828,14 @@ inside its own frame.
 At window widths of 960 pixels and above, the sidebar is 220 pixels wide
 and shows the Ember mark and name, one row per screen (Overview, Team,
 Engines, Dependencies, Settings) and `Ember <version>` at the bottom.
+A row's count appears as a pill in `type-caption` with `on-accent` text
+(`#ffffff` in both themes) on `accent`. The pill is 18 pixels tall and at
+least 18 pixels wide; a wider count makes it wider. A 2-pixel ring matches
+the row's current background: sidebar, hover or selected. Inside the ring,
+2 pixels of padding on the left and right keep the count clear of the ring.
+In the full sidebar the pill sits at the right end of the row, centred
+vertically.
+
 Overview's row counts
 top-level live items: standalone live runs plus every flow and panel in
 Live, including stopped flows waiting for Claude and gone runners or panel
@@ -3843,16 +3851,11 @@ or missing, only above zero. A screen is created the first time it is shown.
 Below a window width of 960 pixels, the sidebar collapses to 64 pixels wide:
 the Ember mark without its name, followed by centred 40 by 36 pixel rows
 showing only each screen's icon. Each row's tooltip and accessible name are
-the screen's name; a count above zero appears as a pill at the icon's top
-right, in `type-caption` with `on-accent` text (`#ffffff` in both themes)
-on `accent`. The pill is 18 pixels tall and at least 18 pixels wide, and
-sits in the row's top-right corner; a wider count extends it to the left.
-A 2-pixel ring matches the row's current background: sidebar, hover or
-selected. Inside the ring, 2 pixels of padding on the left and right keep
-the count clear of the ring. The count is added
-to the tooltip, such as `Overview · 2 live`, and keeps the row's accessible
-description. Full sidebar counts use a 22-pixel-tall badge. The version
-line is hidden and the mark's tooltip is `Ember <version>`.
+the screen's name. A count above zero appears as the same pill, in the
+row's top-right corner over the icon's top right; a wider count extends it
+to the left. The count is added to the tooltip, such as
+`Overview · 2 live`, and keeps the row's accessible description. The
+version line is hidden and the mark's tooltip is `Ember <version>`.
 
 A ghost button with the `panel-left` icon and tooltip `Hide sidebar` sits
 at the top right of the full sidebar, on the line of the mark and name, or

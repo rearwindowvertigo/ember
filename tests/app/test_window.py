@@ -496,12 +496,18 @@ def test_collapsed_count_pill_and_tooltip(
             assert inside.height() >= item.count_label.fontMetrics().height()
     window.resize(960, 600)
     assert item.count() == 12
-    assert item.count_label.property("role") == "badge"
-    assert item.count_label.height() == 22
-    assert item.count_label.minimumWidth() == 0
+    QCoreApplication.processEvents()
+    assert item.count_label.property("role") == "nav-count"
+    assert item.count_label.height() == window_module.NAV_COUNT_SIZE
+    assert item.count_label.minimumWidth() == window_module.NAV_COUNT_SIZE
     margins = item.count_label.contentsMargins()
-    assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (
-        window_module.BADGE_MARGINS
+    assert min(margins.left(), margins.right()) >= 4
+    assert min(margins.top(), margins.bottom()) >= 2
+    pill = item.count_label.geometry()
+    assert pill.right() == item.width() - 11
+    assert pill.center().y() == item.rect().center().y()
+    assert item.count_label.contentsRect().width() >= (
+        item.count_label.fontMetrics().horizontalAdvance("12")
     )
     assert item.toolTip() == ""
 

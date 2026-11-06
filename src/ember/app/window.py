@@ -67,17 +67,8 @@ MINIMUM_HEIGHT = 480
 ICON_SIZE = 18
 """The size of a sidebar row's icon."""
 
-BADGE_HEIGHT = 22
-"""The height of a full sidebar row's count, in pixels."""
-
-BADGE_MARGINS = (8, 0, 8, 0)
-"""A full sidebar row count's padding, left, top, right and bottom."""
-
 NAV_COUNT_SIZE = 18
-"""The height and least width of a collapsed sidebar row's count pill."""
-
-NAV_COUNT_MARGINS = (4, 2, 4, 2)
-"""The collapsed pill's 2-pixel ring plus its padding, left, top, right and bottom."""
+"""The height and least width of a sidebar row's count pill."""
 
 SIDEBAR_BREAKPOINT = 960
 """Window widths below this show the sidebar's icon-only rows."""
@@ -144,7 +135,7 @@ def app_version() -> str:
 
 
 class NavButton(QPushButton):
-    """A screen's icon, title and count, or an icon and count pill when collapsed."""
+    """A screen's icon, title and count pill, or its icon and pill when collapsed."""
 
     def __init__(self, key: str, title: str, icon_name: str) -> None:
         """Create the row.
@@ -173,9 +164,10 @@ class NavButton(QPushButton):
         self.text_label = QLabel(title)
         self.text_label.setFont(theme.font("label"))
         self.count_label = QLabel()
-        self.count_label.setProperty("role", "badge")
+        self.count_label.setProperty("role", "nav-count")
         self.count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.count_label.setFixedHeight(BADGE_HEIGHT)
+        self.count_label.setFixedHeight(NAV_COUNT_SIZE)
+        self.count_label.setMinimumWidth(NAV_COUNT_SIZE)
         self.count_label.setFont(theme.font("caption"))
         self.count_label.hide()
         for part in (self.icon_label, self.text_label, self.count_label):
@@ -214,15 +206,6 @@ class NavButton(QPushButton):
         margin = 0 if collapsed else 10
         self.row.setContentsMargins(margin, 0, margin, 0)
         self.row.setAlignment(self.icon_label, Qt.AlignmentFlag.AlignCenter)
-        self.count_label.setProperty("role", "nav-count" if collapsed else "badge")
-        widgets.repolish(self.count_label)
-        # A repolish keeps the margins of the role the label was first shown
-        # with, so set each role's ring and padding here.
-        self.count_label.setContentsMargins(
-            *(NAV_COUNT_MARGINS if collapsed else BADGE_MARGINS)
-        )
-        self.count_label.setFixedHeight(NAV_COUNT_SIZE if collapsed else BADGE_HEIGHT)
-        self.count_label.setMinimumWidth(NAV_COUNT_SIZE if collapsed else 0)
         if not collapsed:
             self.row.addWidget(self.count_label, 0, Qt.AlignmentFlag.AlignVCenter)
         self.setFixedSize(
