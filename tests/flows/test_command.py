@@ -177,11 +177,27 @@ def test_dry_run(
     if as_json:
         result = json.loads(out)
         assert result["waves"] == [["a"], ["b"]]
-        assert result["writer"]["source"] == "plan"
+        assert result["writer"] == {
+            "engine": "codex",
+            "model": "gpt-5",
+            "effort": "high",
+            "source": "plan",
+        }
+        assert result["reviewer"] == {
+            "engine": "codex",
+            "model": "gpt-5",
+            "effort": "low",
+            "source": "plan",
+        }
         assert result["check"] == []
         gapcheck = result["gapcheck"]
     else:
-        assert "writer codex:gpt-5@high (plan)" in out
+        assert out.splitlines()[:2] == [
+            "plan, writer: codex gpt-5 · high (plan)",
+            "plan, reviewer: codex gpt-5 · low (plan)",
+        ]
+        assert "plan, writer:" not in err
+        assert "plan, reviewer:" not in err
         assert "wave 1:\n  a: a.py\nwave 2:\n  b: b.py" in out
         gapcheck = out.split("gap check: ")[1].strip()
     assert shlex.split(gapcheck) == [
@@ -1517,6 +1533,93 @@ def test_dry_run_reads_the_flow_settings(env: dict[str, str], plan_file: Path) -
     assert result["whole_review"] is False
     assert result["gapcheck_status"] == "run"
     assert "--engine" not in result["gapcheck"]
+
+    code, out, err = invoke(env, "--plan", str(plan_file), "--dry-run")
+    assert code == 0, err
+    assert out.splitlines()[:2] == [
+        "Team, Single tasks Writer: codex gpt-5 · high (single.writer)",
+        "Team, Flow reviewer: codex gpt-5-mini · low (flow.reviewer)",
+    ]
+    assert "Team," not in err
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("default_effort", [None, "medium"])
+def test_dry_run_announces_worker_options(
+    env: dict[str, str],
+    plan_file: Path,
+    as_json: bool,
+    default_effort: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Options replace plan workers and retain their source and default effort."""
+    monkeypatch.setattr(
+        StubDriver, "default_effort", lambda self, model: default_effort
+    )
+    code, out, err = invoke(
+        env,
+        "--plan",
+        str(plan_file),
+        "--dry-run",
+        "--writer",
+        "claude:opus@high",
+        "--reviewer",
+        "codex:other",
+        *(["--json"] if as_json else []),
+    )
+    assert code == 0, err
+    if as_json:
+        result = json.loads(out)
+        assert result["writer"] == {
+            "engine": "claude",
+            "model": "opus",
+            "effort": "high",
+            "source": "option",
+        }
+        assert result["reviewer"] == {
+            "engine": "codex",
+            "model": "other",
+            "effort": default_effort,
+            "source": "option",
+        }
+    else:
+        assert out.splitlines()[:2] == [
+            "option, writer: claude opus · high (option)",
+            f"option, reviewer: codex other · {default_effort or 'default'} (option)",
+        ]
+    assert "option, writer:" not in err
+    assert "option, reviewer:" not in err
+
+
+@pytest.mark.parametrize("source", ["option", "plan"])
+@pytest.mark.parametrize("same", [False, True])
+def test_dry_run_announces_separate_effort_source(
+    env: dict[str, str], plan_file: Path, source: str, same: bool
+) -> None:
+    """A matching menu supplies effort when an explicit worker omits it."""
+    choices.set_settings(
+        {
+            "single.writer": "codex:gpt-5",
+            "single.reviewer": "codex:gpt-5",
+            "flow.writer": "same" if same else "codex:gpt-5",
+            "flow.reviewer": "same" if same else "codex:gpt-5",
+        },
+        env=env,
+    )
+    options = []
+    if source == "option":
+        options = ["--writer", "codex:gpt-5", "--reviewer", "codex:gpt-5"]
+    else:
+        data = json.loads(plan_file.read_text())
+        del data["writer"]["effort"], data["reviewer"]["effort"]
+        plan_file.write_text(json.dumps(data))
+    code, out, err = invoke(env, "--plan", str(plan_file), "--dry-run", *options)
+    assert code == 0, err
+    row = "single" if same else "flow"
+    assert out.splitlines()[:2] == [
+        f"{source}, {role}: codex gpt-5 · high (model: {source}, effort: {row}.{role})"
+        for role in plan.ROLES
+    ]
 
 
 def test_plan_parallel_wins_over_the_setting(

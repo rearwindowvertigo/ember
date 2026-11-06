@@ -25,7 +25,7 @@ from ember.flows import lock, plan, record
 from ember.gapcheck import policy
 from ember.runs import exits
 from ember.runs import record as run_record
-from ember.runs.core import STALL_MINUTES, Core
+from ember.runs.core import STALL_MINUTES, Core, WorkerSelection
 
 NOT_MERGED = 82
 POLL_SECONDS = 1.0
@@ -129,6 +129,7 @@ def _worker(
     """Check a worker and resolve its effective effort from this settings read."""
     plan.check_worker(worker, settings, core.env, core.load_driver)
     effort = worker.effort
+    effort_source = worker.effort_source
     row = (settings.get("menu") or {}).get(plan.ROW[role])
     if (
         effort is None
@@ -138,6 +139,8 @@ def _worker(
         and row["model"] == worker.model
     ):
         effort = row["effort"]
+        if effort is not None:
+            effort_source = f"single.{role}" if row.get("same") else plan.ROW[role]
     driver = core.load_driver(worker.engine)
     if effort is None:
         effort = driver.default_effort(worker.model)
@@ -147,7 +150,7 @@ def _worker(
             f"{worker.engine} does not take the effort {effort}",
             "next: emb flow --help",
         )
-    return replace(worker, effort=effort)
+    return replace(worker, effort=effort, effort_source=effort_source)
 
 
 def _require_tool(name: str, env: Mapping[str, str]) -> None:
@@ -461,8 +464,19 @@ def _dry_run(
             file=out,
         )
     else:
-        print(f"writer {writer.text()} ({writer.source})", file=out)
-        print(f"reviewer {reviewer.text()} ({reviewer.source})", file=out)
+        for worker in (writer, reviewer):
+            print(
+                WorkerSelection(
+                    engine=worker.engine,
+                    model=worker.model,
+                    effort=worker.effort,
+                    model_source=worker.model_source,
+                    effort_source=worker.effort_source,
+                    screen=worker.screen,
+                    row=worker.row,
+                ).line(),
+                file=out,
+            )
         print(f"base {base}", file=out)
         print(
             f"rounds {document.rounds} fix rounds, at most {document.rounds + 1} "
