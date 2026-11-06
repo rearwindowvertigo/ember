@@ -18,9 +18,6 @@
 ### Fixed
 
 * **app:** collect garbage only on the GUI thread ([6974518](https://github.com/rearwindowvertigo/ember/commit/69745181b432a827e51031abec36f2935373a6d1))
-* **app:** start without the crash log when it cannot be opened ([74d9a36](https://github.com/rearwindowvertigo/ember/commit/74d9a361352d1ada59d5dbf359987b2ed5fd9bc8))
-* **cli:** add the capacity offer rule to the uncertain report line ([c772173](https://github.com/rearwindowvertigo/ember/commit/c772173e6a12b8b2c383b3cd58a9a0ce3f965b86))
-* **cli:** limit the start report line to starts and keep read-only starts going ([c086a7b](https://github.com/rearwindowvertigo/ember/commit/c086a7b2e5f38f583d0c606dd269cf0d324488ef))
 
 ## [0.15.0](https://github.com/rearwindowvertigo/ember/compare/v0.14.1...v0.15.0) (2026-11-05)
 
