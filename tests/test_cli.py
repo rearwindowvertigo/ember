@@ -1625,6 +1625,118 @@ def finished_cli_run(
     return capsys.readouterr().out.splitlines()[0].removeprefix("run ")
 
 
+@pytest.mark.parametrize("mode", ["start", "send", "recover", "recover-collected"])
+@pytest.mark.parametrize("denial", ["none", "hidden", "protected"])
+def test_finished_run_command_owner_wait_exit(
+    tmp_path: Path,
+    run_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mode: str,
+    denial: str,
+) -> None:
+    from ember import engines, sandbox
+    from ember.runs import core, exits, record
+
+    stub = _stub_engine()
+    monkeypatch.setattr(core, "POLL_SECONDS", 0.02)
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        engines,
+        "load_driver",
+        lambda name, env=None: stub.StubDriver(name, stub.script_path(run_env)),
+    )
+    choices.set_settings({"sandbox.claude": "on"}, env=run_env)
+    repo = stub.make_repo(tmp_path, run_env)
+    folder = Path(run_env["HOME"]) / ".toolchain"
+    folder.mkdir()
+    denied_path = run_env["XDG_RUNTIME_DIR"] if denial == "protected" else str(folder)
+    reply = "done" if denial == "none" else f"{denied_path}/python: Permission denied"
+    brief = tmp_path / "brief.md"
+    brief.write_text(f"Task\n@write result.txt done\n@reply {reply}\n")
+    start = [
+        "run", "--engine", "claude", "--dir", str(repo), "--task-file", str(brief),
+    ]  # fmt: skip
+    run_id = None
+    if mode == "start":
+        argv = start
+    elif mode == "send":
+        clean = tmp_path / "clean.md"
+        clean.write_text("First turn\n")
+        assert main([*start[:-1], str(clean)], env=run_env) == 0
+        run_id = capsys.readouterr().out.splitlines()[0].removeprefix("run ")
+        argv = ["run", "--send", run_id, "--message-file", str(brief)]
+    else:
+        run_core = core.Core(run_env)
+        assert (
+            run_core.execute(
+                lambda: run_core.start(
+                    core.StartOptions("claude", str(repo), str(brief))
+                )
+            )
+            == 0
+        )
+        run_id = capsys.readouterr().out.splitlines()[0].removeprefix("run ")
+        run = record.load(run_id, run_env)
+        if mode == "recover-collected":
+            outcome = record.load_outcome(run, run.turn)
+            outcome["exit"] = None
+            record.outcome_path(run, run.turn).write_text(json.dumps(outcome))
+        argv = ["run", "--recover", run_id]
+    assert main(argv, env=run_env) == (exits.OWNER_WAIT if denial == "hidden" else 0)
+    captured = capsys.readouterr()
+    if run_id is None:
+        run_id = captured.out.splitlines()[0].removeprefix("run ")
+    run = record.load(run_id, run_env)
+    owners = [line for line in captured.err.splitlines() if line.startswith("owner:")]
+    assert owners == list(run.owner_wait)
+    assert bool(owners) == (denial == "hidden")
+    assert run.last_exit == 0
+    assert record.load_outcome(run, run.turn)["exit"] == 0
+    if mode == "recover":
+        assert "nothing to recover" in captured.err
+    else:
+        assert " · exit 0 · " in captured.out
+    if denial == "hidden":
+        assert "next:" not in captured.err
+        # A no-op recovery repeats every pending line exactly once per call.
+        extra = "owner: repair another pending action"
+        record.update(run, {"owner_wait": (*run.owner_wait, extra), "owner_read": ()})
+        assert main(["run", "--recover", run_id], env=run_env) == exits.OWNER_WAIT
+        assert capsys.readouterr().err.splitlines()[1:] == [*owners, extra]
+
+
+@pytest.mark.parametrize("code", [69, 71, 73, 74, 75, 76, 77, 80, 124])
+@pytest.mark.parametrize("mode", ["start", "send", "recover"])
+def test_run_failure_keeps_exit_with_pending_owner_wait(
+    finished_cli_run: str,
+    run_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mode: str,
+    code: int,
+) -> None:
+    from ember.runs import core, record
+
+    run = record.load(finished_cli_run, run_env)
+    record.update(run, {"owner_wait": ("owner: answer the denied path",)})
+
+    def fail(self: core.Core, *args: object, **kwargs: object) -> int:
+        self.last_run_id = run.id
+        raise core.RunError(code, "command failed", run=run.id)
+
+    monkeypatch.setattr(core.Core, mode, fail)
+    if mode == "start":
+        argv = ["--engine", "claude", "--dir", run.repo, "--task-file", "brief"]
+    elif mode == "send":
+        message = tmp_path / "message.md"
+        message.write_text("Correction")
+        argv = ["--send", run.id, "--message-file", str(message)]
+    else:
+        argv = ["--recover", run.id]
+    assert main(["run", *argv], env=run_env) == code
+
+
 def test_run_owner_status_and_answered(
     finished_cli_run: str,
     run_env: dict[str, str],
@@ -1757,7 +1869,7 @@ def test_successful_denial_waits_before_carry_on(
     resolution: str,
 ) -> None:
     from ember import sandbox
-    from ember.runs import record
+    from ember.runs import exits, record
 
     previous = record.load(finished_cli_run, run_env)
     hidden = Path(run_env["HOME"]) / "private-toolchain"
@@ -1779,7 +1891,7 @@ def test_successful_denial_waits_before_carry_on(
             ],
             env=run_env,
         )
-        == 0
+        == exits.OWNER_WAIT
     )
     captured = capsys.readouterr()
     run_id = captured.out.splitlines()[0].removeprefix("run ")

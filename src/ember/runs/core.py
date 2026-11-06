@@ -318,6 +318,7 @@ class Core:
         self.last_run_id: str | None = None
         self.status_next: str | None = None
         self.status_owner: list[str] = []
+        self.printed_owner: set[str] = set()
         self.last_error: RunError | None = None
 
     # Output
@@ -327,6 +328,8 @@ class Core:
 
     def _warn(self, text: str) -> None:
         print(text, file=self.err or sys.stderr, flush=True)
+        if text.startswith("owner:"):
+            self.printed_owner.add(text)
 
     def execute(self, action: Callable[[], int]) -> int:
         """Run one command and turn its failure into an exit.
@@ -342,6 +345,7 @@ class Core:
         """
         self.last_error = None
         self.last_run_id = None
+        self.printed_owner.clear()
         try:
             return action()
         except RunError as error:

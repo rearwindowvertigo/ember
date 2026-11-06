@@ -259,6 +259,11 @@ Pass the claim with `--claim <id>`.
 
 Keep the run id from the start's first line with the claim.
 
+Exit 84 from a start, `--send` or `--recover` means the run has pending
+owner actions; the turn's recorded exit stays unchanged. Put every printed
+`owner:` line to the owner first and run nothing that depends on it until
+the owner answers, even when the turn finished and did not need a denied path.
+
 Ember prints `next:` or `owner:` lines on standard error at each step of
 an `emb run` task: at exit 0 after a start, `--send`, `--recover`, `--close`
 or `emb merge`, on every non-zero exit, and in `emb run --status <run>`,
@@ -370,6 +375,10 @@ started, after its turn ended, its work was committed and its reply was
 read and reported. Report runs parked and runs left open, with reasons.
 
 ### 9. Merge, clean up and finish
+
+Before merging a run, check `emb run --status <run>`. A run whose step is
+`owner` is not merged until the owner answers and `emb run --answered <run>`
+has run.
 
 Give the verdict line as `--note`, such as `--note 'Keep, with a docstring
 fix'`. `emb merge` prints it as `Verdict: <note>` before the merge and keeps

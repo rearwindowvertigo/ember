@@ -942,7 +942,12 @@ def _run_run(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
             run_id = core.last_run_id if mode == "start" else getattr(args, mode)
             if run_id is not None:
                 with contextlib.suppress(record.RecordError):
-                    _, next_line = core.step(record.load(run_id, env))
+                    step, next_line = core.step(record.load(run_id, env))
+                    if mode in ("start", "send", "recover") and step == "owner":
+                        for text in record.load(run_id, env).owner_wait:
+                            if text not in core.printed_owner:
+                                print(text, file=sys.stderr)
+                        code = exits.OWNER_WAIT
         if next_line is not None:
             print(next_line, file=sys.stderr)
     if mode == "status" and code == EX_OK:

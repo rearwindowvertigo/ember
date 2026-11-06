@@ -426,7 +426,7 @@ def denied_path_replies() -> dict[str, str]:
         prefix = "sandbox-denied-paths/files/.ember-eval/replies/"
         replies[prefix + "run-start.out"] = out.getvalue()
         replies[prefix + "run-start.err"] = err.getvalue()
-        replies[prefix + "run-start.code"] = "0\n"
+        replies[prefix + "run-start.code"] = f"{exits.OWNER_WAIT}\n"
         for as_json in (False, True):
             out.seek(0)
             out.truncate()
@@ -443,6 +443,23 @@ def denied_path_replies() -> dict[str, str]:
             shown = status_stderr(core, err.getvalue(), record.load(run.id, env))
             if shown:
                 replies[prefix + "run-status.err"] = shown
+        prefix = "owner-wait-before-merge/files/.ember-eval/replies/"
+        denial = core._saved_outcome(run)["denied_paths"][0]
+        owner = record.load(run.id, env).owner_wait[0]
+        replies[prefix + "run-start.err"] = (
+            f"WARNING: {{{{RUN}}}} was denied {denial['path']}\n{owner}\n"
+        )
+        replies[prefix + "run-start.outcome.json"] = json.dumps(
+            {"denied_paths": [denial]}
+        )
+        replies[prefix + "run-start.reply"] = (
+            "Added `--since YYYY-MM-DD` to tools/report.py and tests for a day "
+            "inside the data, a day after every order, and a malformed day.\n\n"
+            "Checks: python3 -m unittest discover -s tests: 7 tests OK.\n\n"
+            f"An optional toolchain probe was denied {denial['path']}. "
+            "The work did not need this path; the system Python ran the checks.\n\n"
+            "Not covered: nothing.\n"
+        )
         # All paths describe the fixture home, never the generator's home.
         return {
             name: text.replace(str(root), "/eval") for name, text in replies.items()
