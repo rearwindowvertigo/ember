@@ -188,7 +188,7 @@ class EmberApp:
     server: QLocalServer
     tray: tray_module.Tray | None
     collector: Collector
-    crash_log: _CrashLog
+    crash_log: _CrashLog | None
     stopped: bool = False
     autostart_reason: str | None = None
     version: str | None = None
@@ -310,7 +310,7 @@ def start(argv: list[str], env: Mapping[str, str] | None = None) -> EmberApp | i
     Returns:
         The running parts, or an exit code when the app does not start
         here: 0 when a running instance took over, 64 for a usage error, 69
-        without a graphical session, runtime folder or writable crash log.
+        without a graphical session or runtime folder.
     """
     environment: Mapping[str, str] = os.environ if env is None else env
     args = _parse(argv)
@@ -340,12 +340,14 @@ def start(argv: list[str], env: Mapping[str, str] | None = None) -> EmberApp | i
         )
         return EX_UNAVAILABLE
 
+    crash_log: _CrashLog | None = None
     try:
         crash_log = _CrashLog(environment)
     except (OSError, ValueError) as error:
-        server.close()
-        print(f"emb app: cannot open crash log: {error}", file=sys.stderr)
-        return EX_UNAVAILABLE
+        print(
+            f"emb app: cannot open crash log: {error}; starting without it",
+            file=sys.stderr,
+        )
     collector = Collector(app)
     context: AppContext | None = None
     try:
@@ -411,7 +413,8 @@ def start(argv: list[str], env: Mapping[str, str] | None = None) -> EmberApp | i
             context.tasks.wait(QUIT_WAIT_MS)
         server.close()
         collector.stop()
-        crash_log.close()
+        if crash_log is not None:
+            crash_log.close()
         raise
 
 
@@ -447,7 +450,8 @@ def stop(parts: EmberApp) -> None:
     QCoreApplication.processEvents()
     parts.context.tasks.wait(QUIT_WAIT_MS)
     parts.collector.stop()
-    parts.crash_log.close()
+    if parts.crash_log is not None:
+        parts.crash_log.close()
 
 
 def run(argv: list[str], env: Mapping[str, str] | None = None) -> int:

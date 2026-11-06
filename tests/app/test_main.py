@@ -490,16 +490,18 @@ def test_start_and_stop_collector_and_crash_log(
     assert gc.isenabled() == enabled
 
 
-def test_crash_log_open_failure_does_not_disable_gc(
-    app_env: dict[str, str], capsys: pytest.CaptureFixture[str]
+def test_crash_log_open_failure_starts_without_it(
+    app_env: dict[str, str], capsys: pytest.CaptureFixture[str], qtbot: QtBot
 ) -> None:
-    """An unavailable crash log rejects startup without changing GC state."""
+    """An unavailable crash log is reported, and the app starts without it."""
     enabled = gc.isenabled()
     folder = paths.state_dir(app_env)
     folder.mkdir(parents=True)
     (folder / "app-crash.log").mkdir()
-    assert main.start([], app_env) == main.EX_UNAVAILABLE
-    assert "cannot open crash log" in capsys.readouterr().err
+    for parts in _start([], app_env, qtbot):
+        assert parts.crash_log is None
+        assert parts.collector.timer.isActive()
+        assert "cannot open crash log" in capsys.readouterr().err
     assert gc.isenabled() == enabled
 
 
