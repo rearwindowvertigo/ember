@@ -29,6 +29,8 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QCloseEvent,
+    QColor,
+    QEnterEvent,
     QHideEvent,
     QKeySequence,
     QResizeEvent,
@@ -89,10 +91,17 @@ QPushButton[role="nav"]:hover {{ background: {hover}; }}
 QPushButton[role="nav"]:checked {{ background: {selected}; }}
 QPushButton[role="nav"][keyfocus="true"]:focus {{ border: 2px solid {focus}; }}
 QLabel[role="nav-count"] {{
-    background: {subtle};
-    color: {primary};
-    border-radius: 8px;
-    padding: 0 3px;
+    background: {accent};
+    color: {on_accent};
+    border: 2px solid {sidebar};
+    border-radius: 7px;
+    padding: 0 1px;
+}}
+QLabel[role="nav-count"][row-state="hover"] {{
+    border-color: {hover_ring};
+}}
+QLabel[role="nav-count"][row-state="selected"] {{
+    border-color: {selected_ring};
 }}
 QPushButton[role="restart-sidebar"] {{
     background: {accent_bg};
@@ -104,6 +113,18 @@ QPushButton[role="restart-sidebar"] {{
 def _rgba(token: str) -> str:
     color = theme.color(token)
     return f"rgba({color.red()}, {color.green()}, {color.blue()}, {color.alpha()})"
+
+
+def _nav_ring(token: str) -> str:
+    """Return an opaque row colour with its overlay over the sidebar."""
+    background = theme.color("bg-sidebar")
+    overlay = theme.color(token)
+    alpha = overlay.alphaF()
+    return QColor.fromRgbF(
+        overlay.redF() * alpha + background.redF() * (1 - alpha),
+        overlay.greenF() * alpha + background.greenF() * (1 - alpha),
+        overlay.blueF() * alpha + background.blueF() * (1 - alpha),
+    ).name()
 
 
 def app_version() -> str:
@@ -155,6 +176,8 @@ class NavButton(QPushButton):
         layout.addWidget(self.text_label, 1)
         layout.addWidget(self.count_label, 0, Qt.AlignmentFlag.AlignVCenter)
         self.icon_label.installEventFilter(self)
+        self.toggled.connect(self._count_state)
+        self._count_state()
         self.draw_icon()
 
     def draw_icon(self) -> None:
@@ -185,8 +208,9 @@ class NavButton(QPushButton):
         self.row.setContentsMargins(margin, 0, margin, 0)
         self.row.setAlignment(self.icon_label, Qt.AlignmentFlag.AlignCenter)
         self.count_label.setProperty("role", "nav-count" if collapsed else "badge")
-        self.count_label.setFixedHeight(16 if collapsed else BADGE_HEIGHT)
         widgets.repolish(self.count_label)
+        self.count_label.setFixedHeight(14 if collapsed else BADGE_HEIGHT)
+        self.count_label.setMinimumWidth(14 if collapsed else 0)
         if not collapsed:
             self.row.addWidget(self.count_label, 0, Qt.AlignmentFlag.AlignVCenter)
         self.setFixedSize(
@@ -203,25 +227,42 @@ class NavButton(QPushButton):
 
     def _place_count(self) -> None:
         if self.collapsed:
+            # Clear contents margins retained from the full sidebar's badge.
+            self.count_label.setContentsMargins(0, 0, 0, 0)
             self.count_label.adjustSize()
             icon = self.icon_label.geometry()
             self.count_label.move(
                 max(
                     0,
                     min(
-                        icon.right() + 1 - self.count_label.width() // 2,
+                        icon.right() + 1 - 4,
                         self.width() - self.count_label.width(),
                     ),
                 ),
                 max(
                     0,
                     min(
-                        icon.top() - self.count_label.height() // 2,
+                        icon.top() - 7,
                         self.height() - self.count_label.height(),
                     ),
                 ),
             )
             self.count_label.raise_()
+
+    def _count_state(self) -> None:
+        """Match the pill's ring to the selected, hovered or normal row."""
+        state = "selected" if self.isChecked() else "hover" if self.underMouse() else ""
+        self.count_label.setProperty("row-state", state)
+        widgets.repolish(self.count_label)
+        self._place_count()
+
+    def enterEvent(self, event: QEnterEvent) -> None:  # noqa: D102
+        super().enterEvent(event)
+        self._count_state()
+
+    def leaveEvent(self, event: QEvent) -> None:  # noqa: D102
+        super().leaveEvent(event)
+        self._count_state()
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
         """Keep the pill on the icon when its layout moves or resizes it."""
@@ -655,14 +696,18 @@ class MainWindow(QMainWindow):
                 hover=_rgba("bg-hover"),
                 selected=_rgba("bg-selected"),
                 focus=_rgba("accent"),
-                subtle=_rgba("bg-subtle"),
-                primary=_rgba("text-primary"),
+                accent=_rgba("accent"),
+                on_accent=_rgba("on-accent"),
+                sidebar=_rgba("bg-sidebar"),
+                hover_ring=_nav_ring("bg-hover"),
+                selected_ring=_nav_ring("bg-selected"),
                 accent_bg=_rgba("bg-accent"),
                 round_radius=theme.CONTROL_SM // 2,
             )
         )
         for item in self.nav.values():
             item.draw_icon()
+            item._place_count()
 
     # Showing, hiding and quitting
 

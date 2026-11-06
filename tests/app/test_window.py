@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import Mock, call
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QProcessEnvironment, Qt
+from PySide6.QtCore import QCoreApplication, QPoint, QProcessEnvironment, Qt
 from PySide6.QtWidgets import QApplication, QWidget
 from pytestqt.qtbot import QtBot
 
@@ -459,33 +459,93 @@ def test_sidebar_collapses_below_960_and_expands_at_960(
             assert hide.x() > mark.x()
 
 
-def test_collapsed_count_pill_and_tooltip(env: dict[str, str], qtbot: QtBot) -> None:
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_collapsed_count_pill_and_tooltip(
+    env: dict[str, str], qtbot: QtBot, qapp: QApplication, mode: str
+) -> None:
+    theme.apply(qapp, mode)
     window, _context, _quit = _window(env, qtbot)
     window.resize(959, 600)
     window.show()
     item = window.nav["overview"]
     QCoreApplication.processEvents()
-    for count in (2, 0, -1, 12):
+    for count in (1, 2, 0, -1, 12):
         item.set_count(count, f"{count} live")
         assert item.count_label.isVisible() is (count > 0)
         assert item.toolTip() == (
             f"Overview · {count} live" if count > 0 else "Overview"
         )
         assert item.accessibleName() == "Overview"
+        assert item.accessibleDescription() == (f"{count} live" if count > 0 else "")
         if count > 0:
             assert item.count_label.property("role") == "nav-count"
             assert item.count_label.font() == theme.font("caption")
             icon = item.icon_label.geometry()
             pill = item.count_label.geometry()
-            assert pill.x() == min(
-                icon.right() + 1 - pill.width() // 2, item.width() - pill.width()
-            )
-            assert pill.y() == max(0, icon.top() - pill.height() // 2)
+            assert pill.height() == 14
+            assert item.count_label.minimumWidth() == 14
+            assert pill.width() >= 14
+            assert pill.x() == min(icon.right() + 1 - 4, item.width() - pill.width())
+            assert pill.y() == max(0, icon.top() - 7)
             assert item.rect().contains(pill)
     window.resize(960, 600)
     assert item.count() == 12
     assert item.count_label.property("role") == "badge"
+    assert item.count_label.height() == 22
+    assert item.count_label.minimumWidth() == 0
     assert item.toolTip() == ""
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_collapsed_count_ring_matches_row_background(
+    env: dict[str, str], qtbot: QtBot, qapp: QApplication, mode: str
+) -> None:
+    theme.apply(qapp, "dark" if mode == "light" else "light")
+    window, _context, _quit = _window(env, qtbot)
+    window.resize(959, 600)
+    window.show()
+    qtbot.waitExposed(window)
+    theme.apply(qapp, mode)
+    item = window.nav["dependencies"]
+    item.set_count(1, "1 to update or install")
+    QCoreApplication.processEvents()
+    backgrounds = {}
+    for selected, hovered in (
+        (False, False),
+        (False, True),
+        (True, True),
+        (True, False),
+        (False, False),
+    ):
+        window.nav["dependencies" if selected else "overview"].setChecked(True)
+        if hovered:
+            qtbot.mouseMove(item, item.rect().center())
+        else:
+            qtbot.mouseMove(window.sidebar, QPoint(1, 1))
+        QCoreApplication.processEvents()
+        image = window.sidebar.grab().toImage()
+        pill = item.count_label.geometry()
+        assert pill.height() == 14
+        assert pill.width() >= 14
+        assert item.rect().contains(pill)
+        origin = item.mapTo(window.sidebar, QPoint(0, 0))
+        pill.translate(origin)
+        background = image.pixelColor(origin + QPoint(item.width() // 2, 30))
+        x = pill.center().x()
+        assert image.pixelColor(x, pill.top()) == background
+        assert image.pixelColor(x, pill.top() + 1) == background
+        assert image.pixelColor(x, pill.bottom()) == background
+        assert image.pixelColor(x, pill.bottom() - 1) == background
+        assert image.pixelColor(x, pill.bottom() - 2) != background
+        for token in ("accent", "on-accent"):
+            assert any(
+                image.pixelColor(x, y) == theme.color(token)
+                for x in range(pill.left(), pill.right() + 1)
+                for y in range(pill.top(), pill.bottom() + 1)
+            )
+        backgrounds[selected, hovered] = background.name()
+    assert len(set(backgrounds.values())) == 3
+    assert backgrounds[True, True] == backgrounds[True, False]
 
 
 def test_restart_offer_updates_both_controls(env: dict[str, str], qtbot: QtBot) -> None:
