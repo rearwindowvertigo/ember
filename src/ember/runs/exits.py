@@ -4,6 +4,10 @@ Each non-zero exit prints its message on standard error, then one line that
 starts `next: ` (a command Claude runs) or `owner: ` (something only the
 owner does). A line names its placeholders in braces; a placeholder with no
 value prints as `<name>`.
+
+Exit 84 is the command's exit for a pending owner wait after an otherwise
+successful start, send or recovery. Its output is the run's pending owner
+lines; the recorded turn exit stays unchanged.
 """
 
 import string
@@ -26,6 +30,7 @@ REFUSED = 75
 MOVED = 76
 HOOK_REFUSED = 77
 NO_REPLY = 80
+OWNER_WAIT = 84
 STALLED = 124
 
 START = "emb run --engine <engine> --dir <git checkout> --task-file <file>"
@@ -106,6 +111,7 @@ LINES: dict[int, str | Mapping[str, str]] = {
         "add": RECOVER + " (git add failed; repair it before recovery)",
     },
     NO_REPLY: "next: emb run --screen {run}, then " + SEND,
+    OWNER_WAIT: "owner: answer the pending owner actions for {run}",
     STALLED: RECOVER + " (waits for the turn still running in its session, "
     "then collects it)",
 }

@@ -78,7 +78,8 @@ Ember never commits from it. The source checkout is separate.
 It does not see uncommitted edits or later source-checkout changes. For
 each uncommitted source path, start prints
 `WARNING: read-only run <id> does not see uncommitted <path>` on standard
-error. A successful run still exits 0.
+error. A finished turn exits 0 unless a pending owner wait makes the command
+exit 84.
 The run records the resolved worktree path, main checkout and common git
 folder at start. Merge, cleanup and prune use the recorded paths, including
 paths from runs created under the old layout. Do not construct a path from
@@ -267,20 +268,27 @@ A broken outcome gives null, which is unknown.
 
 When an `owner:` line offers reading, give the owner
 the `Settings, Sandbox read paths; emb choices --set ...` action.
-At exit 0, say the turn finished. Read access is needed only if the
-worker's report says the work needed the denied path. When the report shows
-the work did not need it, say so.
+When the recorded turn exit is 0, say the turn finished. Read access is needed
+only if the worker's report says the work needed the denied path. When the
+report shows the work did not need it, say so.
 The command keeps existing read paths and adds the offered folder, or an
 addable secret location's matched path. Never run it, edit the settings
 database, add a path to `sandbox.read`, or bypass the denial with `--read`
 yourself.
 
 A finished turn with pending owner actions (denied paths, or any printed
-`owner:` line) prints no carry-on `next:` line. Wait for the owner's answer
-on every pending owner action. After the owner answers a waiting run's
+`owner:` line) prints no carry-on `next:` line. Start, `--send` and `--recover`
+exit 84 when they would otherwise exit 0 with a pending owner wait. Each
+pending `owner:` line prints on standard error, including when recovery has
+nothing left to collect; the recorded turn exit stays unchanged. Put these
+lines to the owner before any dependent command, even when the work did not
+need a denied path. Wait for the owner's answer on every pending owner
+action. After the owner answers a waiting run's
 owner action, run `emb run --answered <run>`, then follow the `next:` line
 it prints. `emb run --status <run>` shows the step as waiting for the owner
 until it is answered, then prints the `next:` line.
+Do not merge a run whose status step is `owner` until the owner answers and
+`emb run --answered <run>` has run.
 
 Home shell and line-editor startup files, including `.profile`, `.bashrc`,
 `.bash_profile`, `.zshrc`, `.zprofile`, `.zshenv` and `.inputrc`, are
@@ -318,6 +326,7 @@ SKILL.md step 6 covers the printed lines. These exits have additional rules.
 | 69 | Codex does not trust the repository | A trust refusal in a dry run or start creates nothing, including no worktree. It prints the trust message and an `owner:` line asking the owner to run `codex` in the repository once, with no `next:` line. Do not follow close-and-restart for this refusal. |
 | 70 | Worktree creation failed, or no main checkout or commit | Never force-remove a worktree. |
 | 77 | A hook refused the commit | Inspect the uncommitted work with `git -C <worktree> status`. |
+| 84 | Pending owner wait after start, `--send` or `--recover` | Put every pending `owner:` line to the owner first. Run nothing that depends on it until the owner answers, then run `emb run --answered <run>` before merging. |
 
 A stalled run's partial edits need the owner's approval before discard.
 

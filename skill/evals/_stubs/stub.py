@@ -16,6 +16,7 @@ and the number of earlier calls on that route: the first of
     .files/      a tree committed in a run or flow worktree
     .untracked/  a tree left uncommitted in the run's worktree
     .reply       the turn's reply text, a template
+    .outcome.json extra recorded turn-result fields
     .summary     a panel's summary text, a template
 
 Templates replace `{{ID}}`, `{{RUN}}`, `{{BRANCH}}`, `{{WORKTREE}}`,
@@ -49,12 +50,16 @@ standard error unless a kept result holds that claim or `--dry-run` is set.
 The `verify_branch.py` path comes from `ember.skill.link_path(os.environ)`.
 A run records `base_branch`, the branch checked out in its `--dir` checkout
 at start (null when detached). An exit-0 `choices --finish` records its
-claim as `gone` in `state.json`'s `claims`, and a run whose claim is `gone`
-derives no finish line. Stored `step` and `next` keys in a state document are
+claim as `gone` in `state.json`'s `claims`. A closed run with no merge pending
+whose claim is `gone` derives `done` with no next line.
+Stored `step` and `next` keys in a state document are
 ignored. Canned starts with a status JSON retain that record with the call's
 claim, subject and trailers; later status calls derive their output from it.
 Owner actions suppress carry-on next lines and leave the run on the `owner`
-step. Status repeats the pending owner lines. `run-answered` clears the wait;
+step. An otherwise successful start, send or recovery exits 84 with every
+pending owner line; the recorded turn exit stays unchanged. Merge prints
+pending owner lines on standard error and in JSON's `owner_wait` array when
+nonempty. Status repeats the pending owner lines. `run-answered` clears the wait;
 a later turn or all suggested sandbox read paths also end it.
 Run, merge, cleanup and flow replies append the production `report:` lines
 after next or owner lines, including canned replies. Flow watch JSON also
@@ -104,7 +109,10 @@ EVAL = Path(os.environ.get("EMBER_EVAL_DIR") or Path(__file__).resolve().parent.
 REPLIES = EVAL / "replies"
 STATE = EVAL / "state.json"
 LOG = EVAL / "calls.log"
-PARTS = (".out", ".json", ".err", ".code", ".files", ".untracked", ".reply", ".summary")
+PARTS = (
+    ".out", ".json", ".err", ".code", ".files", ".untracked", ".reply", ".summary",
+    ".outcome.json",
+)  # fmt: skip
 RUN_MODES = (
     "send",
     "screen",
@@ -771,6 +779,7 @@ def do_turn(
         "signed_out": False,
         "incomplete": None,
         "seconds": SECONDS,
+        **json.loads(read_part(base, ".outcome.json", variables, "{}")),
     }
     (folder / f"turn-{run['turn']}.outcome.json").write_text(json.dumps(outcome))
     run.setdefault("turns", []).append({"turn": run["turn"], **outcome})
@@ -917,6 +926,9 @@ def derive_next(run: dict[str, Any], state: dict[str, Any]) -> tuple[str, str | 
             or run_merged(run)
             or not run_branch_left(run)
         ):
+            claim = run.get("claim")
+            if claim is not None and state["claims"].get(claim) == "gone":
+                return "done", None
             return "finish", finish_line(run, state)
         return "merge", verify_line(run)
     if run["status"] == "failed" or (
@@ -1570,10 +1582,16 @@ def merge(args: list[str], state: dict[str, Any], variables: dict[str, str]) -> 
     run = None
     if run_match and not branches.FLOW_BRANCH.fullmatch(branch):
         run = state["runs"].get(run_match["run"])
+    owner_wait = (
+        list(run.get("owner_wait", []))
+        if run is not None and derive_next(run, state)[0] == "owner"
+        else []
+    )
     if cleaned.startswith("kept"):
         run = None
     next_line = derive_next(run, state)[1] if run is not None else None
     err = "".join(f"{warning}\n" for warning in warnings)
+    err += "".join(f"{line}\n" for line in owner_wait)
     if has(args, "--json"):
         action, _, reason = cleaned.partition(": ")
         reason, separator, next_action = reason.partition("; next: ")
@@ -1595,6 +1613,8 @@ def merge(args: list[str], state: dict[str, Any], variables: dict[str, str]) -> 
             ],
             "next": next_line,
         }
+        if owner_wait:
+            result["owner_wait"] = owner_wait
         err += f"{next_line}\n" if next_line else ""
         return Reply(0, json.dumps(result, indent=2) + "\n", err)
     lines = [f"Verdict: {note}", first, cleaned]
@@ -2233,14 +2253,16 @@ def command_reports(
     if name in ("run-start", "run-send", "run-recover") and run:
         owners = [line for line in reply.err.splitlines() if line.startswith("owner:")]
         if owners and not run.get("parent"):
-            run["owner_wait"] = owners
+            run["owner_wait"] = list(
+                dict.fromkeys([*run.get("owner_wait", []), *owners])
+            )
             run["answered_at"] = None
             reply.err = "".join(
                 line + "\n"
                 for line in reply.err.splitlines()
                 if not line.startswith("next:")
             )
-    if reply.code:
+    if reply.code and reply.code != exits.OWNER_WAIT:
         context = {**run, "run": run_id}
         variant = run_variant(run)
         entry = exits.LINES.get(reply.code)
@@ -2258,6 +2280,21 @@ def command_reports(
         report = exits.report(reply.code, variant, **context)
         if report and report not in reply.err.splitlines():
             reply.err += report + "\n"
+    if (
+        name in ("run-start", "run-send", "run-recover")
+        and run
+        and reply.code in (0, exits.OWNER_WAIT)
+        and derive_next(run, state)[0] == "owner"
+    ):
+        reply.err = "".join(
+            line + "\n"
+            for line in reply.err.splitlines()
+            if not line.startswith("next:")
+        )
+        for line in run["owner_wait"]:
+            if line not in reply.err.splitlines():
+                reply.err += line + "\n"
+        reply.code = exits.OWNER_WAIT
 
 
 def main(argv: list[str]) -> int:

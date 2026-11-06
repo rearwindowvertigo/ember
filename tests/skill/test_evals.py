@@ -33,6 +33,7 @@ CASES = (
     "claim-unknown-skill",
     "send-refused-foreign-messages",
     "owner-line-not-run",
+    "owner-wait-before-merge",
     "merge-and-cleanup-keeps",
     "turn-results-counted",
     "sandbox-denied-paths",
@@ -888,6 +889,79 @@ def test_merge_merges_and_cleans_up(tmp_path: Path, env: dict[str, str]) -> None
     )
 
 
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("keep_worktree", [False, True])
+def test_stub_merge_prints_pending_owner_lines(
+    tmp_path: Path,
+    env: dict[str, str],
+    as_json: bool,
+    keep_worktree: bool,
+) -> None:
+    work = case("claim-and-menu-writer", tmp_path, env)
+    run_id, branch, worktree = start(work)
+    owners = ["owner: allow a denied path", "owner: answer another pending action"]
+    state_file = work.eval / "state.json"
+    state = json.loads(state_file.read_text())
+    state["runs"][run_id]["owner_wait"] = owners
+    state_file.write_text(json.dumps(state))
+    if keep_worktree:
+        (worktree / "uncommitted.txt").write_text("leave this here")
+    result = work.emb(
+        "merge", branch, "--into", work.git("branch", "--show-current"),
+        "--verdict", "keep", "--note", "Keep", "--subject", "feat: add --since",
+        *(["--json"] if as_json else []),
+    )  # fmt: skip
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.splitlines() == owners
+    if as_json:
+        document = json.loads(result.stdout)
+        assert document["owner_wait"] == owners
+        assert document["next"] is None
+        assert document["merge_commit"]
+    assert work.git("show", "HEAD:tools/report.py").find("--since") >= 0
+
+
+def test_owner_wait_eval_finished_turn_needs_no_denied_path(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    work = case("owner-wait-before-merge", tmp_path, env)
+    started = work.emb(
+        "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief(),
+    )  # fmt: skip
+    assert started.returncode == exits.OWNER_WAIT, started.stderr
+    run_id = started.stdout.splitlines()[0].removeprefix("run ")
+    document = json.loads(work.emb("run", "--status", run_id, "--json").stdout)
+    assert document["last_exit"] == 0 and document["status"] == "waiting"
+    assert (document["step"], document["next"]) == ("owner", None)
+    [turn] = document["turns"]
+    assert turn["exit"] == 0 and turn["state"] == "done"
+    assert turn["denied_paths"] == [
+        {
+            "path": "/eval/home/.toolchain",
+            "reason": "hidden",
+            "allow_path": "/eval/home/.toolchain/versions/3.14",
+        }
+    ]
+    assert "The work did not need this path" in started.stdout
+    assert document["commits"]
+    [owner] = document["owner_wait"]
+    assert started.stderr.splitlines().count(owner) == 1
+    assert "next:" not in started.stderr
+    recovered = work.emb("run", "--recover", run_id)
+    assert recovered.returncode == exits.OWNER_WAIT
+    assert recovered.stderr.splitlines() == [owner]
+    assert json.loads(work.emb("run", "--status", run_id, "--json").stdout) == document
+    outcome = work.eval / "runs" / run_id / "turn-1.outcome.json"
+    assert json.loads(outcome.read_text())["exit"] == 0
+    assert not (EVALS / "owner-wait-before-merge/owner-replies.md").exists()
+    # Sending another finished turn that leaves an owner wait also exits 84.
+    (work.eval / "replies/run-send.err").write_text(owner + "\n")
+    sent = work.emb("run", "--send", run_id, "--message-file", work.brief())
+    assert sent.returncode == exits.OWNER_WAIT and sent.stderr.count(owner) == 1
+    sent_status = json.loads(work.emb("run", "--status", run_id, "--json").stdout)
+    assert sent_status["last_exit"] == sent_status["turns"][-1]["exit"] == 0
+
+
 @pytest.mark.parametrize("subject", [None, "", " ", "feat: a\nbody", "a\rb"])
 def test_merge_requires_a_subject_before_changing_the_target(
     tmp_path: Path, env: dict[str, str], subject: str | None
@@ -1163,12 +1237,17 @@ def test_stub_next_lines_follow_an_editing_run(
         == "finish"
     )
 
-    # An exit-0 finish records the claim `gone`; no line is derived.
+    # An exit-0 finish records the claim `gone`; the run is done with no line.
     assert work.emb("choices", "--finish", claim).returncode == 0
     choices.finish(claim, env=work.env)
-    assert real_step(work, run_id) == ("finish", None)
     gone = work.emb("run", "--status", run_id, "--json")
-    assert json.loads(gone.stdout)["next"] is None and gone.stderr == ""
+    document = json.loads(gone.stdout)
+    assert (document["step"], document["next"]) == ("done", None)
+    assert real_step(work, run_id) == ("done", None)
+    text = work.emb("run", "--status", run_id)
+    assert "step: done\n" in text.stdout
+    assert text.stderr == ""
+    assert gone.stderr == ""
     state = json.loads((work.eval / "state.json").read_text())
     assert state["claims"] == {claim: "gone"}
 
@@ -1629,7 +1708,7 @@ def test_denied_path_case_keeps_every_attempt_and_owner_action(
         "--task-file",
         work.brief("Inspect the report"),
     )
-    assert result.returncode == 0
+    assert result.returncode == exits.OWNER_WAIT
     run_id = result.stdout.splitlines()[0].removeprefix("run ")
     status = work.emb("run", "--status", run_id, "--json")
     assert status.returncode == 0
@@ -3146,7 +3225,7 @@ def test_stub_owner_wait_lifecycle(
         work.brief(),
     )
     run_id = started.stdout.splitlines()[0].removeprefix("run ")
-    assert started.returncode == 0 and "next:" not in started.stderr
+    assert started.returncode == exits.OWNER_WAIT and "next:" not in started.stderr
     waiting = work.emb("run", "--status", run_id, "--json")
     assert json.loads(waiting.stdout)["step"] == "owner"
     assert waiting.stderr == "owner: allow the toolchain\n"

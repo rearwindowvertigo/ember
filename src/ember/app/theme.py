@@ -41,6 +41,7 @@ TOKENS: dict[str, tuple[str, str]] = {
     "fill-primary-hover": ("#303030", "#e3e3e3"),
     "on-primary": ("#ffffff", "#0d0d0d"),
     "accent": ("#257de0", "#257de0"),
+    "on-accent": ("#ffffff", "#ffffff"),
     "focus-ring": ("#257de0", "#257de0"),
     "accent-hover": ("#2171ca", "#338ced"),
     "text-accent": ("#1757ac", "#6aabf1"),

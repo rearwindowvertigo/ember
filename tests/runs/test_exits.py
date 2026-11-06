@@ -4,7 +4,7 @@ import pytest
 
 from ember.runs import exits
 
-CODES = (1, 64, 65, 66, 69, 70, 71, 72, 73, 74, 75, 76, 77, 80, 124)
+CODES = (1, 64, 65, 66, 69, 70, 71, 72, 73, 74, 75, 76, 77, 80, 84, 124)
 
 
 def test_table_has_every_code() -> None:

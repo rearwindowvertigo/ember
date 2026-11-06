@@ -1,5 +1,6 @@
 """Step precedence, read-only derivation and missing git history."""
 
+import sqlite3
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -7,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from ember import branches, choices, skill
+from ember import branches, choices, db, paths, skill
 from ember.runs import core, exits, record, steps
 
 from .stub_engine import git, make_env, make_repo  # pyrefly: ignore[missing-import]
@@ -122,12 +123,51 @@ def test_order(
         assert line == f"next: emb run --{command} {run.id}"
 
 
-@pytest.mark.parametrize("claim", [None, "claim-a"])
-def test_finished_claim_has_no_line(run: record.Run, claim: str | None) -> None:
-    if claim is not None:
-        choices.finish(claim, env=run.env)
-    run = replace(run, status=record.CLOSED, claim=claim)
+@pytest.mark.parametrize("session", [core.LIVE, core.DEAD, core.MISSING])
+def test_finished_claim_is_done(run: record.Run, session: str) -> None:
+    choices.finish("claim-a", env=run.env)
+    run = replace(run, status=record.CLOSED)
+    assert steps.derive(run, session, False, _git) == ("done", None)
+
+
+def test_closed_run_without_claim_stays_finish(run: record.Run) -> None:
+    run = replace(run, status=record.CLOSED, claim=None)
     assert steps.derive(run, core.MISSING, False, _git) == ("finish", None)
+
+
+@pytest.mark.parametrize("state", ["claimed", "none", "missing-db", "missing-row"])
+def test_open_or_unknown_claim_stays_finish(run: record.Run, state: str) -> None:
+    if state == "missing-db":
+        paths.settings_db_path(run.env).unlink()
+    if state == "claimed":
+        choices.set_once({"single.writer": "ask"}, env=run.env)
+    if state in ("claimed", "none"):
+        reply = choices.claim("claim-a", env=run.env)
+        assert reply["claim"]["status"] == state
+    elif state == "missing-row":
+        choices.finish("other-claim", env=run.env)
+    run = replace(run, status=record.CLOSED)
+    assert steps.derive(run, core.MISSING, False, _git) == (
+        "finish",
+        "next: emb choices --finish claim-a",
+    )
+    if state == "missing-db":
+        assert not paths.settings_db_path(run.env).exists()
+
+
+@pytest.mark.parametrize("error", [OSError, sqlite3.OperationalError])
+def test_unreadable_claim_stays_finish(
+    run: record.Run, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    def unreadable(*args: object, **kwargs: object) -> None:
+        raise error("cannot read claims")
+
+    monkeypatch.setattr(db, "open_read", unreadable)
+    run = replace(run, status=record.CLOSED)
+    assert steps.derive(run, core.MISSING, False, _git) == (
+        "finish",
+        "next: emb choices --finish claim-a",
+    )
 
 
 @pytest.mark.parametrize("base_branch", [None, "main"])
@@ -234,6 +274,9 @@ def test_merged_after_branch_deleted(
         "next: emb choices --finish claim-a",
     )
 
+    choices.finish("claim-a", env=run.env)
+    assert steps.derive(run, core.MISSING, False, _git) == ("done", None)
+
 
 def test_pruned_tip_counts_as_not_merged(tmp_path: Path, run: record.Run) -> None:
     """A tip absent from the object store, including a pruned tip, is not merged."""
@@ -274,6 +317,7 @@ def test_closed_run_in_a_removed_checkout_finishes(run: record.Run) -> None:
 def test_closed_run_with_its_branch_keeps_the_merge_line(
     tmp_path: Path, run: record.Run
 ) -> None:
+    choices.finish("claim-a", env=run.env)
     repo = make_repo(tmp_path, run.env)
     git(repo, "branch", "worker", env=run.env)
     run = replace(
@@ -313,6 +357,7 @@ def test_provider_error_line_names_the_last_turn_kind(
 
 @pytest.mark.parametrize("status", [record.CLOSED, record.FAILED, record.WAITING])
 def test_owner_wait_precedes_other_steps(run: record.Run, status: str) -> None:
+    choices.finish("claim-a", env=run.env)
     run = replace(run, status=status, last_exit=69, owner_wait=("owner: install tmux",))
     assert steps.derive(run, core.MISSING, False, _git) == ("owner", None)
     run = replace(run, parent={"command": "flow"})
