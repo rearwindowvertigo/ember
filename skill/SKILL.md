@@ -262,10 +262,13 @@ an `emb run` task: at exit 0 after a start, `--send`, `--recover`, `--close`
 or `emb merge`, on every non-zero exit, and in `emb run --status <run>`,
 which also prints the run's `step:`. A `next:` line is the next command with
 its arguments filled in. Read standard error after every run, also at exit 0.
-Report every `WARNING:` and `report:` line. Give an `owner:` line to the
-owner first, naming the action, and wait for the answer before running
-any `next:` line, correction or retry
-that depends on what it names. Otherwise follow a `next:` line within these
+Quote every `WARNING:` and `owner:` line to the owner as printed, also when
+the turn succeeded. Give `owner:` lines first, naming each action, and wait
+for the answer before running any `next:` line, correction or retry that
+depends on what it names. A `report:` line tells you what your message to
+the owner must hold: state each fact it names in plain words, do each thing
+it asks of that message (such as listing every printed choice with what it
+does), and offer nothing it rules out. Otherwise follow a `next:` line within these
 rules and the owner gates below. A line leaves the brief, the
 review bar, the verdict, `--note` and `--subject` to you. After a turn with
 commits the line is the verify command, then the merge command: review and
