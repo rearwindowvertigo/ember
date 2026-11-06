@@ -964,7 +964,11 @@ def _run_run(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
         if isinstance(run_id, str):
             with contextlib.suppress(record.RecordError):
                 context = {**record.load(run_id, env).to_json(), **context}
-        text = exits.report(error.code, error.variant, **context)
+        text = (
+            exits.report(error.code, error.variant, **context)
+            if error.code != exits.UNAVAILABLE or mode == "start"
+            else None
+        )
         if text:
             print(text, file=sys.stderr)
     return code

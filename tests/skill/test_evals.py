@@ -1822,6 +1822,23 @@ def test_denied_path_wait_ends_only_after_answer(
     assert unknown.stderr.endswith("next: emb run --status\n")
 
 
+@pytest.mark.parametrize("mode", ["send", "recover", "close", "status", "answered"])
+def test_unknown_run_matches_real_usage_exit(
+    tmp_path: Path, env: dict[str, str], mode: str
+) -> None:
+    """Unknown run ids return the usage exit and the no_run next step."""
+    work = case("small-change-no-worker", tmp_path, env)
+    args = ["run", f"--{mode}", "missing-run"]
+    if mode == "send":
+        args.extend(["--message-file", work.brief()])
+    result = work.emb(*args)
+    assert result.returncode == exits.USAGE
+    assert result.stdout == ""
+    assert result.stderr == (
+        f"emb run: no run missing-run\n{exits.line(exits.USAGE, 'no_run')}\n"
+    )
+
+
 # The runner, with bwrap and claude replaced by fakes
 
 

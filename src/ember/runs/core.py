@@ -991,12 +991,9 @@ class Core:
                 self._say(f"run {run_id}")
                 self._warn(worker.line())
                 if run.read_only:
-                    short_base = self._git_out(top, "rev-parse", "--short", base)
-                    if short_base is None:
-                        raise RunError(
-                            exits.UNEXPECTED,
-                            f"cannot shorten commit {run.base} in {top}",
-                        )
+                    short_base = (
+                        self._git_out(top, "rev-parse", "--short", base) or base[:12]
+                    )
                     for name in self._snapshot(top):
                         self._warn(
                             f"WARNING: read-only run {run.id} "

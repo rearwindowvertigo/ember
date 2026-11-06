@@ -754,6 +754,43 @@ def test_read_only_warning_names_the_commit_used_when_source_head_moves(
     assert "WARNING:" not in out
 
 
+@pytest.mark.parametrize("short_base", [None, ""])
+def test_read_only_start_without_short_hash_uses_resolved_commit(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    short_base: str | None,
+) -> None:
+    """A missing short hash uses the resolved commit and lets the run finish."""
+    base = git(repo, "rev-parse", "HEAD", env=env)
+    (repo / "dirty.txt").write_text("Owner notes\n")
+    core_ = _core(env)
+    git_out = core_._git_out
+
+    def without_short_hash(cwd: str | Path, *args: str) -> str | None:
+        """Return no hash only for the warning's abbreviation lookup."""
+        if args == ("rev-parse", "--short", base):
+            return short_base
+        return git_out(cwd, *args)
+
+    monkeypatch.setattr(core_, "_git_out", without_short_hash)
+    assert (
+        _start(core_, repo, _brief(tmp_path, "Review\n@reply fine\n"), read_only=True)
+        == 0
+    )
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert run.base == base
+    assert run.turn_state == record.COLLECTED
+    assert run.last_exit == 0
+    assert (
+        f"WARNING: read-only run {run.id} does not see uncommitted dirty.txt "
+        f"(reads {base[:12]})\n"
+    ) in err
+
+
 def test_read_only_run_that_changes_files_is_reported(
     tmp_path: Path,
     env: dict[str, str],

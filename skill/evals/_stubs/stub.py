@@ -1166,11 +1166,11 @@ def known_run(
         The record.
 
     Raises:
-        Reply: The run is not known (66).
+        Reply: The run is not known (64).
     """
     run = state["runs"].get(run_id or "")
     if run is None:
-        raise refuse(66, f"no run {run_id}", "next: emb run --status")
+        raise refuse(64, f"no run {run_id}", "next: emb run --status")
     commits = run["commits"]
     variables.update(
         RUN=run["id"],

@@ -1510,16 +1510,20 @@ def test_deps_failed_check_hides_path(
         (80, None),
     ],
 )
+@pytest.mark.parametrize("dry_run", [False, True])
 def test_run_cli_reports_after_exit_line(
     run_env: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     code: int,
     variant: str | None,
+    dry_run: bool,
 ) -> None:
+    """Start failures print the report after the exit line, including dry runs."""
     from ember.runs import core, exits
 
     def fail(self: core.Core, options: core.StartOptions) -> int:
+        """Fail the start before a run record exists."""
         raise core.RunError(
             code, "failed", variant, branch="worker", worktree="/worktree"
         )
@@ -1527,7 +1531,16 @@ def test_run_cli_reports_after_exit_line(
     monkeypatch.setattr(core.Core, "start", fail)
     assert (
         main(
-            ["run", "--engine", "claude", "--dir", ".", "--task-file", "brief"],
+            [
+                "run",
+                "--engine",
+                "claude",
+                "--dir",
+                ".",
+                "--task-file",
+                "brief",
+                *(["--dry-run"] if dry_run else []),
+            ],  # fmt: skip
             env=run_env,
         )
         == code
@@ -1542,6 +1555,36 @@ def test_run_cli_reports_after_exit_line(
         expected.append(report)
     assert captured.err.splitlines() == expected
     assert captured.out == ""
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["attach", "screen", "close", "status", "send", "recover", "interrupt", "answered"],
+)
+def test_non_start_unavailable_does_not_report_no_worker(
+    run_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mode: str,
+) -> None:
+    """A failing non-start command does not claim that no worker started."""
+    from ember.runs import core, exits
+
+    def fail(self: core.Core, *args: object, **kwargs: object) -> int:
+        """Fail without a run context, as a missing dependency can."""
+        raise core.RunError(exits.UNAVAILABLE, "tmux is missing", "tmux")
+
+    monkeypatch.setattr(core.Core, mode, fail)
+    args = ["run", f"--{mode}", "missing-run"]
+    if mode == "send":
+        args.extend(["--message-file", "message.md"])
+    assert main(args, env=run_env) == exits.UNAVAILABLE
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "emb run: tmux is missing",
+        exits.line(exits.UNAVAILABLE, "tmux"),
+    ]
 
 
 @pytest.fixture
