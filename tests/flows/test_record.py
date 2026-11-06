@@ -80,6 +80,9 @@ def test_creation(flow: dict[str, Any], created: Path, env: dict[str, str]) -> N
     assert record.task_entry(flow, "a")["status"] == "pending"
     record.task_entry(flow, "a")["findings"].append({"problem": "a"})
     assert record.task_entry(flow, "b")["findings"] == []
+    assert record.task_entry(flow, "a")["corrections"] == []
+    record.task_entry(flow, "a")["corrections"].append("answers/1.md")
+    assert record.task_entry(flow, "b")["corrections"] == []
     with pytest.raises(KeyError):
         record.task_entry(flow, "unknown")
 
@@ -166,6 +169,36 @@ def test_save_requires_plan_waves(
         record.save(flow, env)
 
 
+def test_corrections_round_trip(
+    flow: dict[str, Any], created: Path, env: dict[str, str]
+) -> None:
+    """A task retains the private correction paths in answer order."""
+    corrections = [str(created / "answers" / f"{n}.md") for n in (2, 5)]
+    flow["tasks"][0]["corrections"] = corrections
+    record.save(flow, env)
+    loaded = record.load(flow["id"], env)
+    assert loaded["tasks"][0]["corrections"] == corrections
+    assert loaded["tasks"][1]["corrections"] == []
+
+
+def test_load_without_corrections(
+    flow: dict[str, Any], created: Path, env: dict[str, str]
+) -> None:
+    """Older task records default to independent empty correction histories."""
+    for task in flow["tasks"]:
+        del task["corrections"]
+    path = created / record.FLOW_NAME
+    text = json.dumps(flow)
+    path.write_text(text)
+    loaded = record.load(flow["id"], env)
+    assert all(task["corrections"] == [] for task in loaded["tasks"])
+    assert path.read_text() == text
+    loaded["tasks"][0]["corrections"].append("answers/1.md")
+    assert loaded["tasks"][1]["corrections"] == []
+    record.save(loaded, env)
+    assert record.load(flow["id"], env)["tasks"][0]["corrections"] == ["answers/1.md"]
+
+
 @pytest.mark.parametrize("bad", [b"invalid", b"\xff", b"[]", b"{}"])
 def test_broken_json(
     flow: dict[str, Any], created: Path, env: dict[str, str], bad: bytes
@@ -214,6 +247,9 @@ def test_invalid_field(
         ("round", -1),
         ("entry", "merge"),
         ("writer_run", 1),
+        ("corrections", None),
+        ("corrections", "answers/1.md"),
+        ("corrections", [1]),
         ("files", None),
     ],
 )

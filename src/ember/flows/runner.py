@@ -551,6 +551,10 @@ class _Runner:
                 fix_base=task.get("fix_base"),
                 standing=self.standing_read(),
                 merged_siblings=self.merged_siblings(task),
+                corrections=[
+                    (int(path.stem), path.read_text(encoding="utf-8"))
+                    for path in map(Path, task["corrections"])
+                ],
             )
             path = self.artifact(task, "review", text)
             self.change(
@@ -1135,6 +1139,7 @@ class _Runner:
                     )
                     if kind == "send":
                         fields["answer_file"] = answer["file"]
+                        fields["corrections"] = [*task["corrections"], answer["file"]]
                     if kind in ("review", "worker") and answer.get("worker"):
                         role = "reviewer" if kind == "review" else "writer"
                         fields[role] = self.freeze(
