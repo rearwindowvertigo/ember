@@ -101,12 +101,16 @@ REPORTS = [  # noqa: E501
     (
         73,
         "uncertain",
-        "retry delivery is uncertain; do not send again before inspecting the session",
+        "retry delivery is uncertain; do not send again before inspecting the session; "
+        "then offer only a retry with the same model and effort; offer no other "
+        "model, engine, Claude subagent or Claude's own work",
     ),
     (
         74,
         "uncertain",
-        "retry delivery is uncertain; do not send again before inspecting the session",
+        "retry delivery is uncertain; do not send again before inspecting the session; "
+        "then offer only a retry with the same model and effort; offer no other "
+        "model, engine, Claude subagent or Claude's own work",
     ),
     (74, None, "interrupted; partial edits may be committed on worker"),
     (74, "retry", "interrupted; partial edits may be committed on worker"),

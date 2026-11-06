@@ -1131,7 +1131,7 @@ have no report line. Report lines are not translated or configurable.
 | 73, `capacity` | `report: capacity; retries exhausted; offer only a retry with the same model and effort once capacity returns; offer no other model, engine, Claude subagent or Claude's own work` |
 | 73, `outage` | `report: outage; offer only a retry with the same model and effort once it clears; offer no other model, engine, Claude subagent or Claude's own work` |
 | 73, `usage_limit` | `report: usage_limit; a retry on the same worker needs no question; another worker or model needs the owner's answer; OpenCode may be offered` |
-| 73 or 74, `uncertain` | `report: retry delivery is uncertain; do not send again before inspecting the session` |
+| 73 or 74, `uncertain` | `report: retry delivery is uncertain; do not send again before inspecting the session; then offer only a retry with the same model and effort; offer no other model, engine, Claude subagent or Claude's own work` |
 | 74, default, `retry` or `complete`, editing run | `report: interrupted; partial edits may be committed on <branch>` |
 | 76 | `report: branch or HEAD moved; nothing committed; recover only when the branch and HEAD are as recorded, otherwise leave the work to the owner` |
 | 77, default (commit refused) | `report: the commit hook refused; the work is uncommitted in <worktree>` |

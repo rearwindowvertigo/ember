@@ -189,7 +189,8 @@ def report(code: int, variant: str | None = None, **context: object) -> str | No
     elif code in (PROVIDER_ERROR, INTERRUPTED) and variant == "uncertain":
         text = (
             "retry delivery is uncertain; do not send again before inspecting the "
-            "session"
+            "session; then offer only a retry with the same model and effort; offer "
+            "no other model, engine, Claude subagent or Claude's own work"
         )
     elif code == PROVIDER_ERROR:
         text = {
