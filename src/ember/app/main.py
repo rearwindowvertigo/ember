@@ -10,6 +10,7 @@ run, and only the later one to listen is reachable on the socket.
 """
 
 import argparse
+import faulthandler
 import importlib.metadata
 import os
 import sys
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import QApplication
 from ember import autostart, paths
 from ember.app import icons, theme, widgets
 from ember.app import tray as tray_module
+from ember.app.collector import Collector
 from ember.app.context import AppContext
 from ember.app.window import MainWindow
 
@@ -151,6 +153,31 @@ def restart_command() -> list[str]:
     return [sys.executable, "-I", "-m", "ember.cli", "app"]
 
 
+class _CrashLog:
+    """Keep the crash log open while faulthandler writes all thread tracebacks."""
+
+    def __init__(self, env: Mapping[str, str]) -> None:
+        """Open the private state log in append mode and enable faulthandler."""
+        folder = paths.state_dir(env)
+        paths.ensure_private_dir(folder, root=folder)
+        self._fd: int | None = paths.open_private_file(
+            folder / "app-crash.log", os.O_WRONLY | os.O_APPEND
+        )
+        try:
+            faulthandler.enable(file=self._fd, all_threads=True)
+        except BaseException:
+            os.close(self._fd)
+            self._fd = None
+            raise
+
+    def close(self) -> None:
+        """Disable faulthandler before closing its file descriptor."""
+        if self._fd is not None:
+            faulthandler.disable()
+            os.close(self._fd)
+            self._fd = None
+
+
 @dataclass
 class EmberApp:
     """The parts of a running app."""
@@ -160,6 +187,9 @@ class EmberApp:
     window: MainWindow
     server: QLocalServer
     tray: tray_module.Tray | None
+    collector: Collector
+    crash_log: _CrashLog
+    stopped: bool = False
     autostart_reason: str | None = None
     version: str | None = None
     """The version this process started as."""
@@ -186,7 +216,7 @@ class _Controller(QObject):
         if self._package is not None:
             self._watcher.addPath(str(self._package))
         self._watcher.directoryChanged.connect(self._package_changed)
-        parts.app.aboutToQuit.connect(self._stop_watching)
+        parts.app.aboutToQuit.connect(self._quit)
         parts.window.destroyed.connect(self._stop_watching)
         hints = parts.app.styleHints()
         hints.colorSchemeChanged.connect(self._scheme_changed)
@@ -207,6 +237,11 @@ class _Controller(QObject):
             word, _, token = line.partition(" ")
             if word == "show":
                 self.parts.window.bring_forward(activation_token({TOKEN: token}))
+
+    def _quit(self) -> None:
+        """Stop background reads before restoring automatic collection on quit."""
+        self._stop_watching()
+        stop(self.parts)
 
     def _stop_watching(self) -> None:
         self._package = None
@@ -275,7 +310,7 @@ def start(argv: list[str], env: Mapping[str, str] | None = None) -> EmberApp | i
     Returns:
         The running parts, or an exit code when the app does not start
         here: 0 when a running instance took over, 64 for a usage error, 69
-        without a graphical session or runtime folder.
+        without a graphical session, runtime folder or writable crash log.
     """
     environment: Mapping[str, str] = os.environ if env is None else env
     args = _parse(argv)
@@ -305,48 +340,79 @@ def start(argv: list[str], env: Mapping[str, str] | None = None) -> EmberApp | i
         )
         return EX_UNAVAILABLE
 
-    app.setApplicationName("Ember")
-    QGuiApplication.setDesktopFileName(APP_ID)
-    app.setWindowIcon(icons.ember_icon())
-    has_tray = tray_module.available()
-    app.setQuitOnLastWindowClosed(not has_tray)
-    theme.apply(app, theme.resolve_mode("system", app))
-    widgets.install_focus_tracking(app)
-    widgets.install_tooltips(app)
+    try:
+        crash_log = _CrashLog(environment)
+    except (OSError, ValueError) as error:
+        server.close()
+        print(f"emb app: cannot open crash log: {error}", file=sys.stderr)
+        return EX_UNAVAILABLE
+    collector = Collector(app)
+    context: AppContext | None = None
+    try:
+        app.setApplicationName("Ember")
+        QGuiApplication.setDesktopFileName(APP_ID)
+        app.setWindowIcon(icons.ember_icon())
+        has_tray = tray_module.available()
+        app.setQuitOnLastWindowClosed(not has_tray)
+        theme.apply(app, theme.resolve_mode("system", app))
+        widgets.install_focus_tracking(app)
+        widgets.install_tooltips(app)
 
-    context = AppContext(environment)
+        context = AppContext(environment)
 
-    def quit_app() -> None:
-        # The window and the icon go at once; `stop` waits for the reads.
-        window.hide()
+        def quit_app() -> None:
+            """Hide the window and tray, then quit the event loop."""
+            # The window and the icon go at once; `stop` waits for the reads.
+            window.hide()
+            if tray is not None:
+                tray.hide()
+            app.quit()
+
+        window = MainWindow(context, has_tray=has_tray, quit_app=quit_app)
+
+        def open_overview() -> None:
+            """Bring the overview screen forward from the tray."""
+            window.show_screen("overview")
+            window.bring_forward()
+
+        tray = (
+            tray_module.Tray(
+                context, window.bring_forward, open_overview, window.quit_app
+            )
+            if has_tray
+            else None
+        )
+        parts = EmberApp(
+            app,
+            context,
+            window,
+            server,
+            tray,
+            collector,
+            crash_log,
+            version=installed_version(),
+        )
+        _Controller(parts)
         if tray is not None:
-            tray.hide()
-        app.quit()
+            tray.show()
+        if not args.hidden or tray is None:
+            window.show()
 
-    window = MainWindow(context, has_tray=has_tray, quit_app=quit_app)
-
-    def open_overview() -> None:
-        window.show_screen("overview")
-        window.bring_forward()
-
-    tray = (
-        tray_module.Tray(context, window.bring_forward, open_overview, window.quit_app)
-        if has_tray
-        else None
-    )
-    parts = EmberApp(app, context, window, server, tray, version=installed_version())
-    _Controller(parts)
-    if tray is not None:
-        tray.show()
-    if not args.hidden or tray is None:
-        window.show()
-
-    context.reload_settings()
-    context.refresh_engines()
-    context.refresh_deps(check_now=True)
-    context.runs.start()
-    context.flows.set_active(True)
-    return parts
+        context.reload_settings()
+        context.refresh_engines()
+        context.refresh_deps(check_now=True)
+        context.runs.start()
+        context.flows.set_active(True)
+        return parts
+    except BaseException:
+        if context is not None:
+            context.runs.stop()
+            context.flows.set_active(False)
+            context.tasks.wait(QUIT_WAIT_MS)
+        server.close()
+        collector.stop()
+        crash_log.close()
+        raise
 
 
 def restart(parts: EmberApp) -> None:
@@ -369,6 +435,9 @@ def stop(parts: EmberApp) -> None:
     Args:
         parts: The running app.
     """
+    if parts.stopped:
+        return
+    parts.stopped = True
     parts.window.hide()
     if parts.tray is not None:
         parts.tray.hide()
@@ -377,6 +446,8 @@ def stop(parts: EmberApp) -> None:
     parts.server.close()
     QCoreApplication.processEvents()
     parts.context.tasks.wait(QUIT_WAIT_MS)
+    parts.collector.stop()
+    parts.crash_log.close()
 
 
 def run(argv: list[str], env: Mapping[str, str] | None = None) -> int:
