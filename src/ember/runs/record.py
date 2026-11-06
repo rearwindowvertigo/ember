@@ -163,6 +163,21 @@ class Run:
     subject: str
     """The brief's first non-empty line."""
 
+    owner_wait: tuple[str, ...] = ()
+    """Pending owner lines from the current turn or failure."""
+
+    owner_read: tuple[str, ...] = ()
+    """One suggested sandbox.read value per owner line, or an empty string."""
+
+    answered_at: float | None = None
+    """When the lead recorded the owner's answer, or None."""
+
+    last_start_failure: bool = False
+    """Whether the last exit happened before start completed."""
+
+    last_variant: str | None = None
+    """The variant of last_exit, or None for older records and default exits."""
+
     capacity_retries: int = 2
     """The retry limit saved at start."""
 
@@ -249,6 +264,11 @@ _TYPES: dict[str, tuple[tuple[type, ...], bool]] = {
     "ended_at": ((int, float), True),
     "last_exit": ((int,), True),
     "last_reason": (_STR, True),
+    "last_variant": (_STR, True),
+    "last_start_failure": ((bool,), False),
+    "owner_wait": ((list,), False),
+    "owner_read": ((list,), False),
+    "answered_at": ((int, float), True),
     "commits": ((list,), False),
     "subject": (_STR, False),
 }
@@ -507,6 +527,11 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
     if not isinstance(value, dict):
         raise RecordError(name, "run.json is not an object")
     value = {
+        "owner_wait": [],
+        "owner_read": [],
+        "answered_at": None,
+        "last_variant": None,
+        "last_start_failure": False,
         "sandbox_paths": {},
         "capacity_retries": 2,
         "capacity_wait": 30,
@@ -553,7 +578,17 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
         raise RecordError(name, "run.json has an invalid turn_state")
     if values["parent"] is not None and not _valid_parent(values["parent"]):
         raise RecordError(name, "run.json has an invalid parent")
-    for key in ("started_at", "updated_at", "ended_at", "last_screen_change_at"):
+    if values["answered_at"] is not None and not _nonnegative_number(
+        values["answered_at"]
+    ):
+        raise RecordError(name, "run.json has an invalid answered_at")
+    for key in (
+        "started_at",
+        "updated_at",
+        "ended_at",
+        "last_screen_change_at",
+        "answered_at",
+    ):
         if values[key] is not None:
             values[key] = float(values[key])
     if choices.OPENCODE_ID_FORMAT not in value and values["engine"] == "opencode":

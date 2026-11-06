@@ -92,7 +92,8 @@ def test_save_and_load_round_trip(env: dict[str, str]) -> None:
         "updated_at", "ended_at", "last_exit", "last_reason", "commits",
         "subject", "main", "common", "detached", "last_screen_change_at",
         "capacity_retries", "capacity_wait", "sandbox_paths", "parent",
-        "opencode_id_format",
+        "opencode_id_format", "owner_wait", "owner_read", "answered_at", "last_variant",
+        "last_start_failure",
     }  # fmt: skip
     assert [entry.name for entry in folder.iterdir()] == ["run.json"]
 
@@ -573,3 +574,45 @@ def test_opencode_id_migration_load_update_reload(
     record.update(loaded, {"subject": "updated"})
     assert json.loads(path.read_text())["opencode_id_format"] == 1
     assert record.load(run.id, env).model == expected
+
+
+def test_owner_fields_round_trip_and_older_defaults(env: dict[str, str]) -> None:
+    run = replace(
+        _run(env),
+        owner_wait=("owner: allow /folder",),
+        owner_read=("/folder",),
+        answered_at=2.5,
+        last_variant="uncertain",
+    )
+    record.save(run)
+    assert record.load(run.id, env) == run
+    data = run.to_json()
+    for key in (
+        "owner_wait",
+        "owner_read",
+        "answered_at",
+        "last_variant",
+        "last_start_failure",
+    ):
+        del data[key]
+    old = record.from_json(data, run.folder, env)
+    assert old.owner_wait == old.owner_read == ()
+    assert old.answered_at is None and old.last_variant is None
+    assert old.last_start_failure is False
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("owner_wait", [1]),
+        ("owner_read", None),
+        ("answered_at", -1),
+        ("answered_at", float("inf")),
+        ("answered_at", True),
+        ("last_variant", 1),
+    ],
+)
+def test_invalid_owner_fields(env: dict[str, str], key: str, value: object) -> None:
+    run = _run(env)
+    with pytest.raises(record.RecordError, match=key):
+        record.from_json({**run.to_json(), key: value}, run.folder, env)

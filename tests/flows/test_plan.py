@@ -455,10 +455,48 @@ def test_resolution_order(
     )
     raw["writer"] = {"engine": "codex", "model": "gpt-5", "effort": "low"}
     item = parsed(raw, tmp_path)
-    assert plan.resolve("writer", None, item, settings) == item.writer
+    assert item.writer is not None
+    assert (
+        plan.resolve("writer", None, item, settings).to_json() == item.writer.to_json()
+    )
     assert (
         plan.resolve("writer", "claude:other@high", item, settings).source == "option"
     )
+
+
+@pytest.mark.parametrize("role", plan.ROLES)
+@pytest.mark.parametrize("source", ["option", "plan", "menu", "same"])
+def test_resolved_worker_announce_metadata(
+    raw: dict[str, Any], tmp_path: Path, env: dict[str, str], role: str, source: str
+) -> None:
+    """Resolve announce labels and sources without adding stored worker fields."""
+    option = None
+    if source == "option":
+        option = "claude:opus@high"
+    elif source == "plan":
+        raw[role] = {"engine": "claude", "model": "opus", "effort": "high"}
+    else:
+        choices.set_settings(
+            {f"flow.{role}": "same" if source == "same" else "claude:opus"},
+            env=env,
+        )
+    worker = plan.resolve(role, option, parsed(raw, tmp_path), choices.read(env=env))
+    if source in {"option", "plan"}:
+        assert (worker.screen, worker.row) == (source, role)
+        assert worker.model_source == worker.effort_source == source
+    else:
+        expected_row = (
+            f"Single tasks {role.title()}" if source == "same" else f"Flow {role}"
+        )
+        expected_source = f"single.{role}" if source == "same" else f"flow.{role}"
+        assert (worker.screen, worker.row) == ("Team", expected_row)
+        assert worker.model_source == worker.effort_source == expected_source
+    assert worker.to_json() == {
+        "engine": "claude",
+        "model": "opus",
+        "effort": "high",
+        "source": "menu" if source == "same" else source,
+    }
 
 
 @pytest.mark.parametrize(

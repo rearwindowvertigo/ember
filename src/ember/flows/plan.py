@@ -4,7 +4,7 @@ import json
 import re
 import subprocess
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -59,6 +59,10 @@ class Worker:
     model: str
     effort: str | None
     source: str
+    screen: str = ""
+    row: str = ""
+    model_source: str = ""
+    effort_source: str = ""
 
     def text(self) -> str:
         """Return the worker option syntax."""
@@ -68,7 +72,12 @@ class Worker:
 
     def to_json(self) -> dict[str, Any]:
         """Return the four stored worker fields."""
-        return asdict(self)
+        return {
+            "engine": self.engine,
+            "model": self.model,
+            "effort": self.effort,
+            "source": self.source,
+        }
 
 
 @dataclass(frozen=True)
@@ -432,11 +441,17 @@ def resolve(
     """Resolve a worker from the option, plan, then a usable menu row."""
     if role not in ROLES:
         raise ValueError(f"unknown role: {role}")
-    if option is not None:
-        return parse_worker(option, "option")
-    worker = getattr(plan, role)
+    worker = (
+        parse_worker(option, "option") if option is not None else getattr(plan, role)
+    )
     if worker is not None:
-        return worker
+        return replace(
+            worker,
+            screen=worker.source,
+            row=role,
+            model_source=worker.source,
+            effort_source=worker.source,
+        )
     line = (
         f"owner: name the flow's {role} with --{role}, "
         f"or set Flow {role} on the Team screen"
@@ -457,7 +472,16 @@ def resolve(
             f"owner: name the flow's {role} with --{role} claude:{row['model']}, "
             f"or set Flow {role} to a CLI worker on the Team screen",
         )
-    return Worker(row["engine"], row["model"], row["effort"], "menu")
+    return Worker(
+        row["engine"],
+        row["model"],
+        row["effort"],
+        "menu",
+        screen="Team",
+        row=f"Single tasks {role.title()}" if row.get("same") else f"Flow {role}",
+        model_source=name,
+        effort_source=name,
+    )
 
 
 def check_worker(

@@ -104,6 +104,7 @@ _TASK_FIELDS = {
     "findings": "[dict]",
     "changed_files": "[str]",
     "outside_files": "[str]",
+    "corrections": "[str]",
     "entry": "str?",
     "answer": "int?",
     "merge_tip": "str?",
@@ -147,7 +148,14 @@ def _new_task(task_id: str, subject: str) -> dict[str, Any]:
     """Initialize every task field with independent lists."""
     task: dict[str, Any] = dict.fromkeys(_TASK_FIELDS)
     task.update(id=task_id, subject=subject, status="pending", round=0)
-    for key in ("reviews", "findings", "changed_files", "outside_files", "cleanup"):
+    for key in (
+        "reviews",
+        "findings",
+        "changed_files",
+        "outside_files",
+        "corrections",
+        "cleanup",
+    ):
         task[key] = []
     return task
 
@@ -329,6 +337,10 @@ def load(flow_id: str, env: Mapping[str, str] | None = None) -> dict[str, Any]:
         value.setdefault("plan_waves", [])
         value.setdefault("base_branch", None)
         value.setdefault("common", None)
+        if isinstance(value.get("tasks"), list):
+            for task in value["tasks"]:
+                if isinstance(task, dict):
+                    task.setdefault("corrections", [])
     _validate(flow_id, value)
     if choices.OPENCODE_ID_FORMAT not in value:
         for row in (value, *value["tasks"]):

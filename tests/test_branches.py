@@ -468,21 +468,32 @@ def test_merge_ignores_ignored_files_in_the_target(
     assert _merge(env, driver, streams, run.branch, repo) == 0
 
 
+@pytest.mark.parametrize("squash", [False, True])
 def test_merge_conflict_leaves_target_unchanged_and_75(
-    tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    squash: bool,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     run = _start(tmp_path, env, repo, driver, "Task\n@write README.md worker\n")
     assert run.branch is not None
+    branch = run.branch if squash else "worker"
+    if not squash:
+        git(repo, "branch", branch, run.branch, env=env)
     (repo / "README.md").write_text("lead\n")
     git(repo, "commit", "-q", "-am", "lead", env=env)
     head = git(repo, "rev-parse", "HEAD", env=env)
     streams = Streams()
-    assert _merge(env, driver, streams, run.branch, repo) == 75
+    assert _merge(env, driver, streams, branch, repo) == 75
     out, err = streams.take()
     assert out == ""
-    assert f"conflict in README.md; main unchanged at {head}" in err
+    assert "conflict in README.md;" in err
+    assert f"main unchanged at {head}" in err
     assert err.splitlines()[-1].startswith(
-        f"next: resolve the conflicts on {run.branch}, review"
+        f"owner: resolve the conflict on {branch}, or ask for a new run "
+        "cut from the updated target"
     )
     assert git(repo, "rev-parse", "HEAD", env=env) == head
     assert git(repo, "status", "--porcelain", env=env) == ""
@@ -491,6 +502,33 @@ def test_merge_conflict_leaves_target_unchanged_and_75(
     ).exists()
     assert (repo / "README.md").read_text() == "lead\n"
     assert _branch_exists(repo, run.branch, env)
+
+    from ember.cli import main
+    from ember.runs import exits
+
+    assert (
+        main(
+            [
+                "merge",
+                branch,
+                "--into",
+                "main",
+                "--verdict",
+                "keep",
+                "--note",
+                "Keep",
+                "--subject",
+                "feat: work",
+                "--dir",
+                str(repo),
+            ],
+            env=env,
+        )
+        == 75
+    )
+    captured = capsys.readouterr()
+    assert "next:" not in captured.err
+    assert captured.err.splitlines()[-1] == exits.report(75, "conflict")
 
 
 def test_merge_of_a_contained_branch_makes_no_commit(

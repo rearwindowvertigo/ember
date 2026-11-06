@@ -423,14 +423,17 @@ factory of the module `ember.engines.<engine>`; an engine without one exits 69
 with `owner: this Ember build has no driver for <engine>; update Ember`.
 
 Data goes to standard output. Errors go to standard error as
-`emb run: <message>`; each non-zero exit then prints one `next:` or `owner:`
-line from the exit table below.
+`emb run: <message>`; each non-zero exit then prints its `next:` or `owner:`
+line from the exit table below, subject to the owner wait described under
+Status. Exits with a `report:` line print it on standard error after the
+action lines.
 
 After exit 0, a start, `--send`, `--recover`, `--close` (including
-`--force`) or `--status RUN` prints the run's derived next line once on
-standard error when one applies. `--quiet` does not suppress it. Dry runs
-and status lists print no derived next line. Runs with a `parent` have no
-derived next line; status still prints the orphan warnings described below.
+`--force`), `--answered` or `--status RUN` prints the run's derived next
+line once on standard error when one applies. `--quiet` does not suppress
+it. Dry runs and status lists print no derived next line. Runs with a
+`parent` have no derived next line; status still prints the orphan
+warnings described below.
 
 ### Options
 
@@ -452,6 +455,7 @@ derived next line; status still prints the orphan warnings described below.
 | `--close RUN` | End the session and record the run closed |
 | `--force` | With `--close`: close even while a turn runs, another command waits on the run, or the session holds messages Ember did not send. With `--send`: send even when the session holds messages Ember did not send |
 | `--recover RUN` | Collect and commit a turn that ended while no command waited, or wait for it |
+| `--answered RUN` | After the owner's reply: record the answer time, end the owner wait and print the current derived next line when one applies |
 | `--status [RUN]` | Print one run's record, or every run's |
 | `--json` | With `--status` or `--dry-run`: print JSON |
 | `--quiet` | Limit progress output to the run id, resolved worker and each turn's summary; retain the next line |
@@ -555,9 +559,11 @@ variable that placed it there (`XDG_DATA_HOME`, or `HOME` when no absolute
 A read-only run has no branch and gets its own detached worktree in the
 same worktrees folder, at the named checkout's `HEAD`. It does not see
 uncommitted edits or later changes in the source checkout. At start it
-prints `WARNING: read-only run <id> does not see uncommitted <path>` on
+prints `WARNING: read-only run <id> does not see uncommitted <path> (reads <hash>)` on
 standard error for each uncommitted path in that checkout; these warnings
-do not change a successful exit.
+do not change a successful exit. `<hash>` is the `git rev-parse --short`
+form of the commit used to create the detached worktree. Ember resolves
+the source `HEAD` once for both the worktree and these warnings.
 
 Each run's sandbox follows the engine's switch, `sandbox.codex`,
 `sandbox.opencode` or `sandbox.claude`. The run records who provides it in
@@ -685,6 +691,16 @@ suggestion. Protected runtime and other worker worktree paths also receive
 no `sandbox.read` suggestion. A matched path inside Ember's own
 configuration or state folder instead receives an owner line saying it
 cannot be added.
+
+A secret location's single `owner:` line starts with:
+
+```text
+owner: Overview offers no Allow reading for <path>; folders inside $XDG_CONFIG_HOME are never offered;
+```
+
+`$XDG_CONFIG_HOME` is printed literally. An addable
+secret location keeps the Settings and `emb choices --set` instruction
+after this prefix, including the exit-0 qualification when applicable.
 
 Secret locations include `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`,
 `~/.config/gcloud`, `~/.config/gh`, `~/.docker/config.json`, `~/.netrc`,
@@ -944,7 +960,12 @@ UTC. It is also the tmux session's name.
 | `parent` | object or null | The Ember command that started the run: `command` (`gapcheck`, `panel` or `flow`), `id` (the panel or flow id, null for a gap check), and `pid` and `start` (the process id and its start time in clock ticks since boot); null for `emb run` and for an older record without the field |
 | `last_screen_change_at` | number or null | Epoch seconds when a wait loop last observed a changed screen; null before recorded activity or when absent from an older record |
 | `last_exit` | integer or null | The exit code of the last turn or failure |
+| `last_variant` | string or null | The exit variant used for action and report lines; null when absent from an older record |
+| `last_start_failure` | boolean | Whether the last exit happened before the start completed; false when absent from an older record |
 | `last_reason` | string or null | Its message, or the paths a read-only turn changed |
+| `owner_wait` | list of strings | Pending `owner:` lines; empty when absent from an older record |
+| `owner_read` | list of strings | Suggested `sandbox.read` values in owner-line order; an empty string for an action without one; empty when absent from an older record |
+| `answered_at` | number or null | Epoch seconds when `--answered` ended the wait; null before an answer or when absent from an older record |
 | `commits` | list of strings | The run's commits, oldest first |
 | `subject` | string | The brief's first non-empty line |
 
@@ -972,14 +993,43 @@ complete `next:` or `owner:` line, or null. The first matching row applies:
 | Condition | `step` | `next` |
 |---|---|---|
 | The run has a `parent` | `parent` | null |
+| Pending owner actions recorded | `owner` | null |
 | Closed and either read-only, without commits, with its last commit contained in its base branch, or with no branch left in its checkout | `finish` | `next: emb choices --finish <claim>`; null without a claim or when its status is `gone` |
 | Closed with uncontained editing commits on a branch that still exists | `merge` | Verify and merge line below |
-| Status `failed`, or a turn not `sent` whose `last_exit` is nonzero | `failed` | The default exit line for `last_exit`; null for 0 or null, and the exit-1 line for an unknown code |
+| Status `failed`, or a turn not `sent` whose `last_exit` is nonzero | `failed` | The exit line for `last_exit` and its saved variant; older records fall back to the provider kind; null for 0 or null, and the exit-1 line for an unknown code |
 | Status `starting`, or turn 0 | `starting` | `next: emb run --status <run>` |
 | Turn `sent` and session `live` | `running` | `next: emb run --status <run>` |
 | Turn `sent`, or result collection remains unfinished | `recover` | `next: emb run --recover <run>` |
 | Editing run with commits whose last commit is not contained in its base branch | `merge` | Verify and merge line below |
 | Otherwise | `close` | `next: emb run --close <run>` |
+
+A run without a parent records a wait for printed `owner:` actions,
+including failures and denied paths that print an owner line. Denials
+without an owner line do not create a wait. While it waits, Ember omits
+the carry-on `next:` line. `--status` repeats the pending `owner:` lines
+and any applicable `report:` line; JSON has `"step": "owner"` and
+`"next": null`. An owner wait takes precedence over a failed or closed
+run's step.
+
+The lead runs `emb run --answered <run>` only after the owner's reply.
+It records the answer time, clears the wait and prints the derived next
+line again. For an answered failure whose action was an `owner:` line,
+this is a new start if no turn started, otherwise a send. The command
+also works on a closed run. With nothing pending or a parent run, it
+exits 0 and prints the current status next line when one applies; an
+unknown run exits 64 with `next: emb run --status`.
+
+A denial-only wait also ends when `sandbox.read` contains every value
+the pending owner lines suggested: each `allow_path`, or the denied path
+when that was suggested instead. Other actions need `--answered`.
+Waiting does not refuse `--send`, `--recover`, `--close` or `emb merge`.
+A later turn's result replaces the earlier turn's wait. Runs started by
+flows, panels or gap checks do not record owner waits; their parent steps
+and `waiting_for_flow` behavior apply.
+
+For a `failed` or `owner` step, status prints the report line for the saved
+exit and variant on standard error, including with `--json`. Older
+records without a variant use the recorded provider kind when available.
 
 Containment uses the same checks as cleanup, including `Ember-Task-Tip`
 trailers, even after the worker branch is deleted. A missing base branch
@@ -1071,6 +1121,29 @@ evidence that no provider error occurred.
 | 80 | The turn ended with no reply | `next: emb run --screen <run>, then emb run --send <run> ...` |
 | 124 | Stall; the turn may still be running | `next: emb run --recover <run>` |
 
+These `emb run` exits also print the following exact report lines.
+Placeholders name the run's branch or worktree. Other exits and variants
+have no report line. Report lines are not translated or configurable.
+
+| Exit and case | Report line |
+|---|---|
+| 69, no turn started | `report: no worker started; do not retry the start or start another engine before the owner answers` |
+| 73, `capacity` | `report: capacity; retries exhausted; offer only a retry with the same model and effort once capacity returns; offer no other model, engine, Claude subagent or Claude's own work` |
+| 73, `outage` | `report: outage; offer only a retry with the same model and effort once it clears; offer no other model, engine, Claude subagent or Claude's own work` |
+| 73, `usage_limit` | `report: usage_limit; a retry on the same worker needs no question; another worker or model needs the owner's answer; OpenCode may be offered` |
+| 73 or 74, `uncertain` | `report: retry delivery is uncertain; do not send again before inspecting the session` |
+| 74, default, `retry` or `complete`, editing run | `report: interrupted; partial edits may be committed on <branch>` |
+| 76 | `report: branch or HEAD moved; nothing committed; recover only when the branch and HEAD are as recorded, otherwise leave the work to the owner` |
+| 77, default (commit refused) | `report: the commit hook refused; the work is uncommitted in <worktree>` |
+| 80 | `report: the turn ended with no reply` |
+
+A sign-in failure during a turn prints its exit-69 owner line without the
+no-worker-started report. Exit 74's `starting` and `send` variants print
+no report; `uncertain` prints only the uncertain-delivery line. Read-only
+runs omit the interrupted-partial-edits line. Exit 77's `add` variant
+prints no report. These run report lines come from `emb run`, including
+status, rather than from internal worker calls by other Ember commands.
+
 ### Provider errors and capacity retries
 
 Provider errors have a `provider_kind`: `capacity`, `usage_limit` or
@@ -1115,7 +1188,7 @@ attempt seconds do not. Both totals persist across recovery.
 | Brief | Pasted once Codex's composer shows `? for shortcuts` | Sent through the server's session API once the server answers and the view has drawn its screen | Written as turn 1's request before the pane starts; given to the CLI on standard input |
 | Turn end and reply | Read from Codex's rollout file: `task_complete` with its last message, or `turn_aborted`; an `error` event during the turn fails it | Read from the session status and messages: the turn's last assistant message, once the session is idle; its text parts are the reply | The CLI's exit; the reply is the assistant text after the turn's last tool result |
 | Later messages | Pasted | Sent through the session API | A new `claude -p` that resumes the previous turn's CLI session |
-| Read-only run | Ember's profile extends Codex's `:workspace` profile for the writable detached worktree; legacy source checkouts use `:read-only` | The agent may not edit, write or patch files or reach folders outside the checkout other than the folders of its read paths; the detached worktree is mounted writable | The tools are `Read`, `Glob` and `Grep`; the detached worktree is mounted writable |
+| Read-only run | Ember's profile extends Codex's `:workspace` profile for the writable detached worktree; legacy source checkouts use `:read-only` | The agent may not edit, write or patch files or reach folders outside the checkout other than the folders of its read paths; the detached worktree is mounted writable | The tools are `Read`, `Glob` and `Grep`, plus limited `Bash` for detached runs inside `bubblewrap` as described below; the detached worktree is mounted writable |
 | Sandbox provider | `codex` | `bubblewrap` | `bubblewrap` |
 | `--interrupt` | Presses Escape in the session | Aborts the turn through the session API | Sends `SIGINT` to the process group of the turn's CLI, as Ctrl+C in the pane does; the program takes the next turn |
 | Messages Ember did not send | Each `user_message` in the rollout that does not match, in order, a message Ember pasted | Each user message whose id Ember did not send | None; the pane takes no typed messages |
@@ -1163,6 +1236,42 @@ Claude's turns use `--restricted`, `--safe-mode` and `--strict-mcp-config`;
 the run's read paths are added with `--add-dir` and edits to them are
 refused. While a tool call or a model message runs, Claude's pane prints a
 line such as `· running Bash for 3 min` at least once a minute.
+
+A read-only Claude CLI run gets `Bash` only when its worktree is detached
+and its recorded sandbox is `bubblewrap`. This includes task and
+whole-flow reviewers, gap check reviewers, panel members and
+`emb run --read-only` when those conditions hold. Legacy runs using the
+source checkout and runs with the sandbox off keep only `Read`, `Glob`
+and `Grep`.
+
+The shell allows these command prefixes with arguments:
+
+- `git diff`, `git log`, `git show`, `git status`, `git blame`, `git grep`,
+  `git ls-files`, `git rev-parse`;
+- `make check`, `make test`;
+- `pytest`, `uv run pytest`.
+
+`--tools` includes `Bash`; `--allowedTools` contains the read tools and
+one `Bash(<command>:*)` rule per listed prefix. Other commands have no
+allow rule, including `git -C <dir> ...`. Claude Code checks the commands
+of a compound shell command separately. Permission prompts are disabled.
+The git write verbs remain refused as for editing runs: `add`, `commit`,
+`push`, `merge`, `rebase`, `reset`, `checkout`, `switch`, `branch`,
+`cherry-pick`, `tag`, `stash`, `restore`, `rm`, `mv`, `am`, `apply`, `pull`
+and `fetch`.
+
+Arguments after an allowed prefix are not filtered. This includes git
+`--output`, `git grep -O` and `--open-files-in-pager`, make `-f`, `--file`,
+`-C`, `--eval` and `NAME=value` arguments, and pytest `--junitxml`,
+`--basetemp` and `-p`. Commands run inside Ember's sandbox in the writable
+detached worktree; the read-only change warnings still apply.
+
+For read-only turns, Ember sets `PYTHONDONTWRITEBYTECODE=1`, appends
+`-p no:cacheprovider` to `PYTEST_ADDOPTS`, and sets `RUFF_CACHE_DIR` to
+`$XDG_CACHE_HOME/ember/worker/claude/<run>/ruff`, outside the worktree.
+It sets `UV_FROZEN=1` and leaves uv's project environment location
+unchanged. These values travel with each turn's request to the Claude
+host. Editing runs keep their existing tools and environment.
 
 ## `emb gapcheck`
 
@@ -1867,7 +1976,19 @@ subject, declared files and the other tasks' files, the `## Sources to read`
 section when the plan has read files, review focus, context,
 failure model, the base and head for `git diff` and `git log`, changed and
 outside files, and up to 20,000 characters of the writer's last report.
-It lists merged sibling tasks whose recorded squash commits are not
+The `Changed outside the declared files` section lists Ember's recorded
+`outside_files`, independently of the writer's report.
+
+After a lead send answer is applied, later reviewer briefs for that task
+include its correction text under `Lead corrections`, in answer order,
+labelled `Answer <n>`. They describe these as settled decisions that the
+reviewer does not reopen. Any file a correction names counts as in scope
+for that review, even when it remains in `outside_files`. Ember does not
+parse correction text or remove paths from `outside_files`. This history
+is included only in that task's reviewer briefs, not in whole-flow review
+briefs or replacement writer briefs.
+
+The brief lists merged sibling tasks whose recorded squash commits are not
 ancestors of the task's reviewed head, with each task's id, subject and
 commit. It says their changes are on the flow branch and absent from the
 task branch. With no such siblings, it omits the list. The brief names no
@@ -2129,6 +2250,7 @@ refused. `save` updates `updated_at` and atomically replaces `flow.json`.
 | `changed_files`, `outside_files` | Last turn's changed paths and paths outside its declarations |
 | `entry` | Next operation: `write`, `send`, `review` or null |
 | `answer` | Answer number being applied, or null |
+| `corrections` | Private paths of applied send corrections in answer order; defaults to `[]` when missing |
 | `merge_tip`, `merge_commit` | Approved worker tip and resulting squash commit, or null; containment may succeed without a new commit |
 | `cleanup` | Cleanup result objects from the merge |
 | `warnings` | Merge warnings when present, including a worker breaking change without `!` in the task subject |
@@ -2144,7 +2266,7 @@ Events have `seq` starting at 1, `at` in epoch seconds, and `kind`:
 |---|---|
 | `flow` | `status`, `reason` |
 | `task` | `task`, `status`, `reason`; a merged task also records `cleanup` and `warnings` |
-| `lead_stop` | `task` or null, `status`, `reason`, `choices` |
+| `lead_stop` | `task` or null, `status`, `reason`, `choices`; `provider_kind` from the run's last outcome when present |
 | `denied_paths` | `task`, `role`, `denied_paths`; each new denial includes `path`, `reason`, `allow_path`, `run` and `turn` |
 | `check` | `wave`, `exit`, `log`, `output` |
 | `end` | `status`, `reason`, `exit` |
@@ -2175,8 +2297,26 @@ an error.
 ### Output
 
 Data goes to standard output; diagnostics and action lines go to standard
-error. `--dry-run` text prints the resolved writer and reviewer with their
-sources, the base commit, `rounds <n> fix rounds, at most <n+1> reviews
+error. `--dry-run` text prints one announce line for the writer and one
+for the reviewer on standard output, in the `emb run --dry-run` form:
+
+```text
+Team, Flow writer: codex gpt-6.1-sol · high (flow.writer)
+Team, Flow reviewer: claude opus · high (flow.reviewer)
+```
+
+A flow row set to Same as names `Single tasks Writer` or `Single tasks
+Reviewer` and the corresponding `single.writer` or `single.reviewer`
+source. Explicit worker options and plan workers use their source label
+in place of the screen and `writer` or `reviewer` as the row, for example
+`option, writer: claude opus · high (option)` or
+`plan, reviewer: claude opus · default (plan)`. Unset effort prints as
+`default`; differing model and effort sources are labelled separately as
+in single-run announcements. JSON retains the `writer` and `reviewer`
+objects with `engine`, `model`, `effort` and `source`; it includes no
+announce lines or additional announcement fields.
+
+The text then prints the base commit, `rounds <n> fix rounds, at most <n+1> reviews
 per task (<source>)`, the check as shell words (or `none`), numbered waves
 with each task's declared files, `parallel <n> (<source>), stall <n> min,
 whole-flow review on|off`, and the gap check line: `gap check: <command>`,
@@ -2239,6 +2379,7 @@ The JSON watch report contains:
 | `stops` | Unread lead-stop events with their sequence, task, reason and available choices |
 | `abandoned` | Retained branches of dropped or replaced writers |
 | `next` | The action line, also printed on standard error |
+| `report` | List of report lines, also printed on standard error after `next`; empty when none apply |
 
 Each task report has `id`, `status`, `reason`, `round`, `writer_run`,
 `branch`, `worktree`, `merge_commit`, `outside_files`, `denied_paths`, `cleanup` and
@@ -2263,6 +2404,26 @@ the runner. At a successful end it says to review the flow branch and run
 An end with unmerged tasks first says to report them to the owner. A failed
 pending check says to fix the flow branch with an `emb run` and merge,
 then resume. Other failures name `--status`; runner loss names `--resume`.
+
+The following report lines follow the action line on standard error,
+including with `--watch --json`:
+
+| Case | Report line |
+|---|---|
+| Lead stop, no live runner | `report: lead stop on <task>; no runner is live and the owner's answer starts it; list every printed choice and recommend one` |
+| Lead stop, live runner | `report: lead stop on <task>; the runner is still live for the other tasks; list every printed choice and recommend one` |
+| Lead stop after capacity | `report: capacity on <task>; recommend only the same-worker retry` |
+| Exit 82 | `report: tasks unmerged; report every task's status and reason; leave the unmerged work and the flow branch to the owner` |
+| Exit 72 | `report: the runner is gone; work may still be running` |
+
+Watch prints one report line per delivered stop event. With no new stop
+events, it prints one per task currently `stopped` or `conflict`. A
+flow-level stop uses the flow id in place of `<task>`. A stop with saved
+`provider_kind: capacity` prints only the capacity line for that stop.
+Every user-facing flow command that exits 82 or 72 prints the corresponding
+report line after its action line. Flow `next:` lines remain in place
+when workers have pending owner actions; the single-run owner wait does
+not suppress them.
 
 `--status FLOW --json` prints `flow.json` plus `runner_live`. Each task has
 `latest_review` as in watch reports, and its `findings` objects include
@@ -3213,6 +3374,12 @@ longer fails.
 Messages go to standard error as `emb merge: <message>` or
 `emb cleanup: <message>`; each non-zero exit then prints one `next:` or
 `owner:` line.
+
+For an exit-75 merge conflict, the action is
+`owner: resolve the conflict on <branch>, or ask for a new run cut from the updated target`
+in place of a `next:` line. It is followed on standard error by
+`report: merge conflict; do not retry or force it; ask the owner: a new run cut from the updated target, or the owner resolves it`.
+Other merge and cleanup exits, including 76 and 77, print no report line.
 
 | Code | Meaning |
 |---|---|

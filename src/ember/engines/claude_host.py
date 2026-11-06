@@ -6,7 +6,8 @@ from `<turn>` on, runs that request's argv in the worktree with
 `prompt-<n>.md` on standard input, copies standard output to
 `turn-<n>.jsonl` and standard error to `turn-<n>.stderr`, and writes
 `turn-<n>.exit` when the CLI ends. The CLI runs without the variables of the
-session that started Ember. When the request names a sandbox, the CLI runs
+session that started Ember, with each request's environment overrides applied
+only to that turn. When the request names a sandbox, the CLI runs
 inside `ember.sandbox.claude_wrap`; the program itself runs outside it. While
 a tool call or a model message is in progress, the program prints a status
 line at least once a minute. The program never ends by itself; ending the
@@ -247,6 +248,13 @@ class Host:
             argv = [str(item) for item in request["argv"]]
             prompt_path = Path(request["prompt"])
             box = request.get("sandbox")
+            overrides = request.get("env", {})
+            if not isinstance(overrides, dict) or not all(
+                isinstance(key, str) and isinstance(value, str)
+                for key, value in overrides.items()
+            ):
+                raise TypeError("the request's env is not a string mapping")
+            env = cli_environment({**self.env, **overrides})
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
             return self._refuse(
                 files, f"cannot read the request of turn {turn}: {error}"
@@ -259,7 +267,7 @@ class Host:
             )
         self.running = turn
         try:
-            code = self._run(argv, prompt_path, files)
+            code = self._run(argv, prompt_path, files, env)
         finally:
             self.running = None
         _write_exit(files["exit"], code)
@@ -312,8 +320,13 @@ class Host:
                 print(text, flush=True)
 
     def _run(
-        self, argv: Sequence[str], prompt_path: Path, files: Mapping[str, Path]
+        self,
+        argv: Sequence[str],
+        prompt_path: Path,
+        files: Mapping[str, Path],
+        env: Mapping[str, str],
     ) -> int:
+        """Run a turn with its environment and periodic progress reports."""
         progress = Progress(time.monotonic(), self.status_seconds)
         done = threading.Event()
         reporter = threading.Thread(
@@ -321,7 +334,7 @@ class Host:
         )
         reporter.start()
         try:
-            return self._stream(argv, prompt_path, files, progress)
+            return self._stream(argv, prompt_path, files, progress, env)
         finally:
             done.set()
             reporter.join()
@@ -332,7 +345,9 @@ class Host:
         prompt_path: Path,
         files: Mapping[str, Path],
         progress: Progress,
+        env: Mapping[str, str],
     ) -> int:
+        """Stream the CLI's output using the turn's environment."""
         with files["jsonl"].open("wb") as output, files["stderr"].open("wb") as errors:
             try:
                 with prompt_path.open("rb") as prompt:
@@ -342,7 +357,7 @@ class Host:
                         stdin=prompt,
                         stdout=subprocess.PIPE,
                         stderr=errors,
-                        env=self.env,
+                        env=env,
                     )
             except OSError as error:
                 errors.write(f"cannot start claude: {error}\n".encode())
