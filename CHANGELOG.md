@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.16.0](https://github.com/rearwindowvertigo/ember/compare/v0.15.0...v0.16.0) (2026-11-06)
+
+
+### Added
+
+* add make screens to render every screen offscreen ([609744c](https://github.com/rearwindowvertigo/ember/commit/609744c9642122cf8d99ea71c6e54f31dd292a33))
+* **app:** mark a changed setting and offer a Reset to its default ([7b25e2e](https://github.com/rearwindowvertigo/ember/commit/7b25e2e6817bd7a7a6ce62cbce1e6fa1ea3a1950))
+* **cli:** name what a denied secret path and a read-only run cannot see ([f7b08bd](https://github.com/rearwindowvertigo/ember/commit/f7b08bd6ee00af5c3e94d2579161a274cef77989))
+* **cli:** print report lines and wait for the owner after a run's exits ([52532f8](https://github.com/rearwindowvertigo/ember/commit/52532f85390f7191a84f0417b84c02ad65498a6c))
+* **engines:** give read-only Claude CLI runs a read-only shell ([207ea78](https://github.com/rearwindowvertigo/ember/commit/207ea7840107a718b5f7ddb533e1a9bfe9dbcb1b))
+* **flows:** pass the lead's corrections into later reviewer briefs ([cc5e760](https://github.com/rearwindowvertigo/ember/commit/cc5e760d1a09bccd91d67922424ed9a4e780eee7))
+* **flows:** print announce lines for a flow's workers in the dry run ([bcf3a43](https://github.com/rearwindowvertigo/ember/commit/bcf3a439915e092fc379da76f92f4bee1ac3a38c))
+* **flows:** print report lines at lead stops and flow exits ([0c4b971](https://github.com/rearwindowvertigo/ember/commit/0c4b97114eb1e9457b6df004134f354a43b2a3b7))
+
+
+### Fixed
+
+* **app:** collect garbage only on the GUI thread ([6974518](https://github.com/rearwindowvertigo/ember/commit/69745181b432a827e51031abec36f2935373a6d1))
+
 ## [0.15.0](https://github.com/rearwindowvertigo/ember/compare/v0.14.1...v0.15.0) (2026-11-05)
 
 
