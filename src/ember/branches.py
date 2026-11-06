@@ -1626,11 +1626,10 @@ def _merge(
     )
 
 
-def _merged_run_next(job: Cleanup, branch: str) -> str | None:
-    """Derive the newest unparented run's next step after cleanup."""
+def _merged_run_lines(job: Cleanup, branch: str) -> tuple[str | None, tuple[str, ...]]:
+    """Derive the newest unparented run's next and owner lines after cleanup."""
     results = [item for item in job.results if item.branch == branch]
-    if any(item.action == KEPT for item in results):
-        return None
+    kept = any(item.action == KEPT for item in results)
     runs = []
     for item in results:
         if item.run is not None:
@@ -1639,8 +1638,12 @@ def _merged_run_next(job: Cleanup, branch: str) -> str | None:
     for run in sorted(runs, key=lambda run: run.started_at, reverse=True):
         if run.parent is None:
             core = job._core or job.make_core(job.err)
-            return core.step(run)[1]
-    return None
+            step, next_line = core.step(run)
+            return (
+                None if kept else next_line,
+                run.owner_wait if step == "owner" else (),
+            )
+    return None, ()
 
 
 def merge(
@@ -1757,7 +1760,9 @@ def merge(
         job.run([branch])
     except GitFailedError as error:
         failure = error
-    next_line = _merged_run_next(job, branch) if failure is None else None
+    next_line, owner_wait = _merged_run_lines(job, branch)
+    if failure is not None:
+        next_line = None
     if as_json:
         document = {
             "branch": branch,
@@ -1769,7 +1774,11 @@ def merge(
             "cleanup": [item.to_json() for item in job.results],
             "next": next_line,
         }
+        if owner_wait:
+            document["owner_wait"] = list(owner_wait)
         print(json.dumps(document, indent=2), file=out)
+    for owner_line in owner_wait:
+        print(owner_line, file=err)
     if failure is not None:
         return _print_failure("merge", failure, err, failures)
     if next_line is not None:
