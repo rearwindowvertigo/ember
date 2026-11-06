@@ -926,7 +926,8 @@ def derive_next(run: dict[str, Any], state: dict[str, Any]) -> tuple[str, str | 
             or run_merged(run)
             or not run_branch_left(run)
         ):
-            if run.get("claim") and state["claims"].get(run["claim"]) == "gone":
+            claim = run.get("claim")
+            if claim is not None and state["claims"].get(claim) == "gone":
                 return "done", None
             return "finish", finish_line(run, state)
         return "merge", verify_line(run)

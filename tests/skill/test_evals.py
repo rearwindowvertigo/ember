@@ -1237,12 +1237,16 @@ def test_stub_next_lines_follow_an_editing_run(
         == "finish"
     )
 
-    # An exit-0 finish records the claim `gone`; no line is derived.
+    # An exit-0 finish records the claim `gone`; the run is done with no line.
     assert work.emb("choices", "--finish", claim).returncode == 0
     choices.finish(claim, env=work.env)
     gone = work.emb("run", "--status", run_id, "--json")
     document = json.loads(gone.stdout)
     assert (document["step"], document["next"]) == ("done", None)
+    assert real_step(work, run_id) == ("done", None)
+    text = work.emb("run", "--status", run_id)
+    assert "step: done\n" in text.stdout
+    assert text.stderr == ""
     assert gone.stderr == ""
     state = json.loads((work.eval / "state.json").read_text())
     assert state["claims"] == {claim: "gone"}

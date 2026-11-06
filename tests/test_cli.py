@@ -1625,6 +1625,40 @@ def finished_cli_run(
     return capsys.readouterr().out.splitlines()[0].removeprefix("run ")
 
 
+def test_closed_run_with_gone_claim_status_is_done(
+    run_env: dict[str, str],
+    finished_cli_run: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ember.runs import core, record
+
+    run_id = finished_cli_run
+    run = record.load(run_id, run_env)
+    record.save(replace(run, claim="claim-a"))
+    assert main(["run", "--close", run_id], env=run_env) == 0
+    capsys.readouterr()
+    assert main(["run", "--status", run_id, "--json"], env=run_env) == 0
+    before = json.loads(capsys.readouterr().out)
+    assert before["step"] == "finish"
+    assert before["session_state"] == core.MISSING
+
+    choices.finish("claim-a", env=run_env)
+    assert main(["run", "--status", run_id], env=run_env) == 0
+    captured = capsys.readouterr()
+    assert "step: done\n" in captured.out
+    assert f"session_state: {before['session_state']}\n" in captured.out
+    assert "next:" not in captured.out
+    assert captured.err == ""
+
+    assert main(["run", "--status", run_id, "--json"], env=run_env) == 0
+    captured = capsys.readouterr()
+    document = json.loads(captured.out)
+    assert document["step"] == "done"
+    assert document["next"] is None
+    assert document["session_state"] == before["session_state"]
+    assert captured.err == ""
+
+
 @pytest.mark.parametrize("mode", ["start", "send", "recover", "recover-collected"])
 @pytest.mark.parametrize("denial", ["none", "hidden", "protected"])
 def test_finished_run_command_owner_wait_exit(
