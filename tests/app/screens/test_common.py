@@ -181,6 +181,8 @@ def assert_rows_reflow(
     screen: QWidget, rows: list[common.TooltipRow], qtbot: QtBot
 ) -> None:
     """Check shrinking, a shared stack, its saved width, and widening again."""
+    from PySide6.QtCore import QCoreApplication, QEvent
+
     from ember.app import theme, widgets
 
     picker = next(
@@ -192,6 +194,7 @@ def assert_rows_reflow(
     screen.resize(1400, 480)
     screen.show()
     qtbot.wait(30)
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
     visible = [row for row in rows if row.isVisible()]
     wide = visible[0].slot.width()
     assert not any(row.stacked for row in visible)
@@ -200,6 +203,8 @@ def assert_rows_reflow(
     for width in range(1000, 399, -8):
         screen.resize(width, 480)
         qtbot.wait(5)
+        # fit() sets stacked before the posted layout request applies geometry.
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
         states = {row.stacked for row in visible}
         assert len(states) == 1
         if True in states:
@@ -219,6 +224,7 @@ def assert_rows_reflow(
     assert shrank
     screen.resize(1400, 480)
     qtbot.wait(30)
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
     assert not any(row.stacked for row in visible)
     assert {row.slot.width() for row in visible} == {wide}
 
