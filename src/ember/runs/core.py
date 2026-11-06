@@ -991,10 +991,16 @@ class Core:
                 self._say(f"run {run_id}")
                 self._warn(worker.line())
                 if run.read_only:
+                    short_base = self._git_out(top, "rev-parse", "--short", base)
+                    if short_base is None:
+                        raise RunError(
+                            exits.UNEXPECTED,
+                            f"cannot shorten commit {run.base} in {top}",
+                        )
                     for name in self._snapshot(top):
                         self._warn(
                             f"WARNING: read-only run {run.id} "
-                            f"does not see uncommitted {name}"
+                            f"does not see uncommitted {name} (reads {short_base})"
                         )
                 run, window = self._launch(
                     run, driver, brief, options, settings, common, main
@@ -1857,6 +1863,12 @@ class Core:
                     f"emb choices --set {setting}"
                 )
             if text is not None:
+                if item["reason"] == "secret location":
+                    text = (
+                        f"owner: Overview offers no Allow reading for {item['path']}; "
+                        "folders inside $XDG_CONFIG_HOME are never offered; "
+                        + text.removeprefix("owner: ")
+                    )
                 self._warn(text)
                 run = self._wait_owner(run, text, read)
 

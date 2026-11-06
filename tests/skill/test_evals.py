@@ -712,8 +712,10 @@ def test_read_only_warns_for_uncommitted_paths_and_keeps_its_snapshot(
     assert result.returncode == 0, result.stderr
     run_id = result.stdout.splitlines()[0].removeprefix("run ")
     tree = worktree_path(work, run_id)
+    short_head = work.git("rev-parse", "--short", "HEAD")
     assert set(result.stderr.splitlines()[1:]) == {
-        f"WARNING: read-only run {run_id} does not see uncommitted {name}"
+        f"WARNING: read-only run {run_id} does not see uncommitted {name} "
+        f"(reads {short_head})"
         for name in names
     } | {f"next: emb run --close {run_id}"}
     assert (tree / "README.md").read_text() == committed
@@ -1651,7 +1653,7 @@ def test_denied_path_case_keeps_every_attempt_and_owner_action(
             warning += f" ({reason})"
         assert result.stderr.splitlines().count(warning) == 1
     owner_prefix = (
-        "owner: the turn finished (exit 0); read access is needed only if "
+        "the turn finished (exit 0); read access is needed only if "
         "the worker's report says the work needed the path; "
         "Settings, Sandbox read paths;"
     )
@@ -1665,7 +1667,7 @@ def test_denied_path_case_keeps_every_attempt_and_owner_action(
     )
     additions = []
     for line in result.stderr.splitlines():
-        if not line.startswith(owner_prefix):
+        if not line.startswith("owner:") or owner_prefix not in line:
             continue
         command = shlex.split(line.rsplit("; ", 1)[1])
         assert command[:3] == ["emb", "choices", "--set"]

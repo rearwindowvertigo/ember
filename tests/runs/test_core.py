@@ -703,12 +703,55 @@ def test_read_only_run_works_in_a_detached_worktree(
     assert run.commits == ()
     assert run.turn_state == record.COLLECTED
     assert run.last_reason is None
+    short_base = git(Path(run.worktree), "rev-parse", "--short", "HEAD", env=env)
     assert (
-        f"WARNING: read-only run {run.id} does not see uncommitted dirty.txt\n" in err
+        f"WARNING: read-only run {run.id} does not see uncommitted dirty.txt "
+        f"(reads {short_base})\n" in err
     )
     assert f"read-only run {run.id} changed" not in err
     assert not (repo / ".ember").exists()
     assert _fields(out)["branch"] == "-"
+
+
+@pytest.mark.parametrize("saved_base", [False, True])
+def test_read_only_warning_names_the_commit_used_when_source_head_moves(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    saved_base: bool,
+) -> None:
+    """Keep the warning and detached worktree on the same resolved commit."""
+    base = git(repo, "rev-parse", "HEAD", env=env)
+    git(repo, "config", "core.abbrev", "12", env=env)
+    short_base = git(repo, "rev-parse", "--short", base, env=env)
+    if saved_base:
+        git(repo, "commit", "--allow-empty", "-m", "Later commit", env=env)
+    (repo / "dirty.txt").write_text("Owner notes\n")
+    core_ = _core(env)
+    create_worktree = core_._create_worktree
+
+    def move_head_then_create(run: record.Run, main: Path) -> None:
+        """Move the source HEAD between the warning and worktree creation."""
+        git(repo, "commit", "--allow-empty", "-m", "Moved before launch", env=env)
+        create_worktree(run, main)
+
+    monkeypatch.setattr(core_, "_create_worktree", move_head_then_create)
+    assert _start(
+        core_, repo, _brief(tmp_path, "Review\n@reply fine\n"),
+        read_only=True, base=base if saved_base else None,
+    ) == 0  # fmt: skip
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert run.base == base
+    assert git(repo, "rev-parse", "HEAD", env=env) != base
+    assert git(Path(run.worktree), "rev-parse", "HEAD", env=env) == base
+    assert (
+        f"WARNING: read-only run {run.id} does not see uncommitted dirty.txt "
+        f"(reads {short_base})\n"
+    ) in err
+    assert "WARNING:" not in out
 
 
 def test_read_only_run_that_changes_files_is_reported(
@@ -3298,7 +3341,7 @@ def test_corrupt_retry_journal_does_not_reset_the_budget(
     assert len(driver.messages) == 1
 
 
-@pytest.mark.parametrize("secret", [False, True])
+@pytest.mark.parametrize("location", ["hidden", "ssh", "config"])
 @pytest.mark.parametrize("result", ["success", "worker_failure", "commit_failure"])
 def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
     tmp_path: Path,
@@ -3306,10 +3349,20 @@ def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
     repo: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    secret: bool,
+    location: str,
     result: str,
 ) -> None:
-    folder = Path(env["HOME"]) / (".ssh" if secret else ".toolchain, version")
+    """Report denial facts and preserve the owner's explicit read setting."""
+    if location == "config":
+        config = Path(env["HOME"]) / ".config"
+        Path(env["XDG_CONFIG_HOME"]).rename(config)
+        env["XDG_CONFIG_HOME"] = str(config)
+    secret = location != "hidden"
+    folder = {
+        "hidden": Path(env["HOME"]) / ".toolchain, version",
+        "ssh": Path(env["HOME"]) / ".ssh",
+        "config": Path(env["XDG_CONFIG_HOME"]) / "gh",
+    }[location]
     folder.mkdir()
     monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
     choices.set_settings({"sandbox.claude": "on"}, env=env)
@@ -3345,8 +3398,15 @@ def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
         if expected == 0
         else ""
     )
+    notice = (
+        f"Overview offers no Allow reading for {folder}; "
+        "folders inside $XDG_CONFIG_HOME are never offered; "
+        if secret
+        else ""
+    )
     assert owner.startswith(
-        f"owner: {qualification}Settings, Sandbox read paths; emb choices --set "
+        f"owner: {notice}{qualification}Settings, Sandbox read paths; "
+        "emb choices --set "
     )
     command = shlex.split(owner.rsplit("; ", 1)[1])
     key, value = command[-1].split("=", 1)

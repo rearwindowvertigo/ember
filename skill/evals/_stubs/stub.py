@@ -1030,8 +1030,10 @@ def run_start(
     worktree = worktree_path(run_id)
     if read_only:
         branch = None
+        short_head = out(directory, "rev-parse", "--short", head)
         warnings.extend(
-            f"WARNING: read-only run {run_id} does not see uncommitted {name}\n"
+            f"WARNING: read-only run {run_id} does not see uncommitted {name} "
+            f"(reads {short_head})\n"
             for name in snapshot(repo)
         )
         git(repo, "worktree", "add", "-q", "--detach", str(worktree), head)
