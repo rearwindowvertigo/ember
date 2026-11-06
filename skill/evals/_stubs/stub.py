@@ -689,7 +689,7 @@ def turn_block(run: dict[str, Any], files: int, commit: str | None) -> str:
     Returns:
         The summary line, the run's lines and the reply.
     """
-    reply = Path(run["reply"]).read_text(encoding="utf-8")
+    reply = Path(run["reply"]).read_text(encoding="utf-8") if run.get("reply") else ""
     lines = [
         f"{run['engine']} {run['model']} · {run['effort'] or 'default'} · "
         f"{SECONDS}s · exit 0 · {files} files · turn {run['turn']}",
@@ -698,7 +698,7 @@ def turn_block(run: dict[str, Any], files: int, commit: str | None) -> str:
         f"branch {run['branch'] or '-'}",
         f"commit {commit or '-'}",
         "window -",
-        f"reply {run['reply']}",
+        f"reply {run['reply'] or '-'}",
         REPLY_MARK,
         reply.rstrip("\n"),
     ]
