@@ -128,7 +128,8 @@ exits 69, naming the folder and the setting that placed it there.
 
 A `lead_stop` returns exit 0; it is not a completed flow. For every stop,
 send the owner one message naming the task, status, reason, open `lead`
-and `must` findings, and the tasks it blocks (or none). End the message with
+and `must` findings, the tasks it blocks (or none), and every fact its
+`report:` line names, such as whether a runner is live. End the message with
 one direct question ending in a question mark. Use the report's available
 choices, not an assumed list:
 

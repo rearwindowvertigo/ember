@@ -179,6 +179,9 @@ Both are standing settings reported by `emb choices`. Each run saves them
 at start for all its turns and recovery; later Team changes apply to new
 runs. Never change these settings to clear an error.
 
+Quote every `WARNING: <engine> <model> at capacity; retry <n> of <max> in
+<secs>s` to the owner, including when the turn succeeds.
+
 Exhausted or disabled retries end at exit 73. `usage_limit` and `outage`
 exit 73 without retrying. Codex recognizes capacity and usage-limit
 messages; Claude and both OpenCode drivers classify provider errors as
