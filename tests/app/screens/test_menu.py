@@ -226,7 +226,7 @@ def focus_chain(screen: QWidget, qtbot: QtBot, first: QWidget) -> list[QWidget]:
     qtbot.waitUntil(screen.isActiveWindow, timeout=5000)
     first.setFocus(Qt.FocusReason.TabFocusReason)
     seen: list[QWidget] = []
-    for _ in range(40):
+    for _ in range(len(screen.findChildren(QWidget)) + 1):
         widget = QApplication.focusWidget()
         if widget is None or widget in seen:
             break
@@ -1115,9 +1115,8 @@ def test_screen_fits_width(env: dict[str, str], qtbot: QtBot, width: int) -> Non
     _context, screen = _screen(env, qtbot)
     screen.resize(width, 480)
     screen.show()
-    qtbot.wait(50)
+    qtbot.waitUntil(lambda: assert_screen_fits(screen))
     assert screen.width() == width
-    assert_screen_fits(screen)
     for row in screen.tip_rows.values():
         if row.isVisible() and isinstance(row.control, widgets.Segmented):
             assert row.control.width() >= row.control.sizeHint().width()
@@ -1133,3 +1132,104 @@ def test_rows_shrink_stack_and_return(env: dict[str, str], qtbot: QtBot) -> None
     theme.apply(app, "light")
     _context, screen = _screen(env, qtbot)
     assert_rows_reflow(screen, list(screen.tip_rows.values()), qtbot)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("single.writer", "claude:opus"),
+        ("single.reviewer", "claude:opus"),
+        ("single.writer_as", "subagent"),
+        ("single.reviewer_as", "subagent"),
+        ("gapcheck.reviewer", "claude:opus"),
+        ("flow.writer", "claude:opus"),
+        ("flow.reviewer", "claude:opus"),
+        ("gapcheck.when", "off"),
+        ("gapcheck.ask", "all"),
+        ("multi.runs_as", "flow"),
+        ("flow.review_rounds", "1"),
+        ("flow.parallel", "1"),
+        ("flow.stall", "20"),
+        ("flow.whole_review", "off"),
+        ("workflow.agents", "4"),
+        ("workflow.late", "stop"),
+        ("provider.capacity_retries", "0"),
+        ("provider.capacity_wait", "5"),
+    ],
+)
+def test_every_team_row_marks_saved_changes_and_resets(
+    env: dict[str, str], qtbot: QtBot, key: str, value: str
+) -> None:
+    """All single-value keys use saved values, including explicit Same models."""
+    choices.set_settings(SHORTLISTS, env=env)
+    context, screen = _screen(env, qtbot)
+    row = screen.tip_rows[key]
+    reset = row.reset
+    assert reset is not None
+    assert reset.isHidden()
+    default = context.settings()["defaults"][key]
+    assert value != default
+    choices.set_settings({key: default}, env=env)
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        context.reload_settings()
+    assert reset.isHidden()
+    changes: dict[str, object] = {key: value}
+    if key in ("flow.writer", "flow.reviewer", "gapcheck.reviewer"):
+        role = "writer" if key == "flow.writer" else "reviewer"
+        changes[f"single.{role}"] = value
+    choices.set_settings(changes, env=env)
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        context.reload_settings()
+    assert not reset.isHidden()
+    if isinstance(row.control, widgets.Switch):
+        assert row.control.property("changed") is None
+    else:
+        assert row.control.property("changed") is True
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        reset.click()
+    assert key not in choices.snapshot(env=env)["settings"]
+    assert context.setting(key) == default
+    assert reset.isHidden()
+    choices.set_settings({key: value}, env=env)
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        context.reload_settings()
+    assert not reset.isHidden()
+    choices.clear_settings([key], env=env)
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        context.reload_settings()
+    assert reset.isHidden()
+    assert "panel.members" not in screen.tip_rows
+    assert screen.add_member.property("changed") is None
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_changed_team_rows_fit_at_minimum_width(
+    env: dict[str, str], qtbot: QtBot, qapp: QApplication, mode: str
+) -> None:
+    """Team's longest controls and their Reset buttons fit the minimum width."""
+    from ember.app import theme
+
+    from .test_common import assert_screen_fits  # pyrefly: ignore[missing-import]
+
+    theme.apply(qapp, mode)
+    choices.set_settings(
+        {
+            **SHORTLISTS,
+            "single.writer": "claude:opus",
+            "single.writer_as": "subagent",
+            "single.reviewer": "claude:sonnet",
+            "gapcheck.when": "off",
+            "gapcheck.ask": "all",
+            "flow.writer": "claude:opus",
+            "flow.parallel": "1",
+            "flow.review_rounds": "1",
+            "flow.whole_review": "off",
+            "workflow.late": "stop",
+            "provider.capacity_retries": "0",
+        },
+        env=env,
+    )
+    _context, screen = _screen(env, qtbot)
+    screen.resize(640, 480)
+    screen.show()
+    qtbot.waitUntil(lambda: assert_screen_fits(screen))

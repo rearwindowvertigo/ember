@@ -163,6 +163,9 @@ def _set_keyfocus(widget: QWidget, visible: bool) -> None:
     if widget.property("keyfocus") is not visible:
         widget.setProperty("keyfocus", visible)
         repolish(widget)
+        parent = widget.parentWidget()
+        if isinstance(parent, Segmented):
+            parent._update_changed_outline()
 
 
 def install_focus_tracking(app: QApplication) -> FocusTracker:
@@ -744,6 +747,20 @@ class Segmented(QWidget):
         """
         self._buttons[self._values.index(value)].setChecked(True)
 
+    def set_changed(self, changed: bool) -> None:
+        """Mark the selected segment unless any segment has keyboard focus."""
+        self.setProperty("changed", changed)
+        self._update_changed_outline()
+
+    def _update_changed_outline(self) -> None:
+        """Refresh the outline after a segment gains or loses keyboard focus."""
+        outlined = bool(self.property("changed")) and not any(
+            focus_visible(button) for button in self._buttons
+        )
+        for button in self._buttons:
+            button.setProperty("changed", outlined)
+            repolish(button)
+
     def buttons(self) -> list[QPushButton]:
         """Return the option buttons in order."""
         return list(self._buttons)
@@ -848,6 +865,11 @@ class Picker(QComboBox):
         self.setModel(self._model)
         self.setItemDelegate(_PickerDelegate(self))
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def set_changed(self, changed: bool) -> None:
+        """Mark the closed field as different from its setting's default."""
+        self.setProperty("changed", changed)
+        repolish(self)
 
     def add_header(self, text: str) -> None:
         """Add a group header, shown in the list and never selectable."""

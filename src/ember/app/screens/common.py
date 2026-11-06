@@ -7,7 +7,7 @@ time with English month abbreviations whatever the locale. Durations read
 
 import datetime
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer
 from PySide6.QtGui import QResizeEvent
@@ -18,13 +18,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLayout,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
-from ember.app import theme, tray, widgets
+from ember.app import icons, theme, tray, widgets
 
 MONTHS = (
     "Jan",
@@ -362,6 +363,7 @@ class TooltipRow(QWidget):
         """
         super().__init__()
         self.control = control
+        self.reset: QPushButton | None = None
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.stacked = False
         self.box = QBoxLayout(QBoxLayout.Direction.LeftToRight, self)
@@ -392,6 +394,71 @@ class TooltipRow(QWidget):
         self.box.addWidget(self.slot, 0, Qt.AlignmentFlag.AlignVCenter)
         if control.focusPolicy() != Qt.FocusPolicy.NoFocus:
             QWidget.setTabOrder(self.info, control)
+
+    def enable_reset(self, action: Callable[[], None]) -> None:
+        """Reserve a grey Reset button beside a single-value setting control."""
+        self.reset = widgets.button("Reset", "ghost", size="sm")
+        self.reset.setProperty("role", "reset")
+        self.reset.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.reset.setAccessibleName(f"Reset {self.heading.text()}")
+        policy = self.reset.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        self.reset.setSizePolicy(policy)
+        self.reset.hide()
+        slot = self.slot.layout()
+        assert slot is not None
+        slot.setSpacing(theme.SPACE[1])
+        slot.addWidget(self.reset)
+
+        def reset() -> None:
+            """Queue the clear and move keyboard focus back to the control."""
+            action()
+            target = self.control
+            if isinstance(target, widgets.Segmented):
+                target = next(
+                    button for button in target.buttons() if button.isChecked()
+                )
+            target.setFocus(Qt.FocusReason.TabFocusReason)
+
+        self.reset.clicked.connect(reset)
+        theme.signals.changed.connect(self._reset_icon)
+        self._reset_icon()
+        last = (
+            self.control.buttons()[-1]
+            if isinstance(self.control, widgets.Segmented)
+            else self.control
+        )
+        QWidget.setTabOrder(last, self.reset)
+
+    def _reset_icon(self, *_args: object) -> None:
+        """Recolour the Reset icon when the theme changes."""
+        if self.reset is not None:
+            widgets.set_icon(
+                self.reset, icons.icon("rotate-ccw", theme.color("text-secondary"), 16)
+            )
+
+    def set_changed(self, changed: bool) -> None:
+        """Show Reset and the control's marker from a confirmed snapshot."""
+        if self.reset is not None:
+            self.reset.setVisible(changed)
+        if isinstance(self.control, widgets.Picker | widgets.Segmented):
+            self.control.set_changed(changed)
+
+    def reset_width(self) -> int:
+        """Return the reserved Reset width, including its gap."""
+        if self.reset is None:
+            return 0
+        return self.reset.sizeHint().width() + theme.SPACE[1]
+
+    def control_width(self, minimum: bool = False) -> int:
+        """Return the control column's preferred or minimum width with Reset."""
+        width = self.control.sizeHint().width()
+        if isinstance(self.control, QComboBox) and minimum:
+            width = theme.PICKER_MIN_WIDTH
+        return (
+            max(theme.PICKER_MIN_WIDTH if minimum else CONTROL_COLUMN, width)
+            + self.reset_width()
+        )
 
     def fit(self, width: int, stacked: bool) -> None:
         """Set the common column width and put the control beside or below its name."""
@@ -436,7 +503,7 @@ class _ControlFit(QObject):
         self.rows = rows
         for row in rows:
             row.installEventFilter(self)
-        width = max([CONTROL_COLUMN, *(r.control.sizeHint().width() for r in rows)])
+        width = max([CONTROL_COLUMN, *(r.control_width() for r in rows)])
         if not any(r.isVisible() for r in rows):
             self.last_width = width
             for row in rows:
@@ -448,19 +515,8 @@ class _ControlFit(QObject):
         rows = [row for row in self.rows if row.isVisible()]
         if not rows:
             return
-        preferred = max(
-            CONTROL_COLUMN, *(row.control.sizeHint().width() for row in rows)
-        )
-        floor = max(
-            [
-                theme.PICKER_MIN_WIDTH,
-                *(
-                    row.control.sizeHint().width()
-                    for row in rows
-                    if not isinstance(row.control, QComboBox)
-                ),
-            ]
-        )
+        preferred = max(CONTROL_COLUMN, *(row.control_width() for row in rows))
+        floor = max(row.control_width(minimum=True) for row in rows)
         correction = 0
         if self.area is not None:
             column = self.area.widget()

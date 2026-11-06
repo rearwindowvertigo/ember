@@ -23,10 +23,11 @@ jobs:
         with:
           python-version: "3.14"
           enable-cache: true
-      - name: Install the system libraries Qt loads
+      - name: Install the system libraries and fonts Qt loads
         run: >-
           sudo apt-get update &&
           sudo apt-get install --yes --no-install-recommends
           libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 libglib2.0-0t64
+          fonts-dejavu-core
       - run: uv sync --locked
       - run: make check

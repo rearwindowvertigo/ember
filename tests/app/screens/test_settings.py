@@ -420,3 +420,99 @@ def test_rows_shrink_stack_and_return(env: dict[str, str], qtbot: QtBot) -> None
     theme.apply(app, "light")
     _context, screen = _screen(env, qtbot)
     assert_rows_reflow(screen, list(screen.tip_rows.values()), qtbot)
+
+
+@pytest.mark.parametrize(
+    ("name", "key", "value"),
+    [
+        ("Start at login", "app.autostart", "off"),
+        ("Worker network", "worker.network", "on"),
+        ("Theme", "app.theme", "dark"),
+        ("Terminal", "terminal", "custom-terminal --"),
+    ],
+)
+def test_changed_rows_follow_snapshots_and_reset(
+    stub_env: dict[str, str], qtbot: QtBot, name: str, key: str, value: str
+) -> None:
+    """Every Settings control marks external changes and clears its saved key."""
+    from ember.app import widgets
+
+    context, screen = _screen(stub_env, qtbot)
+    screen.show()
+    row = screen.tip_rows[name]
+    reset = row.reset
+    assert reset is not None
+    assert reset.isHidden()
+    default = context.settings()["defaults"][key]
+    choices.set_settings({key: default}, env=stub_env)
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        context.reload_settings()
+    assert reset.isHidden()
+    choices.set_settings({key: value}, env=stub_env)
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        context.reload_settings()
+    assert not reset.isHidden()
+    if isinstance(row.control, widgets.Switch):
+        assert row.control.property("changed") is None
+    else:
+        assert row.control.property("changed") is True
+    if key == "terminal":
+        screen._other_open = True
+        assert screen.other.isVisible()
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        reset.click()
+    assert key not in choices.snapshot(env=stub_env)["settings"]
+    assert context.setting(key) == default
+    assert reset.isHidden()
+    if isinstance(row.control, widgets.Picker | widgets.Segmented):
+        assert row.control.property("changed") is False
+    if key == "terminal":
+        assert not screen.other.isVisible()
+        assert not screen._other_open
+    # A subsequent external clear also removes the marker without a click.
+    choices.set_settings({key: value}, env=stub_env)
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        context.reload_settings()
+    assert not reset.isHidden()
+    choices.clear_settings([key], env=stub_env)
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        context.reload_settings()
+    assert reset.isHidden()
+    assert screen.tip_rows["Sandbox read paths"].reset is None
+
+
+def test_reset_theme_applies_the_default(
+    env: dict[str, str], qtbot: QtBot, qapp: QApplication
+) -> None:
+    """Reset applies System after clearing the theme setting."""
+    choices.set_settings({"app.theme": "dark"}, env=env)
+    context, screen = _screen(env, qtbot)
+    theme.apply(qapp, "dark")
+    reset = screen.tip_rows["Theme"].reset
+    assert reset is not None
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        reset.click()
+    assert theme.current_mode() == theme.resolve_mode("system", qapp)
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_changed_settings_fit_at_minimum_width(
+    stub_env: dict[str, str], qtbot: QtBot, qapp: QApplication, mode: str
+) -> None:
+    """All Settings Reset buttons fit at the minimum window width in both themes."""
+    from .test_common import assert_screen_fits  # pyrefly: ignore[missing-import]
+
+    theme.apply(qapp, mode)
+    choices.set_settings(
+        {
+            "app.theme": "dark",
+            "app.autostart": "off",
+            "worker.network": "on",
+            "terminal": "custom-terminal --",
+        },
+        env=stub_env,
+    )
+    _context, screen = _screen(stub_env, qtbot)
+    screen.resize(640, 480)
+    screen.show()
+    qtbot.waitUntil(lambda: assert_screen_fits(screen))
