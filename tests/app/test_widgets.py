@@ -1064,3 +1064,58 @@ def test_ember_tip_updates_and_hides_when_control_text_clears(
         assert not widgets.tip_popup().isVisible()
     finally:
         widgets.tip_popup().hide_for(control)
+
+
+@pytest.mark.parametrize("kind", ["picker", "segmented"])
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_changed_outline_yields_to_keyboard_focus(
+    qapp: QApplication, qtbot: QtBot, kind: str, mode: str
+) -> None:
+    """Changed values have one accent pixel; keyboard focus uses two."""
+    theme.apply(qapp, mode)
+    widgets.install_focus_tracking(qapp)
+    host = QWidget()
+    qtbot.addWidget(host)
+    layout = QVBoxLayout(host)
+    other = QPushButton("Other")
+    layout.addWidget(other)
+    control: widgets.Picker | widgets.Segmented
+    if kind == "picker":
+        control = widgets.Picker()
+        control.add_option("One", "one")
+        target: QWidget = control
+    else:
+        control = widgets.Segmented((("one", "One"), ("two", "Two")))
+        target = control.buttons()[0]
+    layout.addWidget(control)
+    host.show()
+    qtbot.waitExposed(host)
+    with qtbot.waitActive(host):
+        host.activateWindow()
+    other.setFocus(Qt.FocusReason.MouseFocusReason)
+    accent = theme.color("accent").name()
+
+    def edge(y: int) -> str:
+        """Read a pixel in the middle of the chosen value's top border."""
+        qapp.processEvents()
+        image = target.grab().toImage()
+        return image.pixelColor(image.width() // 2, y).name()
+
+    control.set_changed(False)
+    assert edge(0) != accent
+    control.set_changed(True)
+    assert edge(0) == accent
+    assert edge(1) != accent
+    target.setFocus(Qt.FocusReason.TabFocusReason)
+    assert widgets.focus_visible(target)
+    assert edge(0) == edge(1) == accent
+    if isinstance(control, widgets.Segmented):
+        # Tab can focus an unselected segment; it suppresses the chosen outline.
+        control.buttons()[1].setFocus(Qt.FocusReason.TabFocusReason)
+        assert control.value() == "one"
+        assert edge(0) != accent
+    other.setFocus(Qt.FocusReason.MouseFocusReason)
+    assert edge(0) == accent
+    assert edge(1) != accent
+    control.set_changed(False)
+    assert edge(0) != accent

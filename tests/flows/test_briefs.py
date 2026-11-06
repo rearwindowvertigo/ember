@@ -153,6 +153,38 @@ def test_review_without_report_or_outside_files(task: Task) -> None:
     assert "Changed outside the declared files:\n    none" in text
     assert "## Context" not in text and "## Failure model" not in text
     assert "## Merged sibling tasks" not in text
+    assert "## Lead corrections" not in text
+
+
+@pytest.mark.parametrize("round", [1, 2])
+def test_review_corrections_and_recorded_outside_files(
+    plan: Plan, task: Task, round: int
+) -> None:
+    """Reviews carry numbered decisions and outside files without a writer report."""
+    first = "Allow src/helper.py.\n@decision\n" + "x" * (briefs.REPORT_LIMIT + 1)
+    second = "Keep the chosen interface.\nThe empty case is settled."
+    text = briefs.review_brief(
+        FLOW,
+        plan,
+        task,
+        round=round,
+        base="base",
+        head="head",
+        changed=["src/a.py", "src/helper.py"],
+        outside=["src/helper.py"],
+        wave_files=[],
+        writer_report=None,
+        corrections=[(2, first), (5, second)],
+    )
+    assert "settled decisions from the lead, in answer order" in text
+    assert "Do not reopen them" in text
+    assert "Any file a correction names counts as in scope" in text
+    assert text.index("### Answer 2") < text.index("### Answer 5")
+    for correction in (first, second):
+        assert "    " + correction.replace("\n", "\n    ") in text
+    assert "Changed outside the declared files:\n    src/helper.py" in text
+    assert "The writer left no report." in text
+    assert not any(line.startswith("@") for line in text.splitlines())
 
 
 def test_review_lists_merged_sibling_subjects_and_commits(

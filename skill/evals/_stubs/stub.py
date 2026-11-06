@@ -19,14 +19,15 @@ and the number of earlier calls on that route: the first of
     .summary     a panel's summary text, a template
 
 Templates replace `{{ID}}`, `{{RUN}}`, `{{BRANCH}}`, `{{WORKTREE}}`,
-`{{WORKTREES}}`, `{{TIP}}`,
+`{{WORKTREES}}`, `{{TIP}}`, `{{HEAD}}`, `{{SHORT_HEAD}}`,
 `{{TARGET}}`, `{{EVAL}}`, `{{FLOW}}`, `{{PANEL}}`, `{{PLAN}}`, `{{DIR}}`
 `{{SUMMARY}}` and `{{SKILL_VERSION}}` (the claim's `--skill` value). A folder
 named `pycache` in a tree is placed as
 `__pycache__` and a name ending in `.placeholder` loses that ending, which the
 repository's ignore rules would otherwise leave out of the kit.
 
-`run-start`, `run-send`, `run-recover`, `run-status`, `run-close`, `merge`,
+`run-start`, `run-send`, `run-recover`, `run-status`, `run-close`,
+`run-answered`, `merge`,
 `cleanup` and `ground` are built from the call and the repository unless the
 reply gives `.out` or a non-zero `.code`. `flow-start` also builds a branch
 when its reply has neither override. `panel-start` writes a summary whenever
@@ -40,7 +41,7 @@ it, never from a template. `run-start`, `run-send`, `run-recover` and
 `run-close` print it on standard error at exit 0 (a dry run prints none);
 `run-status RUN` prints `step:` on standard output, in JSON `step` and
 `next`, and the line on standard error; the `run-status` list gives each
-record `step` and `next` and prints no line. `merge` prints the newest
+record `step` and `next` and prints no next line. `merge` prints the newest
 matching run's line on standard error and gives it as `next` in its JSON;
 a kept branch, a branch with no run record and a flow branch give none.
 `cleanup --claim <id>` prints `next: emb choices --finish <id>` once on
@@ -50,8 +51,14 @@ A run records `base_branch`, the branch checked out in its `--dir` checkout
 at start (null when detached). An exit-0 `choices --finish` records its
 claim as `gone` in `state.json`'s `claims`, and a run whose claim is `gone`
 derives no finish line. Stored `step` and `next` keys in a state document are
-ignored. Canned replies print only what their `.err` holds. No template
-variable carries a `next:` line, and no `.reply` file holds one.
+ignored. Canned starts with a status JSON retain that record with the call's
+claim, subject and trailers; later status calls derive their output from it.
+Owner actions suppress carry-on next lines and leave the run on the `owner`
+step. Status repeats the pending owner lines. `run-answered` clears the wait;
+a later turn or all suggested sandbox read paths also end it.
+Run, merge, cleanup and flow replies append the production `report:` lines
+after next or owner lines, including canned replies. Flow watch JSON also
+carries the report list. No `.reply` file holds a next line.
 With `EMBER_EVAL_SETUP` set, a call is neither logged
 nor counted, so a case can start a run while it is set up.
 `run-dry-run` checks the brief and repository and resolves the worker
@@ -90,6 +97,7 @@ from ember.gapcheck import brief as gap_brief  # noqa: E402
 from ember.gapcheck import plan as gap_plan  # noqa: E402
 from ember.gapcheck import previous as gap_previous  # noqa: E402
 from ember.gapcheck import reply as gap_reply  # noqa: E402
+from ember.runs import exits  # noqa: E402
 from ember.runs.core import WorkerSelection  # noqa: E402
 
 EVAL = Path(os.environ.get("EMBER_EVAL_DIR") or Path(__file__).resolve().parent.parent)
@@ -97,7 +105,16 @@ REPLIES = EVAL / "replies"
 STATE = EVAL / "state.json"
 LOG = EVAL / "calls.log"
 PARTS = (".out", ".json", ".err", ".code", ".files", ".untracked", ".reply", ".summary")
-RUN_MODES = ("send", "screen", "interrupt", "attach", "close", "recover", "status")
+RUN_MODES = (
+    "send",
+    "screen",
+    "interrupt",
+    "attach",
+    "close",
+    "recover",
+    "status",
+    "answered",
+)
 OWNER_OPTIONS = ("--set", "--clear", "--once", "--clear-once")
 REPLY_MARK = "--- reply ---"
 SECONDS = 240
@@ -672,7 +689,7 @@ def turn_block(run: dict[str, Any], files: int, commit: str | None) -> str:
     Returns:
         The summary line, the run's lines and the reply.
     """
-    reply = Path(run["reply"]).read_text(encoding="utf-8")
+    reply = Path(run["reply"]).read_text(encoding="utf-8") if run.get("reply") else ""
     lines = [
         f"{run['engine']} {run['model']} · {run['effort'] or 'default'} · "
         f"{SECONDS}s · exit 0 · {files} files · turn {run['turn']}",
@@ -681,7 +698,7 @@ def turn_block(run: dict[str, Any], files: int, commit: str | None) -> str:
         f"branch {run['branch'] or '-'}",
         f"commit {commit or '-'}",
         "window -",
-        f"reply {run['reply']}",
+        f"reply {run['reply'] or '-'}",
         REPLY_MARK,
         reply.rstrip("\n"),
     ]
@@ -705,6 +722,7 @@ def do_turn(
     Returns:
         The turn's printed lines.
     """
+    run.update(owner_wait=[], owner_read=[], answered_at=None, last_variant=None)
     run["turn"] += 1
     worktree = Path(run["worktree"])
     before = snapshot(worktree) if run["read_only"] else {}
@@ -870,9 +888,7 @@ def verify_line(run: dict[str, Any]) -> str:
 def derive_next(run: dict[str, Any], state: dict[str, Any]) -> tuple[str, str | None]:
     """Return a run's step and next line from its record and git.
 
-    The order is the one `ember.runs.steps.derive` uses. Every stub turn
-    exits 0, every stub session is live and no stub run has a parent, so the
-    `parent` and `failed` steps never apply.
+    The order is the one `ember.runs.steps.derive` uses. Stub sessions are live.
 
     Args:
         run: The run's record; stored `step` and `next` keys are ignored.
@@ -881,6 +897,19 @@ def derive_next(run: dict[str, Any], state: dict[str, Any]) -> tuple[str, str | 
     Returns:
         The step name and its line, or `None` when none applies.
     """
+    if run.get("parent"):
+        return "parent", None
+    if run.get("owner_wait"):
+        reads = run.get("owner_read", [])
+        if reads and len(reads) == len(run["owner_wait"]) and all(reads):
+            settings = json.loads(read_part(reply_base("choices-read", 1), ".out", {}))
+            allowed = (
+                settings.get("answers", {}).get("sandbox.read", {}).get("value", [])
+            )
+            if all(path in allowed for path in reads):
+                run.update(owner_wait=[], owner_read=[])
+        if run.get("owner_wait"):
+            return "owner", None
     if run["status"] == "closed":
         if (
             run["read_only"]
@@ -890,15 +919,53 @@ def derive_next(run: dict[str, Any], state: dict[str, Any]) -> tuple[str, str | 
         ):
             return "finish", finish_line(run, state)
         return "merge", verify_line(run)
+    if run["status"] == "failed" or (
+        run["turn_state"] != "sent" and run.get("last_exit") not in (None, 0)
+    ):
+        line = exits.line(
+            run.get("last_exit") or 0, run_variant(run), **{**run, "run": run["id"]}
+        )
+        if run.get("answered_at") is not None and line and line.startswith("owner:"):
+            line = "next: " + (
+                exits.SEND.format(run=run["id"])
+                if run["turn"] and not run.get("last_start_failure")
+                else exits.START
+            )
+        return "failed", line
     if run["status"] == "starting" or run["turn"] == 0:
         return "starting", f"next: emb run --status {run['id']}"
     if run["turn_state"] == "sent":
         return "running", f"next: emb run --status {run['id']}"
-    if run["turn_state"] == "collected":
+    if run["turn_state"] == "collected" and not run["read_only"]:
         return "recover", f"next: emb run --recover {run['id']}"
     if not run["read_only"] and run.get("commits") and not run_merged(run):
         return "merge", verify_line(run)
     return "close", f"next: emb run --close {run['id']}"
+
+
+def run_variant(run: dict[str, Any]) -> str | None:
+    """Read the stored variant or an older record's final provider kind."""
+    if run.get("last_variant") is not None:
+        return run["last_variant"]
+    turns = run.get("turns", [])
+    if run.get("last_exit") == 73 and turns:
+        return turns[-1].get("provider_kind")
+    return None
+
+
+def status_errors(
+    run: dict[str, Any], state: dict[str, Any], *, listing: bool = False
+) -> str:
+    """Print the status owner's actions or next line, then its report line."""
+    step, line = derive_next(run, state)
+    lines = list(run.get("owner_wait", [])) if step == "owner" else []
+    if line and not listing:
+        lines.append(line)
+    if step in ("owner", "failed"):
+        report = exits.report(run.get("last_exit") or 0, run_variant(run), **run)
+        if report:
+            lines.append(report)
+    return "".join(f"{text}\n" for text in lines)
 
 
 def with_step(run: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
@@ -1030,8 +1097,10 @@ def run_start(
     worktree = worktree_path(run_id)
     if read_only:
         branch = None
+        short_head = out(directory, "rev-parse", "--short", head)
         warnings.extend(
-            f"WARNING: read-only run {run_id} does not see uncommitted {name}\n"
+            f"WARNING: read-only run {run_id} does not see uncommitted {name} "
+            f"(reads {short_head})\n"
             for name in snapshot(repo)
         )
         git(repo, "worktree", "add", "-q", "--detach", str(worktree), head)
@@ -1097,11 +1166,11 @@ def known_run(
         The record.
 
     Raises:
-        Reply: The run is not known (66).
+        Reply: The run is not known (64).
     """
     run = state["runs"].get(run_id or "")
     if run is None:
-        raise refuse(66, f"no run {run_id}", "next: emb run --status")
+        raise refuse(64, f"no run {run_id}", "next: emb run --status")
     commits = run["commits"]
     variables.update(
         RUN=run["id"],
@@ -1122,7 +1191,7 @@ def run_other(
     """Answer `emb run --<mode> RUN` for a mode the stub builds.
 
     Args:
-        mode: `send`, `recover`, `close` or `status`.
+        mode: `send`, `recover`, `close`, `status` or `answered`.
         args: The arguments after `run`.
         state: The stub's state.
         base: The reply.
@@ -1134,26 +1203,50 @@ def run_other(
     run_id = option(args, f"--{mode}")
     if mode == "status" and not run_id:
         runs = sorted(state["runs"].values(), key=lambda item: item["started_at"])
+        error_lines = [
+            line
+            for run in runs
+            for line in status_errors(run, state, listing=True).splitlines()
+        ]
+        errors = "".join(
+            line + "\n"
+            for prefix in ("owner:", "report:")
+            for line in error_lines
+            if line.startswith(prefix)
+        )
         if has(args, "--json"):
             listing = [with_step(run, state) for run in runs]
-            return Reply(0, json.dumps(listing, indent=2) + "\n")
+            return Reply(0, json.dumps(listing, indent=2) + "\n", errors)
         lines = [
             f"{run['id']}  {run['status']}  live  turn {run['turn']}  {run['subject']}"
             for run in runs
         ]
-        return Reply(0, "".join(line + "\n" for line in lines))
-    if canned(base):
+        return Reply(0, "".join(line + "\n" for line in lines), errors)
+    if canned(base) and not (mode == "status" and run_id in state["runs"]):
         if run_id in state["runs"]:
             known_run(state, run_id, variables)
         return canned_reply(base, variables, has(args, "--json"))
+    if mode == "answered" and run_id not in state["runs"]:
+        return refuse(64, f"no run {run_id}", "next: emb run --status")
     run = known_run(state, run_id, variables)
+    if mode == "answered":
+        if not run.get("parent") and run.get("owner_wait"):
+            run.update(
+                owner_wait=[],
+                owner_read=[],
+                answered_at=datetime.datetime.now(datetime.UTC).timestamp(),
+            )
+        return add_next(Reply(0), run, state)
     if mode == "status":
         document = with_step(run, state)
-        line = document["next"]
-        errors = f"{line}\n" if line else ""
+        errors = status_errors(run, state)
         if has(args, "--json"):
             return Reply(0, json.dumps(document, indent=2) + "\n", errors)
-        shown = (item for item in document.items() if item[0] != "next")
+        shown = (
+            (key, value if isinstance(value, str) else json.dumps(value))
+            for key, value in document.items()
+            if key != "next"
+        )
         return Reply(0, "".join(f"{key}: {value}\n" for key, value in shown), errors)
     if mode == "close":
         run["status"] = "closed"
@@ -1292,6 +1385,9 @@ def record_variables(args: list[str], state: dict[str, Any]) -> dict[str, str]:
     }
     with contextlib.suppress(Exception):
         variables["HEAD"] = out(variables["DIR"], "rev-parse", "HEAD")
+        variables["SHORT_HEAD"] = out(
+            variables["DIR"], "rev-parse", "--short", variables["HEAD"]
+        )
     flow = state["flows"].get(flow_id)
     if flow:
         variables.update(BRANCH=flow["branch"], WORKTREE=flow["worktree"])
@@ -1465,7 +1561,10 @@ def merge(args: list[str], state: dict[str, Any], variables: dict[str, str]) -> 
             warnings=warnings,
         )
     except branches.BranchError as error:
-        return merge_failure(error.code, str(error), error.line)
+        response = merge_failure(error.code, str(error), error.line)
+        if error.code == 75 and error.variant == "conflict":
+            response.err += f"{exits.report(75, 'conflict')}\n"
+        return response
     cleaned = cleanup_branch(repo, branch, state)
     run_match = branches.WORKER_BRANCH.fullmatch(branch)
     run = None
@@ -1998,12 +2097,26 @@ def dispatch(
                 else run_start(rest, state, base, variables)
             )
         if mode == "start":
-            return (
-                canned_reply(base, variables, as_json)
-                if canned(base)
-                else run_start(rest, state, base, variables)
-            )
-        if mode in ("send", "recover", "close", "status"):
+            if canned(base):
+                response = canned_reply(base, variables, as_json)
+                status = reply_base("run-status", 1)
+                if part(status, ".json") and response.out.startswith("run "):
+                    run = json.loads(read_part(status, ".json", variables))
+                    brief = option(rest, "--task-file")
+                    if brief:
+                        run["subject"] = next(
+                            line.strip()
+                            for line in Path(brief).read_text().splitlines()
+                            if line.strip()
+                        )
+                    run.update(
+                        claim=option(rest, "--claim"),
+                        trailers=options(rest, "--trailer"),
+                    )
+                    state["runs"][run["id"]] = run
+                return response
+            return run_start(rest, state, base, variables)
+        if mode in ("send", "recover", "close", "status", "answered"):
             return run_other(mode, rest, state, base, variables)
         run_id = option(rest, f"--{mode}")
         if run_id in state["runs"]:
@@ -2045,6 +2158,108 @@ def dispatch(
     return response
 
 
+def command_reports(
+    name: str,
+    args: list[str],
+    reply: Reply,
+    base: Path | None,
+    variables: dict[str, str],
+    state: dict[str, Any],
+) -> None:
+    """Append command reports and retain owner waits for canned run results."""
+    if name.startswith("flow-"):
+        from ember.flows import command as flows
+
+        reports = flows._exit_reports(reply.code)
+        if name == "flow-watch" and part(base, ".json"):
+            document = json.loads(read_part(base, ".json", variables))
+            stops = document.get("stops", [])
+            saved = state.setdefault("flow_stops", {}).setdefault(
+                document.get("flow", ""), {}
+            )
+            for stop in stops:
+                saved[stop.get("task") or ""] = stop
+            if stops or document.get("event") == "lead_stop":
+                stops = stops or [
+                    saved.get(task["id"], {"task": task["id"]})
+                    for task in document["tasks"]
+                    if task["status"] in ("stopped", "conflict")
+                ]
+                flow = {**document, "id": document["flow"]}
+                live = document["status"] == "running"
+                # The fixture contains every stop; no live event files are read.
+                if stops:
+                    reports = flows._stop_reports(flow, stops, live, {}) + reports
+                next_line = flows._next(flow, "lead_stop", reply.code, live)
+                reply.err = reply.err.replace(document["next"], next_line)
+                document["next"] = next_line
+            if "event" in document:
+                document["report"] = reports
+                if has(args, "--json"):
+                    reply.out = json.dumps(document, indent=2) + "\n"
+        reply.err = "".join(
+            line + "\n"
+            for line in reply.err.splitlines()
+            if not line.startswith("report:")
+        )
+        reply.err += "".join(report + "\n" for report in reports)
+        return
+    if name in ("merge", "cleanup") and reply.code == 75:
+        conflict = re.search(
+            r"^(?:next: resolve the conflicts|owner: resolve the conflict) "
+            r"on (.+?)(?:,.*)?$",
+            reply.err,
+            re.MULTILINE,
+        )
+        if conflict:
+            owner = (
+                f"owner: resolve the conflict on {conflict[1]}, "
+                "or ask for a new run cut from the updated target"
+            )
+            reply.err = reply.err.replace(conflict[0], owner)
+            report = exits.report(75, "conflict")
+            if report and report not in reply.err.splitlines():
+                reply.err += report + "\n"
+        return
+    if not name.startswith("run-") or name == "run-status":
+        return
+    run_id = next(
+        (option(args, f"--{mode}") for mode in RUN_MODES if option(args, f"--{mode}")),
+        None,
+    )
+    if name == "run-start" and reply.out.startswith("run "):
+        run_id = reply.out.splitlines()[0].removeprefix("run ")
+    run = state["runs"].get(run_id, {})
+    if name in ("run-start", "run-send", "run-recover") and run:
+        owners = [line for line in reply.err.splitlines() if line.startswith("owner:")]
+        if owners and not run.get("parent"):
+            run["owner_wait"] = owners
+            run["answered_at"] = None
+            reply.err = "".join(
+                line + "\n"
+                for line in reply.err.splitlines()
+                if not line.startswith("next:")
+            )
+    if reply.code:
+        context = {**run, "run": run_id}
+        variant = run_variant(run)
+        entry = exits.LINES.get(reply.code)
+        if isinstance(entry, dict):
+            variant = next(
+                (
+                    key if key != "*" else variant
+                    for key in entry
+                    if exits.line(reply.code, key, **context) in reply.err.splitlines()
+                ),
+                variant,
+            )
+        if run and (run.get("last_exit") == reply.code or run.get("owner_wait")):
+            run.update(last_exit=reply.code, last_variant=variant, status="failed")
+        report = exits.report(reply.code, variant, **context)
+        if report and report not in reply.err.splitlines():
+            reply.err += report + "\n"
+
+
 def main(argv: list[str]) -> int:
     """Answer one `emb` call.
 
@@ -2076,6 +2291,7 @@ def main(argv: list[str]) -> int:
         reply = dispatch(name, argv, state, base, variables)
     except Reply as caught:
         reply = caught
+    command_reports(name, argv, reply, base, variables, state)
     save_state(state)
     if not setup:
         entry = {

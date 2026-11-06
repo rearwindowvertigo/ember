@@ -415,6 +415,13 @@ the background.
 
 ## Repeated runs: `_runner/run_repeat.sh` and `_runner/tally.py`
 
+Before a change that moves, removes or rewrites rules in `skill/SKILL.md`
+or `skill/references/` merges into `main`, its author lists the cases whose
+graders exercise those rules. The author compares each listed case with
+`bash skill/evals/_runner/run_repeat.sh --base origin/main <case dir> <out dir>`,
+grades every run on both sides as in Grading, and records `tally.py`'s
+`all graders` pass counts for both `skill` and `base` on the change's issue.
+
 ```
 bash skill/evals/_runner/run_repeat.sh [--runs <n>] [--jobs <n>] [--base <git ref>] <case dir> <out dir>
 ```

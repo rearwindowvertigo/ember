@@ -7,7 +7,7 @@ one in the worktree and shows its progress. For turn `n` the folder holds:
 | File | Holds |
 |---|---|
 | `prompt-<n>.md` | The message, given to the CLI on standard input |
-| `turn-<n>.json` | The request: the turn, the prompt file, the argv and the sandbox |
+| `turn-<n>.json` | The turn, prompt file, argv, sandbox and environment overrides |
 | `turn-<n>.jsonl` | The CLI's `stream-json` output |
 | `turn-<n>.stderr` | The CLI's standard error |
 | `turn-<n>.pid` | The process id of the CLI, or of its `bwrap`, while it runs |
@@ -24,6 +24,8 @@ When the run's sandbox is `bubblewrap`, the request's `sandbox` holds the
 worktree, the repository's common git folder, the run's read paths, its
 read-only mode and its network value, and the host runs the CLI inside
 `ember.sandbox.claude_wrap`; the host itself runs outside the sandbox.
+Read-only requests disable Python bytecode and pytest's cache, put Ruff's cache
+in a run-specific worker cache folder, and freeze uv's lock.
 """
 
 import contextlib
@@ -38,7 +40,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ember import engines
+from ember import engines, paths
 from ember.engines import DriverError, IdleState, LaunchSpec, TurnOutcome, models
 from ember.engines import status as engine_status
 from ember.engines.diagnostics import output_text
@@ -59,7 +61,14 @@ WRITE_TOOLS = ("Bash", "Read", "Edit", "Write", "Glob", "Grep")
 """The tools of an editing run."""
 
 READ_TOOLS = ("Read", "Glob", "Grep")
-"""The tools of a read-only run."""
+"""The file tools of a read-only run."""
+
+READ_COMMANDS = (
+    "git diff", "git log", "git show", "git status", "git blame", "git grep",
+    "git ls-files", "git rev-parse", "make check", "make test", "pytest",
+    "uv run pytest",
+)  # fmt: skip
+"""The Bash commands allowed in a sandboxed, detached read-only run."""
 
 NETWORK_TOOLS = ("WebSearch", "WebFetch")
 """The tools an editing run also gets when its stored `network` is true."""
@@ -307,10 +316,13 @@ class ClaudeDriver(engines.Driver):
             run: The run.
 
         Returns:
-            The read tools for a read-only run; otherwise the editing tools,
-            with the web tools when the run's stored `network` is true.
+            The read tools for a read-only run, with Bash when detached and
+            sandboxed; otherwise the editing tools, with the web tools when
+            the run's stored `network` is true.
         """
         if run.read_only:
+            if run.detached and run.sandbox == "bubblewrap":
+                return (*READ_TOOLS, "Bash")
             return READ_TOOLS
         if run.network:
             return (*WRITE_TOOLS, *NETWORK_TOOLS)
@@ -364,18 +376,21 @@ class ClaudeDriver(engines.Driver):
         Raises:
             DriverError: The CLI is not on `PATH`.
         """
-        tools = ",".join(self.tools(run))
+        tools = self.tools(run)
+        allowed = list(tools)
         folders = self.read_folders(run)
         denied = [
             *(f"Bash(git {verb}:*)" for verb in GIT_WRITES),
             *(rule for _, rule in folders),
         ]
+        if run.read_only and "Bash" in tools:
+            allowed = [*READ_TOOLS, *(f"Bash({cmd}:*)" for cmd in READ_COMMANDS)]
         argv = [
             self._claude(), "-p", "--output-format", "stream-json", "--verbose",
             "--model", run.model,
             *(() if run.effort is None else ("--effort", run.effort)),
             "--restricted", "--safe-mode", "--strict-mcp-config",
-            "--tools", tools, "--allowedTools", tools,
+            "--tools", ",".join(tools), "--allowedTools", ",".join(allowed),
             "--disallowedTools", ",".join(denied),
             "--permission-mode", "default" if run.read_only else "acceptEdits",
             "--permission-prompts", "none",
@@ -453,6 +468,16 @@ class ClaudeDriver(engines.Driver):
             "argv": argv,
             "sandbox": self.sandbox_request(run),
         }
+        if run.read_only:
+            cache = paths.worker_cache_dir(run.env) / "claude" / run.id
+            request["env"] = {
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTEST_ADDOPTS": (
+                    run.env.get("PYTEST_ADDOPTS", "") + " -p no:cacheprovider"
+                ).strip(),
+                "RUFF_CACHE_DIR": str(cache / "ruff"),
+                "UV_FROZEN": "1",
+            }
         temporary = files["json"].with_suffix(".tmp")
         try:
             base.mkdir(mode=0o700, parents=True, exist_ok=True)

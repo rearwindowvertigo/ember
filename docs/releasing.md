@@ -39,6 +39,15 @@
 
 ## Skill eval fixtures
 
+Before a change that moves, removes or rewrites rules in `skill/SKILL.md`
+or `skill/references/` merges into `main`, its author lists the cases whose
+graders exercise those rules and compares each with
+`bash skill/evals/_runner/run_repeat.sh --base origin/main <case dir> <out dir>`.
+The author grades every run on both sides and records `tally.py`'s
+`all graders` pass counts for both `skill` and `base` on the change's issue.
+The [eval README](../skill/evals/README.md#repeated-runs-_runnerrun_repeatsh-and-_runnertallypy)
+describes repeated runs, grading and tallying.
+
 `make eval-fixtures` regenerates the CLI help and canned results used by
 the skill evals. Claim replies and skill-version warnings are generated
 through the CLI with an isolated installed-skill link. Generated help and

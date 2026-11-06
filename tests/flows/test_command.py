@@ -177,11 +177,27 @@ def test_dry_run(
     if as_json:
         result = json.loads(out)
         assert result["waves"] == [["a"], ["b"]]
-        assert result["writer"]["source"] == "plan"
+        assert result["writer"] == {
+            "engine": "codex",
+            "model": "gpt-5",
+            "effort": "high",
+            "source": "plan",
+        }
+        assert result["reviewer"] == {
+            "engine": "codex",
+            "model": "gpt-5",
+            "effort": "low",
+            "source": "plan",
+        }
         assert result["check"] == []
         gapcheck = result["gapcheck"]
     else:
-        assert "writer codex:gpt-5@high (plan)" in out
+        assert out.splitlines()[:2] == [
+            "plan, writer: codex gpt-5 · high (plan)",
+            "plan, reviewer: codex gpt-5 · low (plan)",
+        ]
+        assert "plan, writer:" not in err
+        assert "plan, reviewer:" not in err
         assert "wave 1:\n  a: a.py\nwave 2:\n  b: b.py" in out
         gapcheck = out.split("gap check: ")[1].strip()
     assert shlex.split(gapcheck) == [
@@ -492,6 +508,15 @@ def test_watch_outcomes(
         else "end"
     )
     assert report["next"] in err
+    expected_reports = {
+        82: [
+            "report: tasks unmerged; report every task's status and reason; "
+            "leave the unmerged work and the flow branch to the owner"
+        ],
+        72: ["report: the runner is gone; work may still be running"],
+    }.get(expected, [])
+    assert report["report"] == expected_reports
+    assert err.splitlines() == [report["next"], *expected_reports]
     if status == "failed":
         assert "fix the flow branch" in err
     # Already consumed terminal events still give the terminal outcome.
@@ -506,6 +531,107 @@ def test_done_unmerged(env: dict[str, str], flow: dict[str, Any]) -> None:
     record.save(flow, env)
     code, _, err = invoke(env, "--watch", flow["id"])
     assert code == 82 and "report the unmerged tasks to the owner" in err
+    assert err.splitlines()[-1] == (
+        "report: tasks unmerged; report every task's status and reason; "
+        "leave the unmerged work and the flow branch to the owner"
+    )
+
+
+@pytest.mark.parametrize("live", [False, True])
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("capacity", [False, True])
+def test_watch_reports_each_stop(
+    env: dict[str, str],
+    flow: dict[str, Any],
+    live: bool,
+    as_json: bool,
+    capacity: bool,
+) -> None:
+    """Print one report per event and retain capacity on a repeated watch."""
+    stopped(flow, env)
+    flow["tasks"][1].update(status="conflict", reason="merge conflict")
+    record.save(flow, env)
+    state = (
+        "the runner is still live for the other tasks"
+        if live
+        else "no runner is live and the owner's answer starts it"
+    )
+    reports = []
+    for task_id in ("a", "a", "b", None):
+        event: dict[str, Any] = {
+            "kind": "lead_stop",
+            "task": task_id,
+            "reason": "needs the lead",
+        }
+        if task_id == "a" and capacity:
+            event["provider_kind"] = "capacity"
+            reports.append(
+                "report: capacity on a; recommend only the same-worker retry"
+            )
+        else:
+            reports.append(
+                f"report: lead stop on {task_id or flow['id']}; {state}; "
+                "list every printed choice and recommend one"
+            )
+        record.append_event(flow["id"], event, env)
+    options = ["--watch", flow["id"], *(["--json"] if as_json else [])]
+    with ExitStack() as stack:
+        if live:
+            stack.enter_context(lock.hold(flow["id"], env))
+        code, out, err = invoke(env, *options)
+    assert code == 0
+    assert err.splitlines()[0].startswith("next:")
+    assert err.splitlines()[1:] == reports
+    if as_json:
+        assert json.loads(out)["report"] == reports
+    else:
+        assert "report:" not in out
+    # Consumed events are absent; the current stopped/conflict tasks still report.
+    code, out, err = invoke(env, "--watch", flow["id"], "--json")
+    expected = [reports[0], reports[2]]
+    expected = [
+        line.replace(
+            "the runner is still live for the other tasks",
+            "no runner is live and the owner's answer starts it",
+        )
+        for line in expected
+    ]
+    assert code == 0 and json.loads(out)["stops"] == []
+    assert json.loads(out)["report"] == expected
+    assert err.splitlines()[1:] == expected
+
+
+@pytest.mark.parametrize("code", [72, 82])
+@pytest.mark.parametrize("mode", ["start", "watch", "status", "resume"])
+def test_flow_errors_print_exit_report(
+    env: dict[str, str],
+    flow: dict[str, Any],
+    plan_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    code: int,
+    mode: str,
+) -> None:
+    """All command error paths put the exit report after the next action."""
+
+    def fail(*args: object, **kwargs: object) -> None:
+        """Raise a flow error from the selected command."""
+        raise command.CommandError(code, "stopped", "next: emb flow --status")
+
+    monkeypatch.setattr(command, f"_{mode}", fail)
+    options = (
+        ["--start", "--plan", str(plan_file)]
+        if mode == "start"
+        else [f"--{mode}", flow["id"]]
+    )
+    actual, out, err = invoke(env, *options)
+    report = (
+        "report: the runner is gone; work may still be running"
+        if code == 72
+        else "report: tasks unmerged; report every task's status and reason; "
+        "leave the unmerged work and the flow branch to the owner"
+    )
+    assert actual == code and not out
+    assert err.splitlines() == ["emb flow: stopped", "next: emb flow --status", report]
 
 
 def test_starting_grace(
@@ -993,7 +1119,9 @@ def test_expired_resume_reservation_requires_current_record(
         assert code == 72 and result["exit"] == 72
         assert result["event"] == "runner_lost"
         assert result["next"] == f"next: emb flow --resume {flow['id']}"
-        assert err == result["next"] + "\n"
+        assert err == (
+            result["next"] + "\nreport: the runner is gone; work may still be running\n"
+        )
 
 
 @pytest.mark.parametrize("status", ["starting", "running", "checking", "stopped"])
@@ -1027,7 +1155,11 @@ def test_cancel_idle_flow(
     assert not command._starting(current, env)
     code, out, err = invoke(env, "--watch", flow["id"], "--json")
     assert code == 82 and json.loads(out)["status"] == "cancelled"
-    assert err.strip() == f"next: emb flow --resume {flow['id']}"
+    assert err.splitlines() == [
+        f"next: emb flow --resume {flow['id']}",
+        "report: tasks unmerged; report every task's status and reason; "
+        "leave the unmerged work and the flow branch to the owner",
+    ]
     code, out, err = invoke(env, "--status", flow["id"])
     assert code == 0 and "status: cancelled\n" in out
     assert f"reason: {reason}\n" in out
@@ -1401,6 +1533,93 @@ def test_dry_run_reads_the_flow_settings(env: dict[str, str], plan_file: Path) -
     assert result["whole_review"] is False
     assert result["gapcheck_status"] == "run"
     assert "--engine" not in result["gapcheck"]
+
+    code, out, err = invoke(env, "--plan", str(plan_file), "--dry-run")
+    assert code == 0, err
+    assert out.splitlines()[:2] == [
+        "Team, Single tasks Writer: codex gpt-5 · high (single.writer)",
+        "Team, Flow reviewer: codex gpt-5-mini · low (flow.reviewer)",
+    ]
+    assert "Team," not in err
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("default_effort", [None, "medium"])
+def test_dry_run_announces_worker_options(
+    env: dict[str, str],
+    plan_file: Path,
+    as_json: bool,
+    default_effort: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Options replace plan workers and retain their source and default effort."""
+    monkeypatch.setattr(
+        StubDriver, "default_effort", lambda self, model: default_effort
+    )
+    code, out, err = invoke(
+        env,
+        "--plan",
+        str(plan_file),
+        "--dry-run",
+        "--writer",
+        "claude:opus@high",
+        "--reviewer",
+        "codex:other",
+        *(["--json"] if as_json else []),
+    )
+    assert code == 0, err
+    if as_json:
+        result = json.loads(out)
+        assert result["writer"] == {
+            "engine": "claude",
+            "model": "opus",
+            "effort": "high",
+            "source": "option",
+        }
+        assert result["reviewer"] == {
+            "engine": "codex",
+            "model": "other",
+            "effort": default_effort,
+            "source": "option",
+        }
+    else:
+        assert out.splitlines()[:2] == [
+            "option, writer: claude opus · high (option)",
+            f"option, reviewer: codex other · {default_effort or 'default'} (option)",
+        ]
+    assert "option, writer:" not in err
+    assert "option, reviewer:" not in err
+
+
+@pytest.mark.parametrize("source", ["option", "plan"])
+@pytest.mark.parametrize("same", [False, True])
+def test_dry_run_announces_separate_effort_source(
+    env: dict[str, str], plan_file: Path, source: str, same: bool
+) -> None:
+    """A matching menu supplies effort when an explicit worker omits it."""
+    choices.set_settings(
+        {
+            "single.writer": "codex:gpt-5",
+            "single.reviewer": "codex:gpt-5",
+            "flow.writer": "same" if same else "codex:gpt-5",
+            "flow.reviewer": "same" if same else "codex:gpt-5",
+        },
+        env=env,
+    )
+    options = []
+    if source == "option":
+        options = ["--writer", "codex:gpt-5", "--reviewer", "codex:gpt-5"]
+    else:
+        data = json.loads(plan_file.read_text())
+        del data["writer"]["effort"], data["reviewer"]["effort"]
+        plan_file.write_text(json.dumps(data))
+    code, out, err = invoke(env, "--plan", str(plan_file), "--dry-run", *options)
+    assert code == 0, err
+    row = "single" if same else "flow"
+    assert out.splitlines()[:2] == [
+        f"{source}, {role}: codex gpt-5 · high (model: {source}, effort: {row}.{role})"
+        for role in plan.ROLES
+    ]
 
 
 def test_plan_parallel_wins_over_the_setting(

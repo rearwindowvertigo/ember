@@ -349,6 +349,9 @@ QPushButton[kind="ghost"] {
     border: 1px solid transparent;
     background: transparent;
 }
+QPushButton[role="reset"] {
+    color: @text-secondary;
+}
 QPushButton[kind="ghost"]:hover {
     background: @bg-hover;
 }
@@ -430,6 +433,9 @@ QPushButton[role="segment"]:checked {
     color: @text-primary;
     border: 1px solid @border-strong;
 }
+QPushButton[role="segment"][changed="true"]:checked {
+    border: 1px solid @accent;
+}
 QPushButton[role="segment"][keyfocus="true"]:focus {
     border: 2px solid @focus-ring;
 }
@@ -444,6 +450,9 @@ QLineEdit, QComboBox {
     font-size: 14px;
     selection-background-color: @accent;
     selection-color: #ffffff;
+}
+QComboBox[changed="true"] {
+    border: 1px solid @accent;
 }
 QLineEdit[keyfocus="true"]:focus, QComboBox[keyfocus="true"]:focus {
     border: 2px solid @focus-ring;

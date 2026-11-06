@@ -109,16 +109,31 @@ for coverage and errors as above.
 ## Owner answers
 
 Each gap in `steps` carries an `id` and `ask_owner`, from the owner's Gaps
-Claude asks you about. Take the default of every gap whose `ask_owner` is
-false: write it into the failure model, ask nothing, and list each one in
-your report. For the rest,
-ask each `high` gap as its own question, in task order, waiting for its
-answer before the next question. Give the gap, its scenario, its underlying
-cause and the other places it affects. Offer the fix at that cause first
-as the recommended answer. Then offer the remaining
-`medium` and `low` gaps together as one question whose recommended answer
-accepts their defaults into the failure model. An empty gap list needs no
-question.
+Claude asks you about.
+
+Before asking about any gap or recording its answer, check its factual
+premise against the code, record or file that the gap or its default
+names.
+When the premise cannot be checked, say so in the owner question or report.
+When the premise does not hold, record a corrected default yourself for
+`ask_owner: false` gaps and `medium` or `low` gaps, including defaults the
+owner accepted together, and list the correction in your report.
+For a `high` gap with `ask_owner: true`, take the corrected answer back to
+the owner before recording it.
+
+Take the checked default of every gap whose `ask_owner` is false: write it
+into the failure model, ask nothing, and list each one in your report.
+For the remaining `high` gaps, you may group several into one question
+only after checking that they share one cause.
+Name every gap id and the shared cause in a grouped question.
+Ask it at the position of its earliest gap in task order.
+Keep gaps without a shared cause as separate questions in task order.
+Wait for each answer before asking the next question.
+Follow SKILL.md step 3 for owner questions, and include each gap's id and
+scenario.
+Then offer the remaining `medium` and `low` gaps together as one question
+whose recommended answer accepts their checked defaults into the failure
+model. An empty gap list needs no question.
 
 Record every owner answer and every default taken with:
 
@@ -126,20 +141,17 @@ Record every owner answer and every default taken with:
 emb gapcheck --answer <scratch>/gapcheck-<plan stem>-<n>.json --id <gap id> --text '<answer>'
 ```
 
+For a grouped question, run this command for every gap id in the group.
+
 Ember validates and updates the result. Do not edit the JSON by hand.
 The answer is stored once, on its gap in `steps` (or `settled` for an
 earlier settled gap). `ranked` refers to active gaps by id, step and harm.
 
-Before putting a `high` gap to the owner, check its factual premise
-against a live source, such as a log, a rollout file, a record file or the
-code it names. When the premise cannot be checked, the question to the
-owner says so.
-
 With the owner away and no answer possible, work waits. Do not take a
-default for a `high` gap yourself. Write the answers into the failure
-model, context or task text before `--start` or the Workflow. If answers
-materially change task scope, files, dependencies or ordering, repeat the
-flow dry run with `--previous <last result>` and its printed gap check
+default for a `high` gap with `ask_owner: true` yourself. Write the answers
+into the failure model, context or task text before `--start` or the
+Workflow. If answers materially change task scope, files, dependencies or
+ordering, repeat the flow dry run with `--previous <last result>` and its printed gap check
 command (the gap check alone for a Workflow, with the same `--previous`).
 Recording answers without such changes needs no repeat. The reviewer finds gaps;
 it decides nothing.

@@ -22,7 +22,7 @@ from ember.panels import command as panels
 from ember.panels import record as panel_records
 from ember.panels.members import Member
 from ember.panels.run import member_line
-from ember.runs import record
+from ember.runs import exits, record, steps
 from ember.runs.core import Core, RunError, StartOptions
 
 
@@ -193,19 +193,27 @@ def turn_results_state() -> dict[str, Any]:
     }
 
 
-def status_stderr(core: Core, warnings: str) -> str:
+def status_stderr(core: Core, warnings: str, run: record.Run) -> str:
     """Return what `emb run --status RUN` prints on standard error.
 
     Args:
         core: The core that ran the status.
         warnings: The standard error the core itself wrote.
+        run: The run whose status was printed.
 
     Returns:
-        The warnings, then the `next:` line the command prints after a
-        status when there is one.
+        The warnings, owner actions or next line, then the report line.
     """
-    line = core.status_next
-    return warnings + (f"{line}\n" if line else "")
+    lines = [*core.status_owner]
+    if core.status_next:
+        lines.append(core.status_next)
+    if core.step(run, session_state="live")[0] in ("failed", "owner"):
+        report = exits.report(
+            run.last_exit or 0, steps.exit_variant(run), **run.to_json()
+        )
+        if report:
+            lines.append(report)
+    return warnings + "".join(f"{line}\n" for line in lines)
 
 
 @dataclass
@@ -230,7 +238,6 @@ class _ProviderClock:
 def provider_replies() -> dict[str, str]:
     """Build exit-73 streams and status replies with the run formatters."""
     replies: dict[str, str] = {}
-    template = next(iter(turn_results_state()["runs"].values()))
     capacity = "Selected model is at capacity. Please try a different model."
     for variant, message in (
         ("capacity", capacity),
@@ -240,26 +247,43 @@ def provider_replies() -> dict[str, str]:
     ):
         with TemporaryDirectory() as temporary:
             env = {"XDG_STATE_HOME": temporary}
-            run_id = template["id"]
-            run = record.from_json(
-                {
-                    **template,
-                    "read_only": False,
-                    "detached": False,
-                    "branch": f"ember/codex/{run_id}",
-                    "turn": 1,
-                    "turn_state": record.SENT,
-                    "status": record.RUNNING,
-                    "last_exit": None,
-                    "last_reason": None,
-                    "expected_head": template["base"],
-                    "capacity_retries": 0 if variant == "capacity" else 2,
-                },
-                record.make_run_dir(run_id, env),
-                env,
+            run_id = "codex-20261103-120001-000001"
+            run = record.Run(
+                id=run_id,
+                engine="codex",
+                model="gpt-6.1-sol",
+                effort="high",
+                read_only=False,
+                repo="{{DIR}}",
+                worktree=f"{{{{WORKTREES}}}}/{run_id}",
+                branch=f"ember/codex/{run_id}",
+                base="a" * 40,
+                sandbox="codex",
+                network=True,
+                read=(),
+                read_effective=(),
+                trailers=(),
+                claim=None,
+                status=record.RUNNING,
+                turn=1,
+                turn_state=record.SENT,
+                reply=None,
+                expected_head="a" * 40,
+                started_at=1.0,
+                updated_at=2.0,
+                ended_at=None,
+                last_exit=None,
+                last_reason=None,
+                commits=(),
+                subject="Add --since to tools/report.py",
+                main="{{DIR}}",
+                common="{{DIR}}/.git",
+                capacity_retries=0 if variant == "capacity" else 2,
+                folder=record.make_run_dir(run_id, env),
+                env=env,
             )
             record.save(run)
-            record.write_private(run.folder / "turn-1.prompt.md", "Inspect the report")
+            record.write_private(run.folder / "turn-1.prompt.md", run.subject)
             out, err = StringIO(), StringIO()
             core = Core(env, out=out, err=err)
             driver = Mock(spec=engines.Driver)
@@ -281,6 +305,7 @@ def provider_replies() -> dict[str, str]:
                 run,
                 status=record.FAILED,
                 last_exit=73,
+                last_variant=variant,
                 last_reason=outcome.reason,
                 turn_state=record.SENT if variant == "uncertain" else record.COMMITTED,
             )
@@ -298,6 +323,9 @@ def provider_replies() -> dict[str, str]:
                 raise RunError(73, reason, variant, run=run_id)
 
             code = core.execute(fail)
+            report = exits.report(code, variant, **run.to_json())
+            if report:
+                core._warn(report)
             prefix = f"provider-{variant.replace('_', '-')}/files/.ember-eval/replies/"
             replies[prefix + "run-start.out"] = out.getvalue()
             replies[prefix + "run-start.err"] = err.getvalue()
@@ -312,7 +340,7 @@ def provider_replies() -> dict[str, str]:
                 replies[prefix + "run-status" + (".json" if as_json else ".out")] = (
                     out.getvalue()
                 )
-                shown = status_stderr(core, err.getvalue())
+                shown = status_stderr(core, err.getvalue(), record.load(run.id, env))
                 if shown:
                     replies[prefix + "run-status.err"] = shown
     return replies
@@ -406,13 +434,13 @@ def denied_path_replies() -> dict[str, str]:
             err.truncate()
             with patch.object(Core, "_session_state", return_value="live"):
                 code = core.status(run.id, as_json=as_json)
-            # No warning may follow a status; the `next:` line is the command's.
+            # The CLI prints the pending owner actions after the status.
             if code != 0 or err.getvalue():
                 raise RuntimeError(f"status exited {code}: {err.getvalue()}")
             replies[prefix + "run-status" + (".json" if as_json else ".out")] = (
                 out.getvalue()
             )
-            shown = status_stderr(core, err.getvalue())
+            shown = status_stderr(core, err.getvalue(), record.load(run.id, env))
             if shown:
                 replies[prefix + "run-status.err"] = shown
         # All paths describe the fixture home, never the generator's home.
@@ -471,6 +499,8 @@ def panel_replies() -> dict[str, str]:
         folder = panel_records.folder(panel_id, env)
 
         def render(text: str, *, completion: bool = False) -> str:
+            """Replace the isolated panel's paths and commit with fixture values."""
+            text = text.replace("a" * 40, "{{HEAD}}")
             text = text.replace(str(folder / "summary.md"), "{{SUMMARY}}")
             text = text.replace(str(folder), "{{EVAL}}/runs/{{PANEL}}")
             return text.replace(panel_id, "{{PANEL}}") if completion else text
@@ -485,7 +515,8 @@ def panel_replies() -> dict[str, str]:
                 print(
                     f"WARNING: member {member['n']} "
                     f"({member['engine']}:{member['model']}): read-only run "
-                    f"{member['run']} does not see uncommitted review-notes.md",
+                    f"{member['run']} does not see uncommitted review-notes.md "
+                    "(reads {{SHORT_HEAD}})",
                     file=err,
                 )
             for member in panel["members"]:
@@ -764,14 +795,21 @@ def gapcheck_replies() -> dict[str, str]:
             rounds_source="setting",
             parallel_source="setting",
         )
-        writer = flow_plan.Worker(
-            "codex",
-            model if named else "gpt-6.1-sol",
-            effort if named else "high",
-            "option" if named else "menu",
-        )
-        reviewer = flow_plan.Worker(
-            "codex", model, effort, "option" if named else "menu"
+        settings["menu"] = {
+            f"flow.{role}": {
+                "state": "set",
+                "engine": "codex",
+                "model": "gpt-6.1-sol" if role == "writer" else model,
+                "effort": "high" if role == "writer" else effort,
+                "same": True,
+            }
+            for role in flow_plan.ROLES
+        }
+        writer, reviewer = (
+            flow_plan.resolve(
+                role, f"codex:{model}@{effort}" if named else None, flow, settings
+            )
+            for role in flow_plan.ROLES
         )
         for as_json in (False, True):
             out, err = StringIO(), StringIO()

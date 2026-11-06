@@ -712,8 +712,10 @@ def test_read_only_warns_for_uncommitted_paths_and_keeps_its_snapshot(
     assert result.returncode == 0, result.stderr
     run_id = result.stdout.splitlines()[0].removeprefix("run ")
     tree = worktree_path(work, run_id)
+    short_head = work.git("rev-parse", "--short", "HEAD")
     assert set(result.stderr.splitlines()[1:]) == {
-        f"WARNING: read-only run {run_id} does not see uncommitted {name}"
+        f"WARNING: read-only run {run_id} does not see uncommitted {name} "
+        f"(reads {short_head})"
         for name in names
     } | {f"next: emb run --close {run_id}"}
     assert (tree / "README.md").read_text() == committed
@@ -1409,7 +1411,7 @@ def test_owner_line_start_makes_nothing(
         *(["--dry-run"] if dry_run else []),
     )  # fmt: skip
     assert result.returncode == 69
-    assert result.stderr.splitlines()[-1] == "owner: codex login"
+    assert result.stderr.splitlines()[-2:] == ["owner: codex login", exits.report(69)]
     assert result.stdout == ""
     assert work.git("branch", "--list", "ember/*") == ""
 
@@ -1464,10 +1466,19 @@ def test_generated_status_replies_carry_their_next_line(
         "sandbox-denied-paths",
     ):
         replies = generated_eval_fixtures / name / "files/.ember-eval/replies"
-        error = (replies / "run-status.err").read_text()
         document = json.loads((replies / "run-status.json").read_text())
-        assert error == f"{document['next']}\n"
-        assert error.startswith("next: ")
+        if document["step"] == "owner":
+            assert document["next"] is None
+            assert document["owner_wait"]
+            assert (replies / "run-status.err").read_text().splitlines() == (
+                document["owner_wait"]
+            )
+        else:
+            error = (replies / "run-status.err").read_text()
+            assert error == (
+                f"{document['next']}\n{exits.report(73, document['last_variant'])}\n"
+            )
+            assert error.startswith("next: ")
 
 
 @pytest.mark.parametrize("name", CASES)
@@ -1622,8 +1633,11 @@ def test_denied_path_case_keeps_every_attempt_and_owner_action(
     run_id = result.stdout.splitlines()[0].removeprefix("run ")
     status = work.emb("run", "--status", run_id, "--json")
     assert status.returncode == 0
-    assert status.stderr == f"next: emb run --close {run_id}\n"
-    [turn] = json.loads(status.stdout)["turns"]
+    document = json.loads(status.stdout)
+    assert status.stderr.splitlines() == document["owner_wait"]
+    assert document["step"] == "owner" and document["next"] is None
+    assert document["owner_wait"]
+    [turn] = document["turns"]
     assert turn["exit"] == 0 and turn["state"] == "done"
     denials = {item["path"]: item for item in turn["denied_paths"]}
     expected = {
@@ -1643,7 +1657,7 @@ def test_denied_path_case_keeps_every_attempt_and_owner_action(
             warning += f" ({reason})"
         assert result.stderr.splitlines().count(warning) == 1
     owner_prefix = (
-        "owner: the turn finished (exit 0); read access is needed only if "
+        "the turn finished (exit 0); read access is needed only if "
         "the worker's report says the work needed the path; "
         "Settings, Sandbox read paths;"
     )
@@ -1657,7 +1671,7 @@ def test_denied_path_case_keeps_every_attempt_and_owner_action(
     )
     additions = []
     for line in result.stderr.splitlines():
-        if not line.startswith(owner_prefix):
+        if not line.startswith("owner:") or owner_prefix not in line:
             continue
         command = shlex.split(line.rsplit("; ", 1)[1])
         assert command[:3] == ["emb", "choices", "--set"]
@@ -1695,13 +1709,14 @@ def test_provider_error_case_streams_and_status(
     )
     status = work.emb("run", "--status", run_id, "--json")
     assert status.returncode == 0
-    # Status derives its line from the last turn's provider kind; an
-    # uncertain resend is a capacity error.
-    kind = "capacity" if variant == "uncertain" else variant
-    assert status.stderr == f"{exits.line(73, kind, run=run_id)}\n"
+    assert status.stderr == (
+        f"{exits.line(73, variant, run=run_id)}\n{exits.report(73, variant)}\n"
+    )
+    assert result.stderr.splitlines()[-1] == exits.report(73, variant)
     document = json.loads(status.stdout)
     assert document["step"] == "failed"
     assert document["last_exit"] == 73
+    assert document["last_variant"] == variant
     [turn] = document["turns"]
     assert turn["exit"] == 73 and turn["provider_error"] is True
     assert turn["denied_paths"] == []
@@ -1720,6 +1735,108 @@ def test_provider_error_case_streams_and_status(
         assert "retry 1 of 2 in 30s" in result.stderr
         assert turn["seconds"] == 40
         assert sum(a["seconds"] for a in attempts) == 10
+
+
+@pytest.mark.parametrize("variant", ["capacity", "usage-limit", "outage", "uncertain"])
+def test_provider_status_matches_started_run(
+    tmp_path: Path,
+    env: dict[str, str],
+    variant: str,
+) -> None:
+    """Provider status retains the started run's identity in both output forms."""
+    work = case(f"provider-{variant}", tmp_path, env)
+    subject = f"Add --since after {variant}"
+    claim = f"since-{variant}"
+    trailers = ["Co-Authored-By: Eval <eval@example.invalid>", "Task: since"]
+    result = work.emb(
+        "run",
+        "--engine",
+        "codex",
+        "--dir",
+        ".",
+        "--task-file",
+        work.brief(subject),
+        "--claim",
+        claim,
+        "--trailer",
+        trailers[0],
+        "--trailer",
+        trailers[1],
+    )
+    assert result.returncode == 73
+    run_id = result.stdout.splitlines()[0].removeprefix("run ")
+    status = work.emb("run", "--status", run_id, "--json")
+    document = json.loads(status.stdout)
+    assert document["id"] == run_id
+    assert document["branch"] == f"ember/codex/{run_id}"
+    assert document["claim"] == claim
+    assert document["subject"] == subject
+    assert document["trailers"] == trailers
+    plain = work.emb("run", "--status", run_id)
+    assert f"claim: {claim}\n" in plain.stdout
+    assert f"subject: {subject}\n" in plain.stdout
+    assert all(trailer in plain.stdout for trailer in trailers)
+    assert plain.stderr == status.stderr
+    listed = json.loads(work.emb("run", "--status", "--json").stdout)
+    assert listed == [document]
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_denied_path_wait_ends_only_after_answer(
+    tmp_path: Path,
+    env: dict[str, str],
+    as_json: bool,
+) -> None:
+    """An answered canned run keeps its cleared wait on subsequent status calls."""
+    work = case("sandbox-denied-paths", tmp_path, env)
+    started = work.emb(
+        "run",
+        "--engine",
+        "codex",
+        "--dir",
+        ".",
+        "--read-only",
+        "--task-file",
+        work.brief(),
+    )
+    run_id = started.stdout.splitlines()[0].removeprefix("run ")
+    assert "next:" not in started.stderr
+    assert "Overview offers no Allow reading for /eval/home/.ssh" in started.stderr
+    assert "folders inside $XDG_CONFIG_HOME are never offered" in started.stderr
+    options = ["--json"] if as_json else []
+    waiting = work.emb("run", "--status", run_id, *options)
+    assert "owner:" in waiting.stderr and "next:" not in waiting.stderr
+    answered = work.emb("run", "--answered", run_id)
+    assert answered.returncode == 0
+    assert answered.stdout == ""
+    assert answered.stderr == f"next: emb run --close {run_id}\n"
+    status = work.emb("run", "--status", run_id, "--json")
+    document = json.loads(status.stdout)
+    assert document["step"] == "close"
+    assert document["owner_wait"] == document["owner_read"] == []
+    assert document["answered_at"] is not None
+    assert status.stderr == answered.stderr
+    assert work.emb("run", "--answered", run_id).stderr == answered.stderr
+    unknown = work.emb("run", "--answered", "unknown")
+    assert unknown.returncode == 64
+    assert unknown.stderr.endswith("next: emb run --status\n")
+
+
+@pytest.mark.parametrize("mode", ["send", "recover", "close", "status", "answered"])
+def test_unknown_run_matches_real_usage_exit(
+    tmp_path: Path, env: dict[str, str], mode: str
+) -> None:
+    """Unknown run ids return the usage exit and the no_run next step."""
+    work = case("small-change-no-worker", tmp_path, env)
+    args = ["run", f"--{mode}", "missing-run"]
+    if mode == "send":
+        args.extend(["--message-file", work.brief()])
+    result = work.emb(*args)
+    assert result.returncode == exits.USAGE
+    assert result.stdout == ""
+    assert result.stderr == (
+        f"emb run: no run missing-run\n{exits.line(exits.USAGE, 'no_run')}\n"
+    )
 
 
 # The runner, with bwrap and claude replaced by fakes
@@ -2440,7 +2557,8 @@ def test_panel_start_writes_summary(
         assert (f"member {number} {engine}:{model} · default · ") in result.stderr
         assert (
             f"WARNING: member {number} ({engine}:{model}): read-only run {run_id} "
-            "does not see uncommitted review-notes.md\n"
+            "does not see uncommitted review-notes.md "
+            f"(reads {work.git('rev-parse', '--short', 'HEAD')})\n"
         ) in result.stderr
     assert (work.work / "review-notes.md").read_text() == "Owner review notes.\n"
     (work.eval / "replies/panel-status.out").write_text("{{PANEL}} {{SUMMARY}}")
@@ -2587,6 +2705,7 @@ def test_flow_case_reports_have_reference_fields(
             "stops",
             "abandoned",
             "next",
+            "report",
         }
         for task in report["tasks"]:
             assert task["denied_paths"] == []
@@ -2827,3 +2946,244 @@ def test_answer_refusals_leave_result_unchanged(
     )
     assert checked.returncode == code and saved.read_text() == original
     assert work.calls()[-1]["route"] == "gapcheck-answer"
+
+
+@pytest.mark.parametrize(
+    ("code", "variant", "read_only"),
+    [
+        (74, None, False),
+        (74, "retry", False),
+        (74, "complete", False),
+        (74, "uncertain", False),
+        (74, "starting", False),
+        (74, "send", False),
+        (74, None, True),
+        (76, None, False),
+        (77, None, False),
+        (77, "add", False),
+        (80, None, False),
+        (69, "tmux", False),
+    ],
+)
+def test_run_failure_reports_match_commands(
+    tmp_path: Path,
+    env: dict[str, str],
+    code: int,
+    variant: str | None,
+    read_only: bool,
+) -> None:
+    """Canned failures print reports only for the variants the CLI reports."""
+    work = case("small-change-no-worker", tmp_path, env)
+    result = work.emb(
+        "run",
+        "--engine",
+        "codex",
+        "--dir",
+        ".",
+        "--task-file",
+        work.brief(),
+        *(["--read-only"] if read_only else []),
+    )
+    assert result.returncode == 0, result.stderr
+    run_id = result.stdout.splitlines()[0].removeprefix("run ")
+    document = json.loads(work.emb("run", "--status", run_id, "--json").stdout)
+    line = exits.line(code, variant, **{**document, "run": run_id})
+    replies = work.eval / "replies"
+    (replies / "run-send.code").write_text(str(code))
+    (replies / "run-send.err").write_text(f"emb run: fixture failure\n{line}\n")
+    failure = work.emb("run", "--send", run_id, "--message-file", work.brief())
+    assert failure.returncode == code
+    report = exits.report(code, variant, **document)
+    assert failure.stderr == (
+        f"emb run: fixture failure\n{line}\n" + (f"{report}\n" if report else "")
+    )
+    assert "report:" not in failure.stdout
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("live", [False, True])
+@pytest.mark.parametrize("capacity", [False, True])
+def test_flow_stop_reports_match_commands(
+    tmp_path: Path,
+    env: dict[str, str],
+    as_json: bool,
+    live: bool,
+    capacity: bool,
+) -> None:
+    """Every stop prints one report after next, also included in watch JSON."""
+    work = case("flow-lead-stop-waits", tmp_path, env)
+    replies = work.eval / "replies"
+    path = replies / "flow-watch.1.json"
+    document = json.loads(path.read_text())
+    document["status"] = "running" if live else "stopped"
+    document["stops"][0]["provider_kind"] = "capacity" if capacity else None
+    document["stops"].append({"task": None, "kind": "lead_stop"})
+    path.write_text(json.dumps(document))
+    result = work.emb("flow", "--watch", "flow-id", *(["--json"] if as_json else []))
+    assert result.returncode == 0, result.stderr
+    state = (
+        "the runner is still live for the other tasks"
+        if live
+        else "no runner is live and the owner's answer starts it"
+    )
+    expected = [
+        "report: capacity on strict; recommend only the same-worker retry"
+        if capacity
+        else f"report: lead stop on strict; {state}; "
+        "list every printed choice and recommend one",
+        f"report: lead stop on flow-id; {state}; "
+        "list every printed choice and recommend one",
+    ]
+    assert result.stderr.splitlines()[0].startswith("next:")
+    assert result.stderr.splitlines()[1:] == expected
+    if as_json:
+        assert json.loads(result.stdout)["report"] == expected
+    else:
+        assert "report:" not in result.stdout
+
+
+@pytest.mark.parametrize("code", [72, 82])
+@pytest.mark.parametrize("mode", ["start", "watch", "status", "resume"])
+def test_flow_exit_reports_match_commands(
+    tmp_path: Path,
+    env: dict[str, str],
+    code: int,
+    mode: str,
+) -> None:
+    """Each user-facing flow failure appends its exit report after next."""
+    work = case("small-change-no-worker", tmp_path, env)
+    base = work.eval / "replies" / f"flow-{mode}"
+    base.with_suffix(".code").write_text(str(code))
+    base.with_suffix(".out").write_text("fixture output\n")
+    base.with_suffix(".err").write_text("next: emb flow --status flow-id\n")
+    args = (
+        ["--start", "--plan", str(flow_plan(work))]
+        if mode == "start"
+        else [f"--{mode}", "flow-id"]
+    )
+    result = work.emb("flow", *args)
+    expected = (
+        "report: the runner is gone; work may still be running"
+        if code == 72
+        else "report: tasks unmerged; report every task's status and reason; "
+        "leave the unmerged work and the flow branch to the owner"
+    )
+    assert result.returncode == code
+    assert result.stderr == f"next: emb flow --status flow-id\n{expected}\n"
+
+
+@pytest.mark.parametrize("name", FLOW_CASES)
+def test_flow_dry_run_announces_both_workers(
+    tmp_path: Path,
+    env: dict[str, str],
+    name: str,
+) -> None:
+    """Generated flow previews announce the same resolved workers as JSON."""
+    work = case(name, tmp_path, env)
+    args = ["flow", "--plan", str(flow_plan(work)), "--dry-run"]
+    text = work.emb(*args)
+    document = json.loads(work.emb(*args, "--json").stdout)
+    named = name == "owner-away-named-workers"
+    for index, role in enumerate(("writer", "reviewer")):
+        worker = document[role]
+        label = f"option, {role}" if named else f"Team, Single tasks {role.title()}"
+        source = "option" if named else f"single.{role}"
+        assert text.stdout.splitlines()[index] == (
+            f"{label}: {worker['engine']} {worker['model']} · "
+            f"{worker['effort']} ({source})"
+        )
+    assert text.stderr == ""
+
+
+def test_merge_conflict_prints_owner_then_report(
+    tmp_path: Path,
+    env: dict[str, str],
+) -> None:
+    """A real fixture merge conflict carries the production owner and report lines."""
+    work = case("claim-and-menu-writer", tmp_path, env)
+    _, branch, _ = start(work)
+    (work.work / "tools/report.py").write_text("print('owner replacement')\n")
+    work.git("add", "tools/report.py")
+    work.git("commit", "-m", "Change report on target")
+    result = work.emb(
+        "merge",
+        branch,
+        "--into",
+        "claude/report-since",
+        "--verdict",
+        "keep",
+        "--note",
+        "Keep",
+        "--subject",
+        "feat: add since",
+    )
+    assert result.returncode == 75, result.stderr
+    assert result.stderr.splitlines()[-2:] == [
+        f"owner: resolve the conflict on {branch}, "
+        "or ask for a new run cut from the updated target",
+        exits.report(75, "conflict"),
+    ]
+    assert "next:" not in result.stderr
+
+
+@pytest.mark.parametrize("answer", ["answered", "read", "send"])
+def test_stub_owner_wait_lifecycle(
+    tmp_path: Path,
+    env: dict[str, str],
+    answer: str,
+) -> None:
+    """Owner waits suppress carry-on lines until an answer or a later turn."""
+    work = case("small-change-no-worker", tmp_path, env)
+    path = str(tmp_path / "toolchain")
+    (work.eval / "replies/run-start.err").write_text("owner: allow the toolchain\n")
+    started = work.emb(
+        "run",
+        "--engine",
+        "codex",
+        "--dir",
+        ".",
+        "--task-file",
+        work.brief(),
+    )
+    run_id = started.stdout.splitlines()[0].removeprefix("run ")
+    assert started.returncode == 0 and "next:" not in started.stderr
+    waiting = work.emb("run", "--status", run_id, "--json")
+    assert json.loads(waiting.stdout)["step"] == "owner"
+    assert waiting.stderr == "owner: allow the toolchain\n"
+    if answer == "read":
+        state_file = work.eval / "state.json"
+        state = json.loads(state_file.read_text())
+        state["runs"][run_id]["owner_read"] = [path]
+        state_file.write_text(json.dumps(state))
+        settings_file = work.eval / "replies/choices-read.out"
+        settings = json.loads(settings_file.read_text())
+        settings["answers"]["sandbox.read"]["value"] = [path]
+        settings_file.write_text(json.dumps(settings))
+    elif answer == "answered":
+        assert work.emb("run", "--answered", run_id).returncode == 0
+    else:
+        sent = work.emb("run", "--send", run_id, "--message-file", work.brief())
+        assert sent.returncode == 0, sent.stderr
+    status = work.emb("run", "--status", run_id, "--json")
+    assert json.loads(status.stdout)["step"] == "close"
+    assert status.stderr == f"next: emb run --close {run_id}\n"
+
+
+def test_flow_repeated_capacity_stop_keeps_report(
+    tmp_path: Path,
+    env: dict[str, str],
+) -> None:
+    """A watch with no new events reports the stopped task's saved provider kind."""
+    work = case("flow-lead-stop-waits", tmp_path, env)
+    replies = work.eval / "replies"
+    document = json.loads((replies / "flow-watch.1.json").read_text())
+    document["stops"][0]["provider_kind"] = "capacity"
+    (replies / "flow-watch.1.json").write_text(json.dumps(document))
+    document["stops"] = []
+    (replies / "flow-watch.2.json").write_text(json.dumps(document))
+    (replies / "flow-watch.2.err").write_text(document["next"] + "\n")
+    for _ in range(2):
+        result = work.emb("flow", "--watch", "flow-id", "--json")
+        expected = "report: capacity on strict; recommend only the same-worker retry"
+        assert json.loads(result.stdout)["report"] == [expected]
+        assert result.stderr.splitlines()[-1] == expected

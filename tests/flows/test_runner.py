@@ -302,6 +302,7 @@ def test_review_stops_and_blocks_transitively(
     assert not any(e["kind"] == "end" for e in events)
     stop = next(e for e in events if e["kind"] == "lead_stop")
     assert len(stop["choices"]) == 5
+    assert stop["provider_kind"] is None
 
 
 @pytest.mark.parametrize("latest_should", [False, True])
@@ -596,6 +597,84 @@ def test_answers_resume_stopped_tasks(h: Harness, kind: str) -> None:
         assert runs.load(item["reviews"][-1]["run"], h.env).model == "another"
     if kind == "send":
         assert item["round"] == 0
+
+
+@pytest.mark.parametrize("final_answer", ["review", "worker"])
+def test_reviewer_corrections_survive_resume_and_later_answers(
+    h: Harness, final_answer: str
+) -> None:
+    """Applied corrections reach only this task's later reviews in answer order."""
+    h.scripts_update(**{"Review of task a,": "@reply " + FIX})
+    h.create(
+        [task("a", text="@write a value\n@write README.md expanded"), task("b")],
+        rounds=0,
+    )
+    assert h.run()["tasks"][0]["status"] == "stopped"
+    folder = record.folder(h.id, h.env)
+    original_reviews = set((folder / "briefs").glob("*-review-*.md"))
+    assert all(
+        "## Lead corrections" not in path.read_text() for path in original_reviews
+    )
+    source = h.tmp / "correction.md"
+    first = "README.md is allowed.\n@write a first"
+    second = "Keep the interface.\n@write a second"
+    for number, correction in ((1, first), (3, second)):
+        source.write_text(correction)
+        h.answer("send", file=str(source))
+        source.write_text("The source was changed after sending.")
+        instance = h.instance()
+        instance.answers()
+        # A fresh runner resumes the already saved answer without appending it again.
+        flow = h.run()
+        item = flow["tasks"][0]
+        assert item["status"] == "stopped"
+        expected = [str(folder / "answers" / f"{n}.md") for n in (1, 3) if n <= number]
+        assert item["corrections"] == expected
+        assert flow["tasks"][1]["corrections"] == []
+        if number == 1:
+            h.answer("review")
+            assert h.run()["tasks"][0]["corrections"] == expected
+    h.scripts_update(**{"Review of task a,": "@reply " + PASS})
+    h.answer(final_answer)
+    flow = h.run()
+    assert flow["status"] == "done"
+    assert flow["tasks"][0]["corrections"] == expected
+    reviews = sorted(
+        (folder / "briefs").glob("a-review-*.md"),
+        key=lambda path: int(path.stem.rsplit("-", 1)[1]),
+    )
+    assert len(reviews) == 5
+    for index, path in enumerate(reviews[1:], 1):
+        text = path.read_text()
+        assert "### Answer 1\n\n    README.md is allowed.\n    @write a first" in text
+        assert "Changed outside the declared files:\n    README.md" in text
+        assert "The source was changed" not in text
+        assert ("### Answer 3" in text) == (index >= 3)
+        if index >= 3:
+            assert text.index(first.splitlines()[0]) < text.index(
+                second.splitlines()[0]
+            )
+            assert (
+                "### Answer 3\n\n    Keep the interface.\n    @write a second" in text
+            )
+        assert "### Answer 2" not in text
+    if final_answer == "worker":
+        for path in (folder / "briefs").glob("a-write-*.md"):
+            assert "README.md is allowed." not in path.read_text()
+
+
+def test_refused_send_does_not_enter_correction_history(h: Harness) -> None:
+    """A send refused before the task starts leaves no recorded decision."""
+    h.create()
+    source = h.tmp / "correction.md"
+    source.write_text("Allow README.md")
+    h.answer("send", file=str(source))
+    instance = h.instance()
+    instance.answers()
+    flow = h.flow()
+    assert flow["answers_seen"] == 1
+    assert flow["tasks"][0]["corrections"] == []
+    assert "answer 1 refused" in record.read_events(h.id, h.env)[-1]["reason"]
 
 
 @pytest.mark.parametrize("rounds", [0, 1])
@@ -1759,8 +1838,9 @@ def test_recover_squash_after_target_edit_with_noncolon_worker_separator(
 
 
 @pytest.mark.parametrize("parallel", [1, 2])
+@pytest.mark.parametrize("role", ["writer", "reviewer"])
 def test_capacity_exhaustion_does_not_halt_other_flow_tasks(
-    h: Harness, monkeypatch: pytest.MonkeyPatch, parallel: int
+    h: Harness, monkeypatch: pytest.MonkeyPatch, parallel: int, role: str
 ) -> None:
     choices.set_settings({"provider.capacity_retries": "0"}, env=h.env)
     original = h.driver.wait
@@ -1774,11 +1854,31 @@ def test_capacity_exhaustion_does_not_halt_other_flow_tasks(
         return outcome
 
     monkeypatch.setattr(h.driver, "wait", wait)
-    h.create([task("a", text="@provider capacity"), task("b")], parallel=parallel)
+    if role == "reviewer":
+        h.scripts_update(**{"Review of task a, round 1,": "@provider capacity"})
+    h.create(
+        [task("a", text="@provider capacity" if role == "writer" else None), task("b")],
+        parallel=parallel,
+    )
     flow = h.run()
     assert flow["halted"] is None
     assert flow["tasks"][0]["status"] == "stopped"
     assert flow["tasks"][1]["status"] == "merged"
+    stops = [
+        event
+        for event in record.read_events(h.id, h.env)
+        if event["kind"] == "lead_stop"
+    ]
+    assert len(stops) == 1
+    assert stops[0]["task"] == "a"
+    assert stops[0]["provider_kind"] == "capacity"
+    for _ in range(2):
+        out, err = io.StringIO(), io.StringIO()
+        args = build_parser().parse_args(["flow", "--watch", h.id, "--json"])
+        assert command.main(args, h.env, out=out, err=err) == 0
+        reports = ["report: capacity on a; recommend only the same-worker retry"]
+        assert json.loads(out.getvalue())["report"] == reports
+        assert err.getvalue().splitlines()[1:] == reports
 
 
 @pytest.mark.parametrize("startup", [False, True])

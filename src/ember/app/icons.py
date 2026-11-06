@@ -24,6 +24,7 @@ ICON_NAMES = (
     "terminal",
     "copy",
     "refresh-cw",
+    "rotate-ccw",
     "chevron-down",
     "chevron-right",
     "triangle-alert",

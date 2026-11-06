@@ -1,7 +1,7 @@
 # The full check. It needs no network once `uv sync` has built the environment.
 UV_RUN := uv run --frozen
 
-.PHONY: check lint format-check typecheck test format deb eval-help eval-replies eval-fixtures
+.PHONY: check lint format-check typecheck test format deb screens eval-help eval-replies eval-fixtures
 
 check: lint format-check typecheck test
 
@@ -20,6 +20,10 @@ test:
 format:
 	$(UV_RUN) ruff check --fix
 	$(UV_RUN) ruff format
+
+# Offscreen screen images outside the checkout (dev/screens.md).
+screens:
+	$(UV_RUN) python dev/screens.py $(if $(OUT),--out "$(OUT)")
 
 # The .deb package in dist/ (docs/releasing.md).
 deb:

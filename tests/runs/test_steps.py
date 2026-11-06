@@ -309,3 +309,30 @@ def test_provider_error_line_names_the_last_turn_kind(
     )
     if kind == "usage_limit":
         assert line is not None and "usage_limit resets" in line
+
+
+@pytest.mark.parametrize("status", [record.CLOSED, record.FAILED, record.WAITING])
+def test_owner_wait_precedes_other_steps(run: record.Run, status: str) -> None:
+    run = replace(run, status=status, last_exit=69, owner_wait=("owner: install tmux",))
+    assert steps.derive(run, core.MISSING, False, _git) == ("owner", None)
+    run = replace(run, parent={"command": "flow"})
+    assert steps.derive(run, core.MISSING, False, _git) == ("parent", None)
+
+
+@pytest.mark.parametrize(
+    ("code", "variant"), [(73, "uncertain"), (74, "retry"), (74, "complete")]
+)
+def test_saved_exit_variant_is_used(run: record.Run, code: int, variant: str) -> None:
+    run = replace(run, last_exit=code, last_variant=variant)
+    assert steps.derive(run, core.MISSING, False, _git) == (
+        "failed",
+        exits.line(code, variant, run=run.id, worktree=run.worktree, engine=run.engine),
+    )
+
+
+@pytest.mark.parametrize("turn", [0, 1])
+def test_answered_owner_failure_has_carry_on_line(run: record.Run, turn: int) -> None:
+    run = replace(run, status=record.FAILED, last_exit=69, answered_at=2, turn=turn)
+    step, text = steps.derive(run, core.MISSING, False, _git)
+    assert step == "failed"
+    assert text == "next: " + (exits.SEND.format(run=run.id) if turn else exits.START)

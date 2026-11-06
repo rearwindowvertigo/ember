@@ -1,6 +1,7 @@
 import dataclasses
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -11,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from ember import choices, engines
+from ember import choices, engines, paths
 from ember.engines import DriverError, claude, claude_host
 from ember.engines.claude import ClaudeDriver, final_reply, turn_files
 from ember.runs.record import Run
@@ -229,6 +230,7 @@ def test_command_requests_turn_one_and_runs_the_host(
     assert base.stat().st_mode & 0o777 == 0o700
     files = turn_files(base, 1)
     request = json.loads(files["json"].read_text())
+    assert "env" not in request
     assert request["turn"] == 1
     assert request["prompt"] == str(files["prompt"])
     assert files["prompt"].read_text() == "Brief line\n\nDo it\n"
@@ -251,16 +253,163 @@ def test_command_requests_turn_one_and_runs_the_host(
     assert not (run.folder / "turn-1.json").exists()
 
 
-def test_read_only_run_gets_only_the_read_tools(
-    tmp_path: Path, env: dict[str, str]
+@pytest.mark.parametrize(
+    ("detached", "sandbox"),
+    [(False, "none"), (True, "none"), (False, "bubblewrap")],
+)
+def test_read_only_run_without_detachment_or_sandbox_gets_only_read_tools(
+    tmp_path: Path, env: dict[str, str], detached: bool, sandbox: str
 ) -> None:
+    """Only detached runs inside bubblewrap may use the read-only shell."""
     run = make_run(tmp_path, env, read_only=True, effort=None)
-    claude.driver(env).command(run, "Look")
-    argv = request_argv(run, 1)
+    run = dataclasses.replace(run, detached=detached, sandbox=sandbox)
+    argv = claude.driver(env).turn_argv(run, None)
     assert option(argv, "--tools") == "Read,Glob,Grep"
     assert option(argv, "--allowedTools") == "Read,Glob,Grep"
     assert option(argv, "--permission-mode") == "default"
     assert "--effort" not in argv
+
+
+@pytest.fixture
+def read_shell_argv(tmp_path: Path, env: dict[str, str]) -> list[str]:
+    """Return a sandboxed, detached read-only turn's argv."""
+    run = make_run(tmp_path, env, read_only=True, sandbox="bubblewrap")
+    run = dataclasses.replace(run, detached=True)
+    return claude.driver(env).turn_argv(run, None)
+
+
+def bash_rule_matches(rule: str, command: str) -> bool:
+    """Match a simple command against an argv's Bash prefix or wildcard rule."""
+    if not rule.startswith("Bash(") or not rule.endswith(")"):
+        return False
+    pattern = rule[5:-1]
+    if pattern.endswith(":*"):
+        prefix = pattern[:-2]
+        return command == prefix or command.startswith(prefix + " ")
+    return re.fullmatch(re.escape(pattern).replace(r"\*", ".*"), command) is not None
+
+
+def bash_allowed(argv: list[str], command: str) -> bool:
+    """Check argv rules for one simple command, with denials taking precedence."""
+    allowed = option(argv, "--allowedTools").split(",")
+    denied = option(argv, "--disallowedTools").split(",")
+    return any(bash_rule_matches(rule, command) for rule in allowed) and not any(
+        bash_rule_matches(rule, command) for rule in denied
+    )
+
+
+def test_read_only_shell_permissions(read_shell_argv: list[str]) -> None:
+    """Expose Bash with only the settled command prefixes and no prompts."""
+    assert option(read_shell_argv, "--tools") == "Read,Glob,Grep,Bash"
+    assert option(read_shell_argv, "--allowedTools").split(",") == [
+        "Read", "Glob", "Grep",
+        "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+        "Bash(git status:*)", "Bash(git blame:*)", "Bash(git grep:*)",
+        "Bash(git ls-files:*)", "Bash(git rev-parse:*)",
+        "Bash(make check:*)", "Bash(make test:*)", "Bash(pytest:*)",
+        "Bash(uv run pytest:*)",
+    ]  # fmt: skip
+    assert option(read_shell_argv, "--permission-mode") == "default"
+    assert option(read_shell_argv, "--permission-prompts") == "none"
+    assert option(read_shell_argv, "--disallowedTools").split(",") == [
+        f"Bash(git {verb}:*)" for verb in claude.GIT_WRITES
+    ]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git diff",
+        "git diff HEAD -- src",
+        "git diff -C HEAD",
+        "git diff --output=diff.txt",
+        "git log -5",
+        "git log -C",
+        "git show HEAD:a.py",
+        "git show -C HEAD",
+        "git status --short",
+        "git blame a.py",
+        "git blame -C a.py",
+        "git grep needle -- src",
+        "git grep -C 2 needle",
+        "git grep -Ocat needle",
+        "git grep --open-files-in-pager=cat needle",
+        "git ls-files -z",
+        "git rev-parse --short HEAD",
+        "make check",
+        "make test -j2",
+        "make check -C sub",
+        "make check -f alternate.mk",
+        "make check --makefile alternate.mk",
+        "make check --directory sub",
+        "make check --eval 'target: ; @echo ok'",
+        "make check SHELL=/bin/sh",
+        "pytest",
+        "pytest tests -q",
+        "pytest --capture=sys tests",
+        "pytest -p no:x tests",
+        "pytest --junitxml=results.xml --basetemp=tmp tests",
+        "pytest -qp plugin tests",
+        "uv run pytest tests -q",
+        "uv run pytest --capture=sys tests",
+        "uv run pytest -p no:x tests",
+        "uv run pytest --junit-xml=results.xml --basetemp=tmp tests",
+    ],
+)
+def test_read_only_shell_allows_commands(
+    read_shell_argv: list[str], command: str
+) -> None:
+    """The argv permits the settled commands without filtering their options."""
+    assert bash_allowed(read_shell_argv, command)
+
+
+@pytest.mark.parametrize(
+    "command", ["rm file", "python script.py", "make install", "git diff-files"]
+)
+def test_read_only_shell_refuses_other_commands(
+    read_shell_argv: list[str], command: str
+) -> None:
+    """Other commands have no allow rule."""
+    assert not bash_allowed(read_shell_argv, command)
+
+
+@pytest.mark.parametrize("command", ["git diff && rm tracked.py"])
+def test_read_only_shell_refuses_a_compound_commands_write(
+    read_shell_argv: list[str], command: str
+) -> None:
+    """After Claude splits a compound command, its write has no permission."""
+    commands = command.split(" && ")
+    assert bash_allowed(read_shell_argv, commands[0])
+    assert not all(bash_allowed(read_shell_argv, command) for command in commands)
+
+
+@pytest.mark.parametrize("addopts", [None, "", '-q -k "one or two"'])
+def test_read_only_request_sets_test_environment_on_each_turn(
+    tmp_path: Path, env: dict[str, str], addopts: str | None
+) -> None:
+    """Read-only turns append the cache switch and leave uv's environment local."""
+    if addopts is not None:
+        env["PYTEST_ADDOPTS"] = addopts
+    run = make_run(tmp_path, env, read_only=True)
+    driver = claude.driver(env)
+    driver.command(run, "Look")
+    driver.send(with_turn(run, 2), "Look again")
+    cache = paths.worker_cache_dir(env) / "claude" / run.id
+    for turn in (1, 2):
+        request = json.loads(turn_files(claude.folder(run), turn)["json"].read_text())
+        assert request["env"] == {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTEST_ADDOPTS": (
+                '-q -k "one or two" -p no:cacheprovider'
+                if addopts
+                else "-p no:cacheprovider"
+            ),
+            "RUFF_CACHE_DIR": str(cache / "ruff"),
+            "UV_FROZEN": "1",
+        }
+        assert "UV_PROJECT_ENVIRONMENT" not in request["env"]
+        assert not Path(request["env"]["RUFF_CACHE_DIR"]).is_relative_to(run.worktree)
+    assert env.get("PYTEST_ADDOPTS") == addopts
 
 
 def test_stored_network_adds_the_web_tools(tmp_path: Path, env: dict[str, str]) -> None:
@@ -269,6 +418,31 @@ def test_stored_network_adds_the_web_tools(tmp_path: Path, env: dict[str, str]) 
     run = make_run(tmp_path, env, network=True)
     claude.driver(env).command(run, "Brief")
     assert option(request_argv(run, 1), "--tools").endswith(",WebSearch,WebFetch")
+
+
+@pytest.mark.parametrize("detached", [False, True])
+@pytest.mark.parametrize("sandbox", ["none", "bubblewrap"])
+@pytest.mark.parametrize("network", [False, True])
+def test_editing_run_permissions_are_unchanged(
+    tmp_path: Path,
+    env: dict[str, str],
+    detached: bool,
+    sandbox: str,
+    network: bool,
+) -> None:
+    """Editing runs keep unrestricted Bash with the existing git write denials."""
+    run = make_run(tmp_path, env, sandbox=sandbox, network=network)
+    run = dataclasses.replace(run, detached=detached)
+    argv = claude.driver(env).turn_argv(run, None)
+    tools = "Bash,Read,Edit,Write,Glob,Grep"
+    if network:
+        tools += ",WebSearch,WebFetch"
+    assert option(argv, "--tools") == tools
+    assert option(argv, "--allowedTools") == tools
+    assert option(argv, "--disallowedTools").split(",") == [
+        f"Bash(git {verb}:*)" for verb in claude.GIT_WRITES
+    ]
+    assert option(argv, "--permission-mode") == "acceptEdits"
 
 
 def test_read_paths_are_added_and_kept_from_edits(

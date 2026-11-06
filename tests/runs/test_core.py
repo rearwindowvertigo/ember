@@ -703,12 +703,92 @@ def test_read_only_run_works_in_a_detached_worktree(
     assert run.commits == ()
     assert run.turn_state == record.COLLECTED
     assert run.last_reason is None
+    short_base = git(Path(run.worktree), "rev-parse", "--short", "HEAD", env=env)
     assert (
-        f"WARNING: read-only run {run.id} does not see uncommitted dirty.txt\n" in err
+        f"WARNING: read-only run {run.id} does not see uncommitted dirty.txt "
+        f"(reads {short_base})\n" in err
     )
     assert f"read-only run {run.id} changed" not in err
     assert not (repo / ".ember").exists()
     assert _fields(out)["branch"] == "-"
+
+
+@pytest.mark.parametrize("saved_base", [False, True])
+def test_read_only_warning_names_the_commit_used_when_source_head_moves(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    saved_base: bool,
+) -> None:
+    """Keep the warning and detached worktree on the same resolved commit."""
+    base = git(repo, "rev-parse", "HEAD", env=env)
+    git(repo, "config", "core.abbrev", "12", env=env)
+    short_base = git(repo, "rev-parse", "--short", base, env=env)
+    if saved_base:
+        git(repo, "commit", "--allow-empty", "-m", "Later commit", env=env)
+    (repo / "dirty.txt").write_text("Owner notes\n")
+    core_ = _core(env)
+    create_worktree = core_._create_worktree
+
+    def move_head_then_create(run: record.Run, main: Path) -> None:
+        """Move the source HEAD between the warning and worktree creation."""
+        git(repo, "commit", "--allow-empty", "-m", "Moved before launch", env=env)
+        create_worktree(run, main)
+
+    monkeypatch.setattr(core_, "_create_worktree", move_head_then_create)
+    assert _start(
+        core_, repo, _brief(tmp_path, "Review\n@reply fine\n"),
+        read_only=True, base=base if saved_base else None,
+    ) == 0  # fmt: skip
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert run.base == base
+    assert git(repo, "rev-parse", "HEAD", env=env) != base
+    assert git(Path(run.worktree), "rev-parse", "HEAD", env=env) == base
+    assert (
+        f"WARNING: read-only run {run.id} does not see uncommitted dirty.txt "
+        f"(reads {short_base})\n"
+    ) in err
+    assert "WARNING:" not in out
+
+
+@pytest.mark.parametrize("short_base", [None, ""])
+def test_read_only_start_without_short_hash_uses_resolved_commit(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    short_base: str | None,
+) -> None:
+    """A missing short hash uses the resolved commit and lets the run finish."""
+    base = git(repo, "rev-parse", "HEAD", env=env)
+    (repo / "dirty.txt").write_text("Owner notes\n")
+    core_ = _core(env)
+    git_out = core_._git_out
+
+    def without_short_hash(cwd: str | Path, *args: str) -> str | None:
+        """Return no hash only for the warning's abbreviation lookup."""
+        if args == ("rev-parse", "--short", base):
+            return short_base
+        return git_out(cwd, *args)
+
+    monkeypatch.setattr(core_, "_git_out", without_short_hash)
+    assert (
+        _start(core_, repo, _brief(tmp_path, "Review\n@reply fine\n"), read_only=True)
+        == 0
+    )
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert run.base == base
+    assert run.turn_state == record.COLLECTED
+    assert run.last_exit == 0
+    assert (
+        f"WARNING: read-only run {run.id} does not see uncommitted dirty.txt "
+        f"(reads {base[:12]})\n"
+    ) in err
 
 
 def test_read_only_run_that_changes_files_is_reported(
@@ -1628,6 +1708,9 @@ def test_start_failure_after_the_run_folder_exists_is_recorded(
     assert run.status == record.FAILED
     assert run.last_exit == code
     assert str(error) in (run.last_reason or "")
+    if last.startswith("owner:"):
+        assert run.owner_wait == (last,)
+        assert _core(env).step(run) == ("owner", None)
 
 
 def test_failed_start_calls_driver_close_and_keeps_the_start_error(
@@ -3295,7 +3378,7 @@ def test_corrupt_retry_journal_does_not_reset_the_budget(
     assert len(driver.messages) == 1
 
 
-@pytest.mark.parametrize("secret", [False, True])
+@pytest.mark.parametrize("location", ["hidden", "ssh", "config"])
 @pytest.mark.parametrize("result", ["success", "worker_failure", "commit_failure"])
 def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
     tmp_path: Path,
@@ -3303,10 +3386,20 @@ def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
     repo: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    secret: bool,
+    location: str,
     result: str,
 ) -> None:
-    folder = Path(env["HOME"]) / (".ssh" if secret else ".toolchain, version")
+    """Report denial facts and preserve the owner's explicit read setting."""
+    if location == "config":
+        config = Path(env["HOME"]) / ".config"
+        Path(env["XDG_CONFIG_HOME"]).rename(config)
+        env["XDG_CONFIG_HOME"] = str(config)
+    secret = location != "hidden"
+    folder = {
+        "hidden": Path(env["HOME"]) / ".toolchain, version",
+        "ssh": Path(env["HOME"]) / ".ssh",
+        "config": Path(env["XDG_CONFIG_HOME"]) / "gh",
+    }[location]
     folder.mkdir()
     monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
     choices.set_settings({"sandbox.claude": "on"}, env=env)
@@ -3333,14 +3426,24 @@ def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
     owners = [line for line in err.splitlines() if line.startswith("owner:")]
     assert len(owners) == 1
     owner = owners[0]
+    assert run.owner_wait == (owner,)
+    assert core_.step(run) == ("owner", None)
+    assert "next:" not in err
     qualification = (
         "the turn finished (exit 0); read access is needed only if "
         "the worker's report says the work needed the path; "
         if expected == 0
         else ""
     )
+    notice = (
+        f"Overview offers no Allow reading for {folder}; "
+        "folders inside $XDG_CONFIG_HOME are never offered; "
+        if secret
+        else ""
+    )
     assert owner.startswith(
-        f"owner: {qualification}Settings, Sandbox read paths; emb choices --set "
+        f"owner: {notice}{qualification}Settings, Sandbox read paths; "
+        "emb choices --set "
     )
     command = shlex.split(owner.rsplit("; ", 1)[1])
     key, value = command[-1].split("=", 1)
@@ -3351,6 +3454,8 @@ def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
     # A permission change applies to the next launch, never the saved snapshot.
     choices.set_settings({"sandbox.read": [str(folder)]}, env=env)
     assert sandbox.denied_paths(text, run.sandbox_paths) == [item]
+    assert core_.step(run)[0] != "owner"
+    assert record.load(run.id, env).owner_wait == ()
     assert _start(core_, repo, brief) == expected
     out, err = capsys.readouterr()
     next_run = record.load(_run_id(out), env)
@@ -3429,6 +3534,7 @@ def test_protected_runtime_denial_has_no_settings_suggestion(
     ]
     assert "was denied" in err and "(protected)" in err
     assert "sandbox.read=" not in err
+    assert run.owner_wait == ()
 
 
 @pytest.mark.parametrize("engine", ["codex", "claude", "opencode"])
@@ -3974,3 +4080,185 @@ def test_uncertain_followup_keeps_new_turn_pending(
     assert saved.turn == 2 and saved.turn_state == record.SENT
     assert core_.execute(lambda: core_.send(saved.id, message)) == 75
     assert Path(saved.worktree).is_dir()
+
+
+@pytest.mark.parametrize("parent", [False, True])
+@pytest.mark.parametrize("closed", [False, True])
+def test_answered_clears_wait_and_records_time(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    parent: bool,
+    closed: bool,
+) -> None:
+    core_ = _core(env)
+    assert _start(core_, repo, _brief(tmp_path, "Task\n")) == 0
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    if parent:
+        run = record.update(run, {"parent": record.parent("flow", "flow-test")})
+    run = core_._wait_owner(run, "owner: install tmux")
+    assert bool(run.owner_wait) is not parent
+    if closed:
+        run = record.update(run, {"status": record.CLOSED})
+    assert core_.answered(run.id) == 0
+    answered = record.load(run.id, env)
+    assert answered.owner_wait == ()
+    assert (answered.answered_at is None) is parent
+    assert core_.step(answered)[0] != "owner"
+    assert core_.answered(run.id) == 0
+    assert record.load(run.id, env).answered_at == answered.answered_at
+
+
+def test_owner_wait_cleared_when_later_turn_is_sent(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core_ = _core(env)
+    assert _start(core_, repo, _brief(tmp_path, "Task\n")) == 0
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    core_._wait_owner(run, "owner: install tmux")
+    original = core_._turn
+
+    def collect(
+        pending: record.Run, driver: Driver, started: float, window: str | None
+    ) -> int:
+        assert pending.turn == 2
+        current = record.load(pending.id, env)
+        assert current.owner_wait == current.owner_read == ()
+        assert current.answered_at is None
+        return original(pending, driver, started, window)
+
+    monkeypatch.setattr(core_, "_turn", collect)
+    message = _brief(tmp_path, "Continue\n", "message.md")
+    assert core_.execute(lambda: core_.send(run.id, message)) == 0
+    current = record.load(run.id, env)
+    assert current.turn == 2 and current.owner_wait == ()
+    assert core_.step(current)[0] != "owner"
+
+
+def test_all_denial_reads_required_and_non_denial_needs_answer(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    core_ = _core(env)
+    assert _start(core_, repo, _brief(tmp_path, "Task\n")) == 0
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    folders = [tmp_path / "one", tmp_path / "two"]
+    for folder in folders:
+        folder.mkdir()
+        run = core_._wait_owner(run, f"owner: allow {folder}", str(folder))
+    choices.set_settings({"sandbox.read": [str(folders[0])]}, env=env)
+    assert core_.step(run) == ("owner", None)
+    run = core_._wait_owner(run, "owner: repair database")
+    choices.set_settings({"sandbox.read": [str(p) for p in folders]}, env=env)
+    assert core_.step(run) == ("owner", None)
+    assert core_.answered(run.id) == 0
+    assert core_.step(record.load(run.id, env))[0] != "owner"
+
+
+@pytest.mark.parametrize("code", [exits.INTERRUPTED, exits.STALLED])
+@pytest.mark.parametrize("allowed", [False, True])
+def test_sent_turn_keeps_recovery_guidance_after_owner_wait(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    code: int,
+    allowed: bool,
+) -> None:
+    """A new turn's wait and recovery are independent of the earlier denial."""
+    from ember.cli import main
+
+    folder = Path(env["HOME"]) / ".toolchain"
+    folder.mkdir()
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    core_ = _core(env)
+    brief = _brief(tmp_path, f"Task\n@reply Permission denied: '{folder}/python'\n")
+    assert _start(core_, repo, brief) == 0
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    assert run.owner_wait and run.owner_read == (str(folder),)
+    if allowed:
+        choices.set_settings({"sandbox.read": [str(folder)]}, env=env)
+    observed: list[dict[str, Any]] = []
+
+    def wait(pending: record.Run) -> None:
+        """Inspect the sent turn before its wait ends or is interrupted."""
+        if not observed:
+            assert pending.turn == 2 and pending.turn_state == record.SENT
+            assert main(["run", "--status", run.id, "--json"], env=env) == 0
+            captured = capsys.readouterr()
+            document = json.loads(captured.out)
+            assert document["step"] == "running"
+            assert document["next"] == f"next: emb run --status {run.id}"
+            assert document["owner_wait"] == document["owner_read"] == []
+            assert document["answered_at"] is None
+            assert captured.err == document["next"] + "\n"
+            observed.append(document)
+        if code == exits.INTERRUPTED:
+            raise KeyboardInterrupt
+
+    followup = _core(env, _driver(env, on_wait=wait), stall=0.01)
+    message = _brief(tmp_path, "Continue\n@hang\n", "correction.md")
+    assert followup.execute(lambda: followup.send(run.id, message)) == code
+    captured = capsys.readouterr()
+    assert observed
+    assert captured.err.splitlines()[-1] == exits.line(code, run=run.id)
+    assert "owner:" not in captured.err
+    for session, step in ((core.LIVE, "running"), (core.MISSING, "recover")):
+        monkeypatch.setattr(
+            Core, "_session_state", lambda self, run_id, state=session: state
+        )
+        assert main(["run", "--status", run.id, "--json"], env=env) == 0
+        captured = capsys.readouterr()
+        document = json.loads(captured.out)
+        assert document["step"] == step
+        option = "status" if step == "running" else "recover"
+        assert document["next"] == f"next: emb run --{option} {run.id}"
+        assert captured.err == document["next"] + "\n"
+
+
+@pytest.mark.parametrize(
+    ("failure", "code"),
+    [(engines.DriverError("paste failed"), 71), (KeyboardInterrupt(), 74)],
+)
+@pytest.mark.parametrize("allowed", [False, True])
+def test_failed_delivery_restores_only_unresolved_owner_wait(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    failure: BaseException,
+    code: int,
+    allowed: bool,
+) -> None:
+    """Error guidance notices read access granted without an intervening status."""
+    driver = _SendFails("claude", script_path(env))
+    core_ = _core(env, driver)
+    assert _start(core_, repo, _brief(tmp_path, "Task\n")) == 0
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    folder = tmp_path / "toolchain"
+    folder.mkdir()
+    run = core_._wait_owner(run, f"owner: allow {folder}", str(folder))
+    if allowed:
+        choices.set_settings({"sandbox.read": [str(folder)]}, env=env)
+    driver.failure = failure
+    message = _brief(tmp_path, "Continue\n", "correction.md")
+    assert core_.execute(lambda: core_.send(run.id, message)) == code
+    captured = capsys.readouterr()
+    current = record.load(run.id, env)
+    assert current.turn == run.turn and current.turn_state == run.turn_state
+    assert current.owner_wait == (() if allowed else run.owner_wait)
+    assert current.owner_read == (() if allowed else run.owner_read)
+    assert current.answered_at == run.answered_at
+    if allowed:
+        assert captured.err.splitlines()[-1] == exits.line(code, "send", run=run.id)
+    else:
+        assert "next:" not in captured.err

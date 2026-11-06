@@ -181,6 +181,8 @@ def assert_rows_reflow(
     screen: QWidget, rows: list[common.TooltipRow], qtbot: QtBot
 ) -> None:
     """Check shrinking, a shared stack, its saved width, and widening again."""
+    from PySide6.QtCore import QCoreApplication, QEvent
+
     from ember.app import theme, widgets
 
     picker = next(
@@ -192,6 +194,7 @@ def assert_rows_reflow(
     screen.resize(1400, 480)
     screen.show()
     qtbot.wait(30)
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
     visible = [row for row in rows if row.isVisible()]
     wide = visible[0].slot.width()
     assert not any(row.stacked for row in visible)
@@ -200,6 +203,8 @@ def assert_rows_reflow(
     for width in range(1000, 399, -8):
         screen.resize(width, 480)
         qtbot.wait(5)
+        # fit() sets stacked before the posted layout request applies geometry.
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
         states = {row.stacked for row in visible}
         assert len(states) == 1
         if True in states:
@@ -219,6 +224,7 @@ def assert_rows_reflow(
     assert shrank
     screen.resize(1400, 480)
     qtbot.wait(30)
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
     assert not any(row.stacked for row in visible)
     assert {row.slot.width() for row in visible} == {wide}
 
@@ -352,3 +358,62 @@ def test_screen_header_sidebar_button_precedes_title_and_actions(qtbot: QtBot) -
     )
     assert show.geometry().right() < heading.geometry().left()
     assert abs(show.geometry().center().y() - heading.geometry().center().y()) <= 1
+
+
+def test_reset_reserves_space_and_returns_keyboard_focus(qtbot: QtBot) -> None:
+    """Hidden Reset keeps the control column stable and targets the chosen value."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+
+    from ember.app import theme, widgets
+
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    theme.apply(app, "light")
+    widgets.install_focus_tracking(app)
+    for control in (
+        widgets.Picker(),
+        widgets.Segmented((("a", "A"), ("b", "B"))),
+        widgets.Switch(),
+    ):
+        if isinstance(control, widgets.Picker):
+            control.add_option("A", "a")
+        if isinstance(control, widgets.Segmented):
+            control.set_value("b")
+        row = common.TooltipRow("Setting", "Tip", control)
+        qtbot.addWidget(row)
+        calls: list[bool] = []
+        row.enable_reset(lambda calls=calls: calls.append(True))
+        common.align_controls([row])
+        reset = row.reset
+        assert reset is not None
+        assert reset.text().strip() == "Reset"
+        assert reset.toolTip() == ""
+        assert reset.property("kind") == "ghost"
+        assert not reset.icon().isNull()
+        assert reset.sizePolicy().retainSizeWhenHidden()
+        row.resize(650, 80)
+        row.show()
+        qtbot.waitExposed(row)
+        with qtbot.waitActive(row):
+            row.activateWindow()
+        app.processEvents()
+        before = control.geometry()
+        row.set_changed(True)
+        app.processEvents()
+        assert reset.isVisible()
+        assert control.geometry() == before
+        reset.setFocus(Qt.FocusReason.TabFocusReason)
+        reset.click()
+        reset.click()
+        assert calls == [True, True]
+        assert reset.isVisible()  # Only a confirmed snapshot hides the marker.
+        target = (
+            control.buttons()[1] if isinstance(control, widgets.Segmented) else control
+        )
+        assert widgets.focus_visible(target)
+        row.set_changed(False)
+        app.processEvents()
+        assert reset.isHidden()
+        assert control.geometry() == before
+        row.hide()

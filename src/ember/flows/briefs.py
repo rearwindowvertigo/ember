@@ -134,6 +134,7 @@ def review_brief(
     fix_base: str | None = None,
     standing: Sequence[str] = (),
     merged_siblings: Sequence[tuple[str, str, str]] = (),
+    corrections: Sequence[tuple[int, str]] = (),
 ) -> str:
     """Build a review brief with indented evidence and the packaged reply schema.
 
@@ -141,6 +142,7 @@ def review_brief(
     plan's `read`.
     `merged_siblings` holds task ids, subjects and merge commits absent from
     the reviewed head.
+    `corrections` holds answer numbers and the lead's correction texts in order.
     """
     parts = [
         REVIEW_FIRST.format(task=task.id, round=round, flow=flow_id),
@@ -149,6 +151,17 @@ def review_brief(
         "## Task\n\n" + indent(task.subject + "\n\n" + task.task, "    "),
         "## Files\n\n" + indent(_files(task.files, wave_files), "    "),
     ]
+    if corrections:
+        parts.append(
+            "## Lead corrections\n\n"
+            "These are settled decisions from the lead, in answer order. "
+            "Do not reopen them. Any file a correction names counts as in scope "
+            "for this review, even if listed below as outside the declared files.\n\n"
+            + "\n\n".join(
+                f"### Answer {number}\n\n" + indent(text, "    ")
+                for number, text in corrections
+            )
+        )
     if merged_siblings:
         parts.append(
             "## Merged sibling tasks\n\n"
