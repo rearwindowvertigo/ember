@@ -1,6 +1,10 @@
+import gc
+import json
+import os
 import socket
+import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +13,7 @@ from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication
 from pytestqt.qtbot import QtBot
 
-from ember import autostart, deps
+from ember import autostart, deps, paths
 from ember.app import main, theme
 from ember.app import tray as tray_module
 from ember.engines import status
@@ -24,6 +28,8 @@ def app_env(
     env: dict[str, str], monkeypatch: pytest.MonkeyPatch, qapp: QApplication
 ) -> Iterator[dict[str, str]]:
     """An environment with a Qt platform, and stub engine and dependency reads."""
+    monkeypatch.setattr(main.faulthandler, "enable", lambda **_kwargs: None)
+    monkeypatch.setattr(main.faulthandler, "disable", lambda: None)
     monkeypatch.setattr(status, "read", lambda _env, *, refresh=False: {})
     monkeypatch.setattr(deps, "read", lambda _env, **_kwargs: EMPTY_REPORT)
     monkeypatch.setattr(tray_module, "available", lambda: False)
@@ -213,30 +219,33 @@ def test_stop_hides_everything_before_waiting_for_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(tray_module, "available", lambda: True)
-    started = main.start([], app_env)
-    assert isinstance(started, main.EmberApp)
-    qtbot.addWidget(started.window)
-    qtbot.waitUntil(started.context.settings_ready, timeout=5000)
-    tray = started.tray
-    assert tray is not None
     waits: list[tuple[int, bool, bool, bool]] = []
-    real_wait = started.context.tasks.wait
+    for started in _start([], app_env, qtbot):
+        tray = started.tray
+        assert tray is not None
+        real_wait = started.context.tasks.wait
 
-    def wait(msecs: int = -1) -> bool:
-        waits.append(
-            (
-                msecs,
-                started.window.isVisible(),
-                tray.icon.isVisible(),
-                started.server.isListening(),
+        def wait(
+            msecs: int = -1,
+            real_wait: Callable[[int], bool] = real_wait,
+            started: main.EmberApp = started,
+            tray: tray_module.Tray = tray,
+        ) -> bool:
+            """Record visibility and socket state when shutdown waits for jobs."""
+            waits.append(
+                (
+                    msecs,
+                    started.window.isVisible(),
+                    tray.icon.isVisible(),
+                    started.server.isListening(),
+                )
             )
-        )
-        return real_wait(msecs)
+            return real_wait(msecs)
 
-    monkeypatch.setattr(started.context.tasks, "wait", wait)
-    main.stop(started)
-    assert waits == [(12_000, False, False, False)]
-    assert main.QUIT_WAIT_MS > 10_000
+        monkeypatch.setattr(started.context.tasks, "wait", wait)
+        main.stop(started)
+        assert waits == [(12_000, False, False, False)]
+        assert main.QUIT_WAIT_MS > 10_000
 
 
 def test_flows_start_and_stop_with_app(app_env: dict[str, str], qtbot: QtBot) -> None:
@@ -418,3 +427,131 @@ def test_second_start_hands_its_activation_token_to_the_running_window(
         assert main.start(["--hidden"], {**app_env, main.TOKEN: "hidden"}) == 0
         qtbot.wait(200)
         assert tokens == ["dock-token-1", ""]
+
+
+@pytest.mark.parametrize("quit_signal", [False, True])
+def test_start_and_stop_collector_and_crash_log(
+    app_env: dict[str, str],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    quit_signal: bool,
+) -> None:
+    """Startup installs both guards; stop and quitting release them after reads."""
+    enabled = gc.isenabled()
+    handlers: list[tuple[int, bool]] = []
+    disabled: list[bool] = []
+
+    def enable(*, file: int, all_threads: bool) -> None:
+        """Record the descriptor and thread coverage given to faulthandler."""
+        handlers.append((file, all_threads))
+
+    def disable() -> None:
+        """Check that the descriptor is still open when the handler is disabled."""
+        os.fstat(handlers[0][0])
+        disabled.append(True)
+
+    monkeypatch.setattr(main.faulthandler, "enable", enable)
+    monkeypatch.setattr(main.faulthandler, "disable", disable)
+    log = paths.state_dir(app_env) / "app-crash.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("earlier crash\n")
+    log.chmod(0o644)
+    for parts in _start([], app_env, qtbot):
+        assert not gc.isenabled()
+        assert parts.collector.timer.isActive()
+        assert len(handlers) == 1
+        fd, all_threads = handlers[0]
+        assert all_threads
+        assert log.stat().st_mode & 0o777 == 0o600
+        assert log.parent.stat().st_mode & 0o777 == 0o700
+        os.write(fd, b"new crash\n")
+        assert log.read_text() == "earlier crash\nnew crash\n"
+        # Handing over must not replace or close the first instance's guards.
+        assert main.start(["--hidden"], app_env) == 0
+        assert len(handlers) == 1
+        real_wait = parts.context.tasks.wait
+
+        def wait(msecs: int = -1, real_wait: Callable[[int], bool] = real_wait) -> bool:
+            """Check that both guards remain installed while pool jobs finish."""
+            assert not gc.isenabled()
+            assert not disabled
+            return real_wait(msecs)
+
+        monkeypatch.setattr(parts.context.tasks, "wait", wait)
+        if quit_signal:
+            parts.app.aboutToQuit.emit()
+        else:
+            main.stop(parts)
+        assert gc.isenabled() == enabled
+        assert not parts.collector.timer.isActive()
+        assert disabled == [True]
+        with pytest.raises(OSError):
+            os.fstat(fd)
+    assert gc.isenabled() == enabled
+
+
+def test_crash_log_open_failure_does_not_disable_gc(
+    app_env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unavailable crash log rejects startup without changing GC state."""
+    enabled = gc.isenabled()
+    folder = paths.state_dir(app_env)
+    folder.mkdir(parents=True)
+    (folder / "app-crash.log").mkdir()
+    assert main.start([], app_env) == main.EX_UNAVAILABLE
+    assert "cannot open crash log" in capsys.readouterr().err
+    assert gc.isenabled() == enabled
+
+
+def test_failed_start_restores_gc(
+    app_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A setup exception stops the collector and closes the crash log."""
+    enabled = gc.isenabled()
+    disabled: list[bool] = []
+    monkeypatch.setattr(main.faulthandler, "disable", lambda: disabled.append(True))
+
+    def fail() -> bool:
+        """Raise during setup after the collector has started."""
+        assert not gc.isenabled()
+        raise RuntimeError("setup failed")
+
+    monkeypatch.setattr(tray_module, "available", fail)
+    with pytest.raises(RuntimeError, match="setup failed"):
+        main.start([], app_env)
+    assert gc.isenabled() == enabled
+    assert disabled == [True]
+
+
+def test_native_crash_writes_all_threads_to_state_log(env: dict[str, str]) -> None:
+    """A fatal signal writes the main and background Python stacks to the log."""
+    script = """
+import json
+import os
+import resource
+import sys
+import threading
+from ember.app.main import _CrashLog
+
+resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+log = _CrashLog(json.loads(sys.argv[1]))
+ready = threading.Event()
+finish = threading.Event()
+def waiting_thread():
+    ready.set()
+    finish.wait()
+threading.Thread(target=waiting_thread, daemon=True).start()
+ready.wait()
+os.abort()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, json.dumps(env)],
+        capture_output=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode < 0
+    contents = (paths.state_dir(env) / "app-crash.log").read_text()
+    assert "Fatal Python error: Aborted" in contents
+    assert "waiting_thread" in contents
+    assert "<module>" in contents
