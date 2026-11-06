@@ -3845,10 +3845,11 @@ the Ember mark without its name, followed by centred 40 by 36 pixel rows
 showing only each screen's icon. Each row's tooltip and accessible name are
 the screen's name; a count above zero appears as a pill at the icon's top
 right, in `type-caption` with `on-accent` text (`#ffffff` in both themes)
-on `accent`. The pill is 14 pixels tall and at least 14 pixels wide, with
-its left edge 4 pixels left of the icon's right edge and its top 7 pixels
-above the icon's top, clamped inside the row. A 2-pixel ring matches the
-row's current background: sidebar, hover or selected. The count is added
+on `accent`. The pill is 18 pixels tall and at least 18 pixels wide, and
+sits in the row's top-right corner; a wider count extends it to the left.
+A 2-pixel ring matches the row's current background: sidebar, hover or
+selected. Inside the ring, 2 pixels of padding on the left and right keep
+the count clear of the ring. The count is added
 to the tooltip, such as `Overview · 2 live`, and keeps the row's accessible
 description. Full sidebar counts use a 22-pixel-tall badge. The version
 line is hidden and the mark's tooltip is `Ember <version>`.

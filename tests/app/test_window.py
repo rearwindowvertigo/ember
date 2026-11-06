@@ -480,19 +480,29 @@ def test_collapsed_count_pill_and_tooltip(
         if count > 0:
             assert item.count_label.property("role") == "nav-count"
             assert item.count_label.font() == theme.font("caption")
-            icon = item.icon_label.geometry()
+            size = window_module.NAV_COUNT_SIZE
             pill = item.count_label.geometry()
-            assert pill.height() == 14
-            assert item.count_label.minimumWidth() == 14
-            assert pill.width() >= 14
-            assert pill.x() == min(icon.right() + 1 - 4, item.width() - pill.width())
-            assert pill.y() == max(0, icon.top() - 7)
-            assert item.rect().contains(pill)
+            assert pill.height() == size
+            assert item.count_label.minimumWidth() == size
+            assert pill.width() >= size
+            assert pill.topRight() == item.rect().topRight()
+            inside = item.count_label.contentsRect()
+            margins = item.count_label.contentsMargins()
+            assert min(margins.left(), margins.right()) >= 4
+            assert min(margins.top(), margins.bottom()) >= 2
+            assert inside.width() >= item.count_label.fontMetrics().horizontalAdvance(
+                str(count)
+            )
+            assert inside.height() >= item.count_label.fontMetrics().height()
     window.resize(960, 600)
     assert item.count() == 12
     assert item.count_label.property("role") == "badge"
     assert item.count_label.height() == 22
     assert item.count_label.minimumWidth() == 0
+    margins = item.count_label.contentsMargins()
+    assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (
+        window_module.BADGE_MARGINS
+    )
     assert item.toolTip() == ""
 
 
@@ -525,8 +535,8 @@ def test_collapsed_count_ring_matches_row_background(
         QCoreApplication.processEvents()
         image = window.sidebar.grab().toImage()
         pill = item.count_label.geometry()
-        assert pill.height() == 14
-        assert pill.width() >= 14
+        assert pill.height() == window_module.NAV_COUNT_SIZE
+        assert pill.width() >= window_module.NAV_COUNT_SIZE
         assert item.rect().contains(pill)
         origin = item.mapTo(window.sidebar, QPoint(0, 0))
         pill.translate(origin)

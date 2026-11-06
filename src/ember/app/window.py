@@ -22,7 +22,6 @@ from typing import cast
 from PySide6.QtCore import (
     QCoreApplication,
     QEvent,
-    QObject,
     QProcessEnvironment,
     QSize,
     Qt,
@@ -71,6 +70,15 @@ ICON_SIZE = 18
 BADGE_HEIGHT = 22
 """The height of a full sidebar row's count, in pixels."""
 
+BADGE_MARGINS = (8, 0, 8, 0)
+"""A full sidebar row count's padding, left, top, right and bottom."""
+
+NAV_COUNT_SIZE = 18
+"""The height and least width of a collapsed sidebar row's count pill."""
+
+NAV_COUNT_MARGINS = (4, 2, 4, 2)
+"""The collapsed pill's 2-pixel ring plus its padding, left, top, right and bottom."""
+
 SIDEBAR_BREAKPOINT = 960
 """Window widths below this show the sidebar's icon-only rows."""
 
@@ -94,8 +102,8 @@ QLabel[role="nav-count"] {{
     background: {accent};
     color: {on_accent};
     border: 2px solid {sidebar};
-    border-radius: 7px;
-    padding: 0 1px;
+    border-radius: {count_radius}px;
+    padding: 0 2px;
 }}
 QLabel[role="nav-count"][row-state="hover"] {{
     border-color: {hover_ring};
@@ -175,7 +183,6 @@ class NavButton(QPushButton):
         layout.addWidget(self.icon_label)
         layout.addWidget(self.text_label, 1)
         layout.addWidget(self.count_label, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.icon_label.installEventFilter(self)
         self.toggled.connect(self._count_state)
         self._count_state()
         self.draw_icon()
@@ -209,8 +216,13 @@ class NavButton(QPushButton):
         self.row.setAlignment(self.icon_label, Qt.AlignmentFlag.AlignCenter)
         self.count_label.setProperty("role", "nav-count" if collapsed else "badge")
         widgets.repolish(self.count_label)
-        self.count_label.setFixedHeight(14 if collapsed else BADGE_HEIGHT)
-        self.count_label.setMinimumWidth(14 if collapsed else 0)
+        # A repolish keeps the margins of the role the label was first shown
+        # with, so set each role's ring and padding here.
+        self.count_label.setContentsMargins(
+            *(NAV_COUNT_MARGINS if collapsed else BADGE_MARGINS)
+        )
+        self.count_label.setFixedHeight(NAV_COUNT_SIZE if collapsed else BADGE_HEIGHT)
+        self.count_label.setMinimumWidth(NAV_COUNT_SIZE if collapsed else 0)
         if not collapsed:
             self.row.addWidget(self.count_label, 0, Qt.AlignmentFlag.AlignVCenter)
         self.setFixedSize(
@@ -227,26 +239,8 @@ class NavButton(QPushButton):
 
     def _place_count(self) -> None:
         if self.collapsed:
-            # Clear contents margins retained from the full sidebar's badge.
-            self.count_label.setContentsMargins(0, 0, 0, 0)
             self.count_label.adjustSize()
-            icon = self.icon_label.geometry()
-            self.count_label.move(
-                max(
-                    0,
-                    min(
-                        icon.right() + 1 - 4,
-                        self.width() - self.count_label.width(),
-                    ),
-                ),
-                max(
-                    0,
-                    min(
-                        icon.top() - 7,
-                        self.height() - self.count_label.height(),
-                    ),
-                ),
-            )
+            self.count_label.move(max(0, self.width() - self.count_label.width()), 0)
             self.count_label.raise_()
 
     def _count_state(self) -> None:
@@ -263,15 +257,6 @@ class NavButton(QPushButton):
     def leaveEvent(self, event: QEvent) -> None:  # noqa: D102
         super().leaveEvent(event)
         self._count_state()
-
-    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
-        """Keep the pill on the icon when its layout moves or resizes it."""
-        if watched is self.icon_label and event.type() in (
-            QEvent.Type.Move,
-            QEvent.Type.Resize,
-        ):
-            self._place_count()
-        return super().eventFilter(watched, event)
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: D102
         super().resizeEvent(event)
@@ -693,6 +678,7 @@ class MainWindow(QMainWindow):
             _NAV_STYLE.format(
                 radius=theme.RADIUS["sm"],
                 height=theme.CONTROL_MD - 4,
+                count_radius=NAV_COUNT_SIZE // 2,
                 hover=_rgba("bg-hover"),
                 selected=_rgba("bg-selected"),
                 focus=_rgba("accent"),
