@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from ember import ground
+from ember import choices, ground, paths, prepare
 from ember.cli import main
 
 
@@ -97,6 +97,139 @@ def test_subfolder_reads_the_top(repo: Path, env: dict[str, str]) -> None:
     assert folder["files"] == {"CLAUDE.md": False, "AGENTS.md": True}
 
 
+@pytest.mark.parametrize("linked", [False, True])
+@pytest.mark.parametrize(
+    ("command", "state"), [(None, "unset"), ("", "none"), ("npm ci", "set")]
+)
+def test_preparation_states(
+    repo: Path,
+    tmp_path: Path,
+    env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    linked: bool,
+    command: str | None,
+    state: str,
+) -> None:
+    folder = repo
+    if linked:
+        folder = tmp_path / "linked"
+        _git(repo, "worktree", "add", "-q", "--detach", str(folder), env=env)
+    if command is not None:
+        choices.set_settings({"worktree.prepare": {str(repo): command}}, env=env)
+    sub = folder / "sub"
+    sub.mkdir()
+    result = _ground_json(["--dir", str(sub)], env, capsys)
+    assert result["directory"]["prepare"] == {
+        "state": state,
+        "command": command,
+        "repository": str(repo.resolve()),
+    }
+    assert "prepare_reason" not in result["directory"]
+    assert main(["ground", "--dir", str(sub)], env=env) == 0
+    preparation_lines = [
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("prepare:")
+    ]
+    suffix = f": {command}" if state == "set" else ""
+    assert preparation_lines == [f"prepare: {state} for {repo.resolve()}{suffix}"]
+    assert not (folder / "prepare.log").exists()
+
+
+def test_preparation_symlink_resolves_main_checkout(
+    repo: Path, tmp_path: Path, env: dict[str, str]
+) -> None:
+    alias = tmp_path / "alias"
+    alias.symlink_to(repo, target_is_directory=True)
+    choices.set_settings({"worktree.prepare": {str(alias): "npm ci"}}, env=env)
+    assert ground.read(str(alias), env)["directory"]["prepare"] == {
+        "state": "set",
+        "command": "npm ci",
+        "repository": str(repo.resolve()),
+    }
+
+
+def test_preparation_separate_clone_is_unset(
+    repo: Path, tmp_path: Path, env: dict[str, str]
+) -> None:
+    clone = tmp_path / "clone"
+    _git(repo, "clone", "-q", str(repo), str(clone), env=env)
+    choices.set_settings({"worktree.prepare": {str(repo): "npm ci"}}, env=env)
+    assert ground.read(str(clone), env)["directory"]["prepare"] == {
+        "state": "unset",
+        "command": None,
+        "repository": str(clone.resolve()),
+    }
+
+
+def test_preparation_ignores_repository_settings(
+    repo: Path, env: dict[str, str]
+) -> None:
+    _settings(repo / ".claude" / "settings.json", {"worktree": {"prepare": "npm ci"}})
+    assert ground.read(str(repo), env)["directory"]["prepare"] == {
+        "state": "unset",
+        "command": None,
+        "repository": str(repo.resolve()),
+    }
+
+
+def test_preparation_unreadable_database(
+    repo: Path, env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = paths.settings_db_path(env)
+    database.parent.mkdir(parents=True)
+    database.write_text("not a database")
+    result = _ground_json(["--dir", str(repo)], env, capsys)
+    folder = result["directory"]
+    assert folder["prepare"] is None
+    assert "cannot read worktree.prepare" in folder["prepare_reason"]
+    assert folder["git"] is True
+    assert f"prepare: null ({folder['prepare_reason']})" in ground.lines(result)
+
+
+def test_preparation_lookup_failure(
+    repo: Path, env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def lookup(common: str | Path, *, env: Mapping[str, str] | None = None) -> None:
+        raise prepare.PreparationError("cannot inspect saved checkout")
+
+    monkeypatch.setattr(prepare, "lookup", lookup)
+    folder = ground.read(str(repo), env)["directory"]
+    assert folder["prepare"] is None
+    assert folder["prepare_reason"] == "cannot inspect saved checkout"
+
+
+@pytest.mark.parametrize("query", ["common", "worktrees", "empty", "bare", "missing"])
+def test_preparation_repository_failure(
+    repo: Path, env: dict[str, str], monkeypatch: pytest.MonkeyPatch, query: str
+) -> None:
+    git = ground._git
+
+    def reply(
+        folder: Path, environment: Mapping[str, str], *args: str
+    ) -> subprocess.CompletedProcess[str]:
+        common = args == ("rev-parse", "--path-format=absolute", "--git-common-dir")
+        listing = args == ("worktree", "list", "--porcelain", "-z")
+        if (query == "common" and common) or (query == "worktrees" and listing):
+            return subprocess.CompletedProcess(args, 1, "", "cannot inspect repository")
+        if listing and query in ("empty", "bare", "missing"):
+            output = {
+                "empty": "",
+                "bare": f"worktree {repo / '.git'}\0bare\0\0",
+                "missing": f"worktree {repo / 'missing'}\0HEAD abc\0\0",
+            }[query]
+            return subprocess.CompletedProcess(args, 0, output, "")
+        return git(folder, environment, *args)
+
+    monkeypatch.setattr(ground, "_git", reply)
+    result = ground.read(str(repo), env)
+    folder = result["directory"]
+    assert folder["git"] is True
+    assert folder["prepare"] is None
+    assert folder["prepare_reason"]
+    assert any(line.startswith("prepare: null (") for line in ground.lines(result))
+
+
 def test_dirty_counts_changed_paths(repo: Path, env: dict[str, str]) -> None:
     (repo / "README.md").write_text("changed\n")
     (repo / "new.txt").write_text("new\n")
@@ -141,7 +274,7 @@ def test_outside_a_checkout(tmp_path: Path, env: dict[str, str]) -> None:
     env = dict(env, GIT_CEILING_DIRECTORIES=str(tmp_path))
     folder = ground.read(str(plain), env)["directory"]
     assert folder["git"] is False
-    for field in ("top", "branch", "dirty", "remote", "files"):
+    for field in ("top", "branch", "dirty", "remote", "files", "prepare"):
         assert folder[field] is None
         assert folder[f"{field}_reason"] == "not a git checkout"
 
@@ -292,12 +425,14 @@ def test_text_lines(
         "dirty",
         "remote",
         "files",
+        "prepare",
     ]
     assert "surface: claude-desktop (desktop)" in out
     assert f"branch: main at {commit}" in out
     assert "dirty: no" in out
     assert "remote: origin https://github.com/o/r.git (github)" in out
     assert "files: CLAUDE.md no, AGENTS.md no" in out
+    assert f"prepare: unset for {repo.resolve()}" in out
     assert out[2].startswith("worktree_base: null (worktree.baseRef is not set")
 
 
@@ -311,6 +446,7 @@ def test_text_lines_outside_a_checkout(
     out = capsys.readouterr().out.splitlines()
     assert "git: no" in out
     assert "remote: null (not a git checkout)" in out
+    assert "prepare: null (not a git checkout)" in out
 
 
 def test_missing_dir_exits_66(
@@ -355,6 +491,8 @@ def test_git_missing_gives_reasons(tmp_path: Path, env: dict[str, str]) -> None:
     assert "git cannot run" in result["git_reason"]
     assert result["top"] is None
     assert "git cannot run" in result["top_reason"]
+    assert result["prepare"] is None
+    assert "git cannot run" in result["prepare_reason"]
 
 
 def test_status_does_not_write_the_index(repo: Path, env: dict[str, str]) -> None:
