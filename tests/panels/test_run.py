@@ -1,5 +1,8 @@
 import io
 import json
+import math
+import shlex
+import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -9,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from ember import choices, engines
+from ember import choices, engines, prepare, tmux
 from ember.panels import brief, record, run
 from ember.runs import record as runs
 from ember.runs.core import Core, StartOptions
@@ -21,6 +24,7 @@ from runs.stub_engine import (  # pyrefly: ignore[missing-import]
     make_env,
     make_repo,
     script_path,
+    tmux_log,
 )
 
 
@@ -159,6 +163,236 @@ def wait_for(predicate: Callable[[], bool]) -> None:
             return
         time.sleep(0.02)
     raise AssertionError("condition was not reached")
+
+
+@pytest.mark.parametrize("command", [None, ""])
+def test_unset_preparation_preserves_panel_records(
+    h: Harness, command: str | None
+) -> None:
+    if command is not None:
+        choices.set_settings({"worktree.prepare": {str(h.repo): command}}, env=h.env)
+    h.create(1)
+    outcome = h.start()
+    assert outcome.panel["exit"] == 0
+    assert "admission" not in outcome.panel
+    saved = runs.load(outcome.panel["members"][0]["run"], h.env)
+    assert saved.preparation is None
+    assert not (saved.folder / "prepare.log").exists()
+
+
+def test_prepares_every_member_before_admission_and_deadline(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    choices.set_settings({"worktree.prepare": {str(h.repo): "echo ready"}}, env=h.env)
+    h.create()
+    entered, release = threading.Event(), threading.Event()
+    prepared = set()
+    coordinators = []
+    original_admit = run._Coordinator.admit
+
+    class DelayedPreparation(Core):
+        def _prepare(
+            self, run: runs.Run, command: str, stop: threading.Event | None
+        ) -> runs.Run:
+            run = super()._prepare(run, command, stop)
+            if run.engine == "opencode":
+                entered.set()
+                assert release.wait(20)
+            prepared.add(run.engine)
+            return run
+
+    def admit(self: run._Coordinator, job: run._Job) -> None:
+        coordinators.append(self)
+        original_admit(self, job)
+
+    original_session = tmux.new_session
+
+    def session(*args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        assert prepared == set(h.drivers)
+        saved, errors = runs.list_runs(h.env)
+        assert len(saved) == 3 and not errors
+        assert all((item.preparation or {}).get("state") == "ok" for item in saved)
+        assert all(c.deadline >= admitted_at + 60 for c in coordinators)
+        original_session(*args, **kwargs)
+
+    h.core_type = DelayedPreparation
+    monkeypatch.setattr(run._Coordinator, "admit", admit)
+    monkeypatch.setattr(tmux, "new_session", session)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(h.start)
+        try:
+            assert entered.wait(20)
+            wait_for(lambda: len(coordinators) == 2)
+            assert all(math.isinf(c.deadline) for c in coordinators)
+            assert h.panel()["admission"] == "preparing"
+            assert not any(item[0] == "new-session" for item in tmux_log(h.tmp))
+            assert not future.done()
+        finally:
+            admitted_at = time.monotonic()
+            release.set()
+        outcome = future.result(20)
+    assert outcome.panel["exit"] == 0 and outcome.panel["admission"] == "admitted"
+
+
+@pytest.mark.parametrize(
+    "failure", ["exit 12", ": > stray", "timeout", "inspect", "start"]
+)
+def test_preparation_failure_stops_batch_and_keeps_artifacts(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    failed = threading.Event()
+    original_prepare = prepare.run
+
+    class OrderedPreparation(Core):
+        def _prepare(
+            self, run: runs.Run, command: str, stop: threading.Event | None
+        ) -> runs.Run:
+            if run.engine == "opencode":
+                assert failed.wait(20)
+            return super()._prepare(run, command, stop)
+
+    def preparing(
+        command: str,
+        worktree: str | Path,
+        log: str | Path,
+        **kwargs: Any,  # noqa: ANN401
+    ) -> prepare.Result:
+        if Path(worktree).name.startswith("opencode-"):
+            if failure == "timeout":
+                kwargs["timeout"] = 0.1
+                command = "/bin/sleep 60"
+            elif failure == "inspect":
+                command = "/bin/rm .git"
+            elif failure == "start":
+                command = "true"
+                worktree = Path(worktree) / "missing"
+            else:
+                command = failure
+        result = original_prepare(command, worktree, log, **kwargs)
+        if Path(worktree).name.startswith("codex-"):
+            failed.set()
+        return result
+
+    choices.set_settings({"worktree.prepare": {str(h.repo): "echo ready"}}, env=h.env)
+    h.core_type = OrderedPreparation
+    h.create(2)
+    monkeypatch.setattr(prepare, "run", preparing)
+    outcome = h.start()
+    first, second = outcome.panel["members"]
+    assert outcome.panel["exit"] == 79 and outcome.panel["status"] == "incomplete"
+    assert outcome.panel["admission"] == "stopped"
+    assert first["status"] == "not started" and second["status"] == "failed"
+    assert second["exit"] == 79
+    assert not any(item[0] == "new-session" for item in tmux_log(h.tmp))
+    before = h.panel()
+    for item in outcome.panel["members"]:
+        saved = runs.load(item["run"], h.env)
+        assert saved.turn == 0 and saved.last_exit == 79 and not item["closed"]
+        assert saved.status == runs.FAILED and Path(saved.worktree).is_dir()
+        assert (saved.folder / "prepare.log").is_file()
+        assert (record.folder(h.id, h.env) / "members" / f"{item['n']}.log").is_file()
+    for number in ("1", "2"):
+        with pytest.raises(run.RetryRefused, match="stopped admission"):
+            h.retry(number)
+    assert h.panel() == before
+    assert h.recover().panel["exit"] == 79
+    assert not any(item[0] == "new-session" for item in tmux_log(h.tmp))
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_stopping_ends_preparation_groups_and_never_admits(
+    h: Harness, cancel: bool
+) -> None:
+    release = h.tmp / "fail-preparation"
+    command = "/bin/sleep 60 & wait"
+    if not cancel:
+        command = (
+            'case "$PWD" in *opencode-*) '
+            f"while [ ! -f {shlex.quote(str(release))} ]; do /bin/sleep 0.02; done; "
+            f"exit 12;; *) {command};; esac"
+        )
+    choices.set_settings({"worktree.prepare": {str(h.repo): command}}, env=h.env)
+    h.create(2)
+    stop = threading.Event()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(h.start, stop=stop)
+        try:
+            wait_for(
+                lambda: all(
+                    item["run"]
+                    and (runs.load(item["run"], h.env).preparation or {}).get("pid")
+                    for item in h.panel()["members"]
+                )
+            )
+        finally:
+            if cancel:
+                stop.set()
+            else:
+                release.touch()
+        outcome = future.result(20)
+    assert outcome.stopped == cancel and outcome.panel["exit"] == 79
+    assert outcome.panel["status"] == "incomplete"
+    for item in outcome.panel["members"]:
+        saved = runs.load(item["run"], h.env)
+        assert item["status"] == "failed" and item["exit"] == 79
+        assert saved.preparation is not None
+        expected = (
+            "failed" if not cancel and saved.engine == "opencode" else "interrupted"
+        )
+        assert saved.preparation["state"] == expected
+        assert prepare.start_ticks(saved.preparation["pid"]) is None
+        assert Path(saved.worktree).is_dir()
+    assert all(not thread.is_alive() for thread in outcome.threads)
+    assert not any(item[0] == "new-session" for item in tmux_log(h.tmp))
+
+
+def test_recovery_ends_abandoned_preparation_without_restarting(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    choices.set_settings({"worktree.prepare": {str(h.repo): "exit 12"}}, env=h.env)
+    h.create(1)
+    panel = h.start().panel
+    item = panel["members"][0]
+    saved = runs.load(item["run"], h.env)
+    process = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
+    try:
+        ticks = prepare.start_ticks(process.pid)
+        assert ticks is not None
+        runs.update(
+            saved,
+            {
+                "status": runs.STARTING,
+                "last_exit": None,
+                "preparation": {
+                    **(saved.preparation or {}),
+                    "state": "running",
+                    "pid": process.pid,
+                    "start": ticks,
+                },
+            },
+        )
+        panel.update(status="running", admission="preparing", exit=None, ended_at=None)
+        item.update(status="starting", exit=None)
+        record.save(panel, h.env)
+
+        def forbidden(*args: Any, **kwargs: Any) -> prepare.Result:  # noqa: ANN401
+            raise AssertionError("recovery repeated preparation")
+
+        monkeypatch.setattr(prepare, "run", forbidden)
+        outcome = h.recover()
+        assert outcome.panel["status"] == "incomplete" and outcome.panel["exit"] == 79
+        assert outcome.panel["members"][0]["status"] == "failed"
+        assert process.wait(timeout=5) < 0
+        saved = runs.load(saved.id, h.env)
+        assert saved.status == runs.FAILED and saved.last_exit == 79
+        assert (saved.preparation or {})["state"] == "interrupted"
+        assert Path(saved.worktree).is_dir()
+        assert not any(item[0] == "new-session" for item in tmux_log(h.tmp))
+        with pytest.raises(run.RetryRefused, match="stopped admission"):
+            h.retry()
+    finally:
+        process.kill()
+        process.wait(timeout=5)
 
 
 def test_parallel_members_and_run_options(h: Harness) -> None:
