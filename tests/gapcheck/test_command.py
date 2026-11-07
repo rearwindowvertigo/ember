@@ -1116,6 +1116,99 @@ def test_answer_command_records_and_validates_without_a_plan(
     assert not list(tmp_path.glob(".result.json.*"))
 
 
+@pytest.mark.parametrize("as_json", [False, True])
+def test_take_defaults_accepts_comma_lists_and_repeated_options(
+    env: dict[str, str],
+    tmp_path: Path,
+    plan_file: Path,
+    reply_file: Path,
+    as_json: bool,
+) -> None:
+    _, first, _ = check_reply(
+        env,
+        plan_file,
+        reply_file,
+        gap_reply(
+            reply_gap("a", default="Keep 30 days"),
+            reply_gap("b", default="Ask before deleting"),
+            reply_gap("c", default="Keep é\nThen delete"),
+        ),
+    )
+    saved = tmp_path / "result.json"
+    saved.write_text(json.dumps(first))
+    plan_file.unlink()
+    code, out, err = answer_command(
+        env,
+        "--answer",
+        str(saved),
+        "--take-defaults",
+        "g3,g1",
+        "--take-defaults",
+        "g2",
+        *(["--json"] if as_json else []),
+    )
+    assert code == 0, err
+    made = json.loads(saved.read_text())
+    assert [gap["answer"] for gap in made["steps"][0]["gaps"]] == [
+        "Default taken: Keep 30 days",
+        "Default taken: Ask before deleting",
+        "Default taken: Keep é\nThen delete",
+    ]
+    assert made["ranked"] == first["ranked"]
+    if as_json:
+        assert json.loads(out) == made and err == ""
+    else:
+        assert out == ""
+        assert err == f"recorded answers for g3, g1, g2 in {saved}\n"
+    previous.load(str(saved))
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--take-defaults", "g1,g9"],
+        ["--take-defaults", "g1,g1"],
+        ["--take-defaults", "g1", "--take-defaults", "g1"],
+        ["--take-defaults", "g1,g2"],
+        ["--take-defaults", "g1,g3"],
+        ["--take-defaults", "all"],
+        ["--take-defaults", ""],
+        ["--take-defaults", "   "],
+        ["--take-defaults", "g1,"],
+        ["--take-defaults", ",g1"],
+        ["--take-defaults", "g1,,g4"],
+        ["--take-defaults", "g1", "--id", "g1"],
+        ["--take-defaults", "g1", "--text", "a"],
+        ["--take-defaults", "g1", "--id", "g1", "--text", "a"],
+        ["--take-defaults", "g1", "--brief"],
+    ],
+)
+def test_take_defaults_errors_do_not_change_the_file(
+    env: dict[str, str],
+    tmp_path: Path,
+    plan_file: Path,
+    reply_file: Path,
+    options: list[str],
+) -> None:
+    _, first, _ = check_reply(
+        env, plan_file, reply_file, gap_reply(*(reply_gap(n) for n in ("a", "b", "c")))
+    )
+    saved = save_answered(tmp_path / "result.json", first, {"g2": "Keep"})
+    settled = first["steps"][0]["gaps"].pop()
+    del settled["earlier"], settled["ask_owner"]
+    settled.update(step=1, title="First", answer="Keep")
+    first["settled"] = [settled]
+    first["ranked"] = [entry for entry in first["ranked"] if entry["id"] != "g3"]
+    first["counts"][settled["harm"]] -= 1
+    saved.write_text(json.dumps(first))
+    previous.load(str(saved))
+    before = saved.read_bytes()
+    code, out, err = answer_command(env, "--answer", str(saved), *options, "--json")
+    assert code == 64, err
+    assert out == "" and "next:" in err
+    assert saved.read_bytes() == before
+
+
 @pytest.mark.parametrize(
     "options",
     [
@@ -1148,15 +1241,18 @@ def test_answer_errors_do_not_change_the_file(
     assert saved.read_bytes() == before
 
 
+@pytest.mark.parametrize("defaults", [False, True])
 def test_answer_input_and_write_errors(
     env: dict[str, str],
     tmp_path: Path,
     plan_file: Path,
     reply_file: Path,
     monkeypatch: pytest.MonkeyPatch,
+    defaults: bool,
 ) -> None:
     saved = tmp_path / "result.json"
-    options = ["--answer", str(saved), "--id", "g1", "--text", "a"]
+    options = ["--answer", str(saved)]
+    options += ["--take-defaults", "g1"] if defaults else ["--id", "g1", "--text", "a"]
     code, _, _ = answer_command(env, *options)
     assert code == 66
     saved.write_text("{}")
@@ -1266,7 +1362,9 @@ def test_different_plan_path_warns_and_records_both_paths(
         previous.validate(made)
 
 
-@pytest.mark.parametrize("options", [[], ["--id", "g1"], ["--text", "a"]])
+@pytest.mark.parametrize(
+    "options", [[], ["--id", "g1"], ["--text", "a"], ["--take-defaults", "g1,g2"]]
+)
 def test_check_requires_plan_and_answer_options_require_answer(
     env: dict[str, str], options: list[str]
 ) -> None:

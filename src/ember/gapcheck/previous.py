@@ -394,33 +394,67 @@ def answer(result: Previous, identity: str, text: str) -> dict[str, Any]:
     """
     if not text.strip():
         raise ValueError("--text must contain an answer")
+    return _record_answers(result, [identity], text)
+
+
+def take_defaults(result: Previous, identities: Sequence[str]) -> dict[str, Any]:
+    """Record each listed active gap's default under the result lock.
+
+    Raises:
+        ValueError: The list is empty or contains an unknown, duplicate,
+            settled or already answered id.
+        PreviousError: The current result cannot be read or fails validation.
+        OSError: The lock cannot be used or the result cannot be written.
+
+    Returns:
+        The updated result document.
+    """
+    return _record_answers(result, identities, None)
+
+
+def _record_answers(
+    result: Previous, identities: Sequence[str], text: str | None
+) -> dict[str, Any]:
+    """Reload, validate and record answers under a stable per-result lock."""
     lock = result.path.with_name(f"{result.path.name}.lock")
     fd = paths.open_private_file(lock)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         current = load(str(result.path))
-        return _write_answer(current, identity, text)
+        made = copy.deepcopy(current.document)
+        gaps = {gap["id"]: gap for step in made["steps"] for gap in step["gaps"]}
+        if text is not None:
+            gaps.update((gap["id"], gap) for gap in made["settled"])
+        if not identities:
+            raise ValueError("--take-defaults needs at least one gap id")
+        seen = set()
+        for identity in identities:
+            if identity in seen:
+                raise ValueError(f"duplicate gap id {identity!r}")
+            seen.add(identity)
+            if identity not in gaps:
+                kind = "active" if text is None else "active or settled"
+                raise ValueError(f"no {kind} gap with id {identity!r}")
+            if text is None and gaps[identity].get("answer") is not None:
+                raise ValueError(f"gap {identity!r} is already answered")
+        for identity in identities:
+            gap = gaps[identity]
+            gap["answer"] = f"Default taken: {gap['default']}" if text is None else text
+        return _write_result(current.path, made)
     finally:
         os.close(fd)
 
 
-def _write_answer(result: Previous, identity: str, text: str) -> dict[str, Any]:
+def _write_result(path: Path, made: dict[str, Any]) -> dict[str, Any]:
     """Validate and replace a result while its caller holds the result lock."""
-    made = copy.deepcopy(result.document)
-    gaps = [gap for step in made["steps"] for gap in step["gaps"]]
-    gaps.extend(made["settled"])
-    found = next((gap for gap in gaps if gap["id"] == identity), None)
-    if found is None:
-        raise ValueError(f"no active or settled gap with id {identity!r}")
-    found["answer"] = text
     validate(made)
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
-            dir=result.path.parent,
-            prefix=f".{result.path.name}.",
+            dir=path.parent,
+            prefix=f".{path.name}.",
             delete=False,
         ) as stream:
             temporary = Path(stream.name)
@@ -428,7 +462,7 @@ def _write_answer(result: Previous, identity: str, text: str) -> dict[str, Any]:
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, result.path)
+        os.replace(temporary, path)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)

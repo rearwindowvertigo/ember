@@ -255,8 +255,9 @@ def test_legacy_ranked_copies_are_checked_before_normalizing(tmp_path: Path) -> 
         previous.load(write(tmp_path, document))
 
 
+@pytest.mark.parametrize("defaults", [False, True])
 def test_overlapping_answers_reload_under_a_lock_that_survives_replacement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defaults: bool
 ) -> None:
     document = result(
         {"step": 1, "title": "Read", "gaps": [gap("a"), gap("b", id="g2")]}
@@ -296,7 +297,11 @@ def test_overlapping_answers_reload_under_a_lock_that_survives_replacement(
                     real_flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             finally:
                 os.close(fd)
-            second = pool.submit(previous.answer, second_snapshot, "g2", "Stop")
+            second = (
+                pool.submit(previous.take_defaults, second_snapshot, ["g2"])
+                if defaults
+                else pool.submit(previous.answer, second_snapshot, "g2", "Stop")
+            )
             assert second_waiting.wait(timeout=10)
         finally:
             release_first.set()
@@ -304,15 +309,140 @@ def test_overlapping_answers_reload_under_a_lock_that_survives_replacement(
         second.result(timeout=10)
     assert {gap.id: gap.answer for gap in previous.load(saved).gaps} == {
         "g1": "Keep",
-        "g2": "Stop",
+        "g2": "Default taken: Keep it" if defaults else "Stop",
     }
     assert lock_path.stat().st_ino == inode
 
 
-def test_answer_revalidates_the_current_document(tmp_path: Path) -> None:
+@pytest.mark.parametrize("defaults", [False, True])
+def test_answer_revalidates_the_current_document(
+    tmp_path: Path, defaults: bool
+) -> None:
     saved = write(tmp_path, result({"step": 1, "title": "Read", "gaps": [gap("a")]}))
     snapshot = previous.load(saved)
     Path(saved).write_text("{}", encoding="utf-8")
     with pytest.raises(previous.PreviousError):
-        previous.answer(snapshot, "g1", "Keep")
+        if defaults:
+            previous.take_defaults(snapshot, ["g1"])
+        else:
+            previous.answer(snapshot, "g1", "Keep")
     assert Path(saved).read_text(encoding="utf-8") == "{}"
+
+
+def test_defaults_use_one_replacement_under_the_result_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = result(
+        {"step": 1, "title": "Read", "gaps": [gap("a", default="Keep é\nThen delete")]},
+        {"step": 2, "title": "Build", "gaps": [gap("b", id="g2", default="Stop")]},
+    )
+    saved = write(tmp_path, document)
+    real_replace = os.replace
+    replacements = []
+
+    def replace(source: Path, target: Path) -> None:
+        fd = os.open(saved + ".lock", os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+        replacements.append(json.loads(source.read_text()))
+        real_replace(source, target)
+
+    monkeypatch.setattr(previous.os, "replace", replace)
+    made = previous.take_defaults(previous.load(saved), ["g2", "g1"])
+    expected = json.loads(json.dumps(document))
+    expected["steps"][0]["gaps"][0]["answer"] = "Default taken: Keep é\nThen delete"
+    expected["steps"][1]["gaps"][0]["answer"] = "Default taken: Stop"
+    assert made == expected == json.loads(Path(saved).read_text())
+    assert replacements == [expected]
+    assert not list(tmp_path.glob(".earlier.json.*"))
+    previous.load(saved)
+
+
+@pytest.mark.parametrize(
+    "identities",
+    [
+        [],
+        ["g1", ""],
+        ["g1", "g1"],
+        ["g1", "g9"],
+        ["g1", "g2"],
+        ["g1", "g3"],
+        ["g1", "g4"],
+    ],
+)
+def test_invalid_defaults_leave_the_result_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, identities: list[str]
+) -> None:
+    document = result(
+        {"step": 1, "title": "Read", "gaps": [gap("a"), gap("b", id="g2", answer="X")]},
+        settled=[history_gap("c", id="g3", answer="Y")],
+        closed=[{**history_gap("d", id="g4"), "reason": "Removed"}],
+    )
+    saved = write(tmp_path, document)
+    snapshot = previous.load(saved)
+    before = Path(saved).read_bytes()
+
+    def refuse(*args: object) -> None:
+        raise AssertionError("invalid batches must not create a temporary result")
+
+    monkeypatch.setattr(previous.tempfile, "NamedTemporaryFile", refuse)
+    with pytest.raises(ValueError):
+        previous.take_defaults(snapshot, identities)
+    assert Path(saved).read_bytes() == before
+    assert snapshot.document == document
+
+
+def test_defaults_revalidate_answers_after_acquiring_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saved = write(
+        tmp_path,
+        result({"step": 1, "title": "Read", "gaps": [gap("a"), gap("b", id="g2")]}),
+    )
+    snapshot = previous.load(saved)
+    real_flock = fcntl.flock
+    current = json.loads(Path(saved).read_text())
+    current["steps"][0]["gaps"][1]["answer"] = "Owner's answer"
+    updated = json.dumps(current).encode()
+
+    def flock(fd: int, operation: int) -> None:
+        Path(saved).write_bytes(updated)
+        real_flock(fd, operation)
+
+    monkeypatch.setattr(previous.fcntl, "flock", flock)
+    with pytest.raises(ValueError, match="g2.*already answered"):
+        previous.take_defaults(snapshot, ["g1", "g2"])
+    assert Path(saved).read_bytes() == updated
+    assert all(gap.answer is None for gap in snapshot.gaps)
+
+
+def test_defaults_use_the_current_default_and_accept_a_missing_answer(
+    tmp_path: Path,
+) -> None:
+    item = gap("a")
+    del item["answer"]
+    document = result({"step": 1, "title": "Read", "gaps": [item]})
+    saved = write(tmp_path, document)
+    snapshot = previous.load(saved)
+    item["default"] = "Stop"
+    write(tmp_path, document)
+    previous.take_defaults(snapshot, ["g1"])
+    assert previous.load(saved).gaps[0].answer == "Default taken: Stop"
+
+
+@pytest.mark.parametrize("identity", ["g1", "g2"])
+def test_single_answer_can_overwrite_active_and_settled_answers(
+    tmp_path: Path, identity: str
+) -> None:
+    saved = write(
+        tmp_path,
+        result(
+            {"step": 1, "title": "Read", "gaps": [gap("a", answer="Old")]},
+            settled=[history_gap("b", id="g2", answer="Old")],
+        ),
+    )
+    previous.answer(previous.load(saved), identity, "New")
+    assert {gap.id: gap.answer for gap in previous.load(saved).gaps}[identity] == "New"

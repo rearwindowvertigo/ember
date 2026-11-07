@@ -4,7 +4,7 @@ With `--previous`, an earlier result's gaps and answers go to the reviewer,
 and the reviewer accounts for each active and settled gap. Settled answers
 and closed history are carried into the new result. Exit 81 reports an
 invalid or incomplete reply.
-Answer mode exits 64 for invalid options or an unknown id, 65 for an invalid
+Answer mode exits 64 for invalid options or ids, 65 for an invalid
 result, 66 for an unreadable file and 74 for a write failure. Other exits
 use the run's codes. The command never creates or finishes a
 claim.
@@ -88,8 +88,12 @@ def _usage(args: argparse.Namespace) -> None:
         ]
         if extra:
             problem = f"{', '.join(extra)} cannot be used with --answer"
-        elif args.id is None or args.text is None:
-            problem = "--answer needs --id and --text"
+        elif args.take_defaults and (args.id is not None or args.text is not None):
+            problem = "--take-defaults cannot be combined with --id or --text"
+        elif not args.take_defaults and (args.id is None or args.text is None):
+            problem = "--answer needs --id and --text, or --take-defaults"
+    elif args.take_defaults:
+        problem = "--take-defaults needs --answer"
     elif args.id is not None or args.text is not None:
         problem = "--id and --text need --answer"
     elif args.plan is None:
@@ -289,11 +293,20 @@ def _load_previous(path: str | None) -> previous.Previous | None:
 
 
 def _answer(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
-    """Record an answer after loading and validating the result."""
+    """Record answers after loading and validating the result."""
     saved = _load_previous(args.answer)
     assert saved is not None
+    identities = [
+        identity.strip()
+        for group in args.take_defaults
+        for identity in group.split(",")
+    ]
     try:
-        made = previous.answer(saved, args.id, args.text)
+        made = (
+            previous.take_defaults(saved, identities)
+            if args.take_defaults
+            else previous.answer(saved, args.id, args.text)
+        )
     except ValueError as error:
         raise CommandError(64, str(error), "next: emb gapcheck --help") from error
     except previous.PreviousError as error:
@@ -312,6 +325,8 @@ def _answer(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         ) from error
     if args.json:
         print(json.dumps(made, indent=2, ensure_ascii=False), file=out)
+    elif args.take_defaults:
+        print(f"recorded answers for {', '.join(identities)} in {saved.path}", file=err)
     else:
         print(f"recorded answer for {args.id} in {saved.path}", file=err)
     return 0
