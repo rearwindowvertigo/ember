@@ -17,7 +17,6 @@
 
 ### Fixed
 
-* limit preparation lookup errors to the worktree.prepare setting ([a94ea95](https://github.com/rearwindowvertigo/ember/commit/a94ea950c46a9b08152d105942d3aa9d8de95664))
 * name run and flow branches in an empty emb cleanup result ([d6e01ac](https://github.com/rearwindowvertigo/ember/commit/d6e01acccb575475a443c1ffc74eae2c53288be3))
 * name the review budget and its source in a flow stop ([1e97cfb](https://github.com/rearwindowvertigo/ember/commit/1e97cfb1c7c406c0659cf978ed38db87b44812c2))
 
