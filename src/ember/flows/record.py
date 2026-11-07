@@ -64,6 +64,7 @@ _FLOW_FIELDS = {
     "writer": "worker",
     "reviewer": "worker",
     "rounds": "int",
+    "review_budget": "dict",
     "parallel": "int",
     "check_timeout": "int",
     "check": "[str]",
@@ -203,6 +204,15 @@ def new_flow(
         "writer": writer.to_json(),
         "reviewer": reviewer.to_json(),
         "rounds": plan.rounds,
+        "review_budget": {
+            "value": plan.rounds + int(plan.rounds_source == "setting"),
+            "unit": "reviews" if plan.rounds_source == "setting" else "fix_rounds",
+            "source": {
+                "setting": "flow.review_rounds",
+                "plan": "plan.rounds",
+                "default": "default",
+            }[plan.rounds_source],
+        },
         "parallel": plan.parallel,
         "check_timeout": plan.check_timeout,
         "check": list(plan.check),
@@ -279,6 +289,21 @@ def _validate(flow_id: str, flow: object) -> None:
             raise FlowError(flow_id, f"flow.json has an invalid {key}")
     if flow["stall_minutes"] <= 0:
         raise FlowError(flow_id, "flow.json has an invalid stall_minutes")
+    budget = flow["review_budget"]
+    _fields(
+        flow_id,
+        budget,
+        {"value": "int", "unit": "str", "source": "str"},
+        "review_budget",
+    )
+    reviews = budget["source"] == "flow.review_rounds"
+    if (
+        budget["source"]
+        not in ("flow.review_rounds", "plan.rounds", "default", "unknown")
+        or budget["unit"] != ("reviews" if reviews else "fix_rounds")
+        or budget["value"] != flow["rounds"] + int(reviews)
+    ):
+        raise FlowError(flow_id, "flow.json has an invalid review_budget")
     if flow["runner"] is not None:
         _fields(
             flow_id, flow["runner"], {"pid": "int", "started_at": "number"}, "runner"
@@ -337,6 +362,8 @@ def load(flow_id: str, env: Mapping[str, str] | None = None) -> dict[str, Any]:
         value.setdefault("plan_waves", [])
         value.setdefault("base_branch", None)
         value.setdefault("common", None)
+        if "review_budget" not in value:
+            value["review_budget"] = _saved_budget(path.parent, value.get("rounds"))
         if isinstance(value.get("tasks"), list):
             for task in value["tasks"]:
                 if isinstance(task, dict):
@@ -350,6 +377,24 @@ def load(flow_id: str, env: Mapping[str, str] | None = None) -> dict[str, Any]:
                     worker["model"] = choices.full_opencode_id(worker["model"])
         value[choices.OPENCODE_ID_FORMAT] = 1
     return value
+
+
+def _saved_budget(directory: Path, rounds: object) -> dict[str, Any]:
+    """Recover only the source named explicitly in a saved original plan."""
+    try:
+        original = json.loads((directory / PLAN_NAME).read_text(encoding="utf-8"))
+    except OSError, ValueError:
+        original = None
+    explicit = (
+        isinstance(original, dict)
+        and type(original.get("rounds")) is int
+        and original["rounds"] == rounds
+    )
+    return {
+        "value": rounds,
+        "unit": "fix_rounds",
+        "source": "plan.rounds" if explicit else "unknown",
+    }
 
 
 def save(flow: dict[str, Any], env: Mapping[str, str] | None = None) -> None:

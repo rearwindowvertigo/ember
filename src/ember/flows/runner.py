@@ -593,9 +593,11 @@ class _Runner:
         except (OSError, UnicodeError) as error:
             result = verdict.Review(None, (), f"cannot read the reply: {error}")
         warning = self.close(review_run.id)
-        action, reason = result.decision(self.flow["rounds"] - task["round"])
-        if reason:
-            reason = reason.replace("<n>", str(task["round"]))
+        action, reason = result.decision(
+            self.flow["rounds"] - task["round"],
+            exhausted_reason="unresolved after "
+            + verdict.budget_text(self.flow["review_budget"], fix_rounds=task["round"]),
+        )
         with self.mutex:
             if self.finished or self.shutdown.is_set():
                 return "stop"

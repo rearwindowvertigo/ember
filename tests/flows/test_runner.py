@@ -352,16 +352,56 @@ def test_status_distinguishes_two_reviews(h: Harness, latest_should: bool) -> No
     assert watch["findings"] == {"must": 0, "should": 1 + int(latest_should), "lead": 1}
 
 
-def test_exhausted_fix_budget(h: Harness) -> None:
+@pytest.mark.parametrize(
+    "source", ["plan.rounds", "flow.review_rounds", "default", "unknown"]
+)
+def test_exhausted_fix_budget(h: Harness, source: str) -> None:
     h.script_data = {
         "a read-only review;": "@reply " + FIX,
         "Fix round 1 of task a": "@write a fixed",
     }
     h.scripts_update()
     h.create(rounds=1)
+    flow = h.flow()
+    flow["review_budget"] = {
+        "value": 2 if source == "flow.review_rounds" else 1,
+        "unit": "reviews" if source == "flow.review_rounds" else "fix_rounds",
+        "source": source,
+    }
+    record.save(flow, h.env)
     item = h.run()["tasks"][0]
-    assert item["reason"] == "unresolved after 1 fix rounds"
+    assert (
+        item["reason"]
+        == {
+            "plan.rounds": "unresolved after 1 fix round (plan rounds 1)",
+            "flow.review_rounds": "unresolved after 2 reviews "
+            "(flow.review_rounds 2 allows 1 fix round)",
+            "default": "unresolved after 1 fix round (default 1 fix round)",
+            "unknown": "unresolved after 1 fix round "
+            "(budget 1 fix round; source unknown)",
+        }[source]
+    )
     assert len(item["reviews"]) == 2
+    assert item["round"] == 1
+
+
+def test_one_review_setting_stops_without_a_fix(h: Harness) -> None:
+    h.scripts_update(**{"a read-only review;": "@reply " + FIX})
+    h.create(rounds=0)
+    flow = h.flow()
+    flow["review_budget"] = {
+        "value": 1,
+        "unit": "reviews",
+        "source": "flow.review_rounds",
+    }
+    record.save(flow, h.env)
+    choices.set_settings({"flow.review_rounds": "4"}, env=h.env)
+    item = h.run()["tasks"][0]
+    assert item["reason"] == (
+        "unresolved after 1 review (flow.review_rounds 1 allows no fix round)"
+    )
+    assert item["round"] == 0 and len(item["reviews"]) == 1
+    assert not list((record.folder(h.id, h.env) / "briefs").glob("a-fix-*.md"))
 
 
 @pytest.mark.parametrize("text", ["Do nothing", "@write a value"])
@@ -753,7 +793,7 @@ def test_hook_correction_does_not_grant_more_automatic_fix_rounds(h: Harness) ->
     h.answer("send", file=str(correction))
     item = h.run()["tasks"][0]
     assert item["round"] == 1
-    assert item["reason"] == "unresolved after 1 fix rounds"
+    assert item["reason"] == "unresolved after 1 fix round (plan rounds 0)"
 
 
 def test_stale_and_unreadable_answers_advance_cursor(h: Harness) -> None:

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from ember import branches, choices, citations, db, paths, tmux
-from ember.flows import lock, plan, record
+from ember.flows import lock, plan, record, verdict
 from ember.gapcheck import policy
 from ember.runs import exits
 from ember.runs import record as run_record
@@ -1201,7 +1201,9 @@ def _status(
             print(json.dumps(flow, indent=2), file=out)
         else:
             for key, value in flow.items():
-                if key != "tasks":
+                if key == "review_budget":
+                    print(f"review_budget: {verdict.budget_text(value)}", file=out)
+                elif key != "tasks":
                     print(f"{key}: {value}", file=out)
             for task in flow["tasks"]:
                 print(_task_line(task), file=out)
@@ -1223,6 +1225,7 @@ def _status(
         _denial_status(flow, env)
         item = {key: flow[key] for key in ("id", "status", "reason", "dir", "branch")}
         item["denied_paths"] = flow["denied_paths"]
+        item["review_budget"] = flow["review_budget"]
         item.update(
             runner_live=lock.live(flow["id"], env),
             merged=sum(task["status"] == "merged" for task in flow["tasks"]),
@@ -1239,6 +1242,10 @@ def _status(
             print(
                 f"{item['id']}  {status}  "
                 f"{item['merged']}/{item['tasks']} merged  {item['dir']}",
+                file=out,
+            )
+            print(
+                f"  review_budget: {verdict.budget_text(item['review_budget'])}",
                 file=out,
             )
             for denial in item["denied_paths"]:

@@ -406,6 +406,52 @@ def test_start(
 
 
 @pytest.mark.parametrize(
+    ("setting", "plan_rounds", "value", "unit", "source"),
+    [
+        ("1", None, 1, "reviews", "flow.review_rounds"),
+        ("4", None, 4, "reviews", "flow.review_rounds"),
+        ("1", 0, 0, "fix_rounds", "plan.rounds"),
+        ("1", 3, 3, "fix_rounds", "plan.rounds"),
+        (None, None, 2, "fix_rounds", "default"),
+    ],
+)
+def test_start_freezes_review_budget(
+    env: dict[str, str],
+    plan_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    setting: str | None,
+    plan_rounds: int | None,
+    value: int,
+    unit: str,
+    source: str,
+) -> None:
+    if setting is None:
+        settings = command._settings(None, env)
+        settings["answers"].pop("flow.review_rounds", None)
+        monkeypatch.setattr(command, "_settings", lambda claim, env: settings)
+    else:
+        choices.set_settings({"flow.review_rounds": setting}, env=env)
+    if plan_rounds is not None:
+        document = json.loads(plan_file.read_text())
+        document["rounds"] = plan_rounds
+        plan_file.write_text(json.dumps(document))
+    code, out, err = invoke(env, "--plan", str(plan_file), "--start")
+    assert code == 0, err
+    flow_id = out.splitlines()[0].split()[1]
+    directory = record.folder(flow_id, env)
+    saved = json.loads((directory / record.FLOW_NAME).read_text())
+    expected = {"value": value, "unit": unit, "source": source}
+    assert saved["review_budget"] == expected
+    assert saved["rounds"] == value - int(unit == "reviews")
+    choices.set_settings({"flow.review_rounds": "2"}, env=env)
+    plan_file.write_text("{}")
+    (directory / record.PLAN_NAME).write_text("{}")
+    code, out, err = invoke(env, "--status", flow_id, "--json")
+    assert code == 0, err
+    assert json.loads(out)["review_budget"] == expected
+
+
+@pytest.mark.parametrize(
     ("case", "expected"),
     [("tmux", 69), ("branch", 70), ("inside", 69), ("runtime", 69)],
 )
@@ -702,6 +748,61 @@ def test_status(env: dict[str, str], flow: dict[str, Any]) -> None:
     assert "emb flow: skipped" in err
     code, out, _ = invoke(env, "--status")
     assert code == 0 and f"{flow['id']}  starting  0/2 merged" in out
+
+
+@pytest.mark.parametrize(
+    ("value", "unit", "source", "description"),
+    [
+        (
+            1,
+            "reviews",
+            "flow.review_rounds",
+            "1 review (flow.review_rounds 1 allows no fix round)",
+        ),
+        (
+            4,
+            "reviews",
+            "flow.review_rounds",
+            "4 reviews (flow.review_rounds 4 allows 3 fix rounds)",
+        ),
+        (0, "fix_rounds", "plan.rounds", "0 fix rounds (plan rounds 0)"),
+        (1, "fix_rounds", "plan.rounds", "1 fix round (plan rounds 1)"),
+        (2, "fix_rounds", "default", "2 fix rounds (default 2 fix rounds)"),
+        (
+            2,
+            "fix_rounds",
+            "unknown",
+            "2 fix rounds (budget 2 fix rounds; source unknown)",
+        ),
+    ],
+)
+def test_status_review_budget(
+    env: dict[str, str],
+    flow: dict[str, Any],
+    value: int,
+    unit: str,
+    source: str,
+    description: str,
+) -> None:
+    flow["rounds"] = value - int(unit == "reviews")
+    budget = {"value": value, "unit": unit, "source": source}
+    flow["review_budget"] = budget
+    record.save(flow, env)
+    if source == "unknown":
+        del flow["review_budget"]
+        (record.folder(flow["id"], env) / record.FLOW_NAME).write_text(json.dumps(flow))
+    for single in (True, False):
+        args = ["--status", *([flow["id"]] if single else [])]
+        code, out, err = invoke(env, *args, "--json")
+        assert code == 0, err
+        status = json.loads(out)
+        item = status if single else status[0]
+        assert item["review_budget"] == budget
+        if single:
+            assert item["rounds"] == flow["rounds"]
+        code, out, err = invoke(env, *args)
+        assert code == 0, err
+        assert f"review_budget: {description}" in out
 
 
 @pytest.mark.parametrize("legacy", [False, True])
