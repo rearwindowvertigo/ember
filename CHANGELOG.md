@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.18.0](https://github.com/rearwindowvertigo/ember/compare/v0.17.0...v0.18.0) (2026-11-07)
+
+
+### Added
+
+* add a per-repository worktree preparation setting ([6dfe6a0](https://github.com/rearwindowvertigo/ember/commit/6dfe6a02206cc4cd1feda20ff966f2e7518f0249))
+* prepare every panel member worktree before any member starts ([3521499](https://github.com/rearwindowvertigo/ember/commit/3521499100073874d1753d693e1b179a8e0c222a))
+* prepare flow worktrees before the first check ([8ee3338](https://github.com/rearwindowvertigo/ember/commit/8ee3338e51e934c09951d5d5e7e9f9e27a6c972b))
+* prepare run worktrees before the first turn ([b5a6737](https://github.com/rearwindowvertigo/ember/commit/b5a6737c839d06cb947379a86faed4557c052b0c))
+* record several gap answers in one emb gapcheck call ([c5c2dc5](https://github.com/rearwindowvertigo/ember/commit/c5c2dc5d324de60589c4f927597c23e45e52367f))
+* refuse merging a flow branch that lacks the target tip ([0a61d2d](https://github.com/rearwindowvertigo/ember/commit/0a61d2d0acfe5195e1a1f87d6254fa77efcc2e20))
+* report worktree preparation in emb ground ([66757aa](https://github.com/rearwindowvertigo/ember/commit/66757aa70e71c68523a24817c91cbe923a34587f))
+* set worktree preparation in Settings ([150ffe6](https://github.com/rearwindowvertigo/ember/commit/150ffe6242bb6e8643b617168cf2dbbb5fe2b4d1))
+
+
+### Fixed
+
+* limit preparation lookup errors to the worktree.prepare setting ([a94ea95](https://github.com/rearwindowvertigo/ember/commit/a94ea950c46a9b08152d105942d3aa9d8de95664))
+* name run and flow branches in an empty emb cleanup result ([d6e01ac](https://github.com/rearwindowvertigo/ember/commit/d6e01acccb575475a443c1ffc74eae2c53288be3))
+* name the review budget and its source in a flow stop ([1e97cfb](https://github.com/rearwindowvertigo/ember/commit/1e97cfb1c7c406c0659cf978ed38db87b44812c2))
+
 ## [0.17.0](https://github.com/rearwindowvertigo/ember/compare/v0.16.0...v0.17.0) (2026-11-07)
 
 
