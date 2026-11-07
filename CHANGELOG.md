@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.17.0](https://github.com/rearwindowvertigo/ember/compare/v0.16.0...v0.17.0) (2026-11-07)
+
+
+### Added
+
+* **app:** show sidebar counts as the accent pill at full width ([372ee53](https://github.com/rearwindowvertigo/ember/commit/372ee534cdbe6cbc5f8b2e4380b2bc12997ba27f))
+* **cli:** exit emb run with 84 when it leaves an owner wait ([68542ef](https://github.com/rearwindowvertigo/ember/commit/68542efab3c5fc3c08c91bf35b8ec789548396a0))
+* **cli:** print a merged run's pending owner lines at emb merge ([1f92835](https://github.com/rearwindowvertigo/ember/commit/1f92835db61c681c2951758156f53c0da134ca55))
+* **cli:** show a finished, merged run as done in emb run --status ([89b74bb](https://github.com/rearwindowvertigo/ember/commit/89b74bb113183e4a3dd00f753d598f4b7a17b621))
+
+
+### Fixed
+
+* **app:** keep the collapsed sidebar's count pill off the row icon ([25d5453](https://github.com/rearwindowvertigo/ember/commit/25d5453831fc5f8793b4c375e58c934805610de5))
+
 ## [0.16.0](https://github.com/rearwindowvertigo/ember/compare/v0.15.0...v0.16.0) (2026-11-06)
 
 
