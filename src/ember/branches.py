@@ -1279,7 +1279,11 @@ def cleanup(
     if as_json:
         print(json.dumps([item.to_json() for item in job.results], indent=2), file=out)
     elif not job.results and failure is None:
-        print(f"emb cleanup: no Ember run branch against {target}", file=err)
+        scope = f" for claim {claim}" if claim is not None else ""
+        print(
+            f"emb cleanup: no Ember run or flow branch left against {target}{scope}",
+            file=err,
+        )
     if failure is not None:
         return _print_failure("cleanup", failure, err, failures)
     if (

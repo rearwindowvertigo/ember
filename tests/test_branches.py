@@ -1326,7 +1326,7 @@ def test_cleanup_ignores_branches_that_are_not_run_branches(
     assert _cleanup(env, driver, streams, repo) == 0
     out, err = streams.take()
     assert out == ""
-    assert err == "emb cleanup: no Ember run branch against main\n"
+    assert err == "emb cleanup: no Ember run or flow branch left against main\n"
     assert _branch_exists(repo, "feature", env)
     assert _branch_exists(repo, "ember/notes", env)
 
@@ -2603,20 +2603,30 @@ def test_merge_with_no_run_has_null_next(
 
 @pytest.mark.parametrize("claim", [None, "claim-a"])
 @pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("as_json", [False, True])
 def test_cleanup_empty_claim_finishes_only_when_requested(
     env: dict[str, str],
     repo: Path,
     driver: StubDriver,
     claim: str | None,
     dry_run: bool,
+    as_json: bool,
 ) -> None:
     streams = Streams()
     assert (
-        _cleanup(env, driver, streams, repo, claim=claim, dry_run=dry_run, as_json=True)
+        _cleanup(
+            env, driver, streams, repo, claim=claim, dry_run=dry_run, as_json=as_json
+        )
         == 0
     )
     out, err = streams.take()
-    assert json.loads(out) == []
-    assert err == (
+    if as_json:
+        assert json.loads(out) == []
+        message = ""
+    else:
+        assert out == ""
+        scope = f" for claim {claim}" if claim is not None else ""
+        message = f"emb cleanup: no Ember run or flow branch left against main{scope}\n"
+    assert err == message + (
         "next: emb choices --finish claim-a\n" if claim and not dry_run else ""
     )
