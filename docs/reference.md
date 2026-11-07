@@ -4556,14 +4556,20 @@ configuration and state folders. Adding either of those, a descendant or
 a symlink alias is refused with the reason. The same restriction applies
 to `emb choices --set sandbox.read=...`.
 
-Worktree preparation, Add repository opens a folder chooser for the
-repository's main checkout, then asks for a shell command. Each row shows
-the repository and command, or No preparation for an empty command. Edit
-changes the command; Remove deletes the entry. An empty command explicitly
-means no preparation; no entry leaves the repository unset. Invalid or
-duplicate paths are refused with the reason. The command runs in every
-new Ember worktree outside the worker sandbox before a worker or check
-starts, as described under `emb run`.
+Worktree preparation has a Repositories row with an info tooltip and Add
+repository on the right. Add repository opens a folder chooser for the
+repository's main checkout, then a Worktree preparation dialog with a title
+heading, wrapped repository path and Command field. The field's info
+tooltip explains that the command runs in each new worktree outside the
+worker sandbox before any worker or check starts, and empty means no
+preparation. Cancel is the default button; Cancel and Escape save nothing.
+Cancelling the folder chooser opens no command dialog. Save accepts an
+empty command. Each repository shows its command, or No preparation for an
+empty command. Edit opens the dialog with the saved command prefilled;
+Remove deletes the entry. The card is disabled while a save is pending.
+An empty command explicitly means no preparation; no entry leaves the
+repository unset. Invalid or duplicate paths are refused with the reason.
+Preparation runs as described under `emb run`.
 
 ### Files
 

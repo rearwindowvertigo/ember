@@ -17,12 +17,14 @@ from typing import TYPE_CHECKING, Any
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -89,13 +91,70 @@ def preparation_command(
     parent: QWidget, repository: str, command: str
 ) -> tuple[str, bool]:
     """Ask for a shell command, accepting empty text as no preparation."""
-    return QInputDialog.getText(
-        parent,
-        "Worktree preparation",
-        f"{repository}\nShell command (leave empty for no preparation):",
-        QLineEdit.EchoMode.Normal,
-        command,
+    dialog = PreparationCommandDialog(repository, command, parent)
+    accepted = dialog.exec() == QDialog.DialogCode.Accepted
+    return dialog.command.text(), accepted
+
+
+class PreparationCommandDialog(QDialog):
+    """Edit a repository's preparation command; Cancel is the default."""
+
+    TITLE = "Worktree preparation"
+    EXPLANATION = (
+        "Runs in each new worktree outside the worker sandbox, before any "
+        "worker or check starts. Leave empty for no preparation."
     )
+
+    def __init__(
+        self, repository: str, command: str, parent: QWidget | None = None
+    ) -> None:
+        """Create the dialog with the repository's saved command prefilled."""
+        super().__init__(parent)
+        self.setWindowTitle(self.TITLE)
+        self.setModal(True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
+        self.title = QLabel(self.TITLE)
+        self.title.setFont(theme.font("title"))
+        layout.addWidget(self.title)
+        self.repository = label(repository, "secondary")
+        self.repository.setTextFormat(Qt.TextFormat.PlainText)
+        self.repository.setWordWrap(True)
+        self.repository.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        layout.addWidget(self.repository)
+        heading = QHBoxLayout()
+        heading.setSpacing(4)
+        heading.addWidget(QLabel("Command"))
+        self.info = widgets.InfoTip("Command", self.EXPLANATION)
+        self.info.setAutoDefault(False)
+        heading.addWidget(self.info)
+        heading.addStretch(1)
+        layout.addLayout(heading)
+        self.command = QLineEdit(command)
+        self.command.setAccessibleName("Command")
+        self.command.setPlaceholderText("npm ci")
+        layout.addWidget(self.command)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.cancel_button = widgets.button("Cancel", "secondary")
+        self.cancel_button.clicked.connect(self.reject)
+        self.save_button = widgets.button("Save", "primary")
+        self.save_button.setAutoDefault(True)
+        self.save_button.clicked.connect(self.accept)
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.save_button)
+        layout.addLayout(buttons)
+        self.cancel_button.setAutoDefault(True)
+        self.cancel_button.setDefault(True)
+        self.cancel_button.setFocus(Qt.FocusReason.OtherFocusReason)
+        title_bar = self.fontMetrics().horizontalAdvance(self.TITLE) + 4 * (
+            self.style().pixelMetric(QStyle.PixelMetric.PM_TitleBarHeight)
+        )
+        self.setMinimumWidth(max(480, title_bar))
+        chain_tab_order([self.info, self.command, self.cancel_button, self.save_button])
 
 
 def _words(value: str) -> list[str] | None:
@@ -239,17 +298,16 @@ class SettingsScreen(QWidget):
     def _preparation(self) -> widgets.Card:
         card, column = titled_card("Worktree preparation")
         self.preparation_card = card
-        description = label(
+        self.add_repository = widgets.button("Add repository", "secondary", size="sm")
+        self.add_repository.clicked.connect(self._add_repository)
+        self._row(
+            column,
+            "Repositories",
             "A shell command Ember runs in each new worktree, outside the worker "
             "sandbox, before any worker or check starts. "
             "Choose the repository's main checkout folder.",
-            "secondary",
+            self.add_repository,
         )
-        description.setWordWrap(True)
-        column.addWidget(description)
-        self.add_repository = widgets.button("Add repository", "secondary", size="sm")
-        self.add_repository.clicked.connect(self._add_repository)
-        column.addWidget(self.add_repository, 0, Qt.AlignmentFlag.AlignLeft)
         self.preparation_box = QWidget()
         self.preparation_layout = QVBoxLayout(self.preparation_box)
         self.preparation_layout.setContentsMargins(0, 0, 0, 0)
@@ -286,6 +344,7 @@ class SettingsScreen(QWidget):
             [
                 self.add_folder,
                 *self.path_rows.values(),
+                self.tip_rows["Repositories"].info,
                 self.add_repository,
                 *(button for row in self.preparation_rows.values() for button in row),
             ]
