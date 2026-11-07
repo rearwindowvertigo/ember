@@ -43,9 +43,24 @@ skill folder.
 Before recommending a worker, run `emb ground --json` once. Read
 `machine`, `surface` (`desktop` true is the Claude desktop app),
 `worktree_base`, and under `directory`: `git`, `top`, `branch`, `dirty`,
-`remote` and `files` (whether `CLAUDE.md` and `AGENTS.md` exist). A null
-with its `<field>_reason` is data; do not substitute assumptions. Exit 66
-means the folder does not exist: run it with `--dir` on an existing folder.
+`remote`, `files` (whether `CLAUDE.md` and `AGENTS.md` exist) and `prepare`.
+`directory.prepare` gives `state`, `command` and the resolved main checkout
+as `repository`. A null with its `<field>_reason` is data; do not substitute
+assumptions. Exit 66 means the folder does not exist: run it with `--dir`
+on an existing folder.
+
+When `prepare.state` is `unset` and the repository needs an install before
+its checks (for example, it has a lock file such as `package-lock.json`),
+propose a preparation command to the owner at most once per repository per
+conversation. Point first to Settings, Worktree preparation, Add repository:
+choose the main checkout and enter the command. Second, give an exact
+`emb choices --set 'worktree.prepare=<JSON object>'` command for the owner's
+terminal, built from the current `worktree.prepare` mapping in the choices
+reply (`emb choices --json`) plus the new repository entry. Say that it
+replaces the whole mapping. Claude never sets it. When the state is `set`
+or `none`, or nothing needs installing, say nothing about preparation.
+`references/runs.md` describes
+when Ember runs the command and how a failed preparation is retried.
 
 ### 2. Claim the run
 
@@ -425,9 +440,9 @@ prints no `next:` line, report each kept line and run
 | 64 | Fix the call; `emb merge` needs `--verdict keep`, a one-line `--note`, a one-line `--subject` for an Ember run branch and two different branches. |
 | 65 | Run it inside the checkout, with branches that exist. |
 | 70 | A git command failed; a merge already made stays. Report the message; follow `next:`. |
-| 75 | Refused: the target is checked out nowhere, is mid-merge, mid-rebase, mid-cherry-pick or mid-revert, has changes, or the merge conflicted. A squash conflict names the files and leaves the target unchanged. Report it. Keep the claim open until the owner settles a conflict. |
-| 76 | The target or worker branch moved while building the squash. Review both tips before repeating the merge. |
-| 77 | The target's `commit-msg` hook, commit identity or signing configuration refused the squash. Follow `next:`; nothing moved. |
+| 75 | Refused: the target is checked out nowhere, is mid-merge, mid-rebase, mid-cherry-pick or mid-revert, has changes, the merge conflicted, or a flow record cannot be read or matched. A completed flow also refuses when its tip does not contain the target tip; follow `references/flows.md` and its printed `next:` line. A squash conflict names the files and leaves the target unchanged. Report it. Keep the claim open until the owner settles a conflict. |
+| 76 | The target or worker branch moved while building a squash or completed-flow merge, or the checked-out target changed before that flow merge. Review both tips before repeating the merge. |
+| 77 | The target's commit hook, commit identity or signing configuration refused the squash or completed-flow merge. Follow `next:`; nothing moved. |
 
 A subagent or Workflow branch (`worktree-agent-*`) gets a merge commit.
 `emb merge` keeps it as `not an Ember run branch`; remove its worktree with
@@ -437,9 +452,13 @@ the `next: git branch -d <branch>` line.
 Before squashing or deleting the session branch, run
 `emb cleanup --merged-into <session branch>` and report the keeps.
 Without a limiting option, `emb cleanup` covers every Ember run branch of
-the repository, including other sessions' runs. Report a kept line for a
-run this session did not start as another session's; do not follow its
-`next:` line. Use `--branch <branch>` to limit cleanup to one branch, or
+the repository, including flow branches and other sessions' runs.
+`emb merge` already cleans up the branch it merged and its worktree when
+the cleanup checks allow it; an empty `emb cleanup` afterwards is expected.
+Its empty message names run and flow branches and any claim filter.
+Report a kept line for a run this session did not start as another
+session's; do not follow its `next:` line. Use `--branch <branch>` to limit
+cleanup to one branch, or
 `--claim <id>` to limit it to the session's own claim.
 Cleanup treats a branch as contained when it is an ancestor of the target,
 when a reachable commit records its tip in `Ember-Task-Tip`, or when merging

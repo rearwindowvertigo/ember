@@ -44,6 +44,17 @@ member gets its own detached worktree there (`references/runs.md`). Members
 have no branch and Ember never commits their changes. Uncommitted edits and
 later source-checkout changes are absent.
 
+The repository's `worktree.prepare` command runs in every member's
+worktree before any member session starts (`references/runs.md`). The
+panel deadline begins when members start, after preparation. A failure,
+timeout or cancellation during preparation stops admission permanently:
+no member starts, the panel is incomplete with exit 79, failing members
+are failed and unlaunched members are not started. The records and worktrees
+are kept. Inspect the named logs and use the printed fresh `emb panel`
+invocation to retry the batch; a single-member `--retry` is refused for
+that batch. Closing its runs removes their worktrees when no worker turn
+started.
+
 Start the panel:
 
 ```bash
@@ -84,7 +95,7 @@ restrictions as `references/runs.md` (Denied paths) describes.
 
 ## Read and compare
 
-After exit 0 or 83, read the whole `summary.md` at the printed `summary`
+After exit 0, 79 or 83, read the whole `summary.md` at the printed `summary`
 path before writing the comparison or answer. It holds every available
 reply, including partial replies from failed members. Read it after an
 interruption too if the owner chooses to use the available answers.

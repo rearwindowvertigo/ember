@@ -46,6 +46,7 @@ empty list.
 | Key | Values | Default | Layers |
 |---|---|---|---|
 | `worker.network` | `on`, `off` | `off` | standing |
+| `worktree.prepare` | JSON object mapping absolute main-checkout paths to shell command strings; empty string means no preparation | `{}` | standing |
 | `engine.claude`, `engine.codex`, `engine.opencode` | `on`, `off` | `on` | standing |
 | `shortlist.claude`, `shortlist.codex` | List of `<model>@<effort>`; model `[A-Za-z0-9][A-Za-z0-9._-]*`, effort `[a-z]+` | `[]` | standing |
 | `shortlist.opencode` | List of full `<integration>/<model>` ids, with optional `@<effort>`; integration `~?[A-Za-z0-9][A-Za-z0-9._-]*`, model one or more `/`-separated parts matching `~?[A-Za-z0-9][A-Za-z0-9._:-]*` | `[]` | standing |
@@ -78,6 +79,24 @@ refusing Ember's configuration and state folders.
 
 A shortlist lists each model once. A request or one-time value for a
 standing-only key is refused.
+
+`worktree.prepare` is set by the owner in Settings, Worktree preparation,
+or at a terminal, for example:
+
+```bash
+emb choices --set 'worktree.prepare={"/srv/project":"npm ci","/srv/other":""}'
+```
+
+The value replaces the whole mapping; retain existing entries when adding
+one. Keys are absolute paths resolved for duplicate checking; two paths
+resolving to the same checkout are refused. Ember matches a new worktree
+to an entry by the repository's common git folder. Ember and Claude Code
+worktrees of that repository match; separate clones do not. Entries whose
+checkout no longer exists are skipped. An existing configured checkout
+that cannot be inspected, or several entries matching the same common git
+folder, fails the lookup. This setting is not read from repository files.
+No entry and an empty command both run no preparation. `emb ground`
+distinguishes them as `unset` and `none`.
 
 OpenCode ids include the integration that serves the model, such as
 `anthropic/claude-sonnet-4` or
@@ -489,7 +508,8 @@ these checks pass.
 
 A failure after the run folder exists records `status: failed` with its
 reason in `last_reason` and exits 69 for a sandbox or runtime folder problem,
-70 for a worktree problem, and 1 otherwise. The worktree and branch stay.
+70 for a worktree problem, 79 for failed worktree preparation, and 1
+otherwise. The worktree and branch stay.
 
 Model and effort:
 
@@ -754,6 +774,45 @@ The first line on standard output is `run <id>`. At start, before the
 first turn, the resolved worker line shown by `--dry-run` is printed on
 standard error, including with `--quiet`.
 
+### Worktree preparation
+
+After `git worktree add` and before the first worker session, Ember runs
+the repository's nonempty `worktree.prepare` command once in the new
+worktree. This applies to editing and read-only runs, gap check reviewers,
+flow writers and reviewers, and panel members. Flow worktrees also run it
+before workers or the first flow check. A new worktree starts with tracked
+files, without installed dependencies, generated files or ignored local
+configuration. Without an entry or with an empty command, Ember performs
+no preparation and adds no preparation record, output or exit code.
+
+The command runs on the lead's machine outside any worker sandbox, through
+`/bin/sh -c`, with the caller's environment and the worktree as its working
+directory. It runs in its own process group with a 1800-second limit.
+Standard output and standard error go to `prepare.log` beside the run or
+flow record, mode 600. The record saves the command, state, exit, elapsed
+seconds, log path, left-behind paths and message, and the process group's
+pid and Linux start ticks.
+
+A nonzero exit, timeout, failure to start, interruption, failure to inspect
+`git status`, or any output from `git status --porcelain` fails preparation.
+The failure names paths left behind. Ignored dependency and build files
+are allowed; tracked changes and untracked non-ignored files are not.
+Editing worker turns commit with `git add -A`.
+
+On failure no worker session starts for that run. The record and worktree
+are kept, the command exits 79, and the diagnostic names the log. A run's
+`next:` line gives a new start with the original options and its saved
+brief. Gap checks print the original `emb gapcheck` invocation; panels
+print a fresh `emb panel` invocation; flows print `emb flow --resume <id>`.
+`emb run --send` and `--recover` never run preparation. Closing a run with
+preparation and no worker turn removes its owned worktree, including
+preparation changes; an editing branch remains.
+
+Timeout, cancellation, interruption and shutdown end the whole preparation
+process group. A later resume, close or prune ends a recorded group left
+behind while its pid and start ticks still match. Flow and panel admission
+and retry rules are described under those commands.
+
 ### Turns
 
 A command that waits for a turn observes it every second. It stops with exit
@@ -850,7 +909,9 @@ run whose turn is collected but not committed, with `next: emb run --recover
 <run> (commits the collected turn), then emb run --close <run>`, and a live
 session that holds messages Ember did not send or whose history cannot be
 checked, with the line `--send` prints. It ends the
-session and keeps an editing run's worktree and branch. It removes a clean
+session and keeps an editing run's worktree and branch, except that a run
+with preparation and no worker turn has its owned worktree removed,
+including preparation changes. Its branch remains. It removes a clean
 read-only run's detached worktree with `git worktree remove`. A detached
 worktree with tracked changes or untracked non-ignored files, or a `HEAD`
 different from its recorded base, is kept with its recorded path. After a
@@ -873,7 +934,8 @@ closed stops with 72, also when the driver fails or the session is missing
 after the close.
 
 `emb run` never pushes, merges, rebases or deletes a branch. Closing removes
-only an owned, clean detached worktree.
+an owned, clean detached worktree or an owned worktree with preparation
+and no worker turn.
 
 ### Locks
 
@@ -913,6 +975,7 @@ Each run folder holds:
 |---|---|
 | `run.json` | The record, mode 600, replaced atomically |
 | `brief.md` | The brief |
+| `prepare.log` | Preparation standard output and standard error, mode 600; present when preparation ran |
 | `launch.sh` | The command the run's tmux session runs, mode 600 |
 | `turn-<n>.md` | The reply of turn `n` |
 | `turn-<n>.status.json` | For a read-only run: its working folder's state before turn `n` |
@@ -968,6 +1031,8 @@ UTC. It is also the tmux session's name.
 | `answered_at` | number or null | Epoch seconds when `--answered` ended the wait; null before an answer or when absent from an older record |
 | `commits` | list of strings | The run's commits, oldest first |
 | `subject` | string | The brief's first non-empty line |
+| `preparation` | object or null | Preparation command, `state` (`running`, `ok`, `failed`, `timeout`, `interrupted`, `not-started`), `log`, optional `pid` and `start`; a finished attempt also has `exit`, `seconds`, `left_behind` and `message`; omitted when no preparation ran |
+| `start_argv` | list of strings | The start command with its saved brief, used by the preparation retry line; omitted when empty |
 
 Paths are absolute.
 
@@ -1123,6 +1188,7 @@ evidence that no provider error occurred.
 | 75 | Close refused while a turn runs or is collected but not committed, a busy session, another command on the run, or a session holding messages Ember did not send | `next: emb run --recover <run>` or `--status`; for messages Ember did not send, `next: ask the owner ...` |
 | 76 | Branch or `HEAD` moved; nothing committed | `next: git -C <worktree> log --oneline -3` |
 | 77 | `git commit was refused`, or `git add failed` | `next: emb run --send <run> --message-file <file>` sends hook output with the correction for a refused commit; a failed `git add` points to `next: emb run --recover <run>` |
+| 79 | Worktree preparation failed before a worker session started | Diagnostic names the log; `next:` gives a new start with the original options and saved brief |
 | 80 | The turn ended with no reply | `next: emb run --screen <run>, then emb run --send <run> ...` |
 | 84 | A start, `--send` or `--recover` otherwise succeeded but ends with a pending owner wait | Each pending `owner:` line on standard error, once per invocation |
 | 124 | Stall; the turn may still be running | `next: emb run --recover <run>` |
@@ -1316,7 +1382,8 @@ claim to the run.
 | `--previous FILE` | Read an earlier complete result; the reviewer gives a disposition for every active and settled gap |
 | `--confirmed` | Run the check although `gapcheck.when` skips the plan or leaves it to the owner |
 | `--answer FILE` | Validate a result and record an answer on its active or settled gap |
-| `--id GAP`, `--text ANSWER` | Required with `--answer`: the gap id and a nonblank answer |
+| `--id GAP`, `--text ANSWER` | With `--answer`: one active or settled gap id and a nonblank answer; cannot be combined with `--take-defaults` |
+| `--take-defaults ID[,ID...]` | With `--answer`: record each listed active unanswered gap's own default; repeatable |
 | `--help` | Print the command's options |
 
 `--brief` and `--reply` cannot be combined. Neither accepts `--engine`,
@@ -1336,12 +1403,24 @@ each empty file in argument order, then one `next: emb gapcheck --help`.
 FIFOs, devices, missing paths and files that cannot be read or decoded.
 Other path checks still apply. It does not check `sandbox.read` paths.
 
-`--answer` requires `--id` and `--text`, accepts `--json`, and accepts no
-other mode or run options. It starts no run and reads no settings. Without
-`--json`, it prints `recorded answer for <id> in <path>` on standard error;
-with it, standard output holds the updated result. It reloads and validates
-the result under an adjacent `<result>.lock` and replaces it atomically.
-The lock file remains in place. Closed gap ids and unknown ids are refused.
+`--answer` requires either `--id` and `--text`, or `--take-defaults`, accepts
+`--json`, and accepts no other mode or run options. It starts no run and
+reads no settings. With `--json`, standard output holds the updated result.
+It reloads and validates the result under an adjacent `<result>.lock` and
+updates it atomically. The lock file remains in place.
+
+The single-answer form accepts active and settled gaps and can overwrite
+an existing answer. Closed and unknown ids are refused. Without `--json`,
+it prints `recorded answer for <id> in <path>` on standard error.
+
+`--take-defaults` accepts comma-separated ids, repeated options, or both,
+with every id listed explicitly; there is no `all`. It records
+`Default taken: <default>` using each gap's own default. The whole batch is
+validated under the result lock before writing. An unknown, duplicate,
+settled or already answered id refuses with exit 64 and leaves the result
+unchanged. Without `--json`, it prints `recorded answers for <ids> in
+<path>` on standard error. The lead checks each default's factual premise
+before recording it, as `skill/references/gap-check.md` describes.
 
 After these input checks, `gapcheck.when` decides the plan unless
 `--confirmed` is given (with `--reply` it is not applied). A plan it skips
@@ -1376,6 +1455,12 @@ the clean detached worktree. Its temporary brief file is
 `$XDG_RUNTIME_DIR/ember/gapcheck-<pid>-<6 hex>.md`, mode 600, with the usual
 Ember runtime fallback. It is removed after the start returns or fails;
 the run keeps its own copy as `brief.md`.
+
+The reviewer's worktree runs the repository's `worktree.prepare` command
+before its session, as described under `emb run`. Preparation failure
+keeps the record and worktree, exits 79, names the log and prints a `next:`
+line with the original gap check invocation. `--brief` and `--reply`
+create no worktree and run no preparation.
 
 ### Plan steps
 
@@ -1543,6 +1628,7 @@ Record owner answers and defaults with:
 
 ```bash
 emb gapcheck --answer <result> --id <gap id> --text '<answer>'
+emb gapcheck --answer <result> --take-defaults g1,g3 --take-defaults g5
 ```
 
 An answer is stored once on its gap in `steps` or `settled`; `ranked` holds
@@ -1648,11 +1734,12 @@ existing reply exits 66. A successful turn with no reply file exits 81.
 |---|---|---|
 | 0 | The reply covers every step and earlier gap, the brief was printed, an answer was recorded, or settings skip or ask | A failed close prints a warning |
 | 1 | Settings database or run record cannot be read, or checkout discovery times out | `owner: repair or remove the settings database the message names`, `next: emb run --status <run>` or a new check |
-| 64 | Usage error, empty or whitespace-only plan or `--read` file, invalid claim, reviewer row not `set`, Claude subagent row, or a run start check | `next: emb gapcheck --help` for usage or empty files, the claim's `emb choices` line, `owner: name the reviewer for this gap check, or set Gap check reviewer on the Team screen`, the `--brief`/`--reply` route, or the run's line |
+| 64 | Usage error, invalid default-answer batch, empty or whitespace-only plan or `--read` file, invalid claim, reviewer row not `set`, Claude subagent row, or a run start check | `next: emb gapcheck --help` for usage, invalid batches or empty files, the claim's `emb choices` line, `owner: name the reviewer for this gap check, or set Gap check reviewer on the Team screen`, the `--brief`/`--reply` route, or the run's line |
 | 65 | `--dir` is not in a git checkout, or the `--previous`/`--answer` file is not a valid complete result | `next: emb gapcheck --plan <plan> --dir <a folder in the checkout>`, or `next: correct <file> to the emb gapcheck result format, with answers on their gaps in steps or settled` |
 | 66 | Plan, reply, `--previous` or `--answer` file cannot be read, or `--dir` does not exist or is not a folder | `next: ls -l <path>` |
 | 69 | Git is unavailable, the runtime folder cannot be used, or the run exits 69 | `owner: install git`, the run's runtime-folder instruction, or the run's line |
 | 74 | Interrupted by `SIGINT`, `SIGTERM` or `SIGHUP`, or an answer cannot be written | The run's recovery line when a run exists, then a gap check action; `next: ls -l <result>` for an answer write failure |
+| 79 | Reviewer worktree preparation failed before its session started | Diagnostic names the log; `next:` repeats the original gap check invocation |
 | 81 | Invalid reply, incomplete earlier-gap dispositions or links, missing or unknown steps, or a successful run without a reply file | `next: emb gapcheck --plan <plan> --reply <reply>` after fixing the reply, or a new check |
 | Other | The run's exit from the `emb run` table | The run's line, then a gap check action |
 
@@ -1843,6 +1930,29 @@ individual runs receive no claim. Worker resolution preserves an omitted
 effort as `null`; callers must freeze the effective effort before starting
 runs that could otherwise reread menu effort.
 
+### Worktree preparation
+
+The owner's standing `worktree.prepare` command runs in the new flow
+worktree after creation and before the runner starts workers or checks.
+It also runs before the first session in every writer and reviewer
+worktree. The execution, log and failure checks are those under `emb run`;
+without a command, no preparation runs.
+
+A flow-worktree preparation failure at `--start` leaves the flow failed
+and keeps its record and worktree. The command exits 79, names the log and
+prints `next: emb flow --resume <id>`. A task-run preparation failure halts
+new runs in that flow. Running workers finish; prepared runs recheck the
+halt at admission, immediately before session creation, and do not launch.
+The preparation halt ends the attempt with exit 79.
+
+Resume retries unsuccessful preparation with the current setting and
+retains earlier attempts and logs. A successful preparation in an existing
+worktree is never repeated. Replacement runs are created only for children
+blocked by preparation, preserving completed writer work; unrelated lead
+stops still need their answers. Indeterminate preparation state refuses
+automatic continuation and names the log and worktree to inspect. Resume,
+close and prune end recorded preparation groups left behind.
+
 ### Runner
 
 The runner runs in a tmux session named `<flow id>` on Ember's private
@@ -1965,7 +2075,8 @@ together, and pending closes can be repeated after a crash.
 A flow waiting on stopped or conflicting tasks ends `stopped`, with no
 end event. Otherwise it ends `done`, with end exit 0 when every task
 merged or 82 when some were dropped or remain blocked. Failed and cancelled flows also
-emit end exit 82. Flow folders, check logs and briefs remain on disk.
+emit end exit 82, except preparation failures, which use exit 79.
+Flow folders, check logs and briefs remain on disk.
 
 ### Reviews
 
@@ -2063,10 +2174,23 @@ Findings are normalized individually:
 
 The decision uses normalized findings in this order: an unreadable review
 stops the task; any `must` with rounds left sends a fix turn to the same
-writer; any `must` without rounds left stops with `unresolved after <n> fix
-rounds`; any `lead` stops with `needs the lead`; verdict `pass` accepts;
-otherwise the task stops with `the review says fix but names no must or
-lead finding`. The round budget is the plan's `rounds`, including zero.
+writer; any `must` without rounds left stops with a reason naming the
+budget and its source; any `lead` stops with `needs the lead`; verdict
+`pass` accepts; otherwise the task stops with `the review says fix but names no must or
+lead finding`. The fix-round budget is the plan's `rounds`, including zero.
+When omitted, `flow.review_rounds` counts reviews per task and gives one
+fewer fix rounds. Exhaustion is described in the unit that set the budget:
+for example, `unresolved after 1 review (flow.review_rounds 1 allows no fix
+round)` or `unresolved after 2 fix rounds (plan rounds 2)`. No automatic
+extra fix round is added.
+
+The budget's value, unit and source are persisted at flow start and shown
+by `emb flow --status`, including the list form. JSON `review_budget` is
+`{"value": <integer>, "unit": "reviews" | "fix_rounds", "source":
+"flow.review_rounds" | "plan.rounds" | "default" | "unknown"}`. Records
+without that field use their saved fix-round count and source `unknown`,
+unless the saved plan explicitly names the matching `rounds`, when the
+source is `plan.rounds`. Current settings are not used to infer the source.
 
 A fix message starts with `Fix round <n> of task <id> in flow <flow id>.`
 It numbers only must findings, with location, problem, scenario and fix,
@@ -2213,6 +2337,7 @@ Both listings sort oldest first.
 | `answers/<n>.md` | Private copy of the correction for answer `n` |
 | `briefs/<task>-write-<n>.md`, `briefs/<task>-review-<n>.md`, `briefs/<task>-fix-<n>.md` | Writer briefs, review briefs and fix messages; artifact numbers increase across replacement writers and fresh round budgets |
 | Check logs | Each check attempt's output in a distinct file named by its `checks` entry |
+| Preparation logs | `prepare.log` for the first flow-worktree attempt; `prepare-<n>.log` for later attempts; mode 600 |
 | `watch.json` | `{"seq": <last reported event>}` |
 | `watch.lock` | The watch command's lock across event selection, output and cursor advancement |
 | `cursor.lock` | Serializes cursor writes and prevents regression |
@@ -2233,6 +2358,9 @@ refused. `save` updates `updated_at` and atomically replaces `flow.json`.
 | `branch`, `worktree` | `ember/flow/<id>` and `worktrees/<id>` in Ember's data folder, with symlinks resolved; the flow branch is created at this path. A record made before Ember 0.13.0 names `<main>/.ember/worktrees/<id>` |
 | `writer`, `reviewer` | Stored worker objects: `engine`, `model`, `effort`, `source` |
 | `rounds`, `parallel`, `check_timeout` | Plan limits; `parallel` is `flow.parallel` when the plan sets none |
+| `review_budget` | `value`, `unit` and `source` of the saved review budget, as described under Reviews |
+| `preparation`, `preparation_history` | Current flow-worktree preparation and earlier attempts; same attempt fields as a run; absent without preparation |
+| `preparation_halt` | Preparation failure halting admission of new runs, or null; absent without a preparation halt |
 | `check`, `trailers`, `read` | Plan argv, commit trailers and readable paths; lists |
 | `stall_minutes` | Stall interval: `--stall`, else `flow.stall` (default 10) |
 | `whole_review` | Whether `flow.whole_review` was on at start; the skill then runs one whole-flow review before merging |
@@ -2388,7 +2516,7 @@ The JSON watch report contains:
 |---|---|
 | `event` | `lead_stop`, `end` or `runner_lost` |
 | `flow`, `status`, `reason` | Flow id and current state |
-| `exit` | Null at a lead stop, 0 or 82 at the end, 72 when the runner is lost |
+| `exit` | Null at a lead stop, 0, 79 or 82 at the end, 72 when the runner is lost |
 | `branch`, `worktree`, `tip`, `dir` | Flow branch, worktree, tip and source checkout |
 | `tasks` | Task reports in plan order |
 | `stops` | Unread lead-stop events with their sequence, task, reason and available choices |
@@ -2453,8 +2581,9 @@ every top-level field except `tasks`, then each task's state and reason.
 `--status` alone lists flows oldest first as
 `<id>  <status>  <n>/<m> merged  <dir>`, or as JSON objects containing `id`,
 `status`, `reason`, `dir`, `branch`, `runner_live`, `merged`, `tasks`
-(the task count) and `denied_paths`. An unreadable flow is skipped with
-`emb flow: skipped <error>` on standard error.
+(the task count), `review_budget` and `denied_paths`. Text status prints
+the review budget in its saved unit with its source. An unreadable flow is
+skipped with `emb flow: skipped <error>` on standard error.
 
 ### Exit codes
 
@@ -2470,7 +2599,8 @@ every top-level field except `tasks`, then each task's state and reason.
 | 71 | Runner session failed to start | `next: emb flow --resume <id>` |
 | 72 | Runner lost before the flow ended | `next: emb flow --resume <id>` |
 | 74 | Interrupted watch; cursor unchanged | `next: emb flow --watch <id> --json` |
-| 75 | Runner live or starting, answer not allowed, flow already done, cancellation pending, cancellation of an ended flow, the 60-second cancellation deadline passed, or a lead answer on a cancelled flow | `--status` for the cancellation deadline, `--status`, `--watch`, or `--resume` for a cancelled lead answer |
+| 75 | Runner live or starting, answer not allowed, flow already done, indeterminate preparation on resume, cancellation pending, cancellation of an ended flow, the 60-second cancellation deadline passed, or a lead answer on a cancelled flow | `--status` for indeterminate preparation or the cancellation deadline, `--status`, `--watch`, or `--resume` for a cancelled lead answer |
+| 79 | Flow-worktree or task-run preparation failed | Inspect the named log, then `emb flow --resume <id>` |
 | 82 | Flow failed, was cancelled, or ended with tasks unmerged | The watch report's next action |
 
 Every nonzero exit prints an `emb flow:` diagnostic or watch report and
@@ -2588,6 +2718,22 @@ models.
 
 ### Running
 
+With a nonempty `worktree.prepare` command for the repository, every
+member's detached worktree is prepared before any member session starts.
+Preparation uses the execution and failure rules under `emb run` and
+writes each member run's `prepare.log`. The panel deadline begins when
+members start, after preparation. With no command, preparation adds no
+record, output or exit code.
+
+A preparation failure, preparation timeout or cancellation during
+preparation permanently stops admission. No member session starts;
+failing members are `failed`, unlaunched members are `not started`, and the
+panel is `incomplete` with exit 79. Records and worktrees stay. The
+diagnostic names preparation logs and the `next:` line gives a fresh
+panel invocation. A single-member retry of this batch is refused (75).
+Closing its runs removes owned worktrees with no worker turn, including
+changes left by preparation. Recovery starts no new member.
+
 Each member runs through its own Core instance in a daemon thread, with
 its own output buffers. Threads start in member order, one second apart
 (`START_SPACING`). Before any member starts, the panel records the source
@@ -2603,13 +2749,15 @@ The coordinator observes stop requests and the deadline at intervals of at
 most one second. `--stall` defaults to 10 minutes per member attempt. A
 start that exits 124 is collected once with `Core.recover`; another 124
 leaves the member `stalled` and its run open. No recovery sends another
-question. `--timeout` defaults to 30 minutes from the first start. At the
-deadline active jobs become `timed out`; member turns keep running.
+question. `--timeout` defaults to 30 minutes from the first member start,
+after preparation when configured. At the deadline active jobs become
+`timed out`; member turns keep running.
 
 SIGINT, SIGTERM and SIGHUP request a stop. Active members become
 `interrupted`, pending members become `not started`, and the panel exits
-74. A stop or deadline writes the record and summary, flushes captured
-member diagnostics, then accepts no further panel-file or output writes
+74, except during preparation as described above. A stop or deadline
+writes the record and summary, flushes captured member diagnostics, then
+accepts no further panel-file or output writes
 from member threads. Member runs are not interrupted or force-closed.
 
 Member statuses:
@@ -2675,7 +2823,8 @@ updates `updated_at` and atomically replaces `panel.json`.
 |---|---|
 | `schema_version` | Integer 1 |
 | `id` | Panel id |
-| `status` | `running`, `done` or `incomplete`; retry requires every member to be answered for `done`, start and recovery require no unfinished members |
+| `status` | `running`, `done` or `incomplete`; a stopped preparation batch is incomplete; retry requires every member to be answered for `done`, other start and recovery outcomes require no unfinished members |
+| `admission` | Optional preparation admission state: `preparing`, `admitted` or `stopped`; absent when preparation is not configured |
 | `dir` | Absolute checkout top |
 | `base` | Commit every member reads, including retries; null before pinning or in a record without this field |
 | `question_file` | Absolute source question path |
@@ -2683,7 +2832,7 @@ updates `updated_at` and atomically replaces `panel.json`.
 | `claim` | Claim used to select members, or null; not passed to runs |
 | `stall_minutes`, `timeout_minutes` | Limits of the latest start, recovery or retry |
 | `started_at`, `updated_at`, `ended_at` | Epoch seconds; `ended_at` is null until finalization |
-| `exit` | Null while running, then 0, 83 or 74 |
+| `exit` | Null while running, then 0, 79, 83 or 74 |
 | `members` | Member records in start order |
 | `left_out` | Saved members excluded from selection, each with `value` and `reason` |
 
@@ -2701,7 +2850,7 @@ updates `updated_at` and atomically replaces `panel.json`.
 | `closed`, `close_error` | Whether the run was closed, and any close refusal reason; panel close tracks remaining open current and retained runs |
 | `attempts` | Attempts with `kind` (`start`, `stall`, `recover`, `retry`), epoch `at` and `exit`; optional `run` holds a retained run id or null |
 
-Loading defaults a missing `base` to null and rejects other missing or
+Loading defaults a missing `base` to null and rejects other missing required or
 unknown fields, wrong types and unknown status values. Panel listing returns
 panels oldest first by `started_at`, then id, with unreadable panel folders reported separately. `emb run --status`
 and Overview skip panel folders and list member runs as ordinary runs.
@@ -2758,6 +2907,10 @@ whole operation. `MEMBER` is the one-based number printed on member lines.
 A failed, stalled, timed-out, interrupted or not-started member can be
 retried. Answered, pending, starting and running members are refused (75).
 An unknown panel or member number exits 65.
+
+A batch whose preparation stopped admission refuses single-member retry
+with exit 75. Inspect the preparation logs and use the printed fresh panel
+invocation to retry every member together.
 
 Before launching, retry closes the member's old run without force, even
 when its record is failed or closed. A refused close exits 75 and names
@@ -2946,6 +3099,7 @@ artifacts remain available.
 | 69 | Explicit engine disconnected or without a driver, git or tmux missing, unusable runtime folder, or panel creation fails with an operating-system error | `owner:` naming the fix; runtime and creation errors name `XDG_RUNTIME_DIR` |
 | 74 | Ctrl+C, SIGTERM or SIGHUP while members ran; member turns keep running | The recovery action, or panel and run status when no run id is known |
 | 75 | Recovery, retry or close while the panel lock is held; no unfinished member to collect; member cannot be retried; or a close was refused | `next: emb panel --status <id>` |
+| 79 | Member worktree preparation failed, timed out or was cancelled before admission | Inspect the named logs, then use the printed fresh panel invocation |
 | 83 | A member did not answer or changed paths | The result's next action above |
 
 ## `emb ground`
@@ -2975,18 +3129,27 @@ as `null (<reason>)`.
 | `directory.dirty` | `value`: whether `git status --porcelain` lists any path; `paths`: how many paths it lists. Ignored files are not counted, nor are the checkout's other worktrees inside its top, as `git worktree list` lists them, so an untracked folder such as `.claude/worktrees` that holds only worktrees is not counted |
 | `directory.remote` | `name`: `origin`, or else the first remote `git remote` lists; `url`: its URL; `kind`: `github` when the URL's host is `github.com`, otherwise `other` |
 | `directory.files` | Whether `CLAUDE.md` and `AGENTS.md` are files at the top of the checkout |
+| `directory.prepare` | `state`: `set`, `none` or `unset`; `command`: the saved nonempty command, empty string or null respectively; `repository`: the resolved absolute main checkout path |
 
 A value that cannot be read is null, and in JSON a sibling key
 `<field>_reason` holds the reason: for example `"remote": null` with
 `"remote_reason": "the repository has no remote"`. Outside a git checkout
-`git` is false and `top`, `branch`, `dirty`, `remote` and `files` are null with
-the reason `not a git checkout`. When git cannot run, `git` is null as well.
+`git` is false and `top`, `branch`, `dirty`, `remote`, `files` and `prepare`
+are null with the reason `not a git checkout`. When git cannot run, `git`
+is null as well.
 
 Git runs with `LC_ALL=C` and without the variables that point it at another
 repository (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`,
 `GIT_OBJECT_DIRECTORY`, `GIT_NAMESPACE` and `GIT_PREFIX`). It runs with
 `GIT_OPTIONAL_LOCKS=0`, so `git status` takes no `index.lock` and does not
 rewrite the index.
+
+Preparation is read from the owner's standing `worktree.prepare` setting,
+matched by common git folder, including when `--dir` is in a linked
+worktree. It is not read from repository files. Lookup or main-checkout
+inspection failure gives `prepare: null` and `prepare_reason`. Text prints
+`prepare: <state> for <repository>`, adding `: <command>` when set. Ground
+runs no preparation command.
 
 `worktree.baseRef` is read from the user settings file, then, in a
 checkout, from the top's `.claude/settings.json` and
@@ -3036,6 +3199,16 @@ from the repository's main checkout, which cleanup never removes.
 - A branch already contained in `TARGET` (see `emb cleanup`) is not merged
   again; the first line is `already contained: BRANCH at <commit> in TARGET at
   <commit>`.
+- For a completed `ember/flow/<id>` branch with a matching flow record
+  whose status is `done`, the flow tip must contain the local `--into`
+  target tip. Ember checks `git merge-base --is-ancestor <target tip>
+  <flow tip>` before containment or merging. A failure exits 75 and merges
+  nothing. Its `next:` line names merging the target into the flow branch
+  in the recorded worktree, the saved plan check argv to run again there
+  (or that no check is configured), and `emb merge` again. An unreadable
+  or mismatched flow record also refuses with exit 75 and a flow status
+  action. Run branches, non-completed flows and flow branches with no
+  record have no such target-tip check.
 - Otherwise the target's worktree must have no unfinished merge, rebase,
   cherry-pick or revert (`MERGE_HEAD`, `REBASE_HEAD`, `rebase-merge`,
   `rebase-apply`, `CHERRY_PICK_HEAD` or `REVERT_HEAD` in its git folder) (75),
@@ -3061,6 +3234,14 @@ from the repository's main checkout, which cleanup never removes.
 - A squash conflict exits 75 naming the conflicting files, leaving the
   target unchanged with no merge to abort. Resolve on the worker branch,
   review, then repeat `emb merge` with `--subject`.
+- For completed flow branches with a matching record, Ember builds the
+  merge tree and a two-parent merge commit before advancing the target.
+  It runs `pre-merge-commit`, then the target's `commit-msg` hook, and
+  honours `commit.gpgsign`. A hook or commit-writing refusal exits 77.
+  Before fast-forwarding the checked-out target, it checks both tips and
+  that the target is still checked out there. A moved tip or changed
+  checkout exits 76 without merging. The merge message follows the title
+  rules below and carries `Ember-Verdict`.
 - For other branches, Ember runs
   `git merge --no-ff --no-edit -m <message> refs/heads/BRANCH` in the target
   worktree. `<message>` comes from `git fmt-merge-msg --no-log`:
@@ -3097,6 +3278,9 @@ without a run record, with the worktree its flow record names. Cleanup keeps it 
 `the flow <id> is running` and `next: emb flow --status <id>`. A task branch
 merged into a flow branch is merged in the flow worktree and cleaned up by
 the same rules.
+
+`emb merge` already cleans up the branch it merged and its worktree when
+cleanup checks allow removal. An empty `emb cleanup` afterwards is expected.
 
 `--json` prints one object:
 
@@ -3254,7 +3438,7 @@ not pruned.
 emb cleanup --merged-into TARGET [--branch BRANCH] [--claim ID] [--dir DIR] [--dry-run] [--json]
 ```
 
-Removes the Ember run branches `TARGET` contains, with their run's worktree
+Removes the Ember run and flow branches `TARGET` contains, with their worktree
 and session. `DIR` is a folder in the git checkout; the default is the current
 folder.
 
@@ -3285,6 +3469,12 @@ It needs no live claim. Records with no claim do not match; an unmatched id
 handles nothing. With both `--branch` and `--claim`, the named branch is
 handled only if its recorded claim matches. Without `--claim`, cleanup
 remains repository-wide unless narrowed by `--branch`.
+
+An empty result prints `emb cleanup: no Ember run or flow branch left
+against <target>` on standard error, adding `for claim <id>` when a claim
+filter was given. JSON remains an empty list. A successful `emb merge`
+already performs cleanup of its merged branch, so this can be the result
+of a subsequent cleanup.
 
 A flow branch `ember/flow/<flow id>` is a run branch with no run record;
 its worktree is the path its flow record names, or, with no flow record,
@@ -3409,9 +3599,9 @@ Other merge and cleanup exits, including 76 and 77, print no report line.
 | 64 | Usage error, no Keep verdict, or missing or invalid `--subject` for an Ember run branch |
 | 65 | The folder is not in a git checkout, or a named branch or target does not exist |
 | 70 | A git command failed: the merge, making the merge message, finding the target's git folder, listing worktrees, `git status`, worktree removal, prune or branch deletion |
-| 75 | Refused: the target is checked out nowhere, its worktree has an unfinished merge, rebase, cherry-pick or revert, or its tree is not clean, or a merge conflict |
-| 76 | The target or worker branch moved while building a squash; target not advanced |
-| 77 | The target's `commit-msg` hook, commit identity or signing configuration refused the squash; nothing moved |
+| 75 | Refused: the target is checked out nowhere, its worktree has an unfinished merge, rebase, cherry-pick or revert, its tree is not clean, a merge conflict, an unreadable or mismatched flow record, or a completed flow tip that does not contain the target tip |
+| 76 | The target or worker branch moved while building a squash or completed-flow merge, or the checked-out target changed before that flow merge; target not advanced |
+| 77 | The target's `commit-msg` hook, commit identity or signing configuration refused a squash or completed-flow merge, or `pre-merge-commit` refused that flow merge; nothing moved |
 
 ## `emb deps`
 
@@ -4335,7 +4525,7 @@ still apply to them.
 
 ### Settings
 
-Settings has two groups. Each change saves at once.
+Settings has three groups. Each change saves at once.
 
 | Group | Row | Key | Control |
 |---|---|---|---|
@@ -4344,6 +4534,7 @@ Settings has two groups. Each change saves at once.
 | Workers | Worker network | `worker.network` | Switch |
 | Workers | Terminal | `terminal` | Picker; Other command shows a text field |
 | Workers | Sandbox read paths | `sandbox.read` | One row per folder with a remove button; Add folder |
+| Worktree preparation | Repositories and commands | `worktree.prepare` | Add repository; Edit and Remove on each row |
 
 After Start at login changes, the app writes or removes the autostart entry
 and shows the reason under the switch when it could not.
@@ -4364,6 +4555,15 @@ Secret and configuration folders can be added by hand, except Ember's
 configuration and state folders. Adding either of those, a descendant or
 a symlink alias is refused with the reason. The same restriction applies
 to `emb choices --set sandbox.read=...`.
+
+Worktree preparation, Add repository opens a folder chooser for the
+repository's main checkout, then asks for a shell command. Each row shows
+the repository and command, or No preparation for an empty command. Edit
+changes the command; Remove deletes the entry. An empty command explicitly
+means no preparation; no entry leaves the repository unset. Invalid or
+duplicate paths are refused with the reason. The command runs in every
+new Ember worktree outside the worker sandbox before a worker or check
+starts, as described under `emb run`.
 
 ### Files
 
