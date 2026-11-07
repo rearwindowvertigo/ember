@@ -451,16 +451,13 @@ class TooltipRow(QWidget):
         return self.reset.sizeHint().width() + theme.SPACE[1]
 
     def control_width(self, minimum: bool = False) -> int:
-        """Return the control column's preferred or minimum width with Reset."""
+        """Return the control's preferred or minimum width, excluding Reset."""
         width = self.control.sizeHint().width()
         if isinstance(self.control, QComboBox) and minimum:
             width = theme.PICKER_MIN_WIDTH
-        return (
-            max(theme.PICKER_MIN_WIDTH if minimum else CONTROL_COLUMN, width)
-            + self.reset_width()
-        )
+        return max(theme.PICKER_MIN_WIDTH if minimum else CONTROL_COLUMN, width)
 
-    def fit(self, width: int, stacked: bool) -> None:
+    def fit(self, width: int, stacked: bool, reset_width: int) -> None:
         """Set the common column width and put the control beside or below its name."""
         self.stacked = stacked
         self.box.setDirection(
@@ -476,6 +473,7 @@ class TooltipRow(QWidget):
         )
         slot = self.slot.layout()
         assert slot is not None
+        slot.setContentsMargins(0, 0, max(0, reset_width - self.reset_width()), 0)
         if not isinstance(self.control, QComboBox):
             slot.setAlignment(
                 self.control,
@@ -503,11 +501,12 @@ class _ControlFit(QObject):
         self.rows = rows
         for row in rows:
             row.installEventFilter(self)
-        width = max([CONTROL_COLUMN, *(r.control_width() for r in rows)])
+        reset_width = max((row.reset_width() for row in rows), default=0)
+        width = max([CONTROL_COLUMN, *(r.control_width() for r in rows)]) + reset_width
         if not any(r.isVisible() for r in rows):
             self.last_width = width
             for row in rows:
-                row.fit(width, False)
+                row.fit(width, False, reset_width)
         self.timer.start(0)
         return width
 
@@ -515,8 +514,11 @@ class _ControlFit(QObject):
         rows = [row for row in self.rows if row.isVisible()]
         if not rows:
             return
-        preferred = max(CONTROL_COLUMN, *(row.control_width() for row in rows))
-        floor = max(row.control_width(minimum=True) for row in rows)
+        reset_width = max(row.reset_width() for row in rows)
+        preferred = (
+            max(CONTROL_COLUMN, *(row.control_width() for row in rows)) + reset_width
+        )
+        floor = max(row.control_width(minimum=True) for row in rows) + reset_width
         correction = 0
         if self.area is not None:
             column = self.area.widget()
@@ -543,7 +545,7 @@ class _ControlFit(QObject):
                 if stacked and row.isVisible()
                 else self.last_width
             )
-            row.fit(width, stacked)
+            row.fit(width, stacked, reset_width)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
         """Refit after viewport resizing or a row's visibility changes."""

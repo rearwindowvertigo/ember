@@ -48,6 +48,7 @@ from PySide6.QtGui import (
     QTextCharFormat,
     QTextDocument,
     QTextLayout,
+    QWheelEvent,
 )
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -742,10 +743,23 @@ class Segmented(QWidget):
     def set_value(self, value: str) -> None:
         """Choose a value without emitting `changed`.
 
+        Focus within the control follows the new value and keeps its ring.
+
         Raises:
             ValueError: The value is not one of the options.
         """
-        self._buttons[self._values.index(value)].setChecked(True)
+        target = self._buttons[self._values.index(value)]
+        if target.isChecked():
+            return
+        focused = next((button for button in self._buttons if button.hasFocus()), None)
+        target.setChecked(True)
+        if focused is not None:
+            reason = (
+                Qt.FocusReason.TabFocusReason
+                if focus_visible(focused)
+                else Qt.FocusReason.MouseFocusReason
+            )
+            target.setFocus(reason)
 
     def set_changed(self, changed: bool) -> None:
         """Mark the selected segment unless any segment has keyboard focus."""
@@ -865,6 +879,10 @@ class Picker(QComboBox):
         self.setModel(self._model)
         self.setItemDelegate(_PickerDelegate(self))
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        """Let the parent scroll without changing the chosen item."""
+        event.ignore()
 
     def set_changed(self, changed: bool) -> None:
         """Mark the closed field as different from its setting's default."""

@@ -20,6 +20,7 @@ from PySide6.QtGui import (
     QPaintEvent,
     QTextLayout,
 )
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QPushButton,
+    QScrollArea,
     QToolTip,
     QVBoxLayout,
     QWidget,
@@ -209,6 +211,55 @@ def test_segmented_click_and_set_value(qtbot: QtBot) -> None:
         control.set_value("other")
 
 
+@pytest.mark.parametrize("focused_segment", [1, 2, None])
+@pytest.mark.parametrize(
+    "reason", [Qt.FocusReason.TabFocusReason, Qt.FocusReason.MouseFocusReason]
+)
+def test_segmented_value_change_follows_focus_within_control(
+    qtbot: QtBot,
+    focus_host: tuple[QWidget, QPushButton, QComboBox],
+    focused_segment: int | None,
+    reason: Qt.FocusReason,
+) -> None:
+    host, other, combo = focus_host
+    control = widgets.Segmented((("a", "A"), ("b", "B"), ("c", "C")))
+    layout = host.layout()
+    assert layout is not None
+    layout.addWidget(control)
+    control.show()
+    control.set_value("b")
+    # TabFocusReason can show a ring while the last input was the mouse,
+    # as it does when Reset returns focus to the selected segment.
+    qtbot.mouseClick(other, Qt.MouseButton.LeftButton)
+    combo.setFocus(Qt.FocusReason.MouseFocusReason)
+    focused = other if focused_segment is None else control.buttons()[focused_segment]
+    focused.setFocus(reason)
+    assert focused.hasFocus()
+    with qtbot.assertNotEmitted(control.changed):
+        control.set_value("a")
+    assert control.value() == "a"
+    target = other if focused_segment is None else control.buttons()[0]
+    assert target.hasFocus()
+    assert widgets.focus_visible(target) == (reason == Qt.FocusReason.TabFocusReason)
+    if focused_segment is not None:
+        assert not widgets.focus_visible(focused)
+
+
+def test_segmented_unchanged_value_keeps_focus_on_unselected_segment(
+    qtbot: QtBot, focus_host: tuple[QWidget, QPushButton, QComboBox]
+) -> None:
+    host, _other, _combo = focus_host
+    control = widgets.Segmented((("a", "A"), ("b", "B")))
+    layout = host.layout()
+    assert layout is not None
+    layout.addWidget(control)
+    control.show()
+    control.buttons()[1].setFocus(Qt.FocusReason.TabFocusReason)
+    with qtbot.assertNotEmitted(control.changed):
+        control.set_value("a")
+    assert widgets.focus_visible(control.buttons()[1])
+
+
 @pytest.mark.parametrize(
     "options",
     [
@@ -251,6 +302,67 @@ def test_picker_first_option_after_header_is_chosen(qtbot: QtBot) -> None:
     picker.add_option("gpt-5", "gpt-5")
     assert picker.currentIndex() == 1
     assert picker.value() == "gpt-5"
+
+
+@pytest.mark.parametrize("focused", [False, True])
+@pytest.mark.parametrize("delta", [-120, 120])
+def test_picker_wheel_scrolls_parent_without_changing_value(
+    qtbot: QtBot, focused: bool, delta: int
+) -> None:
+    area = QScrollArea()
+    qtbot.addWidget(area)
+    area.setWidgetResizable(True)
+    content = QWidget()
+    layout = QVBoxLayout(content)
+    other = QPushButton("Other control")
+    layout.addWidget(other)
+    layout.addSpacing(300)
+    picker = widgets.Picker()
+    for value in ("First", "Second", "Third"):
+        picker.add_option(value, value)
+    picker.setCurrentIndex(1)
+    layout.addWidget(picker)
+    layout.addSpacing(600)
+    area.setWidget(content)
+    area.resize(400, 250)
+    area.show()
+    qtbot.waitExposed(area)
+    area.activateWindow()
+    qtbot.waitActive(area)
+    area.ensureWidgetVisible(picker)
+    QApplication.processEvents()
+    (picker if focused else other).setFocus()
+    assert picker.hasFocus() == focused
+    bar = area.verticalScrollBar()
+    before = bar.value()
+    assert 0 < before < bar.maximum()
+    assert not picker.view().isVisible()
+    window = area.windowHandle()
+    assert window is not None
+    position = picker.mapTo(area, picker.rect().center())
+    with qtbot.assertNotEmitted(picker.currentIndexChanged):
+        QTest.wheelEvent(window, position, QPoint(0, delta))
+    assert picker.currentIndex() == 1
+    qtbot.waitUntil(lambda: bar.value() != before)
+    assert (bar.value() > before) == (delta < 0)
+
+
+def test_picker_keyboard_and_popup_selection(qtbot: QtBot) -> None:
+    picker = widgets.Picker()
+    qtbot.addWidget(picker)
+    for value in ("First", "Second", "Third"):
+        picker.add_option(value, value)
+    picker.show()
+    picker.setFocus()
+    qtbot.keyClick(picker, Qt.Key.Key_Down)
+    assert picker.currentIndex() == 1
+    qtbot.mouseClick(picker, Qt.MouseButton.LeftButton)
+    view = picker.view()
+    assert view.isVisible()
+    qtbot.keyClick(view, Qt.Key.Key_Down)
+    qtbot.keyClick(view, Qt.Key.Key_Return)
+    assert picker.currentIndex() == 2
+    assert not view.isVisible()
 
 
 def test_picker_dropdown_paints(qtbot: QtBot) -> None:
