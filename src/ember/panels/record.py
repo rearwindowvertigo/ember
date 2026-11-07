@@ -187,12 +187,20 @@ def _validate(panel_id: str, panel: object) -> None:
     fields = dict(_PANEL_FIELDS)
     if isinstance(panel, dict) and choices.OPENCODE_ID_FORMAT in panel:
         fields[choices.OPENCODE_ID_FORMAT] = "int"
+    if isinstance(panel, dict) and "admission" in panel:
+        fields["admission"] = "str"
     _fields(panel_id, panel, fields, PANEL_NAME)
     assert isinstance(panel, dict)
     if not is_panel_id(panel_id) or panel["id"] != panel_id:
         raise PanelError(panel_id, "panel.json names an invalid or different panel")
     if panel["schema_version"] != 1 or panel["status"] not in PANEL_STATUSES:
         raise PanelError(panel_id, "panel.json has an invalid version or status")
+    if "admission" in panel and panel["admission"] not in (
+        "preparing",
+        "admitted",
+        "stopped",
+    ):
+        raise PanelError(panel_id, "panel.json has an invalid admission state")
     for key in ("stall_minutes", "timeout_minutes"):
         if panel[key] <= 0:
             raise PanelError(panel_id, f"panel.json has an invalid {key}")

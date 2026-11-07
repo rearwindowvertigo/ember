@@ -616,3 +616,52 @@ def test_invalid_owner_fields(env: dict[str, str], key: str, value: object) -> N
     run = _run(env)
     with pytest.raises(record.RecordError, match=key):
         record.from_json({**run.to_json(), key: value}, run.folder, env)
+
+
+@pytest.mark.parametrize(
+    "state", ["running", "ok", "failed", "timeout", "interrupted", "not-started"]
+)
+def test_preparation_round_trip(env: dict[str, str], state: str) -> None:
+    preparation: dict[str, Any] = {
+        "command": "npm ci",
+        "state": state,
+        "log": "/run/prepare.log",
+        "pid": 123,
+        "start": 456,
+    }
+    if state != "running":
+        preparation.update(exit=0, seconds=1.5, left_behind=[], message=None)
+    run = replace(
+        _run(env), preparation=preparation, start_argv=("emb", "run", "--read-only")
+    )
+    record.save(run)
+    assert record.load(run.id, env) == run
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"state": "unknown"},
+        {"pid": True},
+        {"start": -1},
+        {"pid": 123},
+        {"command": None},
+        {"log": 3},
+        {"state": "ok", "exit": 0, "seconds": -1, "left_behind": []},
+        {"state": "failed", "exit": False, "seconds": 0, "left_behind": []},
+        {"state": "failed", "seconds": 0, "left_behind": [3]},
+    ],
+)
+def test_invalid_preparation_refuses_record(
+    env: dict[str, str], changes: dict[str, Any]
+) -> None:
+    run = _run(env)
+    preparation = {
+        "command": "true",
+        "log": "/run/prepare.log",
+        "state": "running",
+        **changes,
+    }
+    value = {**run.to_json(), "preparation": preparation}
+    with pytest.raises(record.RecordError, match="invalid preparation"):
+        record.from_json(value, run.folder, env)

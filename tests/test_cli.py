@@ -1957,7 +1957,7 @@ def test_failed_launch_keeps_no_worker_report_in_status(
     previous = record.load(finished_cli_run, run_env)
 
     def fail(
-        self: core.Core, run: record.Run, *args: object
+        self: core.Core, run: record.Run, *args: object, **kwargs: object
     ) -> tuple[record.Run, str | None]:
         record.update(run, {"turn": 1, "turn_state": record.SENT})
         raise core.RunError(69, "cannot launch", "runtime", run=run.id)

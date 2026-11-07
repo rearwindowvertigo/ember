@@ -59,6 +59,13 @@ source checkout's `HEAD`. The brief includes the plan text, including an
 uncommitted plan, and tells it to use its own working folder without
 naming the source checkout. Other uncommitted repository edits are absent.
 
+The repository's `worktree.prepare` command runs in the reviewer's worktree
+before its session starts, as `references/runs.md` describes. On preparation
+failure, exit 79 names the log and the `next:` line repeats the original
+`emb gapcheck` invocation. Inspect the log before retrying; no reviewer
+started. The `--brief` and `--reply` routes create no worktree and run no
+preparation.
+
 Use the run's existing claim. `emb gapcheck` uses the owner's Gap check
 reviewer row (`gapcheck.reviewer`, which follows `single.reviewer` while
 `same`). When the owner named the reviewer, or that row is not `set`, pass
@@ -135,13 +142,28 @@ Then offer the remaining `medium` and `low` gaps together as one question
 whose recommended answer accepts their checked defaults into the failure
 model. An empty gap list needs no question.
 
-Record every owner answer and every default taken with:
+Record an owner answer or a corrected default with:
 
 ```bash
 emb gapcheck --answer <scratch>/gapcheck-<plan stem>-<n>.json --id <gap id> --text '<answer>'
 ```
 
-For a grouped question, run this command for every gap id in the group.
+This form also overwrites an existing answer on an active or settled gap.
+For a grouped question with distinct answers, run it for every gap id.
+
+After checking each default's factual premise as above, record several
+unchanged defaults in one call:
+
+```bash
+emb gapcheck --answer <scratch>/gapcheck-<plan stem>-<n>.json --take-defaults g1,g3 --take-defaults g5
+```
+
+List every id explicitly; there is no `all`. Use only defaults you may
+take under the owner-answer rules above. This writes each gap's own
+`Default taken: <default>` answer. It cannot be combined with `--id` or
+`--text`. Under the result lock, Ember validates the whole batch before
+writing: an unknown, duplicate, settled or already answered id refuses
+with exit 64 and leaves the result unchanged.
 
 Ember validates and updates the result. Do not edit the JSON by hand.
 The answer is stored once, on its gap in `steps` (or `settled` for an

@@ -205,6 +205,12 @@ class Run:
     parent: dict[str, Any] | None = None
     """The Ember command that started the run, from `parent()`; None for `emb run`."""
 
+    preparation: dict[str, Any] | None = None
+    """Preparation state, command, process identity and result, when configured."""
+
+    start_argv: tuple[str, ...] = ()
+    """The start command with its saved brief, for a preparation retry."""
+
     folder: Path = field(default=Path(), compare=False)
     """The run's folder."""
 
@@ -223,6 +229,8 @@ class Run:
             if item.name in ("folder", "env"):
                 continue
             value = getattr(self, item.name)
+            if item.name in ("preparation", "start_argv") and not value:
+                continue
             result[item.name] = list(value) if isinstance(value, tuple) else value
         result[choices.OPENCODE_ID_FORMAT] = 1
         return result
@@ -247,6 +255,8 @@ _TYPES: dict[str, tuple[tuple[type, ...], bool]] = {
     "detached": ((bool,), False),
     "last_screen_change_at": ((int, float), True),
     "parent": ((dict,), True),
+    "preparation": ((dict,), True),
+    "start_argv": ((list,), False),
     "sandbox": (_STR, False),
     "sandbox_paths": ((dict,), False),
     "network": ((bool,), False),
@@ -541,6 +551,8 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
         "detached": False,
         "last_screen_change_at": None,
         "parent": None,
+        "preparation": None,
+        "start_argv": [],
         **value,
     }
     values: dict[str, Any] = {}
@@ -578,6 +590,10 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
         raise RecordError(name, "run.json has an invalid turn_state")
     if values["parent"] is not None and not _valid_parent(values["parent"]):
         raise RecordError(name, "run.json has an invalid parent")
+    if values["preparation"] is not None and not _valid_preparation(
+        values["preparation"]
+    ):
+        raise RecordError(name, "run.json has an invalid preparation")
     if values["answered_at"] is not None and not _nonnegative_number(
         values["answered_at"]
     ):
@@ -594,6 +610,38 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
     if choices.OPENCODE_ID_FORMAT not in value and values["engine"] == "opencode":
         values["model"] = choices.full_opencode_id(values["model"])
     return Run(**values, folder=folder, env=_env(env))
+
+
+def _valid_preparation(value: dict[str, Any]) -> bool:
+    """Check preparation state and the identity used for process cleanup."""
+    if value.get("state") not in (
+        "running",
+        "ok",
+        "failed",
+        "timeout",
+        "interrupted",
+        "not-started",
+    ):
+        return False
+    if not isinstance(value.get("command"), str) or not isinstance(
+        value.get("log"), str
+    ):
+        return False
+    for key in ("pid", "start"):
+        item = value.get(key)
+        if item is not None and (type(item) is not int or item < 1):
+            return False
+    if (value.get("pid") is None) != (value.get("start") is None):
+        return False
+    if value["state"] == "running":
+        return True
+    return (
+        (value.get("exit") is None or type(value["exit"]) is int)
+        and _nonnegative_number(value.get("seconds"))
+        and isinstance(value.get("left_behind"), list)
+        and all(isinstance(path, str) for path in value["left_behind"])
+        and (value.get("message") is None or isinstance(value["message"], str))
+    )
 
 
 def _valid_parent(value: dict[str, Any]) -> bool:

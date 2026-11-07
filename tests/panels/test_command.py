@@ -1,5 +1,6 @@
 import io
 import json
+import shlex
 import signal
 import sqlite3
 import threading
@@ -603,6 +604,107 @@ def test_retry_refuses_member_status(h: Harness, status: str) -> None:
     code, out, err = h.invoke("--retry", panel_id, "1", "--json")
     assert code == 75 and not out and f"member 1 is {status}" in err
     assert record.load(panel_id, h.env) == panel
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_preparation_failure_retries_whole_panel_and_keeps_logs(
+    h: Harness, as_json: bool
+) -> None:
+    choices.set_settings(
+        {"worktree.prepare": {str(h.repo): "echo broken; exit 12"}}, env=h.env
+    )
+    options = ["--json"] if as_json else []
+    code, out, err = h.start(
+        "--member",
+        "codex:x@high",
+        "--member",
+        "claude:y@low",
+        "--read",
+        str(h.tmp),
+        "--stall",
+        "2",
+        "--timeout",
+        "3",
+        *options,
+    )
+    assert code == 79
+    panels, errors = record.list_panels(h.env)
+    assert len(panels) == 1 and not errors
+    panel = panels[0]
+    panel_id = panel["id"]
+    assert panel["status"] == "incomplete" and panel["admission"] == "stopped"
+    assert all(m["status"] in ("failed", "not started") for m in panel["members"])
+    assert any(m["status"] == "failed" for m in panel["members"])
+    assert not any(item[0] == "new-session" for item in tmux_log(h.tmp))
+    (next_line,) = actions(err)
+    assert "prepare.log" in next_line
+    argv = shlex.split(next_line.split(", then ", 1)[1])
+    assert argv[:2] == ["emb", "panel"]
+    args = build_parser().parse_args(argv[1:])
+    assert args.question_file == str(record.folder(panel_id, h.env) / "question.md")
+    assert args.member == ["codex:x@high", "claude:y@low"]
+    assert args.dir == str(h.repo) and args.read == [str(h.tmp)]
+    assert args.stall == 2 and args.timeout == 3
+    for item in panel["members"]:
+        if item["run"]:
+            saved = runs.load(item["run"], h.env)
+            if saved.preparation:
+                assert f"preparation log: {saved.preparation['log']}" in err
+                assert Path(saved.preparation["log"]).stat().st_mode & 0o777 == 0o600
+    if as_json:
+        result = json.loads(out)
+        assert result["exit"] == 79 and result["status"] == "incomplete"
+        assert result["next"] == next_line
+    for number in ("1", "2"):
+        code, out, err = h.invoke("--retry", panel_id, number, "--json")
+        assert code == 75 and not out and "stopped admission" in err
+        assert actions(err) == [next_line]
+    code, out, err = h.invoke("--recover", panel_id, "--json")
+    assert code == 79 and json.loads(out)["status"] == "incomplete"
+    assert actions(err) == [next_line]
+    assert not any(item[0] == "new-session" for item in tmux_log(h.tmp))
+    h.question.unlink()
+    choices.set_settings({"worktree.prepare": {str(h.repo): "true"}}, env=h.env)
+    code, out, err = h.invoke(*argv[2:], "--json")
+    assert code == 0, err
+    assert json.loads(out)["panel"] != panel_id
+
+
+def test_close_preparation_failure_removes_dirty_worktree_and_keeps_log(
+    h: Harness,
+) -> None:
+    choices.set_settings(
+        {"worktree.prepare": {str(h.repo): "echo dirty; : > stray"}}, env=h.env
+    )
+    code, out, err = h.start("--member", "codex:x", "--json")
+    assert code == 79, err
+    result = json.loads(out)
+    panel_id = result["panel"]
+    saved = runs.load(result["members"][0]["run"], h.env)
+    assert (Path(saved.worktree) / "stray").is_file()
+    log = saved.folder / "prepare.log"
+    before = log.read_bytes()
+    code, out, err = h.invoke("--close", panel_id, "--json")
+    assert code == 0, err
+    assert json.loads(out)["members"][0]["closed"]
+    assert not Path(saved.worktree).exists()
+    assert runs.load(saved.id, h.env).status == runs.CLOSED
+    assert log.read_bytes() == before
+    code, out, _ = h.invoke("--retry", panel_id, "1", "--json")
+    assert code == 75 and not out
+
+
+def test_stop_before_preparation_starts_stops_batch(h: Harness) -> None:
+    choices.set_settings({"worktree.prepare": {str(h.repo): "true"}}, env=h.env)
+    stop = threading.Event()
+    stop.set()
+    code, out, err = h.start("--member", "codex:x", "--json", stop=stop)
+    assert code == 79
+    result = json.loads(out)
+    assert result["status"] == "incomplete"
+    assert result["members"][0]["status"] == "not started"
+    assert result["members"][0]["run"] is None
+    assert actions(err)[0].startswith("next: emb panel --question-file ")
 
 
 @pytest.mark.parametrize("as_json", [False, True])

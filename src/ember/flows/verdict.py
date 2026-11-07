@@ -1,6 +1,7 @@
 """Read flow review replies and decide whether a task needs another turn."""
 
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from importlib import resources
 from typing import Any
@@ -10,6 +11,32 @@ from ember.gapcheck.reply import extract_json
 SEVERITIES = ("must", "should", "lead")
 VERDICTS = ("pass", "fix")
 SCHEMA_NAME = "review-reply.schema.json"
+
+
+def budget_text(budget: Mapping[str, Any], *, fix_rounds: int | None = None) -> str:
+    """Describe a budget or completed work in the budget's original unit."""
+    value = budget["value"]
+    reviews = budget["unit"] == "reviews"
+    count = value if fix_rounds is None else fix_rounds + int(reviews)
+    unit = "review" if reviews else "fix round"
+    amount = f"{count} {unit}{'' if count == 1 else 's'}"
+    budget_unit = f"fix round{'' if value == 1 else 's'}"
+    source = budget["source"]
+    if source == "flow.review_rounds":
+        allowed = value - 1
+        fixes = (
+            "no fix round"
+            if allowed == 0
+            else f"{allowed} fix round{'' if allowed == 1 else 's'}"
+        )
+        detail = f"flow.review_rounds {value} allows {fixes}"
+    elif source == "plan.rounds":
+        detail = f"plan rounds {value}"
+    elif source == "default":
+        detail = f"default {value} {budget_unit}"
+    else:
+        detail = f"budget {value} {budget_unit}; source unknown"
+    return f"{amount} ({detail})"
 
 
 @dataclass(frozen=True)
@@ -47,19 +74,17 @@ class Review:
             for severity in SEVERITIES
         }
 
-    def decision(self, rounds_left: int) -> tuple[str, str | None]:
-        """Return fix, accept or stop, with a reason for a stop.
-
-        The caller replaces `<n>` in the exhausted-budget reason with the
-        number of fix rounds completed in its current budget.
-        """
+    def decision(
+        self, rounds_left: int, *, exhausted_reason: str = "review budget exhausted"
+    ) -> tuple[str, str | None]:
+        """Return fix, accept or stop, using the caller's budget stop reason."""
         if self.verdict is None:
             return "stop", f"the review is unreadable: {self.problem}"
         counts = self.counts()
         if counts["must"]:
             if rounds_left > 0:
                 return "fix", None
-            return "stop", "unresolved after <n> fix rounds"
+            return "stop", exhausted_reason
         if counts["lead"]:
             return "stop", "needs the lead"
         if self.verdict == "pass":

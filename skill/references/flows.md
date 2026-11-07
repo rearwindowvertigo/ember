@@ -33,8 +33,10 @@ Write a JSON plan in the session scratchpad:
 - `dir`: the absolute checkout path; `base` only when other than `HEAD`.
 - `trailers`: the harness attribution trailer in a list.
 - `rounds`: leave it out; the flow then uses the owner's Max review
-  rounds row. Set it only for a flow that needs a different count, and say
-  why before the dry run. `parallel`: leave it out; the flow then uses the
+  rounds row (`flow.review_rounds`), which counts reviews per task. A plan's
+  `rounds` counts fix rounds, one fewer than reviews. Set it only for a flow
+  that needs a different count, and say why before the dry run.
+  `parallel`: leave it out; the flow then uses the
 owner's Max tasks at once row (`flow.parallel`). The stall time comes from
 Stall after (`flow.stall`) unless you pass `--stall`.
 - `check`: an argv list for the repository's full check. It runs on the
@@ -124,6 +126,26 @@ and cleanup, including for flows started under the old layout. A worktree
 folder inside any Git working tree or the source repository's git folder
 exits 69, naming the folder and the setting that placed it there.
 
+The new flow worktree starts with tracked files, without installed
+dependencies, generated files or ignored local configuration. The owner's
+standing `worktree.prepare` command runs there after creation and before
+the runner starts workers or checks. It also runs in every new writer and
+reviewer worktree before its session starts; `references/runs.md` covers
+the setting, execution and failure checks. With no command, Ember performs
+no preparation.
+
+A flow-worktree preparation failure at `--start` leaves the flow failed
+with exit 79 and its worktree kept. A task-run preparation failure halts
+new runs in that flow. Running worker sessions finish; prepared runs
+recheck the halt immediately before session creation and do not launch.
+Inspect the named log and follow `next: emb flow --resume <id>`. Resume
+retries unsuccessful preparation with the current setting, keeps earlier
+logs and never repeats successful preparation in an existing worktree.
+It creates replacement runs only for children blocked by preparation,
+keeps completed writer work, and leaves unrelated lead stops for their
+owner answers. An indeterminate preparation state refuses automatic
+continuation; inspect its log and worktree.
+
 ## Lead stops and owner decisions
 
 A `lead_stop` returns exit 0; it is not a completed flow. For every stop,
@@ -176,6 +198,15 @@ after the owner answers. Exit 77 also
 covers `git add failed`: repair that failure and use `--recover`; the hook
 output send applies only when `git commit was refused`.
 
+`emb flow --status <id>` names the review budget in the unit that set it;
+JSON `review_budget` gives `value`, `unit` and `source`. For example,
+`flow.review_rounds` 1 permits one review and no fix round; an unresolved
+`must` stops with `unresolved after 1 review (flow.review_rounds 1 allows
+no fix round)`. An explicit plan `rounds` names that plan budget in fix
+rounds. The source is saved at flow start; older records without it report
+source unknown unless their saved plan explicitly names the matching
+`rounds`. The budget permits no automatic extra fix round.
+
 ## Cancellation
 
 You may cancel a flow for any reason you state. State the reason and run:
@@ -219,9 +250,21 @@ describes.
 
 ## Verify, merge and report
 
-Before accepting a flow, fetch the remote default branch and compare it
-with the flow's recorded base. If the default branch has moved, merge it
-into the flow branch and run the plan `check` again in the flow worktree.
+`emb merge` checks a completed flow branch against the local `--into`
+target. With a matching flow record whose status is `done`, the flow tip
+must contain the target tip (`git merge-base --is-ancestor <target tip>
+<flow tip>`). Otherwise it exits 75 and merges nothing. Follow its `next:`
+line: merge the target into the flow branch in the recorded flow worktree,
+run the saved plan check again there, then run `emb merge` again. The line
+prints the saved check argv or says no check is configured. An unreadable
+or mismatched flow record also refuses. Run branches, non-completed flows
+and flow branches without records have no such target-tip check.
+
+Cut a flow from the target it will merge into. If an earlier flow reaches
+that target by squash merge, a later flow cut from the pre-squash branch
+can conflict when incorporating the target. Start it from the updated
+target after the earlier work lands, or incorporate the updated target
+in the flow worktree and rerun the check before merging.
 
 At `end`, exit 0 with every task merged, verify in the flow worktree with the
 `verify_branch.py` command in SKILL.md step 7 for a branch with no run record:
@@ -259,6 +302,10 @@ cleanup rules, with the `emb merge` command in SKILL.md step 9 for a branch
 with no run record: `ember/flow/<id>` and `--dir <dir>`. The completed flow
 branch gets a merge commit, preserving its task squash commits; this call does
 not require `--subject`.
+
+`emb merge` already cleans up the merged branch and its worktree when the
+cleanup checks allow it. An empty `emb cleanup` afterwards is expected;
+the empty message names run and flow branches and any claim filter.
 
 Report `flow <id> · <writer> / <reviewer> · exit <n> · <merged> of
 <tasks> merged · ember/flow/<id>`, one line per task with id, status,

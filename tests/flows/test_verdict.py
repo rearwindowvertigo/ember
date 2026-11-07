@@ -143,8 +143,8 @@ def test_out_of_range_earlier(earlier: object) -> None:
         ("fix", ["lead"], 1, ("stop", "needs the lead")),
         ("pass", ["must", "lead"], 1, ("fix", None)),
         ("fix", ["must"], 1, ("fix", None)),
-        ("pass", ["must"], 0, ("stop", "unresolved after <n> fix rounds")),
-        ("fix", ["must", "lead"], 0, ("stop", "unresolved after <n> fix rounds")),
+        ("pass", ["must"], 0, ("stop", "review budget exhausted")),
+        ("fix", ["must", "lead"], 0, ("stop", "review budget exhausted")),
     ],
 )
 def test_decision(
@@ -162,6 +162,60 @@ def test_decision(
         )
     )
     assert review.decision(left) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "unit", "source", "rounds", "expected"),
+    [
+        (
+            1,
+            "reviews",
+            "flow.review_rounds",
+            0,
+            "1 review (flow.review_rounds 1 allows no fix round)",
+        ),
+        (
+            2,
+            "reviews",
+            "flow.review_rounds",
+            1,
+            "2 reviews (flow.review_rounds 2 allows 1 fix round)",
+        ),
+        (
+            4,
+            "reviews",
+            "flow.review_rounds",
+            3,
+            "4 reviews (flow.review_rounds 4 allows 3 fix rounds)",
+        ),
+        (0, "fix_rounds", "plan.rounds", 0, "0 fix rounds (plan rounds 0)"),
+        (1, "fix_rounds", "plan.rounds", 1, "1 fix round (plan rounds 1)"),
+        (2, "fix_rounds", "default", 2, "2 fix rounds (default 2 fix rounds)"),
+        (
+            0,
+            "fix_rounds",
+            "unknown",
+            0,
+            "0 fix rounds (budget 0 fix rounds; source unknown)",
+        ),
+    ],
+)
+def test_budget_stop_reason(
+    value: int, unit: str, source: str, rounds: int, expected: str
+) -> None:
+    budget = {"value": value, "unit": unit, "source": source}
+    assert verdict.budget_text(budget) == expected
+    reason = "unresolved after " + verdict.budget_text(budget, fix_rounds=rounds)
+    review = verdict.read(
+        json.dumps(
+            {
+                "verdict": "fix",
+                "findings": [{"severity": "must", "scenario": "harm"}],
+            }
+        )
+    )
+    assert review.decision(0, exhausted_reason=reason) == ("stop", reason)
+    assert review.decision(1, exhausted_reason=reason) == ("fix", None)
 
 
 def test_finding_provenance_comes_from_the_caller() -> None:

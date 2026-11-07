@@ -4,7 +4,7 @@ With `--previous`, an earlier result's gaps and answers go to the reviewer,
 and the reviewer accounts for each active and settled gap. Settled answers
 and closed history are carried into the new result. Exit 81 reports an
 invalid or incomplete reply.
-Answer mode exits 64 for invalid options or an unknown id, 65 for an invalid
+Answer mode exits 64 for invalid options or ids, 65 for an invalid
 result, 66 for an unreadable file and 74 for a write failure. Other exits
 use the run's codes. The command never creates or finishes a
 claim.
@@ -88,8 +88,12 @@ def _usage(args: argparse.Namespace) -> None:
         ]
         if extra:
             problem = f"{', '.join(extra)} cannot be used with --answer"
-        elif args.id is None or args.text is None:
-            problem = "--answer needs --id and --text"
+        elif args.take_defaults and (args.id is not None or args.text is not None):
+            problem = "--take-defaults cannot be combined with --id or --text"
+        elif not args.take_defaults and (args.id is None or args.text is None):
+            problem = "--answer needs --id and --text, or --take-defaults"
+    elif args.take_defaults:
+        problem = "--take-defaults needs --answer"
     elif args.id is not None or args.text is not None:
         problem = "--id and --text need --answer"
     elif args.plan is None:
@@ -289,11 +293,20 @@ def _load_previous(path: str | None) -> previous.Previous | None:
 
 
 def _answer(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
-    """Record an answer after loading and validating the result."""
+    """Record answers after loading and validating the result."""
     saved = _load_previous(args.answer)
     assert saved is not None
+    identities = [
+        identity.strip()
+        for group in args.take_defaults
+        for identity in group.split(",")
+    ]
     try:
-        made = previous.answer(saved, args.id, args.text)
+        made = (
+            previous.take_defaults(saved, identities)
+            if args.take_defaults
+            else previous.answer(saved, args.id, args.text)
+        )
     except ValueError as error:
         raise CommandError(64, str(error), "next: emb gapcheck --help") from error
     except previous.PreviousError as error:
@@ -312,6 +325,8 @@ def _answer(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         ) from error
     if args.json:
         print(json.dumps(made, indent=2, ensure_ascii=False), file=out)
+    elif args.take_defaults:
+        print(f"recorded answers for {', '.join(identities)} in {saved.path}", file=err)
     else:
         print(f"recorded answer for {args.id} in {saved.path}", file=err)
     return 0
@@ -433,6 +448,30 @@ def _follow(command: str, reply_path: str | None, code: int) -> str:
     return f"next: {prefix}{command} --reply {shlex.quote(reply_path)}"
 
 
+def _preparation_retry(args: argparse.Namespace) -> str:
+    """Repeat the original check after preparation failed before its reviewer."""
+    argv = ["emb", "gapcheck"]
+    for name in (
+        "plan",
+        "previous",
+        "dir",
+        "engine",
+        "model",
+        "effort",
+        "claim",
+        "stall",
+    ):
+        value = getattr(args, name)
+        if value is not None:
+            argv.extend((f"--{name}", str(value)))
+    for path in args.read:
+        argv.extend(("--read", path))
+    for name in ("window", "json", "confirmed"):
+        if getattr(args, name):
+            argv.append(f"--{name}")
+    return "next: " + shlex.join(argv)
+
+
 @contextlib.contextmanager
 def _stop_signals_interrupt() -> Iterator[None]:
     """Treat SIGTERM and SIGHUP as SIGINT while the reviewer run is started.
@@ -477,6 +516,7 @@ def _run(
     output, errors = io.StringIO(), io.StringIO()
     temporary: Path | None = None
     created = False
+    code = 0
     try:
         try:
             root = paths.runtime_dir(env)
@@ -517,7 +557,14 @@ def _run(
             if created and temporary is not None:
                 temporary.unlink(missing_ok=True)
         finally:
-            err.write(errors.getvalue())
+            diagnostics = errors.getvalue()
+            if code == exits.PREPARATION_FAILED:
+                diagnostics = "".join(
+                    line
+                    for line in diagnostics.splitlines(keepends=True)
+                    if not line.startswith("next:")
+                )
+            err.write(diagnostics)
     first = output.getvalue().splitlines()
     match = re.fullmatch(r"run ([a-z0-9][a-z0-9-]{5,63})", first[0]) if first else None
     if match is None:
@@ -703,7 +750,12 @@ def main(
             )
             if result is None:
                 if code:
-                    print(_follow(command, None, code), file=err)
+                    print(
+                        _preparation_retry(args)
+                        if code == exits.PREPARATION_FAILED
+                        else _follow(command, None, code),
+                        file=err,
+                    )
                 return code
             reply_path = result["run"]["reply"]
         code = code or (INVALID_REPLY if result["parse_error"] else 0)
@@ -727,7 +779,11 @@ def main(
             )
         if code:
             print(
-                problem.follow if problem else _follow(command, reply_path, code),
+                _preparation_retry(args)
+                if code == exits.PREPARATION_FAILED
+                else problem.follow
+                if problem
+                else _follow(command, reply_path, code),
                 file=err,
             )
         return code

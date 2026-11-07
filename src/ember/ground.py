@@ -3,8 +3,9 @@
 `read` returns the machine, the Claude Code surface, Claude Code's
 `worktree.baseRef` setting and the state of one folder: whether it is in a git
 checkout, the top of that checkout, the branch, whether the tree is dirty, the
-remote and which of `CLAUDE.md` and `AGENTS.md` exist at the top. Git runs
-with optional locks off, so reading takes no lock and writes nothing.
+remote, which of `CLAUDE.md` and `AGENTS.md` exist at the top, and Ember's
+worktree preparation setting. Git runs with optional locks off, so reading
+takes no lock and writes nothing.
 
 A value that cannot be read is `None` with a sibling `<field>_reason` key
 holding the reason.
@@ -20,7 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from ember import paths
+from ember import paths, prepare
 
 GIT_TIMEOUT = 60
 """Seconds each git command may take."""
@@ -319,9 +320,48 @@ def _remote(top: Path, env: Mapping[str, str]) -> dict[str, Any]:
     return {"remote": result}
 
 
+def _preparation(top: Path, env: Mapping[str, str]) -> dict[str, Any]:
+    """Read preparation and the resolved main checkout, also from a worktree."""
+    common = _git(top, env, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if common.returncode != 0 or not common.stdout.strip():
+        return {"prepare": None, "prepare_reason": _failure(common, "git rev-parse")}
+    listing = _git(top, env, "worktree", "list", "--porcelain", "-z")
+    if listing.returncode != 0:
+        return {
+            "prepare": None,
+            "prepare_reason": _failure(listing, "git worktree list"),
+        }
+    # Git lists the main checkout first, including from a linked worktree.
+    first = listing.stdout.split("\0\0", 1)[0].split("\0")
+    prefix = "worktree "
+    if (
+        not first[0].startswith(prefix)
+        or not first[0][len(prefix) :]
+        or "bare" in first
+    ):
+        return {
+            "prepare": None,
+            "prepare_reason": f"the repository of {top} has no main checkout",
+        }
+    try:
+        repository = Path(first[0][len(prefix) :]).resolve()
+        if not repository.is_dir():
+            return {
+                "prepare": None,
+                "prepare_reason": f"the main checkout {repository} does not exist",
+            }
+        command = prepare.lookup(common.stdout.strip(), env=env)
+    except (prepare.PreparationError, OSError, ValueError) as error:
+        return {"prepare": None, "prepare_reason": _one_line(error)}
+    state = "unset" if command is None else "none" if command == "" else "set"
+    return {
+        "prepare": {"state": state, "command": command, "repository": str(repository)}
+    }
+
+
 def _not_checkout(reason: str) -> dict[str, Any]:
     result: dict[str, Any] = {}
-    for field in ("top", "branch", "dirty", "remote", "files"):
+    for field in ("top", "branch", "dirty", "remote", "files", "prepare"):
         result[field] = None
         result[f"{field}_reason"] = reason
     return result
@@ -337,7 +377,8 @@ def directory(folder: Path, env: Mapping[str, str] | None = None) -> dict[str, A
     Returns:
         `path`, `git`, `top`, `branch` (`name` and `commit`), `dirty`
         (`value` and `paths`), `remote` (`name`, `url` and `kind`) and
-        `files` (whether each of `CLAUDE.md` and `AGENTS.md` is at the top).
+        `files` (whether each of `CLAUDE.md` and `AGENTS.md` is at the top)
+        and `prepare` (`state`, `command` and the main checkout `repository`).
     """
     environment = _env(env)
     result: dict[str, Any] = {"path": str(folder)}
@@ -357,6 +398,7 @@ def directory(folder: Path, env: Mapping[str, str] | None = None) -> dict[str, A
     result.update(_dirty(top_path, environment))
     result.update(_remote(top_path, environment))
     result["files"] = {name: (top_path / name).is_file() for name in INSTRUCTION_FILES}
+    result.update(_preparation(top_path, environment))
     return result
 
 
@@ -480,6 +522,18 @@ def lines(result: dict[str, Any]) -> list[str]:
             lambda files: ", ".join(
                 f"{name} {'yes' if present else 'no'}"
                 for name, present in files.items()
+            ),
+        ),
+        item(
+            "prepare",
+            folder,
+            lambda preparation: (
+                f"{preparation['state']} for {preparation['repository']}"
+                + (
+                    f": {_one_line(preparation['command'])}"
+                    if preparation["state"] == "set"
+                    else ""
+                )
             ),
         ),
     ]

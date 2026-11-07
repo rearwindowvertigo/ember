@@ -276,6 +276,13 @@ def _add_gapcheck(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--answer", metavar="FILE", help="record an answer in a result")
     parser.add_argument("--id", metavar="GAP", help="the gap id to answer")
     parser.add_argument("--text", metavar="ANSWER", help="the answer to record")
+    parser.add_argument(
+        "--take-defaults",
+        action="append",
+        default=[],
+        metavar="ID[,ID...]",
+        help="with --answer: record each listed gap's default; repeatable",
+    )
 
 
 def _add_flow(parser: argparse.ArgumentParser) -> None:

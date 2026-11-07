@@ -11,16 +11,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
-from ember import paths
+from ember import paths, prepare
 from ember.engines import Driver
 from ember.panels import record
+from ember.runs import exits, worktrees
 from ember.runs import record as runs
-from ember.runs import worktrees
 from ember.runs.core import (
     Core,
     RunError,
     StartOptions,
     WorkerSelection,
+    abandon_start,
     worktree_removal_reason,
 )
 
@@ -86,6 +87,7 @@ class _Job:
     warning_offset: int = 0
     began: float | None = None
     elapsed: float = 0.0
+    admission: threading.Event = field(default_factory=threading.Event)
 
 
 def _reason(diagnostics: str, default: str) -> str:
@@ -127,6 +129,8 @@ def _no_collection_exit(run: runs.Run) -> int:
 
 def exit_code(panel: Mapping[str, Any], stopped: bool) -> int:
     """Return interrupted, clean completion or partial-result status."""
+    if panel.get("admission") == "stopped":
+        return exits.PREPARATION_FAILED
     if stopped:
         return 74
     return (
@@ -178,6 +182,8 @@ class _Coordinator:
         self.jobs: list[_Job] = []
         self.active: set[int] = set()
         self.retrying = False
+        self.preparation_stop = threading.Event()
+        self.ready: set[int] = set()
 
     def persist(self, summary: bool = False) -> None:
         """Save under the mutex and surface storage failures to the coordinator."""
@@ -198,12 +204,14 @@ class _Coordinator:
                 f"cannot persist panel results: {error}",
             )
         self.failed.set()
+        self.preparation_stop.set()
 
     def cutoff(self) -> bool:
         """Return whether no new member operation may begin."""
         return (
             self.ended
             or self.failed.is_set()
+            or self.preparation_stop.is_set()
             or self.stop.is_set()
             or time.monotonic() >= self.deadline
         )
@@ -251,7 +259,61 @@ class _Coordinator:
             return select(options, {**settings, "menu": None})
 
         core._select = frozen_select
+        if self.panel.get("admission") in ("preparing", "stopped"):
+            core.prepare_stop = self.preparation_stop
+            core.admit = lambda saved: self.admit(job)
         return core
+
+    def admit(self, job: _Job) -> None:
+        """Wait after preparation until every member can create its session."""
+        with self.mutex:
+            self.ready.add(job.member["n"])
+            self.persist()
+        while not job.admission.wait(self.poll):
+            if self.cutoff():
+                break
+        with self.mutex:
+            if self.cutoff():
+                raise RunError(
+                    exits.PREPARATION_FAILED
+                    if self.panel.get("admission") != "admitted"
+                    else exits.INTERRUPTED,
+                    "panel admission stopped before this member started",
+                )
+            job.member["status"] = "running"
+            self.persist()
+
+    def stop_admission(self) -> None:
+        """Permanently stop the batch and interrupt its preparation groups."""
+        self.panel["admission"] = "stopped"
+        self.preparation_stop.set()
+        self.persist()
+
+    def unadmitted(self, job: _Job, diagnostics: str) -> bool:
+        """Keep unlaunched worktrees and record a failed preparation batch."""
+        with self.mutex:
+            if self.panel.get("admission") not in ("preparing", "stopped"):
+                return False
+            self.stop_admission()
+            saved = (
+                runs.load(job.member["run"], self.env) if job.member["run"] else None
+            )
+            preparation = saved.preparation if saved else None
+            peer = job.member["n"] in self.ready or (
+                preparation is not None
+                and preparation.get("message") == "preparation stopped before starting"
+            )
+            job.member.update(
+                status="not started" if peer else "failed",
+                exit=None if peer else exits.PREPARATION_FAILED,
+                reason=(
+                    "panel admission stopped before this member started"
+                    if peer
+                    else _reason(diagnostics, "worktree preparation failed")
+                ),
+            )
+            self.finish_job(job)
+            return True
 
     def launch(self, member: dict[str, Any], recovering: bool) -> None:
         """Register a job before its daemon thread can begin or be delayed."""
@@ -261,7 +323,12 @@ class _Coordinator:
             with self.mutex:
                 if self.ended or self.failed.is_set():
                     return
-                member.update(run=run_id, status="running")
+                member.update(
+                    run=run_id,
+                    status="starting"
+                    if self.panel.get("admission") == "preparing"
+                    else "running",
+                )
                 self.persist()
 
         job = _Job(member, _RunIdStream(capture))
@@ -453,6 +520,8 @@ class _Coordinator:
             diagnostics = job.err.getvalue()
             if not self.completed_attempt(job, code):
                 return
+            if self.unadmitted(job, diagnostics):
+                return
             if code == 124 and member["run"] and not recovering:
                 if not self.attempt(job, "stall"):
                     return
@@ -477,8 +546,11 @@ class _Coordinator:
                     reason=(f"unexpected error: {type(error).__name__}: {error}"),
                     exit=1,
                 )
+                if self.panel.get("admission") in ("preparing", "stopped"):
+                    self.stop_admission()
+                    job.member["exit"] = exits.PREPARATION_FAILED
                 if job.member["attempts"]:
-                    job.member["attempts"][-1]["exit"] = 1
+                    job.member["attempts"][-1]["exit"] = job.member["exit"]
                 try:
                     self.finish_job(job)
                 except Exception as failure:
@@ -504,6 +576,8 @@ class _Coordinator:
         self, members: Sequence[dict[str, Any]], recovering: bool, spacing: float
     ) -> Outcome:
         """Start jobs in order, wait for their completion and finalize once."""
+        if not recovering and self.needs_preparation():
+            return self.prepare_members(members, spacing)
         self.deadline = time.monotonic() + self.panel["timeout_minutes"] * 60
         for index, member in enumerate(members):
             if self.cutoff():
@@ -516,6 +590,72 @@ class _Coordinator:
                 if not self.active:
                     break
             self.pause(self.poll)
+        return self.finalize()
+
+    def needs_preparation(self) -> bool:
+        """Resolve the standing command without changing unset panel records."""
+        common = Core(self.env)._git_out(
+            self.panel["dir"], "rev-parse", "--path-format=absolute", "--git-common-dir"
+        )
+        if common is None:
+            raise record.PanelError(self.panel["id"], "cannot find the git folder")
+        return bool(prepare.lookup(common, env=self.env))
+
+    def prepare_members(
+        self, members: Sequence[dict[str, Any]], spacing: float
+    ) -> Outcome:
+        """Retain ownership of preparation groups across persistence failures."""
+        try:
+            return self._prepare_members(members, spacing)
+        finally:
+            if self.failed.is_set() and not any(
+                job.admission.is_set() for job in self.jobs
+            ):
+                self.preparation_stop.set()
+                self.join_preparation()
+
+    def join_preparation(self) -> None:
+        """Wait until every start has ended and reaped its preparation group."""
+        for thread in self.threads:
+            while thread.is_alive():
+                thread.join(self.poll)
+
+    def _prepare_members(
+        self, members: Sequence[dict[str, Any]], spacing: float
+    ) -> Outcome:
+        """Prepare all worktrees, then start the deadline and admit members."""
+        self.panel["admission"] = "preparing"
+        self.persist()
+        for member in members:
+            self.launch(member, False)
+        while not self.cutoff():
+            with self.mutex:
+                if len(self.ready) == len(members):
+                    break
+            self.pause(self.poll)
+        with self.mutex:
+            if self.cutoff():
+                self.stop_admission()
+            else:
+                self.panel["admission"] = "admitted"
+                self.deadline = time.monotonic() + self.panel["timeout_minutes"] * 60
+                self.persist()
+        if self.panel["admission"] == "stopped":
+            # Each start owns its preparation process until it has killed and
+            # reaped the group. Keep the panel lock until those starts return.
+            self.join_preparation()
+        else:
+            for index, job in enumerate(self.jobs):
+                if self.cutoff():
+                    break
+                job.admission.set()
+                if index < len(self.jobs) - 1:
+                    self.pause(spacing)
+            while not self.cutoff():
+                with self.mutex:
+                    if not self.active:
+                        break
+                self.pause(self.poll)
         return self.finalize()
 
     def finalize(self) -> Outcome:
@@ -537,11 +677,16 @@ class _Coordinator:
                         time.monotonic() - job.began
                     )
             for member in self.panel["members"]:
-                if member["status"] == "pending":
+                if member["status"] == "pending" or (
+                    self.panel.get("admission") == "stopped"
+                    and member["n"] in self.active
+                ):
                     member.update(
                         status="not started",
                         reason=(
-                            "the panel stopped before this member started"
+                            "panel admission stopped before this member started"
+                            if self.panel.get("admission") == "stopped"
+                            else "the panel stopped before this member started"
                             if stopped
                             else (
                                 "the panel's deadline passed before this member started"
@@ -568,7 +713,8 @@ class _Coordinator:
                     print(member_line(member), file=self.err, flush=True)
             self.panel.update(
                 status="incomplete"
-                if any(
+                if self.panel.get("admission") == "stopped"
+                or any(
                     member["status"] in record.UNFINISHED
                     for member in self.panel["members"]
                 )
@@ -634,6 +780,29 @@ def recover(
     """Collect unfinished members without starting runs or sending new questions."""
     coordinator = _Coordinator(panel_id, env, core_factory, stop, poll_seconds, err)
     panel = coordinator.panel
+    if panel.get("admission") in ("preparing", "stopped"):
+        coordinator.stop_admission()
+        for member in panel["members"]:
+            saved = None
+            if member["run"]:
+                core = Core(env)
+                with core._turn_lock(member["run"], "recover"):
+                    saved = runs.load(member["run"], env)
+                    with runs.record_lock(saved):
+                        core._end_preparation(saved)
+                        saved = abandon_start(runs.load(saved.id, env))
+            preparation = saved.preparation if saved else None
+            if member["status"] not in ("failed", "not started"):
+                failed = preparation is not None and preparation["state"] not in (
+                    "ok",
+                    "not-started",
+                )
+                member.update(
+                    status="failed" if failed else "not started",
+                    exit=exits.PREPARATION_FAILED if failed else None,
+                    reason="panel admission stopped before this member started",
+                )
+        return coordinator.finalize()
     members = []
     for member in panel["members"]:
         if member["status"] in (*record.UNFINISHED, "pending"):
@@ -774,8 +943,13 @@ def close(
             except runs.RecordError as error:
                 targets[run_id] = str(error)
             else:
-                if existing.status not in (runs.CLOSED, runs.FAILED) or (
-                    existing.status == runs.FAILED and existing.turn_state == runs.SENT
+                if (
+                    (existing.preparation is not None and existing.turn == 0)
+                    or (existing.status not in (runs.CLOSED, runs.FAILED))
+                    or (
+                        existing.status == runs.FAILED
+                        and existing.turn_state == runs.SENT
+                    )
                 ):
                     targets[run_id] = None
                 elif existing.read_only and existing.detached:
@@ -827,6 +1001,8 @@ def retry(
     member = next((m for m in panel["members"] if m["n"] == n), None)
     if member is None:
         raise MemberMissingError(f"panel {panel_id} has no member {number}")
+    if panel.get("admission") in ("preparing", "stopped"):
+        raise RetryRefused("worktree preparation stopped admission for this batch")
     if member["status"] not in (
         "failed",
         "stalled",

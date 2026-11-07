@@ -3,7 +3,9 @@ import io
 import json
 import os
 import shlex
+import stat
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -14,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from ember import branches, choices, paths, tmux
+from ember import branches, choices, paths, prepare, tmux
 from ember.cli import build_parser
 from ember.flows import command, lock, plan, record
 from ember.runs.core import Core
@@ -405,6 +407,207 @@ def test_start(
     assert err == f"next: emb flow --watch {flow_id} --json\n"
 
 
+@pytest.mark.parametrize("setting", [None, ""])
+def test_start_without_preparation(
+    env: dict[str, str], plan_file: Path, repo: Path, setting: str | None
+) -> None:
+    if setting is not None:
+        choices.set_settings({"worktree.prepare": {str(repo): setting}}, env=env)
+    code, out, err = invoke(env, "--plan", str(plan_file), "--start")
+    assert code == 0, err
+    flow_id = out.splitlines()[0].split()[1]
+    current = record.load(flow_id, env)
+    assert "preparation" not in current
+    assert not (record.folder(flow_id, env) / "prepare.log").exists()
+
+
+def test_start_prepares_before_runner(
+    env: dict[str, str], plan_file: Path, repo: Path
+) -> None:
+    choices.set_settings({"worktree.prepare": {str(repo): "echo prepared"}}, env=env)
+
+    def launch(flow_id: str) -> list[str]:
+        current = record.load(flow_id, env)
+        saved = current["preparation"]
+        assert saved["state"] == "ok" and saved["exit"] == 0
+        assert saved["pid"] > 1 and saved["start"] > 0
+        log = Path(saved["log"])
+        assert log == record.folder(flow_id, env) / "prepare.log"
+        assert log.read_text() == "prepared\n"
+        assert stat.S_IMODE(log.stat().st_mode) == 0o600
+        return ["true"]
+
+    code, _, err = invoke(env, "--plan", str(plan_file), "--start", argv=launch)
+    assert code == 0, err
+
+
+@pytest.mark.parametrize(
+    ("shell", "reason"),
+    [("echo failed; exit 9", "exited 9"), ("echo dirty > leftover", "leftover")],
+)
+def test_start_preparation_failure_keeps_flow(
+    tmp_path: Path,
+    env: dict[str, str],
+    plan_file: Path,
+    repo: Path,
+    shell: str,
+    reason: str,
+) -> None:
+    choices.set_settings({"worktree.prepare": {str(repo): shell}}, env=env)
+    code, _, err = invoke(env, "--plan", str(plan_file), "--start")
+    assert code == 79 and reason in err
+    (current,), errors = record.list_flows(env)
+    assert not errors
+    flow_id = current["id"]
+    assert current["status"] == "failed"
+    assert current["preparation"]["state"] == "failed"
+    assert all(task["writer_run"] is None for task in current["tasks"])
+    assert Path(current["worktree"]).is_dir()
+    assert f"next: emb flow --resume {flow_id}" in err
+    assert str(record.folder(flow_id, env) / "prepare.log") in err
+    assert not any("new-session" in call for call in tmux_log(tmp_path))
+    code, out, err = invoke(env, "--watch", flow_id, "--json")
+    assert code == 79, err
+    assert json.loads(out)["next"] == f"next: emb flow --resume {flow_id}"
+
+
+def test_resume_refuses_indeterminate_preparation(
+    tmp_path: Path,
+    env: dict[str, str],
+    flow: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow.update(status="failed", updated_at=0)
+    flow["preparation"] = {
+        "state": "running",
+        "command": "true",
+        "log": "prepare.log",
+        "pid": 123,
+        "start": 456,
+    }
+    record.save(flow, env)
+    ended: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        prepare, "end_group", lambda pid, start: ended.append((pid, start))
+    )
+    code, _, err = invoke(env, "--resume", flow["id"])
+    assert code == 75 and "indeterminate" in err
+    assert ended == [(123, 456)]
+    assert not any("new-session" in call for call in tmux_log(tmp_path))
+    assert record.load(flow["id"], env)["preparation"]["state"] == "running"
+
+
+def test_cancel_during_flow_start_preparation(
+    tmp_path: Path,
+    env: dict[str, str],
+    plan_file: Path,
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shell = shlex.join([sys.executable, "-c", "import time; time.sleep(60)"])
+    choices.set_settings({"worktree.prepare": {str(repo): shell}}, env=env)
+    monkeypatch.setattr(command, "POLL_SECONDS", 0.01)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(invoke, env, "--plan", str(plan_file), "--start")
+        deadline = time.monotonic() + 10
+        while True:
+            found, errors = record.list_flows(env)
+            assert not errors
+            if found and (found[0].get("preparation") or {}).get("pid"):
+                flow_id = found[0]["id"]
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        code, _, err = invoke(env, "--cancel", flow_id, "--reason", "stop setup")
+        assert code == 0, err
+        code, _, err = pending.result(timeout=10)
+    assert code == 79 and f"next: emb flow --resume {flow_id}" in err
+    current = record.load(flow_id, env)
+    saved = current["preparation"]
+    assert current["status"] == "cancelled" and saved["state"] == "interrupted"
+    assert prepare.start_ticks(saved["pid"]) is None
+    assert record.read_events(flow_id, env)[-1]["exit"] == 79
+    assert not any("new-session" in call for call in tmux_log(tmp_path))
+
+
+@pytest.mark.parametrize("failure", ["timeout", "interrupted", "failed"])
+def test_start_preparation_exception(
+    tmp_path: Path,
+    env: dict[str, str],
+    plan_file: Path,
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    shell = shlex.join([sys.executable, "-c", "import time; time.sleep(60)"])
+    choices.set_settings({"worktree.prepare": {str(repo): shell}}, env=env)
+    original = prepare.run
+
+    def fail(*args: Any, **kwargs: Any) -> prepare.Result:  # noqa: ANN401
+        if failure == "interrupted":
+            raise KeyboardInterrupt
+        if failure == "failed":
+            raise OSError("cannot start")
+        return original(*args, **kwargs, timeout=0.05)
+
+    monkeypatch.setattr(prepare, "run", fail)
+    code, _, err = invoke(env, "--plan", str(plan_file), "--start")
+    assert code == 79, err
+    (current,), errors = record.list_flows(env)
+    assert not errors
+    saved = current["preparation"]
+    assert current["status"] == "failed" and saved["state"] == failure
+    assert Path(saved["log"]).is_file()
+    assert f"next: emb flow --resume {current['id']}" in err
+    assert not any("new-session" in call for call in tmux_log(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("setting", "plan_rounds", "value", "unit", "source"),
+    [
+        ("1", None, 1, "reviews", "flow.review_rounds"),
+        ("4", None, 4, "reviews", "flow.review_rounds"),
+        ("1", 0, 0, "fix_rounds", "plan.rounds"),
+        ("1", 3, 3, "fix_rounds", "plan.rounds"),
+        (None, None, 2, "fix_rounds", "default"),
+    ],
+)
+def test_start_freezes_review_budget(
+    env: dict[str, str],
+    plan_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    setting: str | None,
+    plan_rounds: int | None,
+    value: int,
+    unit: str,
+    source: str,
+) -> None:
+    if setting is None:
+        settings = command._settings(None, env)
+        settings["answers"].pop("flow.review_rounds", None)
+        monkeypatch.setattr(command, "_settings", lambda claim, env: settings)
+    else:
+        choices.set_settings({"flow.review_rounds": setting}, env=env)
+    if plan_rounds is not None:
+        document = json.loads(plan_file.read_text())
+        document["rounds"] = plan_rounds
+        plan_file.write_text(json.dumps(document))
+    code, out, err = invoke(env, "--plan", str(plan_file), "--start")
+    assert code == 0, err
+    flow_id = out.splitlines()[0].split()[1]
+    directory = record.folder(flow_id, env)
+    saved = json.loads((directory / record.FLOW_NAME).read_text())
+    expected = {"value": value, "unit": unit, "source": source}
+    assert saved["review_budget"] == expected
+    assert saved["rounds"] == value - int(unit == "reviews")
+    choices.set_settings({"flow.review_rounds": "2"}, env=env)
+    plan_file.write_text("{}")
+    (directory / record.PLAN_NAME).write_text("{}")
+    code, out, err = invoke(env, "--status", flow_id, "--json")
+    assert code == 0, err
+    assert json.loads(out)["review_budget"] == expected
+
+
 @pytest.mark.parametrize(
     ("case", "expected"),
     [("tmux", 69), ("branch", 70), ("inside", 69), ("runtime", 69)],
@@ -702,6 +905,61 @@ def test_status(env: dict[str, str], flow: dict[str, Any]) -> None:
     assert "emb flow: skipped" in err
     code, out, _ = invoke(env, "--status")
     assert code == 0 and f"{flow['id']}  starting  0/2 merged" in out
+
+
+@pytest.mark.parametrize(
+    ("value", "unit", "source", "description"),
+    [
+        (
+            1,
+            "reviews",
+            "flow.review_rounds",
+            "1 review (flow.review_rounds 1 allows no fix round)",
+        ),
+        (
+            4,
+            "reviews",
+            "flow.review_rounds",
+            "4 reviews (flow.review_rounds 4 allows 3 fix rounds)",
+        ),
+        (0, "fix_rounds", "plan.rounds", "0 fix rounds (plan rounds 0)"),
+        (1, "fix_rounds", "plan.rounds", "1 fix round (plan rounds 1)"),
+        (2, "fix_rounds", "default", "2 fix rounds (default 2 fix rounds)"),
+        (
+            2,
+            "fix_rounds",
+            "unknown",
+            "2 fix rounds (budget 2 fix rounds; source unknown)",
+        ),
+    ],
+)
+def test_status_review_budget(
+    env: dict[str, str],
+    flow: dict[str, Any],
+    value: int,
+    unit: str,
+    source: str,
+    description: str,
+) -> None:
+    flow["rounds"] = value - int(unit == "reviews")
+    budget = {"value": value, "unit": unit, "source": source}
+    flow["review_budget"] = budget
+    record.save(flow, env)
+    if source == "unknown":
+        del flow["review_budget"]
+        (record.folder(flow["id"], env) / record.FLOW_NAME).write_text(json.dumps(flow))
+    for single in (True, False):
+        args = ["--status", *([flow["id"]] if single else [])]
+        code, out, err = invoke(env, *args, "--json")
+        assert code == 0, err
+        status = json.loads(out)
+        item = status if single else status[0]
+        assert item["review_budget"] == budget
+        if single:
+            assert item["rounds"] == flow["rounds"]
+        code, out, err = invoke(env, *args)
+        assert code == 0, err
+        assert f"review_budget: {description}" in out
 
 
 @pytest.mark.parametrize("legacy", [False, True])

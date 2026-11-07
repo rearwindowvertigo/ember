@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from ember import paths
+from ember import paths, prepare
 from ember.flows import plan, record
 from ember.runs import record as runs
 from runs.stub_engine import make_env  # pyrefly: ignore[missing-import]
@@ -77,6 +77,11 @@ def test_creation(flow: dict[str, Any], created: Path, env: dict[str, str]) -> N
     assert flow["wave"] == flow["answers_seen"] == 0
     assert flow["plan_waves"] == [["a", "b"]]
     assert flow["status"] == "starting" and flow["tip"] == flow["base"]
+    assert flow["review_budget"] == {
+        "value": 2,
+        "unit": "fix_rounds",
+        "source": "default",
+    }
     assert record.task_entry(flow, "a")["status"] == "pending"
     record.task_entry(flow, "a")["findings"].append({"problem": "a"})
     assert record.task_entry(flow, "b")["findings"] == []
@@ -85,6 +90,50 @@ def test_creation(flow: dict[str, Any], created: Path, env: dict[str, str]) -> N
     assert record.task_entry(flow, "b")["corrections"] == []
     with pytest.raises(KeyError):
         record.task_entry(flow, "unknown")
+
+
+def test_preparation_round_trip(
+    flow: dict[str, Any], created: Path, env: dict[str, str]
+) -> None:
+    attempt = {
+        "command": "true",
+        "pid": 123,
+        "start": 456,
+        **prepare.Result(
+            "failed", 8, 0.1, str(created / "prepare.log"), [], "exited 8"
+        ).as_dict(),
+    }
+    flow["preparation_history"] = [attempt]
+    flow["preparation"] = {**attempt, "state": "ok", "exit": 0, "message": None}
+    flow["preparation_halt"] = "child preparation failed"
+    flow["tasks"][0]["preparation_blocked"] = "reviewer"
+    record.save(flow, env)
+    assert record.load(flow["id"], env) == flow
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("preparation", None),
+        ("preparation", {}),
+        ("preparation", {"command": "true", "state": "unknown", "log": "log"}),
+        (
+            "preparation",
+            {"command": "true", "state": "running", "log": "log", "pid": 1},
+        ),
+        ("preparation_history", None),
+        ("preparation_history", {}),
+        ("preparation_history", [{}]),
+        ("preparation_halt", 79),
+    ],
+)
+def test_invalid_preparation(
+    flow: dict[str, Any], created: Path, env: dict[str, str], field: str, value: object
+) -> None:
+    flow[field] = value
+    (created / record.FLOW_NAME).write_text(json.dumps(flow))
+    with pytest.raises(record.FlowError, match="preparation"):
+        record.load(flow["id"], env)
 
 
 def test_create_does_not_overwrite(
@@ -167,6 +216,66 @@ def test_save_requires_plan_waves(
     del flow["plan_waves"]
     with pytest.raises(record.FlowError, match="has no plan_waves"):
         record.save(flow, env)
+
+
+@pytest.mark.parametrize(
+    ("plan_text", "source"),
+    [
+        ('{"rounds": 2}', "plan.rounds"),
+        ('{"rounds": 1}', "unknown"),
+        ('{"rounds": true}', "unknown"),
+        ('{"rounds": "2"}', "unknown"),
+        ("{}", "unknown"),
+        ("[]", "unknown"),
+        ("invalid", "unknown"),
+        (None, "unknown"),
+    ],
+)
+def test_load_without_review_budget(
+    flow: dict[str, Any],
+    created: Path,
+    env: dict[str, str],
+    plan_text: str | None,
+    source: str,
+) -> None:
+    del flow["review_budget"]
+    path = created / record.FLOW_NAME
+    text = json.dumps(flow)
+    path.write_text(text)
+    saved_plan = created / record.PLAN_NAME
+    if plan_text is None:
+        saved_plan.unlink()
+    else:
+        saved_plan.write_text(plan_text)
+    loaded = record.load(flow["id"], env)
+    assert loaded["review_budget"] == {
+        "value": 2,
+        "unit": "fix_rounds",
+        "source": source,
+    }
+    assert path.read_text() == text
+    record.save(loaded, env)
+    assert record.load(flow["id"], env)["review_budget"] == loaded["review_budget"]
+
+
+@pytest.mark.parametrize(
+    "budget",
+    [
+        None,
+        {},
+        {"value": True, "unit": "fix_rounds", "source": "default"},
+        {"value": 1, "unit": "fix_rounds", "source": "plan.rounds"},
+        {"value": 2, "unit": "reviews", "source": "default"},
+        {"value": 3, "unit": "reviews", "source": "setting"},
+    ],
+)
+def test_invalid_review_budget(
+    flow: dict[str, Any], created: Path, env: dict[str, str], budget: object
+) -> None:
+    flow["review_budget"] = budget
+    (created / record.FLOW_NAME).write_text(json.dumps(flow))
+    with pytest.raises(record.FlowError, match="review_budget"):
+        record.load(flow["id"], env)
 
 
 def test_corrections_round_trip(

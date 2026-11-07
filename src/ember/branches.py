@@ -1279,7 +1279,11 @@ def cleanup(
     if as_json:
         print(json.dumps([item.to_json() for item in job.results], indent=2), file=out)
     elif not job.results and failure is None:
-        print(f"emb cleanup: no Ember run branch against {target}", file=err)
+        scope = f" for claim {claim}" if claim is not None else ""
+        print(
+            f"emb cleanup: no Ember run or flow branch left against {target}{scope}",
+            file=err,
+        )
     if failure is not None:
         return _print_failure("cleanup", failure, err, failures)
     if (
@@ -1359,6 +1363,73 @@ def _merge_title(
     return title
 
 
+def _completed_flow(repo: Repository, branch: str) -> dict[str, Any] | None:
+    """Read a matching flow record, returning only completed flows."""
+    match = FLOW_BRANCH.fullmatch(branch)
+    if match is None:
+        return None
+    flow_id = match["run"]
+    line = f"next: emb flow --status {flow_id}"
+    try:
+        flow = flow_record.load(flow_id, repo.env)
+    except flow_record.FlowMissingError:
+        return None
+    except (flow_record.FlowError, OSError, ValueError) as error:
+        raise BranchError(
+            exits.REFUSED, f"cannot read the flow record: {error}", line
+        ) from error
+    folder = Path(flow["worktree"])
+    common = (
+        _resolved(Path(flow["common"]))
+        if flow.get("common") is not None
+        else _common(flow["main"], repo.env) or _common(folder, repo.env)
+    )
+    actual_common = _common(folder, repo.env)
+    if (
+        flow["branch"] != branch
+        or common != repo.common
+        or folder.name != flow_id
+        or _resolved(folder) == _resolved(repo.main)
+        or (actual_common is not None and actual_common != repo.common)
+    ):
+        raise BranchError(
+            exits.REFUSED,
+            f"the flow record {flow_id} is not this branch's in {repo.main}",
+            line,
+        )
+    return flow if flow["status"] == "done" else None
+
+
+def _check_flow_base(
+    repo: Repository,
+    flow: Mapping[str, Any],
+    branch: str,
+    target: str,
+    head: str,
+    tip: str,
+) -> None:
+    """Require the completed flow tip to contain the selected target tip."""
+    checked = repo.git("merge-base", "--is-ancestor", head, tip)
+    if checked.returncode == 0:
+        return
+    folder = shlex.quote(flow["worktree"])
+    check = (
+        f"run the plan check again there: {shlex.join(flow['check'])}"
+        if flow["check"]
+        else "no plan check is configured"
+    )
+    raise BranchError(
+        exits.REFUSED,
+        f"flow {branch} at {tip} does not contain target {target} at {head}"
+        + (f": {_git_message(checked)}" if checked.returncode != 1 else ""),
+        f"next: merge {target} into {branch} in the flow worktree: "
+        f"git -C {folder} switch {shlex.quote(branch)} && "
+        f"git -C {folder} merge {shlex.quote('refs/heads/' + target)}; "
+        f"{check}; then {shlex.join(['emb', 'merge', branch, '--into', target])} "
+        "--verdict keep --note '<verdict line>'",
+    )
+
+
 def _squash_message(
     repo: Repository,
     head: str,
@@ -1425,6 +1496,68 @@ def _squash_message(
     return subject + "\n\n" + "\n".join(trailers) + "\n", breaking
 
 
+def _commit_tree(
+    repo: Repository,
+    worktree: Path,
+    tree: str,
+    parents: tuple[str, ...],
+    message: str,
+    operation: str,
+) -> str:
+    """Run the message hook and create a commit with the configured signing."""
+    with tempfile.TemporaryDirectory(prefix="ember-merge-") as folder:
+        message_file = Path(folder) / "COMMIT_EDITMSG"
+        message_file.write_text(message, encoding="utf-8")
+        hooks = (
+            ("prepare-commit-msg", "commit-msg")
+            if operation == "merge"
+            else ("commit-msg",)
+        )
+        for name in hooks:
+            hook = repo.git(
+                "hook",
+                "run",
+                "--ignore-missing",
+                name,
+                "--",
+                str(message_file),
+                *(("merge",) if name == "prepare-commit-msg" else ()),
+                cwd=worktree,
+                changes=True,
+            )
+            if hook.returncode:
+                raise BranchError(
+                    exits.HOOK_REFUSED,
+                    f"{name} hook refused the {operation}: {_git_message(hook)}",
+                    "next: fix the commit message or hook, then repeat emb merge",
+                )
+        message = message_file.read_text(encoding="utf-8")
+    signing = repo.git("config", "--type=bool", "--get", "commit.gpgsign", cwd=worktree)
+    if signing.returncode not in (0, 1):
+        raise BranchError(
+            exits.HOOK_REFUSED,
+            f"cannot read commit.gpgsign: {_git_message(signing)}",
+            "next: fix commit.gpgsign, then repeat emb merge",
+        )
+    commit = repo.git(
+        "commit-tree",
+        *(("-S",) if signing.stdout.strip() == "true" else ()),
+        tree,
+        *(arg for parent in parents for arg in ("-p", parent)),
+        cwd=worktree,
+        stdin=message,
+        changes=True,
+    )
+    if commit.returncode:
+        raise BranchError(
+            exits.HOOK_REFUSED,
+            f"git commit-tree refused the {operation}: {_git_message(commit)}",
+            "next: fix the commit identity or signing configuration, "
+            "then repeat emb merge",
+        )
+    return commit.stdout.strip()
+
+
 def _squash(
     repo: Repository,
     branch: str,
@@ -1459,51 +1592,9 @@ def _squash(
             f"next: git -C {worktree} status",
         )
     message, breaking = _squash_message(repo, head, tip, subject, note, worktree)
-    with tempfile.TemporaryDirectory(prefix="ember-squash-") as folder:
-        message_file = Path(folder) / "COMMIT_EDITMSG"
-        message_file.write_text(message, encoding="utf-8")
-        hook = repo.git(
-            "hook",
-            "run",
-            "--ignore-missing",
-            "commit-msg",
-            "--",
-            str(message_file),
-            cwd=worktree,
-            changes=True,
-        )
-        if hook.returncode:
-            raise BranchError(
-                exits.HOOK_REFUSED,
-                f"commit-msg hook refused the squash: {_git_message(hook)}",
-                "next: fix the commit message or hook, then repeat emb merge",
-            )
-        message = message_file.read_text(encoding="utf-8")
-    signing = repo.git("config", "--type=bool", "--get", "commit.gpgsign", cwd=worktree)
-    if signing.returncode not in (0, 1):
-        raise BranchError(
-            exits.HOOK_REFUSED,
-            f"cannot read commit.gpgsign: {_git_message(signing)}",
-            "next: fix commit.gpgsign, then repeat emb merge",
-        )
-    commit = repo.git(
-        "commit-tree",
-        *(("-S",) if signing.stdout.strip() == "true" else ()),
-        tree.stdout.split("\0", 1)[0],
-        "-p",
-        head,
-        cwd=worktree,
-        stdin=message,
-        changes=True,
+    made = _commit_tree(
+        repo, worktree, tree.stdout.split("\0", 1)[0], (head,), message, "squash"
     )
-    if commit.returncode:
-        raise BranchError(
-            exits.HOOK_REFUSED,
-            f"git commit-tree refused the squash: {_git_message(commit)}",
-            "next: fix the commit identity or signing configuration, "
-            "then repeat emb merge",
-        )
-    made = commit.stdout.strip()
     checked_out = repo.git("symbolic-ref", "-q", "HEAD", cwd=worktree)
     if (
         repo.tip(target) != head
@@ -1537,6 +1628,92 @@ def _squash(
     return made, f"merged {branch} at {tip} into {target}: {made}"
 
 
+def _merge_completed_flow(
+    repo: Repository,
+    branch: str,
+    target: str,
+    worktree: Path,
+    head: str,
+    tip: str,
+    note: str | None,
+) -> tuple[str, str]:
+    """Build the merge commit before fast-forwarding the target worktree.
+
+    The merge tree and commit leave the target's index and files untouched.
+    Both branch tips and the checked-out target are checked before the
+    fast-forward. A refused fast-forward leaves files as Git left them.
+    """
+    tree = repo.git("merge-tree", "--write-tree", "--name-only", "-z", head, tip)
+    if tree.returncode:
+        if tree.returncode == 1:
+            conflicts: list[str] = []
+            for path in tree.stdout.split("\0")[1:]:
+                if not path:
+                    break
+                conflicts.append(path)
+            raise BranchError(
+                exits.REFUSED,
+                f"conflict in {', '.join(conflicts) or _git_message(tree)}; "
+                f"{target} unchanged at {head}",
+                f"owner: resolve the conflict on {branch}, or ask for a new run "
+                "cut from the updated target",
+                "conflict",
+            )
+        raise GitFailedError(
+            exits.WORKTREE_FAILED,
+            f"git merge-tree failed: {_git_message(tree)}",
+            f"next: git -C {shlex.quote(str(worktree))} status",
+        )
+    message = _merge_title(repo, branch, target, tip, worktree)
+    if note is not None:
+        message += f"\n\n{VERDICT_TRAILER}: {note}"
+    hook = repo.git(
+        "hook",
+        "run",
+        "--ignore-missing",
+        "pre-merge-commit",
+        cwd=worktree,
+        changes=True,
+    )
+    if hook.returncode:
+        raise BranchError(
+            exits.HOOK_REFUSED,
+            f"pre-merge-commit hook refused the merge: {_git_message(hook)}",
+            "next: fix the hook, then repeat emb merge",
+        )
+    made = _commit_tree(
+        repo, worktree, tree.stdout.split("\0", 1)[0], (head, tip), message, "merge"
+    )
+    checked_out = repo.git("symbolic-ref", "-q", "HEAD", cwd=worktree)
+    if (
+        repo.tip(target) != head
+        or repo.tip(branch) != tip
+        or checked_out.stdout.strip() != f"refs/heads/{target}"
+    ):
+        raise BranchError(
+            exits.MOVED,
+            f"target {target} at {head} or flow {branch} at {tip} moved before "
+            "the merge update; nothing merged",
+            "next: review the branch tips, then repeat emb merge",
+        )
+    advanced = repo.git(
+        "merge",
+        "--ff-only",
+        "--no-edit",
+        "--no-verify",
+        made,
+        cwd=worktree,
+        changes=True,
+    )
+    if advanced.returncode:
+        raise GitFailedError(
+            exits.WORKTREE_FAILED,
+            f"fast-forward of {target} failed: {_git_message(advanced)}",
+            f"next: git -C {shlex.quote(str(worktree))} status, then repeat emb merge",
+        )
+    return made, f"merged {branch} at {tip} into {target}: {made}"
+
+
 def _merge(
     repo: Repository,
     branch: str,
@@ -1564,6 +1741,9 @@ def _merge(
             f"no local branch {branch if branch_tip is None else target}",
             f"next: git -C {repo.top} branch --list",
         )
+    flow = _completed_flow(repo, branch)
+    if flow is not None:
+        _check_flow_base(repo, flow, branch, target, head, branch_tip)
     if is_contained(repo.top, branch_tip, head, repo.env):
         return (
             None,
@@ -1582,6 +1762,10 @@ def _merge(
     if subject is not None:
         return _squash(
             repo, branch, target, worktree, head, branch_tip, subject, note, warnings
+        )
+    if flow is not None:
+        return _merge_completed_flow(
+            repo, branch, target, worktree, head, branch_tip, note
         )
     merged = repo.git(
         "merge",

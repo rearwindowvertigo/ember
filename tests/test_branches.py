@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import subprocess
 import sys
 from collections.abc import Iterator, Mapping
@@ -220,6 +221,15 @@ def _flow_record(env: dict[str, str], repo: Path, worktree: Path) -> dict[str, A
     data.update(status="done", ended_at=0)
     flow_record.create(data, json.dumps(source), env)
     return data
+
+
+def _changed_flow(repo: Path, env: dict[str, str]) -> branches.FlowBranch:
+    flow = branches.create_flow_branch(repo, FLOW_ID, "HEAD", env)
+    _flow_record(env, repo, flow.worktree)
+    (flow.worktree / "flow.txt").write_text("flow\n")
+    git(flow.worktree, "add", "flow.txt", env=env)
+    git(flow.worktree, "commit", "-q", "-m", "feat: flow change", env=env)
+    return flow
 
 
 # Containment
@@ -1316,7 +1326,7 @@ def test_cleanup_ignores_branches_that_are_not_run_branches(
     assert _cleanup(env, driver, streams, repo) == 0
     out, err = streams.take()
     assert out == ""
-    assert err == "emb cleanup: no Ember run branch against main\n"
+    assert err == "emb cleanup: no Ember run or flow branch left against main\n"
     assert _branch_exists(repo, "feature", env)
     assert _branch_exists(repo, "ember/notes", env)
 
@@ -1735,6 +1745,329 @@ def test_merge_flow_keeps_live_branch_then_cleans_it(
     assert flow.worktree.is_dir()
     assert _cleanup(env, driver, streams, repo) == 0
     assert not flow.worktree.exists() and not _branch_exists(repo, flow.branch, env)
+
+
+@pytest.mark.parametrize("target", ["main", "session"])
+@pytest.mark.parametrize("check", [[], ["sh", "-c", "printf '%s' 'a b'; npm test"]])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_merge_completed_flow_requires_target_tip(
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    target: str,
+    check: list[str],
+    as_json: bool,
+) -> None:
+    env["XDG_DATA_HOME"] = str(Path(env["HOME"]) / "data with spaces")
+    flow = _changed_flow(repo, env)
+    data = flow_record.load(FLOW_ID, env)
+    data["check"] = check
+    flow_record.save(data, env)
+    if target != "main":
+        git(repo, "switch", "-q", "-c", target, env=env)
+    (repo / "target.txt").write_text("target\n")
+    git(repo, "add", "target.txt", env=env)
+    git(repo, "commit", "-q", "-m", "feat: target change", env=env)
+    head = git(repo, "rev-parse", target, env=env)
+    tip = git(repo, "rev-parse", flow.branch, env=env)
+    streams = Streams()
+
+    assert (
+        _merge(env, driver, streams, flow.branch, repo, target=target, as_json=as_json)
+        == 75
+    )
+
+    out, err = streams.take()
+    assert not out
+    assert f"flow {flow.branch} at {tip}" in err
+    assert f"target {target} at {head}" in err
+    assert f"git -C {shlex.quote(str(flow.worktree))} switch {flow.branch}" in err
+    assert f"merge refs/heads/{target}" in err
+    assert f"emb merge {flow.branch} --into {target}" in err
+    if check:
+        assert f"run the plan check again there: {shlex.join(check)}" in err
+    else:
+        assert "no plan check is configured" in err
+    assert git(repo, "rev-parse", target, env=env) == head
+    assert git(flow.worktree, "rev-parse", "HEAD", env=env) == tip
+    assert git(repo, "status", "--porcelain", env=env) == ""
+    assert not (repo / "flow.txt").exists()
+
+    git(flow.worktree, "merge", "--no-edit", target, env=env)
+    checked_tip = git(flow.worktree, "rev-parse", "HEAD", env=env)
+    assert (
+        _merge(
+            env,
+            driver,
+            streams,
+            flow.branch,
+            repo,
+            target=target,
+            note="Keep",
+            as_json=as_json,
+        )
+        == 0
+    )
+    if as_json:
+        result = json.loads(streams.take()[0])
+        assert result["merge_commit"] == git(repo, "rev-parse", "HEAD", env=env)
+        assert result["cleanup"][0]["action"] == "removed"
+    assert git(repo, "log", "-1", "--format=%P", env=env) == f"{head} {checked_tip}"
+    assert "Ember-Verdict: Keep" in git(repo, "log", "-1", "--format=%B", env=env)
+    assert (repo / "flow.txt").read_text() == "flow\n"
+    assert not flow.worktree.exists()
+
+
+@pytest.mark.parametrize("status", [None, *flow_record.FLOW_STATUSES])
+def test_merge_flow_guard_only_checks_done_records(
+    env: dict[str, str], repo: Path, driver: StubDriver, status: str | None
+) -> None:
+    flow = _changed_flow(repo, env)
+    data = flow_record.load(FLOW_ID, env)
+    if status is None:
+        (flow_record.folder(FLOW_ID, env) / flow_record.FLOW_NAME).unlink()
+    else:
+        data["status"] = status
+        flow_record.save(data, env)
+    (repo / "target.txt").write_text("target\n")
+    git(repo, "add", "target.txt", env=env)
+    git(repo, "commit", "-q", "-m", "feat: target change", env=env)
+    assert _merge(env, driver, Streams(), flow.branch, repo) == (
+        75 if status == "done" else 0
+    )
+    assert (repo / "flow.txt").exists() == (status != "done")
+
+
+@pytest.mark.parametrize("status", ["done", "running"])
+@pytest.mark.parametrize("invalid", ["json", "branch", "common", "main", "worktree"])
+def test_merge_refuses_unreadable_or_mismatched_flow_record(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    status: str,
+    invalid: str,
+) -> None:
+    flow = _changed_flow(repo, env)
+    data = flow_record.load(FLOW_ID, env)
+    data["status"] = status
+    if invalid == "branch":
+        data["branch"] = "other"
+    elif invalid == "common":
+        data["common"] = str(tmp_path / "other.git")
+    elif invalid == "main":
+        data["main"] = str(tmp_path / "missing-checkout")
+        data["worktree"] = str(tmp_path / "missing" / FLOW_ID)
+    elif invalid == "worktree":
+        data["worktree"] = str(repo)
+    flow_record.save(data, env)
+    if invalid == "json":
+        (flow_record.folder(FLOW_ID, env) / flow_record.FLOW_NAME).write_text("{")
+    head = git(repo, "rev-parse", "HEAD", env=env)
+    streams = Streams()
+    assert _merge(env, driver, streams, flow.branch, repo) == 75
+    out, err = streams.take()
+    assert not out
+    assert (
+        "cannot read the flow record" in err
+        if invalid == "json"
+        else ("is not this branch's" in err)
+    )
+    assert f"next: emb flow --status {FLOW_ID}" in err
+    assert git(repo, "rev-parse", "HEAD", env=env) == head
+    assert git(repo, "status", "--porcelain", env=env) == ""
+    assert flow.worktree.is_dir()
+
+
+@pytest.mark.parametrize("moved", ["target", "flow"])
+@pytest.mark.parametrize(
+    "during", ["merge-base", "merge-tree", "commit-tree", "symbolic-ref"]
+)
+def test_merge_completed_flow_ref_movement_merges_nothing(
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    monkeypatch: pytest.MonkeyPatch,
+    moved: str,
+    during: str,
+) -> None:
+    flow = _changed_flow(repo, env)
+    head = git(repo, "rev-parse", "HEAD", env=env)
+    tip = git(repo, "rev-parse", flow.branch, env=env)
+    old = head if moved == "target" else tip
+    changed = git(
+        repo, "commit-tree", f"{old}^{{tree}}", "-p", old, "-m", "concurrent", env=env
+    )
+    ref = "main" if moved == "target" else flow.branch
+    original = branches.Repository.git
+    fired = False
+
+    def moving_git(
+        self: branches.Repository,
+        *args: str,
+        cwd: Path | None = None,
+        changes: bool = False,
+        stdin: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal fired
+        if not fired and args[0] == during:
+            fired = True
+            git(repo, "update-ref", f"refs/heads/{ref}", changed, old, env=env)
+        return original(self, *args, cwd=cwd, changes=changes, stdin=stdin)
+
+    monkeypatch.setattr(branches.Repository, "git", moving_git)
+    streams = Streams()
+    assert _merge(env, driver, streams, flow.branch, repo, as_json=True) == 76
+    assert fired
+    out, err = streams.take()
+    assert not out and "nothing merged" in err
+    assert head in err and tip in err
+    assert git(repo, "rev-parse", "main", env=env) == (
+        changed if moved == "target" else head
+    )
+    assert git(repo, "rev-parse", flow.branch, env=env) == (
+        changed if moved == "flow" else tip
+    )
+    assert git(repo, "status", "--porcelain", env=env) == ""
+    assert not (repo / "flow.txt").exists()
+    assert not (repo / ".git" / "MERGE_HEAD").exists()
+    assert flow.worktree.is_dir()
+
+
+@pytest.mark.parametrize(
+    "hook", [None, "pre-merge-commit", "prepare-commit-msg", "commit-msg"]
+)
+def test_merge_completed_flow_preserves_edit_after_cleanliness_check(
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    monkeypatch: pytest.MonkeyPatch,
+    hook: str | None,
+) -> None:
+    flow = _changed_flow(repo, env)
+    (flow.worktree / "README.md").write_text("flow README\n")
+    git(flow.worktree, "add", "README.md", env=env)
+    git(flow.worktree, "commit", "-q", "-m", "docs: flow README", env=env)
+    head = git(repo, "rev-parse", "HEAD", env=env)
+    tip = git(flow.worktree, "rev-parse", "HEAD", env=env)
+    if hook is not None:
+        path = repo / ".git" / "hooks" / hook
+        path.write_text("#!/bin/sh\nexit 1\n")
+        path.chmod(0o755)
+    original = branches.Repository.changes
+    owner_edit = b"Owner's unfinished edit\r\n\x00\xff\n"
+    edited = False
+
+    def edit_after_check(
+        self: branches.Repository, worktree: Path, *, skip_nested: bool = False
+    ) -> list[str]:
+        nonlocal edited
+        found = original(self, worktree, skip_nested=skip_nested)
+        if worktree == repo and not edited:
+            assert not found
+            edited = True
+            (repo / "README.md").write_bytes(owner_edit)
+        return found
+
+    monkeypatch.setattr(branches.Repository, "changes", edit_after_check)
+    streams = Streams()
+    assert _merge(env, driver, streams, flow.branch, repo) == (
+        70 if hook is None else 77
+    )
+    out, err = streams.take()
+    assert edited and not out
+    assert (
+        "fast-forward of main failed" in err
+        if hook is None
+        else (f"{hook} hook refused the merge" in err)
+    )
+    assert (repo / "README.md").read_bytes() == owner_edit
+    assert not (repo / "flow.txt").exists()
+    assert git(repo, "rev-parse", "HEAD", env=env) == head
+    assert git(flow.worktree, "rev-parse", "HEAD", env=env) == tip
+    assert git(repo, "diff", "--cached", env=env) == ""
+    assert git(repo, "diff", "--name-only", env=env) == "README.md"
+    assert not (repo / ".git" / "MERGE_HEAD").exists()
+    assert flow.worktree.is_dir()
+
+
+@pytest.mark.parametrize(
+    "hook", ["pre-merge-commit", "prepare-commit-msg", "commit-msg", "post-merge"]
+)
+@pytest.mark.parametrize("refuse", [False, True])
+def test_merge_completed_flow_runs_merge_hooks(
+    env: dict[str, str], repo: Path, driver: StubDriver, hook: str, refuse: bool
+) -> None:
+    flow = _changed_flow(repo, env)
+    head = git(repo, "rev-parse", "HEAD", env=env)
+    readme = (repo / "README.md").read_bytes()
+    path = repo / ".git" / "hooks" / hook
+    path.write_text(f"#!/bin/sh\necho {hook} >> hook.log\nexit {1 if refuse else 0}\n")
+    path.chmod(0o755)
+    git(repo, "config", "core.excludesFile", str(repo / ".git" / "ignore"), env=env)
+    (repo / ".git" / "ignore").write_text("hook.log\n")
+    denied = refuse and hook != "post-merge"
+    assert _merge(env, driver, Streams(), flow.branch, repo) == (77 if denied else 0)
+    assert (repo / "hook.log").read_text().splitlines() == [hook]
+    assert (git(repo, "rev-parse", "HEAD", env=env) == head) == denied
+    assert git(repo, "status", "--porcelain", env=env) == ""
+    if denied:
+        assert (repo / "README.md").read_bytes() == readme
+        assert not (repo / "flow.txt").exists()
+        assert git(repo, "diff", "--cached", env=env) == ""
+    assert not (repo / ".git" / "MERGE_HEAD").exists()
+
+
+@pytest.mark.parametrize("contained", ["ancestor", "squash"])
+def test_merge_completed_flow_guard_precedes_containment(
+    env: dict[str, str], repo: Path, driver: StubDriver, contained: str
+) -> None:
+    flow = _changed_flow(repo, env)
+    if contained == "ancestor":
+        git(repo, "merge", "--ff-only", flow.branch, env=env)
+        git(repo, "commit", "--allow-empty", "-m", "feat: target change", env=env)
+    else:
+        _squash(repo, flow.branch, env)
+    head = git(repo, "rev-parse", "HEAD", env=env)
+    assert _merge(env, driver, Streams(), flow.branch, repo) == 75
+    assert git(repo, "rev-parse", "HEAD", env=env) == head
+    assert flow.worktree.is_dir()
+
+
+def test_merge_run_with_diverged_target_has_no_flow_guard(
+    tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    run = _start(tmp_path, env, repo, driver)
+    assert run.branch is not None
+    (repo / "target.txt").write_text("target\n")
+    git(repo, "add", "target.txt", env=env)
+    git(repo, "commit", "-q", "-m", "feat: target change", env=env)
+    assert _merge(env, driver, Streams(), run.branch, repo) == 0
+    assert (repo / "target.txt").read_text() == "target\n"
+    assert (repo / "work.txt").read_text() == "work\n"
+
+
+@pytest.mark.parametrize("saved_common", [False, True])
+def test_merge_completed_flow_uses_linked_target_worktree(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    saved_common: bool,
+) -> None:
+    flow = _changed_flow(repo, env)
+    data = flow_record.load(FLOW_ID, env)
+    if saved_common:
+        data["common"] = str(repo / ".git")
+        flow_record.save(data, env)
+    target_tree = tmp_path / "target worktree"
+    git(repo, "worktree", "add", "-b", "session", str(target_tree), env=env)
+    head = git(target_tree, "rev-parse", "HEAD", env=env)
+    tip = git(flow.worktree, "rev-parse", "HEAD", env=env)
+    assert _merge(env, driver, Streams(), flow.branch, repo, target="session") == 0
+    assert git(target_tree, "log", "-1", "--format=%P", env=env) == f"{head} {tip}"
+    assert (target_tree / "flow.txt").read_text() == "flow\n"
+    assert not (repo / "flow.txt").exists()
 
 
 def test_cleanup_flow_with_unreadable_lock_keeps_it(
@@ -2270,20 +2603,30 @@ def test_merge_with_no_run_has_null_next(
 
 @pytest.mark.parametrize("claim", [None, "claim-a"])
 @pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("as_json", [False, True])
 def test_cleanup_empty_claim_finishes_only_when_requested(
     env: dict[str, str],
     repo: Path,
     driver: StubDriver,
     claim: str | None,
     dry_run: bool,
+    as_json: bool,
 ) -> None:
     streams = Streams()
     assert (
-        _cleanup(env, driver, streams, repo, claim=claim, dry_run=dry_run, as_json=True)
+        _cleanup(
+            env, driver, streams, repo, claim=claim, dry_run=dry_run, as_json=as_json
+        )
         == 0
     )
     out, err = streams.take()
-    assert json.loads(out) == []
-    assert err == (
+    if as_json:
+        assert json.loads(out) == []
+        message = ""
+    else:
+        assert out == ""
+        scope = f" for claim {claim}" if claim is not None else ""
+        message = f"emb cleanup: no Ember run or flow branch left against main{scope}\n"
+    assert err == message + (
         "next: emb choices --finish claim-a\n" if claim and not dry_run else ""
     )
