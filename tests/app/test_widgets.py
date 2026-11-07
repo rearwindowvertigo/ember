@@ -211,6 +211,55 @@ def test_segmented_click_and_set_value(qtbot: QtBot) -> None:
         control.set_value("other")
 
 
+@pytest.mark.parametrize("focused_segment", [1, 2, None])
+@pytest.mark.parametrize(
+    "reason", [Qt.FocusReason.TabFocusReason, Qt.FocusReason.MouseFocusReason]
+)
+def test_segmented_value_change_follows_focus_within_control(
+    qtbot: QtBot,
+    focus_host: tuple[QWidget, QPushButton, QComboBox],
+    focused_segment: int | None,
+    reason: Qt.FocusReason,
+) -> None:
+    host, other, combo = focus_host
+    control = widgets.Segmented((("a", "A"), ("b", "B"), ("c", "C")))
+    layout = host.layout()
+    assert layout is not None
+    layout.addWidget(control)
+    control.show()
+    control.set_value("b")
+    # TabFocusReason can show a ring while the last input was the mouse,
+    # as it does when Reset returns focus to the selected segment.
+    qtbot.mouseClick(other, Qt.MouseButton.LeftButton)
+    combo.setFocus(Qt.FocusReason.MouseFocusReason)
+    focused = other if focused_segment is None else control.buttons()[focused_segment]
+    focused.setFocus(reason)
+    assert focused.hasFocus()
+    with qtbot.assertNotEmitted(control.changed):
+        control.set_value("a")
+    assert control.value() == "a"
+    target = other if focused_segment is None else control.buttons()[0]
+    assert target.hasFocus()
+    assert widgets.focus_visible(target) == (reason == Qt.FocusReason.TabFocusReason)
+    if focused_segment is not None:
+        assert not widgets.focus_visible(focused)
+
+
+def test_segmented_unchanged_value_keeps_focus_on_unselected_segment(
+    qtbot: QtBot, focus_host: tuple[QWidget, QPushButton, QComboBox]
+) -> None:
+    host, _other, _combo = focus_host
+    control = widgets.Segmented((("a", "A"), ("b", "B")))
+    layout = host.layout()
+    assert layout is not None
+    layout.addWidget(control)
+    control.show()
+    control.buttons()[1].setFocus(Qt.FocusReason.TabFocusReason)
+    with qtbot.assertNotEmitted(control.changed):
+        control.set_value("a")
+    assert widgets.focus_visible(control.buttons()[1])
+
+
 @pytest.mark.parametrize(
     "options",
     [

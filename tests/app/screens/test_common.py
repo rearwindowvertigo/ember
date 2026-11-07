@@ -413,6 +413,70 @@ def test_screen_header_sidebar_button_precedes_title_and_actions(qtbot: QtBot) -
     assert abs(show.geometry().center().y() - heading.geometry().center().y()) <= 1
 
 
+@pytest.mark.parametrize("activation", ["mouse", "keyboard"])
+@pytest.mark.parametrize("move_elsewhere", [False, True])
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_segmented_reset_focus_after_delayed_confirmation(
+    qtbot: QtBot, activation: str, move_elsewhere: bool, mode: str
+) -> None:
+    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtWidgets import QApplication
+
+    from ember.app import theme, widgets
+
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    theme.apply(app, mode)
+    widgets.install_focus_tracking(app)
+    host = QWidget()
+    qtbot.addWidget(host)
+    layout = QVBoxLayout(host)
+    control = widgets.Segmented((("ask", "Ask each time"), ("flow", "Flow")))
+    control.set_value("flow")
+    row = common.TooltipRow("Work of several tasks", "Tip", control)
+    calls: list[bool] = []
+    row.enable_reset(lambda: calls.append(True))
+    row.set_changed(True)
+    layout.addWidget(row)
+    other = QPushButton("Other")
+    layout.addWidget(other)
+    host.show()
+    qtbot.waitExposed(host)
+    with qtbot.waitActive(host):
+        host.activateWindow()
+    reset = row.reset
+    assert reset is not None
+    if activation == "mouse":
+        qtbot.mouseClick(reset, Qt.MouseButton.LeftButton)
+    else:
+        reset.setFocus(Qt.FocusReason.TabFocusReason)
+        qtbot.keyClick(reset, Qt.Key.Key_Space)
+    assert calls == [True]
+    assert control.value() == "flow"
+    assert reset.isVisible()
+    assert widgets.focus_visible(control.buttons()[1])
+    if move_elsewhere:
+        qtbot.keyClick(control.buttons()[1], Qt.Key.Key_Tab)
+        assert reset.hasFocus()
+        qtbot.keyClick(reset, Qt.Key.Key_Tab)
+        assert widgets.focus_visible(other)
+
+    def confirm() -> None:
+        """Apply the snapshot after the queued clear has completed."""
+        control.set_value("ask")
+        row.set_changed(False)
+
+    QTimer.singleShot(0, confirm)
+    qtbot.waitUntil(lambda: control.value() == "ask")
+    assert reset.isHidden()
+    target = other if move_elsewhere else control.buttons()[0]
+    assert target.hasFocus()
+    assert widgets.focus_visible(target)
+    assert not widgets.focus_visible(control.buttons()[1])
+    if move_elsewhere:
+        assert not any(button.hasFocus() for button in control.buttons())
+
+
 def test_reset_reserves_space_and_returns_keyboard_focus(qtbot: QtBot) -> None:
     """Hidden Reset keeps the control column stable and targets the chosen value."""
     from PySide6.QtCore import Qt
