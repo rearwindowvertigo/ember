@@ -1,7 +1,8 @@
 """Plan, start, watch and answer flows through private records and sessions.
 
-Exit 82 reports an ended flow with unmerged tasks or a failure. Other exits
-use ember.runs.exits. Commands do not apply queued answers to task records.
+Exit 79 reports failed worktree preparation; exit 82 reports other ended
+flows with unmerged tasks or a failure. Other exits use ember.runs.exits.
+Commands do not apply queued answers to task records.
 """
 
 import argparse
@@ -21,11 +22,11 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from ember import branches, choices, citations, db, paths, tmux
-from ember.flows import lock, plan, record
+from ember.flows import lock, plan, record, verdict
 from ember.gapcheck import policy
 from ember.runs import exits
 from ember.runs import record as run_record
-from ember.runs.core import STALL_MINUTES, Core, WorkerSelection
+from ember.runs.core import STALL_MINUTES, Core, WorkerSelection, _preparation_signals
 
 NOT_MERGED = 82
 POLL_SECONDS = 1.0
@@ -561,16 +562,56 @@ def _start(
     for role in plan.ROLES:
         flow[role]["effort_frozen"] = True
     record.create(flow, document.text, env)
-    with lifecycle(flow_id, env):
+    with contextlib.ExitStack() as preparing:
+        with lifecycle(flow_id, env):
+            preparing.enter_context(lock.hold(flow_id, env))
+            try:
+                branches.create_flow_branch(
+                    document.dir, flow_id, base, env, worktree=worktree
+                )
+            except branches.BranchError as error:
+                flow.update(status="failed", reason=str(error), ended_at=time.time())
+                record.save(flow, env)
+                raise
+        from ember.flows.runner import PreparationFailedError, prepare_worktree
+
+        failure = None
         try:
-            branches.create_flow_branch(
-                document.dir, flow_id, base, env, worktree=worktree
-            )
-        except branches.BranchError as error:
-            flow.update(status="failed", reason=str(error), ended_at=time.time())
-            record.save(flow, env)
-            raise
-        _session(flow, env, argv, fresh=True)
+            with _preparation_signals():
+                prepare_worktree(flow, env)
+        except PreparationFailedError as error:
+            failure = error
+        with lifecycle(flow_id, env):
+            request = record.cancel_request(flow_id, env)
+            if request is not None:
+                record.finish_cancel(flow, request, env)
+                raise CommandError(
+                    exits.PREPARATION_FAILED
+                    if flow.get("preparation")
+                    else exits.INTERRUPTED,
+                    str(failure or "flow start cancelled"),
+                    f"next: emb flow --resume {flow_id}",
+                )
+            if failure:
+                flow.update(status="failed", reason=str(failure), ended_at=time.time())
+                record.save(flow, env)
+                record.append_event(
+                    flow_id,
+                    {
+                        "kind": "end",
+                        "status": "failed",
+                        "reason": str(failure),
+                        "exit": 79,
+                    },
+                    env,
+                )
+                raise CommandError(
+                    exits.PREPARATION_FAILED,
+                    str(failure),
+                    f"next: emb flow --resume {flow_id}",
+                ) from failure
+            preparing.close()
+            _session(flow, env, argv, fresh=True)
     print(
         f"flow {flow_id}\nbranch {flow['branch']}\nworktree {flow['worktree']}",
         file=out,
@@ -617,6 +658,15 @@ def _resume(
                 f"cancellation of {flow_id} is pending",
                 f"next: emb flow --status {flow_id}",
             )
+        if not lock.live(flow_id, env) and not _starting(flow, env):
+            from ember.flows.runner import RunnerError, preparation_known
+
+            try:
+                preparation_known(flow, env)
+            except RunnerError as error:
+                raise CommandError(
+                    exits.REFUSED, str(error), f"next: emb flow --status {flow_id}"
+                ) from error
         _session(flow, env, argv)
     print(f"flow {flow_id}", file=out)
 
@@ -946,6 +996,8 @@ def _task_report(flow_id: str, task: Mapping[str, Any]) -> dict[str, Any]:
 def _next(flow: Mapping[str, Any], event: str, code: int | None, live: bool) -> str:
     """Describe the next action for a stop, loss or terminal outcome."""
     flow_id, branch = flow["id"], flow["branch"]
+    if code == exits.PREPARATION_FAILED or flow.get("preparation_halt"):
+        return f"next: emb flow --resume {flow_id}"
     if flow["status"] == "cancelled":
         return f"next: emb flow --resume {flow_id}"
     if event == "runner_lost":
@@ -1075,7 +1127,9 @@ def _watch_result(
         elif flow["status"] in record.ENDED:
             event = "end"
             code = (
-                0
+                exits.PREPARATION_FAILED
+                if record.preparation_failed(flow)
+                else 0
                 if flow["status"] == "done"
                 and all(task["status"] == "merged" for task in flow["tasks"])
                 else NOT_MERGED
@@ -1201,7 +1255,9 @@ def _status(
             print(json.dumps(flow, indent=2), file=out)
         else:
             for key, value in flow.items():
-                if key != "tasks":
+                if key == "review_budget":
+                    print(f"review_budget: {verdict.budget_text(value)}", file=out)
+                elif key != "tasks":
                     print(f"{key}: {value}", file=out)
             for task in flow["tasks"]:
                 print(_task_line(task), file=out)
@@ -1223,6 +1279,7 @@ def _status(
         _denial_status(flow, env)
         item = {key: flow[key] for key in ("id", "status", "reason", "dir", "branch")}
         item["denied_paths"] = flow["denied_paths"]
+        item["review_budget"] = flow["review_budget"]
         item.update(
             runner_live=lock.live(flow["id"], env),
             merged=sum(task["status"] == "merged" for task in flow["tasks"]),
@@ -1239,6 +1296,10 @@ def _status(
             print(
                 f"{item['id']}  {status}  "
                 f"{item['merged']}/{item['tasks']} merged  {item['dir']}",
+                file=out,
+            )
+            print(
+                f"  review_budget: {verdict.budget_text(item['review_budget'])}",
                 file=out,
             )
             for denial in item["denied_paths"]:

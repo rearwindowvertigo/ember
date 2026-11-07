@@ -191,8 +191,48 @@ def _dry_run(
     _left_out(selection.left_out, out)
 
 
+def _fresh_panel(panel: Mapping[str, Any], summary: Path) -> str:
+    """Build a fresh invocation from the saved question and resolved members."""
+    argv = [
+        "emb",
+        "panel",
+        "--question-file",
+        str(summary.parent / record.QUESTION_NAME),
+        "--dir",
+        panel["dir"],
+        "--stall",
+        str(panel["stall_minutes"]),
+        "--timeout",
+        str(panel["timeout_minutes"]),
+    ]
+    for member in panel["members"]:
+        value = f"{member['engine']}:{member['model']}"
+        if member["effort"] is not None:
+            value += f"@{member['effort']}"
+        argv.extend(("--member", value))
+    for path in panel["read"]:
+        argv.extend(("--read", path))
+    if panel["claim"] is not None:
+        argv.extend(("--claim", panel["claim"]))
+    return shlex.join(argv)
+
+
 def _next(panel: Mapping[str, Any], summary: Path) -> str:
     """Choose one action for complete answers, failures or unfinished members."""
+    if panel.get("admission") in ("preparing", "stopped"):
+        logs = [
+            path
+            for member in panel["members"]
+            if member["run"]
+            for path in [summary.parent.parent / member["run"] / "prepare.log"]
+            if path.is_file()
+        ]
+        inspect = (
+            "inspect " + ", ".join(shlex.quote(str(path)) for path in logs) + ", then "
+            if logs
+            else ""
+        )
+        return f"next: {inspect}{_fresh_panel(panel, summary)}"
     if panel["exit"] == 0:
         return f"next: read {summary}, then compare the answers"
     unfinished = [m for m in panel["members"] if m["status"] in record.UNFINISHED]
@@ -241,6 +281,16 @@ def _result(
     else:
         _left_out(panel["left_out"], out)
         print(f"summary {summary}", file=out)
+    if panel.get("admission") == "stopped":
+        for member in panel["members"]:
+            if member["run"]:
+                saved = runs.load(member["run"], env)
+                if saved.preparation is not None:
+                    print(
+                        f"member {member['n']} preparation log: "
+                        f"{saved.preparation['log']}",
+                        file=err,
+                    )
     print(line, file=err)
     return panel["exit"]
 
@@ -565,6 +615,12 @@ def main(
         code = 65 if isinstance(error, run.MemberMissingError) else exits.REFUSED
         message = str(error)
         line = f"next: emb panel --status {panel_id}"
+        if isinstance(error, run.RetryRefused) and panel_id:
+            saved = _load(panel_id, environment)
+            if saved.get("admission") in ("preparing", "stopped"):
+                line = _next(
+                    saved, record.folder(panel_id, environment) / record.SUMMARY_NAME
+                )
     except (record.LockError, paths.RuntimeDirError) as error:
         code, message, line = exits.UNAVAILABLE, str(error), exits.line(69, "runtime")
     except Exception as error:

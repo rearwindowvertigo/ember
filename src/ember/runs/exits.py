@@ -29,6 +29,7 @@ INTERRUPTED = 74
 REFUSED = 75
 MOVED = 76
 HOOK_REFUSED = 77
+PREPARATION_FAILED = 79
 NO_REPLY = 80
 OWNER_WAIT = 84
 STALLED = 124
@@ -110,6 +111,7 @@ LINES: dict[int, str | Mapping[str, str]] = {
         "with the correction; the work is uncommitted)",
         "add": RECOVER + " (git add failed; repair it before recovery)",
     },
+    PREPARATION_FAILED: "next: inspect {log}, then {retry}",
     NO_REPLY: "next: emb run --screen {run}, then " + SEND,
     OWNER_WAIT: "owner: answer the pending owner actions for {run}",
     STALLED: RECOVER + " (waits for the turn still running in its session, "

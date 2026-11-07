@@ -49,6 +49,10 @@ def derive(
             run=run.id,
             worktree=run.worktree,
             engine=run.engine,
+            log=shlex.quote(
+                str((run.preparation or {}).get("log", run.folder / "prepare.log"))
+            ),
+            retry=retry_start(run),
         )
         if run.answered_at is not None and text and text.startswith("owner:"):
             text = "next: " + (
@@ -66,6 +70,35 @@ def derive(
     if not run.read_only and run.commits and not _merged(run):
         return "merge", _verify(run, git)
     return "close", f"next: emb run --close {run.id}"
+
+
+def retry_start(run: Run) -> str:
+    """Return a new start using the saved brief and start options."""
+    if run.start_argv:
+        return shlex.join(run.start_argv)
+    argv = [
+        "emb",
+        "run",
+        "--engine",
+        run.engine,
+        "--dir",
+        run.repo,
+        "--task-file",
+        str(run.folder / record.BRIEF_NAME),
+        "--model",
+        run.model,
+    ]
+    if run.effort is not None:
+        argv.extend(("--effort", run.effort))
+    if run.read_only:
+        argv.append("--read-only")
+    for path in run.read:
+        argv.extend(("--read", path))
+    for trailer in run.trailers:
+        argv.extend(("--trailer", trailer))
+    if run.claim is not None:
+        argv.extend(("--claim", run.claim))
+    return shlex.join(argv)
 
 
 def exit_variant(run: Run) -> str | None:

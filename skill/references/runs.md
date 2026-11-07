@@ -61,6 +61,50 @@ A sandboxed run refuses any kept path inside Ember's configuration or
 state folder, or inside its worktrees folder outside the worker's own
 worktree (69), naming both paths. Nothing is created before these pass.
 
+## Worktree preparation
+
+A new worktree starts with tracked files, without installed dependencies,
+generated files or ignored local configuration. The owner can set a shell
+command per repository in Settings, Worktree preparation, Add repository,
+or at a terminal with `emb choices --set 'worktree.prepare=<JSON object>'`.
+The object maps absolute main-checkout paths to commands. Preserve the
+current mapping when giving the owner a command; the value replaces the
+whole mapping. Claude never sets it. No entry means no preparation; an
+empty command also means no preparation and no proposal from Claude.
+SKILL.md step 1 covers when to propose a command.
+
+Ember matches worktrees by their common git folder, so an Ember or Claude
+Code worktree of the configured repository matches; a separate clone does
+not. Ember reads this standing setting, never a repository file. It runs
+the command once after creating each worktree and before its first worker
+session or flow check: editing and read-only runs, gap check reviewers,
+flow worktrees, flow writers and reviewers, and panel members. Without a
+command, their records, output and exits are unchanged.
+
+Preparation runs on the lead's machine outside the worker sandbox, through
+`/bin/sh -c` in the new worktree with the caller's environment. It has its
+own process group and a 1800-second limit. Standard output and standard
+error go to `prepare.log`, mode 600, beside the run or flow record.
+The record's `preparation` holds its command, state, exit, seconds, log,
+left-behind paths and message, plus the process id and start ticks.
+
+A nonzero exit, timeout, start failure, interruption, failed `git status`
+inspection or paths left in `git status --porcelain` fails preparation.
+Ignored dependency and build files are allowed. Changed paths are named;
+an editing worker turn commits with `git add -A`. On failure no worker
+session starts for that run, exit 79 names the log, and the record and
+worktree stay. Inspect the log and follow the printed `next:` retry: a
+new start with the original options and saved brief, the original gap
+check, a fresh panel, or `emb flow --resume <id>`. `--send` and `--recover`
+never rerun preparation. Closing a run with preparation but no worker turn
+removes its owned worktree, including changes left by preparation; its
+editing branch stays.
+
+Timeout, cancellation, interruption and shutdown end the whole preparation
+process group. Resume, close and prune end a recorded group left behind.
+Flow and panel admission and retries are described in `references/flows.md`
+and `references/panels.md`.
+
 ## The session and its output
 
 The first line on standard output is `run <id>`; keep it at once with the
@@ -225,9 +269,10 @@ read-only commands, such as `ls`, `cat` and `echo`, without a rule. Every
 other command, including any that creates or changes a file, is refused.
 The git write verbs stay refused as for editing runs.
 
-A new run worktree holds only tracked files, with no installed dependencies.
-Install dependencies before running checks that need them. Use the shared
-caches below; network access follows `worker.network` as described below.
+Without a preparation command, a new run worktree has no installed
+dependencies. Checks that need them require an install; see Worktree
+preparation above. Within a worker sandbox, use the shared caches below;
+network access follows `worker.network` as described below.
 
 The workers' cache folder,
 `$XDG_CACHE_HOME/ember/worker`, is writable in every
@@ -326,6 +371,7 @@ SKILL.md step 6 covers the printed lines. These exits have additional rules.
 | 69 | Codex does not trust the repository | A trust refusal in a dry run or start creates nothing, including no worktree. It prints the trust message and an `owner:` line asking the owner to run `codex` in the repository once, with no `next:` line. Do not follow close-and-restart for this refusal. |
 | 70 | Worktree creation failed, or no main checkout or commit | Never force-remove a worktree. |
 | 77 | A hook refused the commit | Inspect the uncommitted work with `git -C <worktree> status`. |
+| 79 | Worktree preparation failed before a worker session started | Inspect the named log and follow the new-start retry line; `--send` and `--recover` do not prepare the worktree. |
 | 84 | Pending owner wait after start, `--send` or `--recover` | Put every pending `owner:` line to the owner first. Run nothing that depends on it until the owner answers, then run `emb run --answered <run>` before merging. |
 
 A stalled run's partial edits need the owner's approval before discard.
@@ -348,9 +394,11 @@ to run and flow worktrees.
 ## Closing
 
 Closing ends the session and keeps an editing worktree and
-branch. It removes a clean read-only detached worktree and its git
-registration, including when its only new files are git-ignored. A detached
-worktree with tracked changes, untracked non-ignored files or a moved
+branch, except that a run with preparation and no worker turn has its owned
+worktree removed as described above. It removes a clean read-only detached
+worktree and its git registration, including when its only new files are
+git-ignored. A detached worktree with tracked changes, untracked
+non-ignored files or a moved
 `HEAD` is kept with its recorded path; closing succeeds with a warning
 naming `git worktree remove --force <path>`. `--close --force` still closes
 only the session and does not discard those changes. Report the warning;

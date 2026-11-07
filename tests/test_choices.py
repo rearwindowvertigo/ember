@@ -1,6 +1,7 @@
 import json
 import multiprocessing
 import sqlite3
+import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -146,6 +147,7 @@ def test_defaults(env: dict[str, str]) -> None:
     assert {answer["layer"] for answer in answers.values()} == {"default"}
     assert values == {
         "worker.network": "off",
+        "worktree.prepare": {},
         "engine.claude": "on",
         "engine.codex": "on",
         "engine.opencode": "on",
@@ -1614,3 +1616,69 @@ def test_legacy_opencode_settings_all_layers_migrate_atomically(
         choices.read(env=env, now=T0 + 5)["menu"]["single.writer"]["model"]
         == "anthropic/claude-x"
     )
+
+
+def test_worktree_prepare_default_and_saved_json(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    assert _answer(choices.read(env=env), "worktree.prepare") == ({}, "default")
+    values = {str(tmp_path / 'repo, "one"'): "npm ci && npm test", "/other": ""}
+    parsed = choices.parse_value("worktree.prepare", json.dumps(values))
+    choices.set_settings({"worktree.prepare": parsed}, env=env)
+    assert _answer(choices.read(env=env), "worktree.prepare") == (values, "setting")
+    assert choices.snapshot(env=env)["settings"]["worktree.prepare"] == values
+    choices.clear_settings(["worktree.prepare"], env=env)
+    assert _answer(choices.read(env=env), "worktree.prepare") == ({}, "default")
+
+
+@pytest.mark.parametrize(
+    "value", [None, [], "npm ci", {"relative": "npm ci"}, {1: "npm ci"}, {"/repo": 1}]
+)
+def test_worktree_prepare_invalid(value: object) -> None:
+    with pytest.raises(choices.InvalidChoiceError, match="worktree.prepare"):
+        choices.validate_value("worktree.prepare", value)
+
+
+@pytest.mark.parametrize(
+    "text", ["", "{", "null", "[]", '{"/repo":null}', '{"/repo":"one","/repo":"two"}']
+)
+def test_worktree_prepare_invalid_json(text: str) -> None:
+    with pytest.raises(choices.InvalidChoiceError, match="worktree.prepare"):
+        choices.parse_value("worktree.prepare", text)
+
+
+@pytest.mark.parametrize("layer", [choices.ONCE, choices.REQUEST])
+def test_worktree_prepare_standing_only(env: dict[str, str], layer: str) -> None:
+    with pytest.raises(choices.InvalidChoiceError, match="standing setting only"):
+        choices.validate_value("worktree.prepare", {}, layer)
+    with pytest.raises(choices.InvalidChoiceError, match="standing setting only"):
+        if layer == choices.ONCE:
+            choices.set_once({"worktree.prepare": {}}, env=env)
+        else:
+            choices.read(request={"worktree.prepare": {}}, env=env)
+
+
+def test_worktree_prepare_rejects_resolved_duplicate(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(repo, target_is_directory=True)
+    for other in (alias, repo / ".." / "repo"):
+        with pytest.raises(choices.InvalidChoiceError, match="listed twice"):
+            choices.validate_value(
+                "worktree.prepare", {str(repo): "npm ci", str(other): ""}
+            )
+
+
+def test_worktree_prepare_cli_json(
+    env: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ember.cli import main
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    value = {str(tmp_path / "repo"): "printf '%s' 'a,b=c'"}
+    assert (
+        main(["choices", "--set", "worktree.prepare=" + json.dumps(value)], env=env)
+        == 0
+    )
+    assert _answer(choices.read(env=env), "worktree.prepare") == (value, "setting")

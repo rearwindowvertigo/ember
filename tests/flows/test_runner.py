@@ -8,14 +8,14 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from ember import branches, choices, paths
+from ember import branches, choices, paths, prepare
 from ember.cli import build_parser
 from ember.flows import briefs, command, lock, plan, record, runner
 from ember.runs import record as runs
@@ -170,6 +170,326 @@ def test_parallel_wave_merges_cleans_and_checks(h: Harness) -> None:
         assert item["branch"] is item["worktree"] is None
     assert record.read_events(h.id, h.env)[-1]["exit"] == 0
     assert not lock.live(h.id, h.env)
+
+
+def test_flow_preparation_retry_cleans_first_and_keeps_logs(h: Harness) -> None:
+    h.create(check=[sys.executable, "-c", "print('checked')"])
+    choices.set_settings(
+        {
+            "worktree.prepare": {
+                str(h.repo): "echo first; echo dirty > leftover; "
+                "echo dirty > README.md; exit 8"
+            }
+        },
+        env=h.env,
+    )
+    flow = h.flow()
+    with pytest.raises(runner.PreparationFailedError):
+        runner.prepare_worktree(flow, h.env)
+    first = dict(h.flow()["preparation"])
+    log = Path(first["log"])
+    assert log.read_text() == "first\n"
+    choices.set_settings(
+        {
+            "worktree.prepare": {
+                str(h.repo): "test ! -e leftover && git diff --exit-code && echo second"
+            }
+        },
+        env=h.env,
+    )
+    flow = h.run()
+    assert flow["status"] == "done"
+    assert flow["preparation"]["state"] == "ok"
+    assert flow["preparation_history"] == [first]
+    assert log.read_text() == "first\n"
+    assert Path(flow["preparation"]["log"]).name == "prepare-1.log"
+    assert Path(flow["preparation"]["log"]).read_text() == "second\n"
+    saved = flow["preparation"]
+    choices.set_settings({"worktree.prepare": {str(h.repo): "exit 9"}}, env=h.env)
+    assert h.run()["preparation"] == saved
+
+
+def test_preparation_failure_retries_only_blocked_children(h: Harness) -> None:
+    h.create([task("a"), task("b"), task("c"), task("d", after=["a"])], parallel=1)
+    flow = h.flow()
+    flow["tasks"][2].update(status="stopped", reason="owner decision")
+    record.save(flow, h.env)
+    choices.set_settings(
+        {"worktree.prepare": {str(h.repo): "echo failed; exit 8"}}, env=h.env
+    )
+    assert runner.run(h.id, h.env, core_factory=h.factory, poll_seconds=0.01) == 79
+    failed = h.flow()
+    assert failed["status"] == "failed" and failed["halted"]
+    assert record.read_events(h.id, h.env)[-1]["exit"] == 79
+    original = failed["tasks"][0]["writer_run"]
+    assert runs.load(original, h.env).turn == 0
+    assert failed["tasks"][1]["writer_run"] is None
+    choices.set_settings({"worktree.prepare": {str(h.repo): "true"}}, env=h.env)
+    resumed = h.run()
+    assert resumed["status"] == "stopped"
+    assert [t["status"] for t in resumed["tasks"]] == [
+        "merged",
+        "merged",
+        "stopped",
+        "merged",
+    ]
+    assert resumed["tasks"][2]["reason"] == "owner decision"
+    assert resumed["tasks"][0]["writer_run"] != original
+    assert resumed["tasks"][0]["preparation_runs"] == [
+        {"role": "writer", "run": original}
+    ]
+    closed = runs.load(original, h.env)
+    assert closed.status == runs.CLOSED and not Path(closed.worktree).exists()
+    assert closed.preparation is not None
+    assert Path(closed.preparation["log"]).read_text() == "failed\n"
+
+
+def test_reviewer_preparation_retry_keeps_writer_work(h: Harness) -> None:
+    h.create()
+    choices.set_settings(
+        {
+            "worktree.prepare": {
+                str(h.repo): "git symbolic-ref -q HEAD >/dev/null || exit 8"
+            }
+        },
+        env=h.env,
+    )
+    assert runner.run(h.id, h.env, core_factory=h.factory, poll_seconds=0.01) == 79
+    failed = h.flow()["tasks"][0]
+    writer_id, reviewer_id, head = (
+        failed["writer_run"],
+        failed["reviewer_run"],
+        failed["head"],
+    )
+    assert runs.load(writer_id, h.env).turn == 1
+    assert runs.load(reviewer_id, h.env).turn == 0
+    choices.set_settings({"worktree.prepare": {str(h.repo): "true"}}, env=h.env)
+    resumed = h.run()["tasks"][0]
+    assert resumed["status"] == "merged"
+    assert resumed["writer_run"] == writer_id and resumed["head"] == head
+    assert resumed["reviews"][0]["run"] != reviewer_id
+    assert runs.load(writer_id, h.env).turn == 1
+    assert runs.load(reviewer_id, h.env).status == runs.CLOSED
+
+
+def test_preparation_retry_applies_worker_answer_first(h: Harness) -> None:
+    h.create([task("a"), task("b")], parallel=1)
+    choices.set_settings({"worktree.prepare": {str(h.repo): "exit 8"}}, env=h.env)
+    assert runner.run(h.id, h.env, core_factory=h.factory, poll_seconds=0.01) == 79
+    before = h.flow()["tasks"][0]
+    assert before["preparation_blocked"] == "writer"
+    h.answer("worker", worker="codex:another@low")
+    choices.set_settings({"worktree.prepare": {str(h.repo): "true"}}, env=h.env)
+    flow = h.run()
+    answered, automatic = flow["tasks"]
+    assert flow["status"] == "done" and flow["answers_seen"] == 1
+    assert answered["status"] == automatic["status"] == "merged"
+    assert answered["writer_run"] != before["writer_run"]
+    assert answered["writer"]["model"] == "another"
+    replacement = runs.load(answered["writer_run"], h.env)
+    assert replacement.model == "another" and replacement.effort == "low"
+    assert replacement.preparation is not None
+    assert replacement.preparation["state"] == "ok"
+    assert runs.load(before["writer_run"], h.env).status == runs.CLOSED
+    assert answered["preparation_blocked"] is None
+    assert automatic["writer"] is None
+    assert not any(
+        "answer 1 refused" in (event.get("reason") or "")
+        for event in record.read_events(h.id, h.env)
+    )
+
+
+@pytest.mark.parametrize("kind", ["send", "review", "accept", "drop"])
+def test_reviewer_preparation_retry_follows_lead_answer(h: Harness, kind: str) -> None:
+    h.create()
+    choices.set_settings(
+        {
+            "worktree.prepare": {
+                str(h.repo): "git symbolic-ref -q HEAD >/dev/null || exit 8"
+            }
+        },
+        env=h.env,
+    )
+    assert runner.run(h.id, h.env, core_factory=h.factory, poll_seconds=0.01) == 79
+    before = h.flow()["tasks"][0]
+    assert before["preparation_blocked"] == "reviewer"
+    fields: dict[str, Any] = {}
+    if kind == "send":
+        correction = h.tmp / "correction.md"
+        correction.write_text("@write a corrected")
+        fields["file"] = str(correction)
+    elif kind == "review":
+        fields["worker"] = "codex:another@low"
+    elif kind == "accept":
+        fields["commit"] = before["head"]
+    h.answer(kind, **fields)
+    choices.set_settings(
+        {
+            "worktree.prepare": {
+                str(h.repo): "exit 9" if kind in ("accept", "drop") else "true"
+            }
+        },
+        env=h.env,
+    )
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert flow["answers_seen"] == item["answer"] == 1
+    assert item["status"] == ("dropped" if kind == "drop" else "merged")
+    assert item["writer_run"] == before["writer_run"]
+    assert item["preparation_blocked"] is None
+    writer = runs.load(item["writer_run"], h.env)
+    assert writer.turn == (2 if kind == "send" else 1)
+    if kind == "send":
+        assert git(h.repo, "show", f"{flow['branch']}:a", env=h.env) == "corrected"
+        assert item["corrections"] == [
+            str(record.folder(h.id, h.env) / "answers" / "1.md")
+        ]
+    elif kind == "review":
+        reviewer = runs.load(item["reviews"][-1]["run"], h.env)
+        assert reviewer.model == "another" and reviewer.effort == "low"
+    else:
+        assert item["reviews"] == []
+    assert runs.load(before["reviewer_run"], h.env).status == runs.CLOSED
+    assert item["preparation_runs"] == [
+        {"role": "reviewer", "run": before["reviewer_run"]}
+    ]
+    assert not any(
+        "answer 1 refused" in (event.get("reason") or "")
+        for event in record.read_events(h.id, h.env)
+    )
+
+
+def test_preparation_retry_preserves_answer_refusal_reason(h: Harness) -> None:
+    h.create()
+    choices.set_settings(
+        {
+            "worktree.prepare": {
+                str(h.repo): "git symbolic-ref -q HEAD >/dev/null || exit 8"
+            }
+        },
+        env=h.env,
+    )
+    assert runner.run(h.id, h.env, core_factory=h.factory, poll_seconds=0.01) == 79
+    before = h.flow()["tasks"][0]
+    base = h.flow()["base"]
+    h.answer("accept", commit=base)
+    choices.set_settings({"worktree.prepare": {str(h.repo): "true"}}, env=h.env)
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert flow["answers_seen"] == 1 and item["status"] == "stopped"
+    assert item["writer_run"] == before["writer_run"]
+    assert item["reviewer_run"] == before["reviewer_run"]
+    refused = [
+        event["reason"]
+        for event in record.read_events(h.id, h.env)
+        if "answer 1 refused" in (event.get("reason") or "")
+    ]
+    assert refused == [
+        f"answer 1 refused: the branch moved from {base} to {before['head']}"
+    ]
+
+
+@pytest.mark.parametrize("peer", ["prepared", "running"])
+def test_preparation_halt_at_admission(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, peer: str
+) -> None:
+    h.create([task("a"), task("b", text="@sleep 0.3\n@write b value")], parallel=2)
+    choices.set_settings({"worktree.prepare": {str(h.repo): "true"}}, env=h.env)
+    original = prepare.run
+    ready = threading.Event()
+    peer_run: list[str] = []
+
+    def waiting(predicate: Callable[[], bool]) -> None:
+        deadline = time.monotonic() + 10
+        while not predicate():
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+
+    def preparation(
+        shell: str,
+        worktree: str | Path,
+        log: str | Path,
+        *,
+        started: Callable[[int, int], None],
+        stop: threading.Event | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> prepare.Result:
+        run = runs.load(Path(log).parent.name, h.env)
+        if run.subject == "feat: a":
+            assert ready.wait(10)
+            if peer == "running":
+                waiting(lambda: runs.load(peer_run[0], h.env).turn == 1)
+            shell = "echo failed; exit 8"
+        else:
+            peer_run.append(run.id)
+            ready.set()
+            if peer == "prepared":
+                waiting(lambda: bool(h.flow().get("preparation_halt")))
+        return original(shell, worktree, log, started=started, stop=stop, env=env)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(prepare, "run", preparation)
+        assert runner.run(h.id, h.env, core_factory=h.factory, poll_seconds=0.01) == 79
+    blocked = h.flow()["tasks"][1]
+    run = runs.load(peer_run[0], h.env)
+    assert run.preparation is not None and run.preparation["state"] == "ok"
+    assert run.turn == int(peer == "running")
+    if peer == "running":
+        assert blocked["head"] and blocked["preparation_blocked"] == "reviewer"
+    else:
+        assert blocked["preparation_blocked"] == "writer"
+        assert not (run.folder / "launch.sh").exists()
+    resumed = h.run()
+    assert resumed["status"] == "done"
+    current = resumed["tasks"][1]["writer_run"]
+    assert (current == run.id) == (peer == "running")
+
+
+def test_indeterminate_child_preparation_refuses_resume(h: Harness) -> None:
+    h.create()
+    flow, writer = started_writer(h)
+    runs.update(
+        writer,
+        {
+            "turn": 0,
+            "turn_state": None,
+            "preparation": {
+                "command": "true",
+                "state": "running",
+                "log": str(writer.folder / "prepare.log"),
+            },
+        },
+    )
+    flow["tasks"][0].update(status="writing", writer_run=writer.id)
+    record.save(flow, h.env)
+    assert runner.run(h.id, h.env, core_factory=h.factory, poll_seconds=0.01) == 1
+    assert "indeterminate" in h.flow()["reason"]
+    assert h.flow()["tasks"][0]["writer_run"] == writer.id
+
+
+def test_shutdown_waits_for_child_preparation_cleanup(h: Harness) -> None:
+    h.create()
+    shell = f"{sys.executable} -c 'import time; time.sleep(60)'"
+    choices.set_settings({"worktree.prepare": {str(h.repo): shell}}, env=h.env)
+    shutdown = threading.Event()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(runner._run, h.id, h.env, h.factory, 0.01, shutdown)
+        deadline = time.monotonic() + 10
+        while True:
+            run_id = h.flow()["tasks"][0]["writer_run"]
+            run = runs.load(run_id, h.env) if run_id else None
+            if run and run.preparation and run.preparation.get("pid"):
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+        shutdown.set()
+        assert pending.result(timeout=10) == 79
+    saved = runs.load(run.id, h.env)
+    assert saved.preparation is not None
+    assert saved.preparation["state"] == "interrupted"
+    assert prepare.start_ticks(saved.preparation["pid"]) is None
+    assert saved.turn == 0
+    assert record.read_events(h.id, h.env)[-1]["exit"] == 79
 
 
 @pytest.mark.parametrize("overlap", [False, True])
@@ -352,16 +672,56 @@ def test_status_distinguishes_two_reviews(h: Harness, latest_should: bool) -> No
     assert watch["findings"] == {"must": 0, "should": 1 + int(latest_should), "lead": 1}
 
 
-def test_exhausted_fix_budget(h: Harness) -> None:
+@pytest.mark.parametrize(
+    "source", ["plan.rounds", "flow.review_rounds", "default", "unknown"]
+)
+def test_exhausted_fix_budget(h: Harness, source: str) -> None:
     h.script_data = {
         "a read-only review;": "@reply " + FIX,
         "Fix round 1 of task a": "@write a fixed",
     }
     h.scripts_update()
     h.create(rounds=1)
+    flow = h.flow()
+    flow["review_budget"] = {
+        "value": 2 if source == "flow.review_rounds" else 1,
+        "unit": "reviews" if source == "flow.review_rounds" else "fix_rounds",
+        "source": source,
+    }
+    record.save(flow, h.env)
     item = h.run()["tasks"][0]
-    assert item["reason"] == "unresolved after 1 fix rounds"
+    assert (
+        item["reason"]
+        == {
+            "plan.rounds": "unresolved after 1 fix round (plan rounds 1)",
+            "flow.review_rounds": "unresolved after 2 reviews "
+            "(flow.review_rounds 2 allows 1 fix round)",
+            "default": "unresolved after 1 fix round (default 1 fix round)",
+            "unknown": "unresolved after 1 fix round "
+            "(budget 1 fix round; source unknown)",
+        }[source]
+    )
     assert len(item["reviews"]) == 2
+    assert item["round"] == 1
+
+
+def test_one_review_setting_stops_without_a_fix(h: Harness) -> None:
+    h.scripts_update(**{"a read-only review;": "@reply " + FIX})
+    h.create(rounds=0)
+    flow = h.flow()
+    flow["review_budget"] = {
+        "value": 1,
+        "unit": "reviews",
+        "source": "flow.review_rounds",
+    }
+    record.save(flow, h.env)
+    choices.set_settings({"flow.review_rounds": "4"}, env=h.env)
+    item = h.run()["tasks"][0]
+    assert item["reason"] == (
+        "unresolved after 1 review (flow.review_rounds 1 allows no fix round)"
+    )
+    assert item["round"] == 0 and len(item["reviews"]) == 1
+    assert not list((record.folder(h.id, h.env) / "briefs").glob("a-fix-*.md"))
 
 
 @pytest.mark.parametrize("text", ["Do nothing", "@write a value"])
@@ -753,7 +1113,7 @@ def test_hook_correction_does_not_grant_more_automatic_fix_rounds(h: Harness) ->
     h.answer("send", file=str(correction))
     item = h.run()["tasks"][0]
     assert item["round"] == 1
-    assert item["reason"] == "unresolved after 1 fix rounds"
+    assert item["reason"] == "unresolved after 1 fix round (plan rounds 0)"
 
 
 def test_stale_and_unreadable_answers_advance_cursor(h: Harness) -> None:

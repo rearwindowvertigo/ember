@@ -1,7 +1,8 @@
 """The Settings screen: start at login, theme, and how workers run (design J2).
 
-Two groups in cards. General holds Start at login and Theme; Workers holds
-Worker network, Terminal and Sandbox read paths. Each change saves at once.
+General holds Start at login and Theme; Workers holds Worker network,
+Terminal and Sandbox read paths. Worktree preparation holds each repository's
+preparation command. Each change saves at once.
 The app's controller writes or removes the autostart entry after
 `app.autostart` changes; this screen shows why it could not, when it could
 not.
@@ -10,6 +11,7 @@ not.
 import os
 import shlex
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import Qt
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -30,6 +33,7 @@ from ember.app.screens.common import (
     ToneLine,
     TooltipRow,
     align_controls,
+    chain_tab_order,
     clear_layout,
     label,
     screen_header,
@@ -74,6 +78,26 @@ def choose_folder(parent: QWidget, start: str) -> str:
     )
 
 
+def choose_repository(parent: QWidget, start: str) -> str:
+    """Ask the owner for a repository's main checkout folder."""
+    return QFileDialog.getExistingDirectory(
+        parent, "Add a repository for worktree preparation", start
+    )
+
+
+def preparation_command(
+    parent: QWidget, repository: str, command: str
+) -> tuple[str, bool]:
+    """Ask for a shell command, accepting empty text as no preparation."""
+    return QInputDialog.getText(
+        parent,
+        "Worktree preparation",
+        f"{repository}\nShell command (leave empty for no preparation):",
+        QLineEdit.EchoMode.Normal,
+        command,
+    )
+
+
 def _words(value: str) -> list[str] | None:
     try:
         return shlex.split(value)
@@ -101,12 +125,14 @@ class SettingsScreen(QWidget):
         super().__init__()
         self.context = context
         self._other_open = False
+        self._preparation_saving = False
         layout = scrolled(self)
         screen_header(layout, self.TITLE, SUBTITLE)
         self.tip_rows: dict[str, TooltipRow] = {}
         """Each setting's row with an info icon, by its name."""
         layout.addWidget(self._general())
         layout.addWidget(self._workers())
+        layout.addWidget(self._preparation())
         align_controls(self.tip_rows.values())
         layout.addStretch(1)
         context.settings_changed.connect(self._redraw)
@@ -210,6 +236,30 @@ class SettingsScreen(QWidget):
         self.tip_rows[name] = row
         column.addWidget(row)
 
+    def _preparation(self) -> widgets.Card:
+        card, column = titled_card("Worktree preparation")
+        self.preparation_card = card
+        description = label(
+            "A shell command Ember runs in each new worktree, outside the worker "
+            "sandbox, before any worker or check starts. "
+            "Choose the repository's main checkout folder.",
+            "secondary",
+        )
+        description.setWordWrap(True)
+        column.addWidget(description)
+        self.add_repository = widgets.button("Add repository", "secondary", size="sm")
+        self.add_repository.clicked.connect(self._add_repository)
+        column.addWidget(self.add_repository, 0, Qt.AlignmentFlag.AlignLeft)
+        self.preparation_box = QWidget()
+        self.preparation_layout = QVBoxLayout(self.preparation_box)
+        self.preparation_layout.setContentsMargins(0, 0, 0, 0)
+        self.preparation_layout.setSpacing(8)
+        column.addWidget(self.preparation_box)
+        self.preparation_line = ToneLine("warning")
+        column.addWidget(self.preparation_line)
+        self.preparation_rows: dict[str, tuple[QPushButton, QPushButton]] = {}
+        return card
+
     def _draw_icons(self, *_args: object) -> None:
         color = theme.color("text-primary")
         widgets.set_icon(self.add_folder, icons.icon("folder-plus", color, 16))
@@ -231,6 +281,15 @@ class SettingsScreen(QWidget):
             self.theme.blockSignals(False)
         self._draw_terminal(str(answers["terminal"]["value"]))
         self._draw_paths(list(answers["sandbox.read"]["value"]))
+        self._draw_preparation(dict(answers["worktree.prepare"]["value"]))
+        chain_tab_order(
+            [
+                self.add_folder,
+                *self.path_rows.values(),
+                self.add_repository,
+                *(button for row in self.preparation_rows.values() for button in row),
+            ]
+        )
         for name, key in SETTING_KEYS.items():
             self.tip_rows[name].set_changed(self.context.setting_changed(key))
 
@@ -292,6 +351,45 @@ class SettingsScreen(QWidget):
     def _autostart_reason(self, reason: object) -> None:
         self.autostart_line.show_text(None if reason is None else str(reason))
 
+    def _draw_preparation(self, commands: dict[str, str]) -> None:
+        clear_layout(self.preparation_layout)
+        self.preparation_rows = {}
+        if not commands:
+            self.preparation_layout.addWidget(
+                label("No repositories added.", "secondary")
+            )
+        for repository, command in commands.items():
+            row = QWidget()
+            column = QVBoxLayout(row)
+            column.setContentsMargins(0, 0, 0, 0)
+            column.setSpacing(4)
+            for value in (repository, command or "No preparation"):
+                text = QLabel(value)
+                text.setFont(theme.font("code"))
+                text.setTextFormat(Qt.TextFormat.PlainText)
+                text.setWordWrap(True)
+                text.setTextInteractionFlags(
+                    Qt.TextInteractionFlag.TextSelectableByMouse
+                )
+                column.addWidget(text)
+            buttons = QHBoxLayout()
+            edit = widgets.button("Edit", "secondary", size="sm")
+            edit.setAccessibleName(f"Edit preparation for {repository}")
+            edit.clicked.connect(
+                lambda _checked=False, path=repository: self._edit_preparation(path)
+            )
+            buttons.addWidget(edit)
+            remove = widgets.button("Remove", "ghost", size="sm")
+            remove.setAccessibleName(f"Remove preparation for {repository}")
+            remove.clicked.connect(
+                lambda _checked=False, path=repository: self._remove_preparation(path)
+            )
+            buttons.addWidget(remove)
+            buttons.addStretch(1)
+            column.addLayout(buttons)
+            self.preparation_layout.addWidget(row)
+            self.preparation_rows[repository] = (edit, remove)
+
     # Saving
 
     def _reset(self, key: str) -> None:
@@ -319,8 +417,10 @@ class SettingsScreen(QWidget):
         self,
         values: dict[str, object],
         done: Callable[[dict[str, Any]], None] | None = None,
+        *,
+        result: Callable[[dict[str, Any] | Exception], None] | None = None,
     ) -> None:
-        self.context.save_settings(values, done)
+        self.context.save_settings(values, done, result=result)
 
     def _theme_picked(self, value: str) -> None:
         if value == self.context.setting("app.theme"):
@@ -399,3 +499,54 @@ class SettingsScreen(QWidget):
     def _remove(self, path: str) -> None:
         self.paths_line.show_text(None)
         self._save({"sandbox.read": [p for p in self._paths() if p != path]})
+
+    def _preparation_commands(self) -> dict[str, str]:
+        return dict(self.context.setting("worktree.prepare") or {})
+
+    def _add_repository(self) -> None:
+        if self._preparation_saving:
+            return
+        chosen = choose_repository(self, self.context.env.get("HOME", ""))
+        if not chosen:
+            return
+        try:
+            repository = str(Path(chosen).resolve())
+            commands = self._preparation_commands()
+            if any(Path(path).resolve() == Path(repository) for path in commands):
+                self.preparation_line.show_text(f"{repository} is already in the list.")
+                return
+        except (OSError, ValueError) as error:
+            self.preparation_line.show_text(f"Not saved: {error}.")
+            return
+        command, accepted = preparation_command(self, repository, "")
+        if accepted:
+            self._save_preparation({**commands, repository: command})
+
+    def _edit_preparation(self, repository: str) -> None:
+        if self._preparation_saving:
+            return
+        commands = self._preparation_commands()
+        command, accepted = preparation_command(self, repository, commands[repository])
+        if accepted and command != commands[repository]:
+            self._save_preparation({**commands, repository: command})
+
+    def _remove_preparation(self, repository: str) -> None:
+        if self._preparation_saving:
+            return
+        commands = self._preparation_commands()
+        del commands[repository]
+        self._save_preparation(commands)
+
+    def _save_preparation(self, commands: dict[str, str]) -> None:
+        self._preparation_saving = True
+        self.preparation_card.setEnabled(False)
+        self.preparation_line.show_text(None)
+
+        def finished(result: dict[str, Any] | Exception) -> None:
+            self._preparation_saving = False
+            self.preparation_card.setEnabled(True)
+            self._redraw()
+            if isinstance(result, Exception):
+                self.preparation_line.show_text(f"Not saved: {result}.")
+
+        self._save({"worktree.prepare": commands}, result=finished)

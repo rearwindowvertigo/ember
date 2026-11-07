@@ -1906,15 +1906,26 @@ def gapcheck_answer(args: list[str]) -> Reply:
     """Record an answer with Ember's result validator and atomic writer."""
     location = option(args, "--answer")
     identity, text = option(args, "--id"), option(args, "--text")
-    if location is None or identity is None or text is None:
+    groups = options(args, "--take-defaults")
+    identities = [part.strip() for group in groups for part in group.split(",")]
+    problem = None
+    if groups and (identity is not None or text is not None):
+        problem = "--take-defaults cannot be combined with --id or --text"
+    elif not groups and (identity is None or text is None):
+        problem = "--answer needs --id and --text, or --take-defaults"
+    if location is None or problem is not None:
         return Reply(
             64,
-            err="emb gapcheck: --answer needs --id and --text\n"
+            err=f"emb gapcheck: {problem or '--take-defaults needs --answer'}\n"
             "next: emb gapcheck --help\n",
         )
     try:
         saved = gap_previous.load(location)
-        made = gap_previous.answer(saved, identity, text)
+        made = (
+            gap_previous.take_defaults(saved, identities)
+            if groups
+            else gap_previous.answer(saved, identity or "", text or "")
+        )
     except gap_previous.PreviousError as error:
         return Reply(
             66 if error.unreadable else 65,
@@ -1926,6 +1937,9 @@ def gapcheck_answer(args: list[str]) -> Reply:
         return Reply(74, err=f"emb gapcheck: {error}\nnext: ls -l {location}\n")
     if has(args, "--json"):
         return Reply(0, json.dumps(made, indent=2) + "\n")
+    if groups:
+        names = ", ".join(identities)
+        return Reply(0, err=f"recorded answers for {names} in {saved.path}\n")
     return Reply(0, err=f"recorded answer for {identity} in {saved.path}\n")
 
 

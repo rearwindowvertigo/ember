@@ -22,15 +22,18 @@ import os
 import secrets
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from types import FrameType
 from typing import Any, TextIO
 
-from ember import choices, db, engines, paths, processes, sandbox, tmux
+from ember import choices, db, engines, paths, prepare, processes, sandbox, tmux
 from ember.engines import Driver, LaunchSpec, TurnOutcome, models, status
 from ember.engines.opencode2 import DeliveryUncertainError
 from ember.runs import exits, record, steps, worktrees
@@ -99,6 +102,51 @@ class RunError(Exception):
         self.code = code
         self.variant = variant
         self.context = context
+
+
+def abandon_start(run: Run, *, dry_run: bool = False) -> Run:
+    """Fail an abandoned start while its command and record locks are held.
+
+    Args:
+        run: The reloaded record. A starting run with its command lock held
+            by this caller has no active start process.
+        dry_run: Return the failed record without saving it or ending processes.
+
+    Returns:
+        The failed record, or the unchanged run when it is no longer starting.
+    """
+    if run.status != record.STARTING:
+        return run
+    message = "abandoned worktree preparation during run start"
+    preparation = run.preparation
+    if preparation is not None:
+        pid, start = preparation.get("pid"), preparation.get("start")
+        if not dry_run and pid is not None and start is not None:
+            prepare.end_group(pid, start)
+        if preparation["state"] == "running":
+            preparation = {
+                **preparation,
+                "state": "interrupted",
+                "exit": None,
+                "seconds": max(0.0, time.time() - run.updated_at),
+                "left_behind": [],
+                "message": message,
+            }
+    now = time.time()
+    failed = replace(
+        run,
+        status=record.FAILED,
+        preparation=preparation,
+        last_exit=exits.PREPARATION_FAILED,
+        last_reason=message,
+        last_start_failure=True,
+        last_variant=None,
+        updated_at=now,
+        ended_at=now,
+    )
+    if not dry_run:
+        record.save(failed)
+    return failed
 
 
 def worktree_removal_reason(run: Run) -> str | None:
@@ -291,6 +339,8 @@ class Core:
         poll_seconds: float | None = None,
         out: TextIO | None = None,
         err: TextIO | None = None,
+        admit: Callable[[Run], None] | None = None,
+        prepare_stop: threading.Event | None = None,
     ) -> None:
         """Set up the core.
 
@@ -305,6 +355,9 @@ class Core:
                 `POLL_SECONDS`.
             out: Standard output; `None` for `sys.stdout`.
             err: Standard error; `None` for `sys.stderr`.
+            admit: Called after preparation, immediately before admitting the
+                first session. Raise RunError to refuse admission.
+            prepare_stop: Interrupt preparation when set.
         """
         self.env: Mapping[str, str] = os.environ if env is None else env
         self.load_driver = load_driver or (
@@ -315,6 +368,8 @@ class Core:
         self.poll_seconds = POLL_SECONDS if poll_seconds is None else poll_seconds
         self.out = out
         self.err = err
+        self.admit = admit
+        self.prepare_stop = prepare_stop
         self.last_run_id: str | None = None
         self.status_next: str | None = None
         self.status_owner: list[str] = []
@@ -358,6 +413,18 @@ class Core:
                 with contextlib.suppress(record.RecordError):
                     run = record.load(run_id, self.env)
             if run is not None:
+                if error.code == exits.PREPARATION_FAILED:
+                    text = exits.line(
+                        error.code,
+                        log=shlex.quote(
+                            str(
+                                (run.preparation or {}).get(
+                                    "log", run.folder / "prepare.log"
+                                )
+                            )
+                        ),
+                        retry=steps.retry_start(run),
+                    )
                 if run.last_exit == error.code or (text and text.startswith("owner:")):
                     run = self._record_exit(
                         run,
@@ -862,6 +929,9 @@ class Core:
     def start(self, options: StartOptions) -> int:
         """Check and preview a worker, or start a run and wait for its first turn.
 
+        The command lock is held before the run record exists, throughout
+        preparation and session admission, until the first turn finishes.
+
         Args:
             options: The run's options.
 
@@ -897,14 +967,23 @@ class Core:
         top = self._git_out(folder, "rev-parse", "--show-toplevel")
         if not top:
             raise RunError(exits.NOT_A_CHECKOUT, f"{folder} is not in a git checkout")
-        settings = self._settings(options.claim)
-        driver, worker = self._select(options, settings)
         common_dir = self._git_out(
             top, "rev-parse", "--path-format=absolute", "--git-common-dir"
         )
         if not common_dir:
             raise RunError(exits.NOT_A_CHECKOUT, f"cannot find the git folder of {top}")
         common = Path(common_dir).resolve()
+        try:
+            preparation_command = prepare.lookup(common, env=self.env)
+        except prepare.PreparationError as error:
+            raise RunError(
+                exits.UNAVAILABLE,
+                str(error),
+                "fix",
+                fix="repair the worktree.prepare setting or the checkout named above",
+            ) from error
+        settings = self._settings(options.claim)
+        driver, worker = self._select(options, settings)
         self._check_codex_trust(engine, common)
         if options.base is not None and not options.read_only:
             raise RunError(exits.USAGE, "a saved base requires a read-only run")
@@ -1004,7 +1083,16 @@ class Core:
                             f"does not see uncommitted {name} (reads {short_base})"
                         )
                 run, window = self._launch(
-                    run, driver, brief, options, settings, common, main
+                    run,
+                    driver,
+                    brief,
+                    options,
+                    settings,
+                    common,
+                    main,
+                    preparation_command=preparation_command,
+                    admit=self.admit,
+                    stop=self.prepare_stop,
                 )
             except RunError as error:
                 _close_quietly(driver, run)
@@ -1134,10 +1222,17 @@ class Core:
         settings: Mapping[str, Any],
         common: Path,
         main: Path | None,
+        *,
+        preparation_command: str | None = None,
+        admit: Callable[[Run], None] | None = None,
+        stop: threading.Event | None = None,
     ) -> tuple[Run, str | None]:
         """Create the worktree and session and send the first message."""
         if main is not None:
             self._create_worktree(run, main)
+            if preparation_command:
+                run = self._update(run, start_argv=self._start_argv(run, options))
+                run = self._prepare(run, preparation_command, stop)
             # The new worktree can hold a tracked .codex/config.toml.
             self._check_codex_config(run.engine, run.sandbox, run.worktree, common)
         if run.sandbox == sandbox.NONE:
@@ -1161,6 +1256,8 @@ class Core:
         spec = self._sandboxed(spec, run, common)
         if run.read_only:
             self._save_snapshot(run, 1)
+        if admit is not None:
+            admit(run)
         if spec.first_message is None:
             run = self._turn_sent(run, 1, first_message(run.id, brief))
         launch = run.folder / LAUNCH_NAME
@@ -1194,6 +1291,84 @@ class Core:
             with self._engine_calls(run):
                 driver.send(run, spec.first_message)
         return run, window
+
+    def _start_argv(self, run: Run, options: StartOptions) -> tuple[str, ...]:
+        """Save the caller's options, using a persistent copy of the brief."""
+        argv = [
+            "emb",
+            "run",
+            "--engine",
+            options.engine,
+            "--dir",
+            str(Path(options.dir).resolve()),
+            "--task-file",
+            str(run.folder / record.BRIEF_NAME),
+        ]
+        for flag, value in (
+            ("--model", options.model),
+            ("--effort", options.effort),
+            ("--claim", options.claim),
+        ):
+            if value is not None:
+                argv.extend((flag, value))
+        for flag, enabled in (
+            ("--read-only", options.read_only),
+            ("--window", options.window),
+        ):
+            if enabled:
+                argv.append(flag)
+        for path in options.read:
+            argv.extend(("--read", str(Path(path).resolve())))
+        for trailer in options.trailers:
+            argv.extend(("--trailer", trailer))
+        if self.quiet:
+            argv.append("--quiet")
+        if self.stall_seconds != STALL_MINUTES * 60:
+            argv.extend(("--stall", str(self.stall_seconds / 60)))
+        return tuple(argv)
+
+    def _prepare(self, run: Run, command: str, stop: threading.Event | None) -> Run:
+        """Persist preparation before waiting, and refuse a failed attempt."""
+        log = run.folder / "prepare.log"
+        run = self._update(
+            run, preparation={"command": command, "state": "running", "log": str(log)}
+        )
+
+        def started(pid: int, start: int) -> None:
+            nonlocal run
+            run = self._update(
+                run, preparation={**(run.preparation or {}), "pid": pid, "start": start}
+            )
+
+        began = time.monotonic()
+        try:
+            with _preparation_signals():
+                result = prepare.run(
+                    command, run.worktree, log, started=started, stop=stop, env=self.env
+                )
+        except (Exception, KeyboardInterrupt) as error:
+            result = prepare.Result(
+                "interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
+                None,
+                time.monotonic() - began,
+                str(log),
+                [],
+                "preparation interrupted"
+                if isinstance(error, KeyboardInterrupt)
+                else f"preparation failed: {error}",
+            )
+        run = self._update(
+            run, preparation={**(run.preparation or {}), **result.as_dict()}
+        )
+        if result.state != "ok":
+            raise RunError(
+                exits.PREPARATION_FAILED,
+                f"{run.id}: {result.message or 'preparation failed'}; log: {log}",
+                run=run.id,
+                log=shlex.quote(str(log)),
+                retry=steps.retry_start(run),
+            )
+        return run
 
     def _turn_sent(self, run: Run, turn: int, text: str) -> Run:
         self._save_screen_baseline(run, turn)
@@ -2326,29 +2501,39 @@ class Core:
     def close(self, run_id: str, *, force: bool = False) -> int:
         """Close a run: end its session and record it closed.
 
-        Editing worktrees and branches are kept. Clean detached worktrees
-        are removed; changed detached worktrees and their paths are kept.
+        An unlocked starting run is failed as abandoned before closing.
+        A locked starting run is left alone, including with force. Worktrees
+        of unstarted preparation runs are removed. Other editing worktrees
+        and branches are kept; clean detached worktrees are removed.
 
         Args:
             run_id: The run.
             force: Close even while a turn runs, a command waits on it or its
-                live session holds messages Ember did not send.
+                live session holds messages Ember did not send. A start that
+                holds its command lock is still left alone.
 
         Returns:
             The exit code.
 
         Raises:
-            RunError: A turn is running, a command waits on the run, or its
-                live session holds messages Ember did not send, and `force`
-                is false.
+            RunError: A starting run holds its command lock, or a turn is
+                running, a command waits on the run or its live session holds
+                foreign messages and `force` is false.
         """
         run = self._load(run_id)
-        if force and run.status != record.CLOSED:
+        if force and run.status not in (record.CLOSED, record.STARTING):
             self._end_session(run)
             return exits.OK
         with self._turn_lock(run_id, "close"):
             run = self._load(run_id)
+            if run.status == record.STARTING:
+                with record.record_lock(run):
+                    run = abandon_start(record.load(run_id, self.env))
+            if force and run.status != record.CLOSED:
+                self._end_session(run, command_locked=True)
+                return exits.OK
             if run.status == record.CLOSED:
+                self._end_preparation(run)
                 self._remove_detached(run, command_locked=True)
                 self._say(f"closed {run_id}")
                 return exits.OK
@@ -2398,6 +2583,7 @@ class Core:
         return exits.OK
 
     def _end_session(self, run: Run, *, command_locked: bool = False) -> None:
+        self._end_preparation(run)
         # Processes a worker's tools start in a session of their own survive
         # the tmux session, so the pane's descendants are found first.
         found: list[processes.Process] = []
@@ -2427,7 +2613,8 @@ class Core:
         self._say(f"closed {run.id}")
 
     def _remove_detached(self, run: Run, *, command_locked: bool = False) -> None:
-        if not run.read_only or not run.detached:
+        unstarted = run.preparation is not None and run.turn == 0
+        if not unstarted and (not run.read_only or not run.detached):
             return
         command_lock = (
             contextlib.nullcontext()
@@ -2441,9 +2628,52 @@ class Core:
                 if reason:
                     raise OSError(reason)
                 with self._worktree_lock(Path(run.common or run.repo)):
-                    worktrees.remove_detached(run)
+                    if unstarted:
+                        self._remove_unstarted(run)
+                    else:
+                        worktrees.remove_detached(run)
         except (RunError, record.RecordError, OSError) as error:
-            self._warn(f"WARNING: read-only run {run.id}: {error}")
+            kind = "run" if unstarted else "read-only run"
+            self._warn(f"WARNING: {kind} {run.id}: {error}")
+
+    def _end_preparation(self, run: Run) -> None:
+        """End a preparation group whose recorded process identity still matches."""
+        preparation = run.preparation or {}
+        pid, start = preparation.get("pid"), preparation.get("start")
+        if pid is not None and start is not None:
+            prepare.end_group(pid, start)
+
+    def _remove_unstarted(self, run: Run) -> None:
+        """Remove the owned worktree of a preparation run with no worker turn."""
+        folder = Path(run.worktree)
+        if (
+            not run.common
+            or folder.name != run.id
+            or folder.resolve() == Path(run.repo).resolve()
+            or (run.main and folder.resolve() == Path(run.main).resolve())
+        ):
+            raise OSError(f"cannot verify ownership of worktree {folder}")
+        listing = self._git(run.common, "worktree", "list", "--porcelain", "-z")
+        if listing.returncode:
+            raise OSError(listing.stderr.strip() or "cannot list worktrees")
+        entries = [part.split("\0") for part in listing.stdout.split("\0\0") if part]
+        entry = next(
+            (part for part in entries if part[0] == f"worktree {folder}"), None
+        )
+        if entry is None and not folder.exists():
+            return
+        expected = "detached" if run.read_only else f"branch refs/heads/{run.branch}"
+        if (
+            entry is None
+            or expected not in entry
+            or any(part.startswith("locked") for part in entry)
+        ):
+            raise OSError(f"cannot verify unlocked worktree {folder}")
+        removed = self._git(
+            run.common, "worktree", "remove", "--force", "--", str(folder)
+        )
+        if removed.returncode:
+            raise OSError(removed.stderr.strip() or f"cannot remove {folder}")
 
     def _optional_driver(self, engine: str) -> Driver:
         try:
@@ -2571,6 +2801,26 @@ class Core:
             self._warn(
                 f"next: emb run --recover {run_id}, then emb run --close {run_id}"
             )
+
+
+@contextlib.contextmanager
+def _preparation_signals() -> Iterator[None]:
+    """End preparation on terminal shutdown as well as keyboard interruption."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def interrupt(signum: int, frame: FrameType | None) -> None:
+        raise KeyboardInterrupt
+
+    handlers = {}
+    try:
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            handlers[signum] = signal.signal(signum, interrupt)
+        yield
+    finally:
+        for signum, handler in handlers.items():
+            signal.signal(signum, handler)
 
 
 class _SessionOnly(Driver):

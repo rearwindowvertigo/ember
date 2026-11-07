@@ -2,7 +2,7 @@
 
 Each key resolves to the first of: the request layer, the claimed one-time
 copy, the standing setting, then the key's default. Values passed to these
-functions are typed: strings, and lists of strings for list keys.
+functions are typed: strings, lists of strings, and objects for object keys.
 
 Every function takes an optional `env` mapping, passed to `ember.paths`, and an
 optional `now` in seconds since the epoch, which defaults to the current time.
@@ -286,6 +286,35 @@ def _command_line(value: object) -> None:
         _fail("the command line is empty")
 
 
+def _worktree_prepare(value: object) -> None:
+    """Validate checkout paths and their shell commands."""
+    if not isinstance(value, dict):
+        raise InvalidChoiceError("not a JSON object of checkout paths to commands")
+    seen: set[Path] = set()
+    for checkout, command in value.items():
+        if not isinstance(checkout, str) or not os.path.isabs(checkout):
+            raise InvalidChoiceError(f"{checkout!r} is not an absolute checkout path")
+        if not isinstance(command, str):
+            raise InvalidChoiceError(f"command for {checkout!r} is not a string")
+        try:
+            resolved = Path(checkout).resolve()
+        except (OSError, ValueError) as error:
+            raise InvalidChoiceError(f"cannot resolve {checkout!r}: {error}") from error
+        if resolved in seen:
+            raise InvalidChoiceError(
+                f"{checkout!r} resolves to a checkout listed twice"
+            )
+        seen.add(resolved)
+
+
+def _prepare_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Refuse repeated JSON keys before they are reduced to a mapping."""
+    value = dict(pairs)
+    if len(value) != len(pairs):
+        raise InvalidChoiceError("worktree.prepare: a checkout path is listed twice")
+    return value
+
+
 def _constant(value: object) -> Default:
     return lambda env: value
 
@@ -349,6 +378,15 @@ WORKFLOW_LATE = ("ask", "wait", "stop")
 
 def _keys() -> dict[str, Key]:
     keys = [_key("worker.network", _ON_OFF, "off")]
+    keys.append(
+        Key(
+            "worktree.prepare",
+            _STANDING,
+            _worktree_prepare,
+            _constant({}),
+            pattern="a JSON object of absolute main-checkout paths to shell commands",
+        )
+    )
     keys += [_key(f"engine.{engine}", _ON_OFF, "on") for engine in ENGINES]
     keys += [
         Key(
@@ -518,16 +556,24 @@ def parse_value(name: str, text: str) -> object:
         name: The key.
         text: The text after `=`; lists are comma-separated. `sandbox.read`
             also accepts a JSON string list for paths containing commas.
+            `worktree.prepare` accepts a JSON object.
 
     Returns:
-        A string, or a list of strings for a list key (`[]` for empty text).
+        A string, a list of strings, or a checkout-to-command object.
 
     Raises:
-        InvalidChoiceError: The key is unknown.
+        InvalidChoiceError: The key is unknown or its JSON value is not valid.
     """
     key = KEYS.get(name)
     if key is None:
         raise InvalidChoiceError(f"unknown key {name!r}")
+    if name == "worktree.prepare":
+        try:
+            value = json.loads(text, object_pairs_hook=_prepare_object)
+        except json.JSONDecodeError as error:
+            raise InvalidChoiceError("worktree.prepare is not valid JSON") from error
+        validate_value(name, value)
+        return value
     if name == "sandbox.read" and text.startswith("["):
         try:
             value = json.loads(text)
