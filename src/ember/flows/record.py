@@ -278,6 +278,18 @@ def _validate(flow_id: str, flow: object) -> None:
         raise FlowError(flow_id, "flow.json names another flow")
     if flow["status"] not in FLOW_STATUSES:
         raise FlowError(flow_id, "flow.json has an invalid status")
+    if "preparation_history" in flow and not isinstance(
+        flow["preparation_history"], list
+    ):
+        raise FlowError(flow_id, "flow.json has an invalid preparation_history")
+    for attempt in [
+        *flow.get("preparation_history", []),
+        *([flow["preparation"]] if "preparation" in flow else []),
+    ]:
+        if not isinstance(attempt, dict) or not record._valid_preparation(attempt):
+            raise FlowError(flow_id, "flow.json has an invalid preparation")
+    if "preparation_halt" in flow and not _matches(flow["preparation_halt"], "str?"):
+        raise FlowError(flow_id, "flow.json has an invalid preparation_halt")
     for key, low, high in (
         ("rounds", 0, 3),
         ("parallel", 1, 8),
@@ -330,6 +342,16 @@ def _validate(flow_id: str, flow: object) -> None:
             raise FlowError(flow_id, f"task {task['id']} has an invalid entry")
         if task["round"] < 0:
             raise FlowError(flow_id, f"task {task['id']} has an invalid round")
+        if task.get("preparation_blocked") not in (
+            None,
+            "writer",
+            "reviewer",
+            "continue",
+            "send",
+        ):
+            raise FlowError(
+                flow_id, f"task {task['id']} has an invalid preparation_blocked"
+            )
 
 
 def create(
@@ -418,6 +440,13 @@ def cancel_request(
     return value
 
 
+def preparation_failed(flow: Mapping[str, Any]) -> bool:
+    """Return whether flow or child preparation stopped this attempt."""
+    return bool(flow.get("preparation_halt")) or (flow.get("preparation") or {}).get(
+        "state"
+    ) in ("failed", "timeout", "interrupted", "not-started")
+
+
 def finish_cancel(
     flow: dict[str, Any], request: Mapping[str, Any], env: Mapping[str, str]
 ) -> None:
@@ -431,7 +460,7 @@ def finish_cancel(
             "attempt": flow.get("attempt", 0),
             "status": "cancelled",
             "reason": request["reason"],
-            "exit": 82,
+            "exit": 79 if preparation_failed(flow) else 82,
         },
         env,
     )

@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from ember import paths
+from ember import paths, prepare
 from ember.flows import plan, record
 from ember.runs import record as runs
 from runs.stub_engine import make_env  # pyrefly: ignore[missing-import]
@@ -90,6 +90,50 @@ def test_creation(flow: dict[str, Any], created: Path, env: dict[str, str]) -> N
     assert record.task_entry(flow, "b")["corrections"] == []
     with pytest.raises(KeyError):
         record.task_entry(flow, "unknown")
+
+
+def test_preparation_round_trip(
+    flow: dict[str, Any], created: Path, env: dict[str, str]
+) -> None:
+    attempt = {
+        "command": "true",
+        "pid": 123,
+        "start": 456,
+        **prepare.Result(
+            "failed", 8, 0.1, str(created / "prepare.log"), [], "exited 8"
+        ).as_dict(),
+    }
+    flow["preparation_history"] = [attempt]
+    flow["preparation"] = {**attempt, "state": "ok", "exit": 0, "message": None}
+    flow["preparation_halt"] = "child preparation failed"
+    flow["tasks"][0]["preparation_blocked"] = "reviewer"
+    record.save(flow, env)
+    assert record.load(flow["id"], env) == flow
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("preparation", None),
+        ("preparation", {}),
+        ("preparation", {"command": "true", "state": "unknown", "log": "log"}),
+        (
+            "preparation",
+            {"command": "true", "state": "running", "log": "log", "pid": 1},
+        ),
+        ("preparation_history", None),
+        ("preparation_history", {}),
+        ("preparation_history", [{}]),
+        ("preparation_halt", 79),
+    ],
+)
+def test_invalid_preparation(
+    flow: dict[str, Any], created: Path, env: dict[str, str], field: str, value: object
+) -> None:
+    flow[field] = value
+    (created / record.FLOW_NAME).write_text(json.dumps(flow))
+    with pytest.raises(record.FlowError, match="preparation"):
+        record.load(flow["id"], env)
 
 
 def test_create_does_not_overwrite(

@@ -3,7 +3,9 @@ import io
 import json
 import os
 import shlex
+import stat
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -14,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from ember import branches, choices, paths, tmux
+from ember import branches, choices, paths, prepare, tmux
 from ember.cli import build_parser
 from ember.flows import command, lock, plan, record
 from ember.runs.core import Core
@@ -403,6 +405,161 @@ def test_start(
     assert launch[launch.index("-s") + 1] == flow_id
     assert f"EMBER_FLOW_RUNNER={flow_id}" in launch and launch[-1] == "true"
     assert err == f"next: emb flow --watch {flow_id} --json\n"
+
+
+@pytest.mark.parametrize("setting", [None, ""])
+def test_start_without_preparation(
+    env: dict[str, str], plan_file: Path, repo: Path, setting: str | None
+) -> None:
+    if setting is not None:
+        choices.set_settings({"worktree.prepare": {str(repo): setting}}, env=env)
+    code, out, err = invoke(env, "--plan", str(plan_file), "--start")
+    assert code == 0, err
+    flow_id = out.splitlines()[0].split()[1]
+    current = record.load(flow_id, env)
+    assert "preparation" not in current
+    assert not (record.folder(flow_id, env) / "prepare.log").exists()
+
+
+def test_start_prepares_before_runner(
+    env: dict[str, str], plan_file: Path, repo: Path
+) -> None:
+    choices.set_settings({"worktree.prepare": {str(repo): "echo prepared"}}, env=env)
+
+    def launch(flow_id: str) -> list[str]:
+        current = record.load(flow_id, env)
+        saved = current["preparation"]
+        assert saved["state"] == "ok" and saved["exit"] == 0
+        assert saved["pid"] > 1 and saved["start"] > 0
+        log = Path(saved["log"])
+        assert log == record.folder(flow_id, env) / "prepare.log"
+        assert log.read_text() == "prepared\n"
+        assert stat.S_IMODE(log.stat().st_mode) == 0o600
+        return ["true"]
+
+    code, _, err = invoke(env, "--plan", str(plan_file), "--start", argv=launch)
+    assert code == 0, err
+
+
+@pytest.mark.parametrize(
+    ("shell", "reason"),
+    [("echo failed; exit 9", "exited 9"), ("echo dirty > leftover", "leftover")],
+)
+def test_start_preparation_failure_keeps_flow(
+    tmp_path: Path,
+    env: dict[str, str],
+    plan_file: Path,
+    repo: Path,
+    shell: str,
+    reason: str,
+) -> None:
+    choices.set_settings({"worktree.prepare": {str(repo): shell}}, env=env)
+    code, _, err = invoke(env, "--plan", str(plan_file), "--start")
+    assert code == 79 and reason in err
+    (current,), errors = record.list_flows(env)
+    assert not errors
+    flow_id = current["id"]
+    assert current["status"] == "failed"
+    assert current["preparation"]["state"] == "failed"
+    assert all(task["writer_run"] is None for task in current["tasks"])
+    assert Path(current["worktree"]).is_dir()
+    assert f"next: emb flow --resume {flow_id}" in err
+    assert str(record.folder(flow_id, env) / "prepare.log") in err
+    assert not any("new-session" in call for call in tmux_log(tmp_path))
+    code, out, err = invoke(env, "--watch", flow_id, "--json")
+    assert code == 79, err
+    assert json.loads(out)["next"] == f"next: emb flow --resume {flow_id}"
+
+
+def test_resume_refuses_indeterminate_preparation(
+    tmp_path: Path,
+    env: dict[str, str],
+    flow: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    flow.update(status="failed", updated_at=0)
+    flow["preparation"] = {
+        "state": "running",
+        "command": "true",
+        "log": "prepare.log",
+        "pid": 123,
+        "start": 456,
+    }
+    record.save(flow, env)
+    ended: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        prepare, "end_group", lambda pid, start: ended.append((pid, start))
+    )
+    code, _, err = invoke(env, "--resume", flow["id"])
+    assert code == 75 and "indeterminate" in err
+    assert ended == [(123, 456)]
+    assert not any("new-session" in call for call in tmux_log(tmp_path))
+    assert record.load(flow["id"], env)["preparation"]["state"] == "running"
+
+
+def test_cancel_during_flow_start_preparation(
+    tmp_path: Path,
+    env: dict[str, str],
+    plan_file: Path,
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shell = shlex.join([sys.executable, "-c", "import time; time.sleep(60)"])
+    choices.set_settings({"worktree.prepare": {str(repo): shell}}, env=env)
+    monkeypatch.setattr(command, "POLL_SECONDS", 0.01)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(invoke, env, "--plan", str(plan_file), "--start")
+        deadline = time.monotonic() + 10
+        while True:
+            found, errors = record.list_flows(env)
+            assert not errors
+            if found and (found[0].get("preparation") or {}).get("pid"):
+                flow_id = found[0]["id"]
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        code, _, err = invoke(env, "--cancel", flow_id, "--reason", "stop setup")
+        assert code == 0, err
+        code, _, err = pending.result(timeout=10)
+    assert code == 79 and f"next: emb flow --resume {flow_id}" in err
+    current = record.load(flow_id, env)
+    saved = current["preparation"]
+    assert current["status"] == "cancelled" and saved["state"] == "interrupted"
+    assert prepare.start_ticks(saved["pid"]) is None
+    assert record.read_events(flow_id, env)[-1]["exit"] == 79
+    assert not any("new-session" in call for call in tmux_log(tmp_path))
+
+
+@pytest.mark.parametrize("failure", ["timeout", "interrupted", "failed"])
+def test_start_preparation_exception(
+    tmp_path: Path,
+    env: dict[str, str],
+    plan_file: Path,
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    shell = shlex.join([sys.executable, "-c", "import time; time.sleep(60)"])
+    choices.set_settings({"worktree.prepare": {str(repo): shell}}, env=env)
+    original = prepare.run
+
+    def fail(*args: Any, **kwargs: Any) -> prepare.Result:  # noqa: ANN401
+        if failure == "interrupted":
+            raise KeyboardInterrupt
+        if failure == "failed":
+            raise OSError("cannot start")
+        return original(*args, **kwargs, timeout=0.05)
+
+    monkeypatch.setattr(prepare, "run", fail)
+    code, _, err = invoke(env, "--plan", str(plan_file), "--start")
+    assert code == 79, err
+    (current,), errors = record.list_flows(env)
+    assert not errors
+    saved = current["preparation"]
+    assert current["status"] == "failed" and saved["state"] == failure
+    assert Path(saved["log"]).is_file()
+    assert f"next: emb flow --resume {current['id']}" in err
+    assert not any("new-session" in call for call in tmux_log(tmp_path))
 
 
 @pytest.mark.parametrize(

@@ -15,11 +15,18 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, TextIO
 
-from ember import branches, choices, citations, paths, tmux
+from ember import branches, choices, citations, paths, prepare, tmux
 from ember.engines import Driver
 from ember.flows import briefs, lock, plan, record, verdict
+from ember.runs import exits
 from ember.runs import record as runs
-from ember.runs.core import HOOK_REFUSAL_NAME, Core, StartOptions, WorkerSelection
+from ember.runs.core import (
+    HOOK_REFUSAL_NAME,
+    Core,
+    RunError,
+    StartOptions,
+    WorkerSelection,
+)
 
 POLL_SECONDS = 1.0
 OUTPUT_LIMIT = 4000
@@ -38,6 +45,145 @@ _GIT_ENV = {
 
 class RunnerError(Exception):
     """An operation cannot safely continue in the flow worktree."""
+
+
+class PreparationFailedError(RunnerError):
+    """A flow worktree's preparation failed before scheduling work."""
+
+
+def end_preparation(flow: Mapping[str, Any]) -> None:
+    """End the recorded flow preparation group while its identity matches."""
+    saved = flow.get("preparation") or {}
+    if saved.get("pid") is not None and saved.get("start") is not None:
+        prepare.end_group(saved["pid"], saved["start"])
+
+
+def preparation_known(flow: Mapping[str, Any], env: Mapping[str, str]) -> None:
+    """Refuse automatic continuation when a preparation outcome is unknown."""
+    end_preparation(flow)
+    if (flow.get("preparation") or {}).get("state") == "running":
+        raise RunnerError(
+            "flow preparation is indeterminate; inspect its log and worktree"
+        )
+    for task in flow["tasks"]:
+        for role in ("writer", "reviewer"):
+            run_id = task[f"{role}_run"]
+            if not run_id or task["status"] in ("merged", "dropped"):
+                continue
+            run = runs.load(run_id, env)
+            saved = run.preparation or {}
+            if saved.get("pid") is not None and saved.get("start") is not None:
+                prepare.end_group(saved["pid"], saved["start"])
+            if run.turn == 0 and saved.get("state") == "running":
+                raise RunnerError(
+                    f"{run_id}: preparation is indeterminate; "
+                    "inspect its log and worktree"
+                )
+
+
+def prepare_worktree(
+    flow: dict[str, Any],
+    env: Mapping[str, str],
+    stop: threading.Event | None = None,
+) -> None:
+    """Prepare a flow tree once, retaining each unsuccessful attempt and log."""
+    previous = flow.get("preparation")
+    if previous and previous["state"] == "ok":
+        return
+    if previous and previous["state"] == "running":
+        end_preparation(flow)
+        raise RunnerError(
+            "flow preparation is indeterminate; inspect its log and worktree"
+        )
+    directory = record.folder(flow["id"], env)
+    history = flow.get("preparation_history", [])
+    log = directory / (f"prepare-{len(history) + 1}.log" if previous else "prepare.log")
+    began = time.monotonic()
+    command = ""
+    current: dict[str, Any] = {}
+    try:
+        common = (
+            flow.get("common")
+            or branches.open_repository(Path(flow["worktree"]), env, "flow").common
+        )
+        command = prepare.lookup(common, env=env) or ""
+        if not command and previous is None:
+            return
+        if previous:
+            flow["preparation_history"] = [*history, previous]
+        current = {"command": command, "state": "running", "log": str(log)}
+        flow["preparation"] = current
+        record.save(flow, env)
+
+        def started(pid: int, start: int) -> None:
+            flow["preparation"].update(pid=pid, start=start)
+            record.save(flow, env)
+
+        if command:
+            result = prepare.run(
+                command,
+                flow["worktree"],
+                log,
+                started=started,
+                stop=_PreparationStop(flow["id"], env, stop),
+                env=env,
+            )
+        else:
+            runs.write_private(log, "No preparation command is set.\n")
+            result = prepare.Result("ok", None, 0, str(log), [], None)
+    except (Exception, KeyboardInterrupt) as error:
+        end_preparation(flow)
+        if previous and flow.get("preparation") is previous:
+            flow["preparation_history"] = [*history, previous]
+        result = prepare.Result(
+            "interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
+            None,
+            time.monotonic() - began,
+            str(log),
+            [],
+            "preparation interrupted"
+            if isinstance(error, KeyboardInterrupt)
+            else f"preparation failed: {error}",
+        )
+        if not log.exists():
+            with contextlib.suppress(OSError):
+                runs.write_private(log, (result.message or "preparation failed") + "\n")
+    flow["preparation"] = {
+        **current,
+        "command": command,
+        **result.as_dict(),
+    }
+    record.save(flow, env)
+    if result.state != "ok":
+        raise PreparationFailedError(f"{result.message}; log: {log}")
+
+
+class _PreparationStop(threading.Event):
+    """Observe cancellation during preparation without holding lifecycle.lock."""
+
+    def __init__(
+        self, flow_id: str, env: Mapping[str, str], shutdown: threading.Event | None
+    ) -> None:
+        """Keep the cancellation record and the runner's shutdown event."""
+        super().__init__()
+        self.flow_id = flow_id
+        self.env = env
+        self.shutdown = shutdown
+
+    def is_set(self) -> bool:
+        """Return whether the command or the runner requested cancellation."""
+        return bool(
+            (self.shutdown and self.shutdown.is_set())
+            or record.cancel_request(self.flow_id, self.env) is not None
+        )
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Wait briefly, then reread the cancellation request."""
+        if self.shutdown is not None:
+            self.shutdown.wait(timeout)
+        else:
+            super().wait(timeout)
+        return self.is_set()
 
 
 class _RunIdStream(io.StringIO):
@@ -118,8 +264,11 @@ class _Runner:
         self.poll = poll_seconds
         self.shutdown = shutdown
         self.mutex = threading.Lock()
+        self.preparing = threading.Condition(self.mutex)
+        self.preparing_count = 0
         self.finished = False
         self.failure: str | None = None
+        self.preparation_recovered = False
 
     def _save(self) -> None:
         """Save while the caller holds the record mutex."""
@@ -196,7 +345,8 @@ class _Runner:
                 self.finished = True
                 return
             self.flow.update(status=status, reason=reason)
-            self.flow["runner"]["exiting"] = True
+            if self.flow["runner"]:
+                self.flow["runner"]["exiting"] = True
             if status in record.ENDED:
                 self.flow["ended_at"] = time.time()
             self._save()
@@ -206,7 +356,13 @@ class _Runner:
                     "end",
                     status=status,
                     reason=reason,
-                    exit=0 if status == "done" and complete else 82,
+                    exit=(
+                        exits.PREPARATION_FAILED
+                        if record.preparation_failed(self.flow)
+                        else 0
+                        if status == "done" and complete
+                        else 82
+                    ),
                 )
             else:
                 self._event("flow", status=status, reason=reason)
@@ -306,11 +462,38 @@ class _Runner:
             halted = self.flow["halted"]
         if not halted:
             return True
+        if self.flow.get("preparation_halt"):
+            self.change(
+                task,
+                status="stopped",
+                reason=halted,
+                preparation_blocked=(
+                    "writer"
+                    if write
+                    else "send"
+                    if task["entry"] == "send"
+                    else "continue"
+                    if task.get("review_action") == "fix" or task.get("turn_pending")
+                    else "reviewer"
+                ),
+            )
+            return False
         if write:
             self.change(task, status="pending", entry="write")
         else:
             self.change(task, status="stopped", reason=f"new runs halted: {halted}")
         return False
+
+    def halt_preparation(self, task: dict[str, Any], role: str, reason: str) -> None:
+        """Persist a preparation halt before other runs reach admission."""
+        with self.mutex:
+            if self.finished:
+                return
+            if not self.flow.get("preparation_halt"):
+                self.flow["preparation_halt"] = reason or "worktree preparation failed"
+            self.flow["halted"] = self.flow["preparation_halt"]
+            task["preparation_blocked"] = role
+            self._save()
 
     def call(
         self,
@@ -328,7 +511,51 @@ class _Runner:
 
         out, err = _RunIdStream(capture), io.StringIO()
         core = self.core(out, err)
+
+        def admit(run: runs.Run) -> None:
+            with self.mutex:
+                halted = self.flow.get("preparation_halt")
+                if halted:
+                    raise RunError(
+                        exits.PREPARATION_FAILED,
+                        halted,
+                        run=run.id,
+                    )
+
+        core.admit = admit
+        core.prepare_stop = self.shutdown
+        prepare_run = core._prepare
+
+        def tracked_preparation(
+            run: runs.Run, command: str, stop: threading.Event | None
+        ) -> runs.Run:
+            """Keep shutdown alive until preparation has ended and saved its result."""
+            with self.preparing:
+                if self.shutdown.is_set():
+                    raise RunError(
+                        exits.PREPARATION_FAILED, "the runner is stopping", run=run.id
+                    )
+                self.preparing_count += 1
+            try:
+                return prepare_run(run, command, stop)
+            except RunError as error:
+                if error.code == exits.PREPARATION_FAILED:
+                    self.halt_preparation(task, role, str(error))
+                raise
+            finally:
+                with self.preparing:
+                    self.preparing_count -= 1
+                    self.preparing.notify_all()
+
+        core._prepare = tracked_preparation
         code = core.execute(lambda: action(core))
+        reason = "; ".join(
+            line
+            for line in err.getvalue().splitlines()
+            if line.strip() and not line.lstrip().startswith(("next:", "owner:"))
+        )
+        if code == exits.PREPARATION_FAILED:
+            self.halt_preparation(task, role, reason)
         run_id = task[f"{role}_run"]
         denials = runs.referenced_denials([run_id], self.env)
         with self.mutex:
@@ -347,11 +574,6 @@ class _Runner:
             recovered = runs.load(run_id, self.env)
             if recovered.turn_state == runs.COMMITTED:
                 return not self.shutdown.is_set()
-        reason = "; ".join(
-            line
-            for line in err.getvalue().splitlines()
-            if line.strip() and not line.lstrip().startswith(("next:", "owner:"))
-        )
         if code == 124:
             reason = f"stalled; the turn keeps running in {run_id}"
         provider_kind = None
@@ -361,9 +583,10 @@ class _Runner:
                 provider_kind = runs.load_outcome(run, run.turn).get("provider_kind")
         if code == 73 and provider_kind != "capacity":
             with self.mutex:
-                engine = self.worker(task, role)["engine"]
-                self.flow["halted"] = f"provider error on {engine}; new runs halted"
-                self._save()
+                if not self.flow.get("preparation_halt"):
+                    engine = self.worker(task, role)["engine"]
+                    self.flow["halted"] = f"provider error on {engine}; new runs halted"
+                    self._save()
         if role == "writer" and run_id:
             self.metadata(task)
         self.change(
@@ -906,7 +1129,7 @@ class _Runner:
         return False
 
     def recover(self) -> None:
-        """Reconcile processes, merges and captured run operations before scheduling."""
+        """Clean and prepare the flow, recover runs, then answer and retry children."""
         _kill_check(self.flow.get("active_check"))
         with self.mutex:
             self.flow["active_check"] = None
@@ -922,6 +1145,8 @@ class _Runner:
                 )
             self.git("merge", "--abort")
         self.clean()
+        if not self.preparation_recovered and self.flow.get("preparation"):
+            prepare_worktree(self.flow, self.env, self.shutdown)
         for task in self.flow["tasks"]:
             try:
                 if task["status"] == "merging":
@@ -978,6 +1203,88 @@ class _Runner:
                 self.answer_effect(task)
             except Exception as error:
                 self.change(task, status="stopped", reason=f"recovery failed: {error}")
+        if not self.preparation_recovered:
+            answered = self.answers()
+            self.retry_preparation_children(answered)
+            self.preparation_recovered = True
+
+    def retry_preparation_children(self, answered: set[str]) -> None:
+        """Retry unanswered preparation children without discarding writer commits."""
+        for task in self.flow["tasks"]:
+            if task["id"] in answered or task["status"] in (
+                "accepted",
+                "merged",
+                "dropped",
+            ):
+                continue
+            role = task.get("preparation_blocked")
+            if not role:
+                if "preparation_blocked" in task:
+                    continue
+                # The runner may have died between Core's failure and call's save.
+                for candidate in ("writer", "reviewer"):
+                    run_id = task[f"{candidate}_run"]
+                    if not run_id:
+                        continue
+                    run = runs.load(run_id, self.env)
+                    unsuccessful = (run.preparation or {}).get("state") in (
+                        "failed",
+                        "timeout",
+                        "interrupted",
+                        "not-started",
+                    )
+                    if run.turn == 0 and (
+                        run.last_exit == exits.PREPARATION_FAILED or unsuccessful
+                    ):
+                        role = candidate
+                        break
+            if not role:
+                continue
+            if role in ("writer", "reviewer"):
+                run_id = task[f"{role}_run"]
+                if run_id:
+                    run = runs.load(run_id, self.env)
+                    if run.turn != 0:
+                        raise RunnerError(
+                            f"{run_id}: preparation-blocked run has worker work"
+                        )
+                    with self.mutex:
+                        previous = {"role": role, "run": run_id}
+                        history = task.setdefault("preparation_runs", [])
+                        if previous not in history:
+                            history.append(previous)
+                        self._save()
+                    warning = self.close(run_id)
+                    if warning:
+                        raise RunnerError(warning)
+            fields: dict[str, Any] = {
+                "status": "pending",
+                "reason": None,
+                "entry": "write"
+                if role == "writer"
+                else "send"
+                if role == "send"
+                else "review",
+                "preparation_blocked": None,
+                "recover_review": role == "continue",
+            }
+            if role == "writer":
+                fields.update(
+                    writer_run=None,
+                    branch=None,
+                    worktree=None,
+                    task_base=None,
+                    head=None,
+                )
+            elif role == "reviewer":
+                fields.update(reviewer_run=None, review_action=None)
+            self.change(task, **fields)
+        with self.mutex:
+            if self.flow.get("preparation_halt"):
+                if self.flow["halted"] == self.flow["preparation_halt"]:
+                    self.flow["halted"] = None
+                self.flow["preparation_halt"] = None
+                self._save()
 
     def check(self) -> bool:
         """Run a check attempt, retain its log and clean the flow worktree."""
@@ -1061,13 +1368,17 @@ class _Runner:
         return True
 
     def answer_effect(self, task: dict[str, Any]) -> None:
-        """Complete a durably scheduled close for a drop or replacement."""
+        """Complete durable closes for an answer and its blocked reviewer."""
         effect = task.get("answer_effect")
         if not effect:
             return
-        warning = self.close(effect["run"])
+        warnings = [
+            warning
+            for run_id in (effect.get("preparation_run"), effect["run"])
+            if (warning := self.close(run_id))
+        ]
         with self.mutex:
-            if warning:
+            for warning in warnings:
                 task.setdefault("warnings", []).append(warning)
                 self._event(
                     "task", task=task["id"], status=task["status"], reason=warning
@@ -1075,8 +1386,13 @@ class _Runner:
             task["answer_effect"] = None
             self._save()
 
-    def answers(self) -> None:
-        """Apply each complete answer and its consumption marker in one save."""
+    def answers(self) -> set[str]:
+        """Apply each answer with its consumption marker and preparation decision.
+
+        Returns:
+            Tasks with queued answers, including those whose answers were refused.
+        """
+        answered: set[str] = set()
         lines = record.read_answers(self.id, self.env)
         for index in range(self.flow["answers_seen"], len(lines)):
             answer = lines[index]
@@ -1087,6 +1403,7 @@ class _Runner:
                 if answer is None:
                     raise RunnerError(f"unreadable answer line {index + 1}")
                 task = record.task_entry(self.flow, answer["task"])
+                answered.add(task["id"])
                 kind = answer["kind"]
                 if (
                     kind == "accept"
@@ -1178,6 +1495,21 @@ class _Runner:
                             validate_turn=False,
                             earlier=[],
                         )
+                if "preparation_blocked" in task:
+                    fields["preparation_blocked"] = None
+                    if (
+                        task["preparation_blocked"] == "reviewer"
+                        and task["reviewer_run"]
+                    ):
+                        previous = {"role": "reviewer", "run": task["reviewer_run"]}
+                        fields["preparation_runs"] = [
+                            *task.get("preparation_runs", []),
+                            previous,
+                        ]
+                        fields["reviewer_run"] = None
+                        fields.setdefault(
+                            "answer_effect", {"n": answer["n"], "run": None}
+                        )["preparation_run"] = task["reviewer_run"]
             except (RunnerError, KeyError, TypeError, plan.PlanError) as error:
                 number = answer.get("n", index + 1) if answer else index + 1
                 problem = f"answer {number} refused: {error}"
@@ -1192,7 +1524,8 @@ class _Runner:
                     ):
                         self.flow["abandoned"].append(task["branch"])
                     task.update(fields)
-                    self.flow["halted"] = None
+                    if not self.flow.get("preparation_halt"):
+                        self.flow["halted"] = None
                 self.flow["answers_seen"] = index + 1
                 self._save()
                 if not problem and task is not None:
@@ -1204,6 +1537,7 @@ class _Runner:
                     )
             if task is not None and not problem:
                 self.answer_effect(task)
+        return answered
 
     def dependencies(self) -> None:
         """Propagate dependency blocking and unblocking to a fixed point."""
@@ -1296,7 +1630,9 @@ class _Runner:
                 status="running",
                 reason=None,
                 ended_at=None,
-                halted=None,
+                halted=self.flow["halted"]
+                if self.flow.get("preparation_halt")
+                else None,
                 attempt=self.flow.get("attempt", 0) + 1,
             )
             self.flow["tip"] = self.tip(self.flow["branch"])
@@ -1327,7 +1663,10 @@ class _Runner:
                 return "failed", self.failure
             self.dependencies()
             if self.flow["halted"]:
-                return "stopped", self.flow["halted"]
+                return (
+                    "failed" if self.flow.get("preparation_halt") else "stopped",
+                    self.flow["halted"],
+                )
             wave = self.wave()
             if wave:
                 self.jobs(wave)
@@ -1363,10 +1702,17 @@ class _Runner:
                             closing.enter_context(startup.pop_all())
                             self.finish("cancelled")
                             return 0
+                        preparation_known(self.flow, self.env)
                         self.begin()
                 if continuing:
                     self.answers()
                 status, reason = self.drive()
+            except PreparationFailedError as error:
+                status, reason, code = "failed", str(error), exits.PREPARATION_FAILED
+                print(
+                    f"emb flow: {error}\nnext: emb flow --resume {self.id}",
+                    file=sys.stderr,
+                )
             except Exception as error:
                 status, reason, code = "failed", f"{type(error).__name__}: {error}", 1
                 print(
@@ -1374,16 +1720,28 @@ class _Runner:
                     file=sys.stderr,
                 )
             if self.shutdown.is_set():
+                with self.preparing:
+                    self.preparing.wait_for(lambda: self.preparing_count == 0)
                 _kill_check(self.flow.get("active_check"))
                 status = "failed"
-                reason = (
-                    "the runner was stopped by a signal; "
-                    f"emb flow --resume {self.id} goes on"
-                )
+                if self.flow.get("preparation_halt"):
+                    reason = self.flow["preparation_halt"]
+                elif record.preparation_failed(self.flow):
+                    saved = self.flow["preparation"]
+                    reason = f"{saved['message']}; log: {saved['log']}"
+                else:
+                    reason = (
+                        "the runner was stopped by a signal; "
+                        f"emb flow --resume {self.id} goes on"
+                    )
+            if self.flow.get("preparation_halt"):
+                code = exits.PREPARATION_FAILED
             with contextlib.ExitStack() as lifecycle:
                 lifecycle.enter_context(_lifecycle_guard(self.folder))
                 if (
                     not self.shutdown.is_set()
+                    and not self.flow.get("preparation_halt")
+                    and code != exits.PREPARATION_FAILED
                     and record.cancel_request(self.id, self.env) is None
                     and len(record.read_answers(self.id, self.env))
                     > self.flow["answers_seen"]
@@ -1463,7 +1821,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         shutdown.set()
 
     previous = {
-        sig: signal.signal(sig, stop) for sig in (signal.SIGHUP, signal.SIGTERM)
+        sig: signal.signal(sig, stop)
+        for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
     }
     try:
         code = _run(flow_id, os.environ, Core, POLL_SECONDS, shutdown)
@@ -1474,7 +1833,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         with contextlib.suppress(tmux.TmuxError, paths.RuntimeDirError):
             tmux.kill(flow_id, env=os.environ)
     if shutdown.is_set():
-        os._exit(1)
+        os._exit(code if code == exits.PREPARATION_FAILED else 1)
     return code
 
 
