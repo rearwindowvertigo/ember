@@ -38,7 +38,7 @@ def derive(
             or _merged(run)
             or not _branch_exists(run, git)
         ):
-            return "finish", _finish(run)
+            return _finish(run)
         return "merge", _verify(run, git)
     if run.status == record.FAILED or (
         run.turn_state != record.SENT and run.last_exit not in (None, 0)
@@ -131,9 +131,10 @@ def _branch_exists(
     return result.returncode not in (1, 128)
 
 
-def _finish(run: Run) -> str | None:
+def _finish(run: Run) -> tuple[str, str | None]:
+    """Return the closed run's step and claim-finish line."""
     if run.claim is None:
-        return None
+        return "finish", None
     try:
         with db.open_read(run.env) as conn:
             if conn is not None:
@@ -141,10 +142,10 @@ def _finish(run: Run) -> str | None:
                     "SELECT status FROM claims WHERE id = ?", (run.claim,)
                 ).fetchone()
                 if row is not None and row[0] == "gone":
-                    return None
+                    return "done", None
     except OSError, sqlite3.Error:
         pass
-    return f"next: emb choices --finish {shlex.quote(run.claim)}"
+    return "finish", f"next: emb choices --finish {shlex.quote(run.claim)}"
 
 
 def _verify(run: Run, git: Callable[..., subprocess.CompletedProcess[str]]) -> str:

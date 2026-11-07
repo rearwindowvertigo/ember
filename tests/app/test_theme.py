@@ -79,6 +79,7 @@ def test_token_values_match_the_plan() -> None:
     assert theme.TOKENS["bg-page"] == ("#ffffff", "#191919")
     assert theme.TOKENS["bg-hover"] == ("#0000000d", "#ffffff13")
     assert theme.TOKENS["accent"] == theme.TOKENS["focus-ring"]
+    assert theme.TOKENS["on-accent"] == ("#ffffff", "#ffffff")
 
 
 def test_opaque_backgrounds_found() -> None:

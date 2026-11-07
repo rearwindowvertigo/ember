@@ -3427,6 +3427,8 @@ def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
     assert len(owners) == 1
     owner = owners[0]
     assert run.owner_wait == (owner,)
+    assert core_.printed_owner == {owner}
+    assert run.last_exit == expected
     assert core_.step(run) == ("owner", None)
     assert "next:" not in err
     qualification = (

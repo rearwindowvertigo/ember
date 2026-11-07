@@ -290,6 +290,7 @@ def test_merge_with_keep_merges_and_cleans_up(
     assert f"removed worktree {run.worktree}" in lines[1]
     assert f"closed {run.id}" in err
     assert "next:" not in err
+    assert "owner:" not in err
     assert git(repo, "log", "-1", "--format=%P", env=env).count(" ") == 0
     assert git(repo, "log", "-1", "--format=%s", env=env) == "feat: work"
     assert (repo / "work.txt").read_text() == "work\n"
@@ -308,6 +309,16 @@ def test_merge_json(
     streams = Streams()
     assert _merge(env, driver, streams, run.branch, repo, as_json=True) == 0
     document = json.loads(streams.take()[0])
+    assert set(document) == {
+        "branch",
+        "target",
+        "note",
+        "warnings",
+        "merge_commit",
+        "contained_before",
+        "cleanup",
+        "next",
+    }
     assert document["branch"] == run.branch
     assert document["target"] == "main"
     assert document["merge_commit"] == git(repo, "rev-parse", "HEAD", env=env)
@@ -318,6 +329,81 @@ def test_merge_json(
     assert item["run"] == run.id
     assert item["action"] == "removed"
     assert item["next"] is None
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("kept", [False, True])
+@pytest.mark.parametrize("contained", [False, True])
+def test_merge_prints_pending_owner_lines(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    as_json: bool,
+    kept: bool,
+    contained: bool,
+) -> None:
+    owner_wait = (
+        "owner: answer whether the worker may read /private/config",
+        "owner: allow the denied path /private/source in sandbox.read",
+    )
+    run = replace(
+        _start(tmp_path, env, repo, driver),
+        claim="claim-a",
+        owner_wait=owner_wait,
+    )
+    record.save(run)
+    assert run.branch is not None
+    if contained:
+        git(repo, "merge", "-q", "--ff-only", run.branch, env=env)
+    if kept:
+        (Path(run.worktree) / "uncommitted").write_text("keep")
+    streams = Streams()
+    assert (
+        _merge(env, driver, streams, run.branch, repo, note="Keep", as_json=as_json)
+        == 0
+    )
+    out, err = streams.take()
+    assert [line for line in err.splitlines() if line.startswith("owner:")] == list(
+        owner_wait
+    )
+    assert "next:" not in err
+    if as_json:
+        document = json.loads(out)
+        assert set(document) == {
+            "branch",
+            "target",
+            "note",
+            "warnings",
+            "merge_commit",
+            "contained_before",
+            "cleanup",
+            "next",
+            "owner_wait",
+        }
+        assert document["owner_wait"] == list(owner_wait)
+        assert document["next"] is None
+        assert document["branch"] == run.branch
+        assert document["target"] == "main"
+        assert document["note"] == "Keep"
+        assert document["warnings"] == []
+        assert document["contained_before"] is contained
+        assert document["merge_commit"] == (
+            None if contained else git(repo, "rev-parse", "HEAD", env=env)
+        )
+        assert document["cleanup"][0]["action"] == (
+            branches.KEPT if kept else branches.REMOVED
+        )
+    else:
+        assert "owner:" not in out
+        assert out.startswith("Verdict: Keep\n")
+        assert f"{'already contained:' if contained else 'merged'} {run.branch}" in out
+    assert (repo / "work.txt").read_text() == "work\n"
+    assert _branch_exists(repo, run.branch, env) is kept
+    assert Path(run.worktree).exists() is kept
+    saved = record.load(run.id, env)
+    assert saved.owner_wait == owner_wait
+    assert (saved.status == record.CLOSED) is not kept
 
 
 def test_merge_note_prints_first_and_becomes_a_trailer(
