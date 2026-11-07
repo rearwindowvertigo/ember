@@ -1,6 +1,7 @@
 import os
 from collections.abc import Iterator
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import pytest
@@ -298,6 +299,225 @@ def test_read_paths_add_duplicate_and_remove(
     assert not screen.paths_line.isVisibleTo(screen)
 
 
+def test_preparation_add_edit_empty_and_remove(
+    env: dict[str, str],
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(first, target_is_directory=True)
+    folders = iter([str(alias), str(second)])
+    commands = iter([("npm ci && npm run build", True), ("uv sync", True), ("", True)])
+    starts: list[str] = []
+    prompts: list[tuple[str, str]] = []
+
+    def choose(_parent: QWidget, start: str) -> str:
+        starts.append(start)
+        return next(folders)
+
+    def command(_parent: QWidget, repository: str, saved: str) -> tuple[str, bool]:
+        prompts.append((repository, saved))
+        return next(commands)
+
+    monkeypatch.setattr(settings_module, "choose_repository", choose)
+    monkeypatch.setattr(settings_module, "preparation_command", command)
+    context, screen = _screen(env, qtbot)
+    assert screen.preparation_rows == {}
+    for _ in range(2):
+        with qtbot.waitSignal(context.settings_changed, timeout=5000):
+            screen.add_repository.click()
+    assert starts == [env["HOME"], env["HOME"]]
+    assert _stored(env, "worktree.prepare") == {
+        str(first): "npm ci && npm run build",
+        str(second): "uv sync",
+    }
+    edit, remove = screen.preparation_rows[str(first)]
+    assert edit.text() == "Edit"
+    assert remove.text() == "Remove"
+    assert edit.accessibleName() == f"Edit preparation for {first}"
+    assert remove.accessibleName() == f"Remove preparation for {first}"
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        edit.click()
+    assert prompts == [
+        (str(first), ""),
+        (str(second), ""),
+        (str(first), "npm ci && npm run build"),
+    ]
+    assert _stored(env, "worktree.prepare") == {str(first): "", str(second): "uv sync"}
+    assert "No preparation" in [
+        text.text() for text in screen.preparation_box.findChildren(QLabel)
+    ]
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        screen.preparation_rows[str(first)][1].click()
+    assert _stored(env, "worktree.prepare") == {str(second): "uv sync"}
+    assert list(screen.preparation_rows) == [str(second)]
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        screen.preparation_rows[str(second)][1].click()
+    assert _stored(env, "worktree.prepare") == {}
+    assert screen.preparation_rows == {}
+
+
+def test_preparation_cancel_and_unchanged_command_save_nothing(
+    env: dict[str, str],
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = str(tmp_path / "repository")
+    choices.set_settings({"worktree.prepare": {repository: "uv sync"}}, env=env)
+    folders = iter(["", str(tmp_path / "another")])
+    commands = iter([("ignored", False), ("ignored", False), ("uv sync", True)])
+    monkeypatch.setattr(
+        settings_module, "choose_repository", lambda *args: next(folders)
+    )
+    monkeypatch.setattr(
+        settings_module, "preparation_command", lambda *args: next(commands)
+    )
+    context, screen = _screen(env, qtbot)
+    with qtbot.assertNotEmitted(context.settings_changed, wait=100):
+        screen.add_repository.click()
+        screen.add_repository.click()
+        screen.preparation_rows[repository][0].click()
+        screen.preparation_rows[repository][0].click()
+    assert context.tasks.pending() == 0
+    assert _stored(env, "worktree.prepare") == {repository: "uv sync"}
+
+
+def test_preparation_add_empty_command(
+    env: dict[str, str],
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = str(tmp_path / "repository")
+    monkeypatch.setattr(settings_module, "choose_repository", lambda *args: repository)
+    monkeypatch.setattr(
+        settings_module, "preparation_command", lambda *args: ("", True)
+    )
+    context, screen = _screen(env, qtbot)
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        screen.add_repository.click()
+    assert _stored(env, "worktree.prepare") == {repository: ""}
+    assert [
+        text.text()
+        for text in screen.preparation_box.findChildren(QLabel)
+        if text.isVisibleTo(screen)
+    ] == [
+        repository,
+        "No preparation",
+    ]
+
+
+def test_preparation_refuses_duplicate_resolved_folder(
+    env: dict[str, str],
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(repository, target_is_directory=True)
+    choices.set_settings({"worktree.prepare": {str(repository): ""}}, env=env)
+    monkeypatch.setattr(settings_module, "choose_repository", lambda *args: str(alias))
+
+    def command(*_args: object) -> tuple[str, bool]:
+        pytest.fail("a duplicate must not open the command dialog")
+
+    monkeypatch.setattr(settings_module, "preparation_command", command)
+    context, screen = _screen(env, qtbot)
+    screen.add_repository.click()
+    assert screen.preparation_line.text() == f"{repository} is already in the list."
+    assert context.tasks.pending() == 0
+    assert _stored(env, "worktree.prepare") == {str(repository): ""}
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_preparation_disables_card_until_save_finishes(
+    env: dict[str, str],
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fail: bool,
+) -> None:
+    repository = str(tmp_path / "repository")
+    peer = str(tmp_path / "peer")
+    before = {repository: "npm ci", peer: ""}
+    choices.set_settings({"worktree.prepare": before}, env=env)
+    context, screen = _screen(env, qtbot)
+    write = choices.set_settings
+    started = Event()
+    release = Event()
+
+    def save(
+        values: dict[str, object],
+        expect_generation: int | None = None,
+        *,
+        env: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        started.set()
+        assert release.wait(5)
+        if fail:
+            raise choices.InvalidChoiceError("preparation write refused")
+        return write(values, expect_generation=expect_generation, env=env)
+
+    monkeypatch.setattr(choices, "set_settings", save)
+    monkeypatch.setattr(
+        settings_module, "preparation_command", lambda *args: ("", True)
+    )
+    signal = context.error if fail else context.settings_changed
+    with qtbot.waitSignal(signal, timeout=5000):
+        try:
+            screen.preparation_rows[repository][0].click()
+            qtbot.waitUntil(started.is_set)
+            assert not screen.preparation_card.isEnabled()
+            assert not screen.add_repository.isEnabled()
+            for edit, remove in screen.preparation_rows.values():
+                assert not edit.isEnabled()
+                assert not remove.isEnabled()
+            screen._redraw()
+            assert not screen.preparation_rows[repository][0].isEnabled()
+            assert _stored(env, "worktree.prepare") == before
+        finally:
+            release.set()
+    assert screen.preparation_card.isEnabled()
+    assert screen.add_repository.isEnabled()
+    for edit, remove in screen.preparation_rows.values():
+        assert edit.isEnabled()
+        assert remove.isEnabled()
+    if fail:
+        assert _stored(env, "worktree.prepare") == before
+        assert "preparation write refused" in screen.preparation_line.text()
+        assert screen.preparation_line.isVisibleTo(screen)
+        # A retry succeeds and clears the failure reason.
+        monkeypatch.setattr(choices, "set_settings", write)
+        with qtbot.waitSignal(context.settings_changed, timeout=5000):
+            screen.preparation_rows[repository][0].click()
+    assert _stored(env, "worktree.prepare") == {repository: "", peer: ""}
+    assert not screen.preparation_line.isVisibleTo(screen)
+
+
+def test_stale_preparation_save_redraws_saved_mapping(
+    env: dict[str, str], qtbot: QtBot, tmp_path: Path
+) -> None:
+    repository = str(tmp_path / "repository")
+    peer = str(tmp_path / "peer")
+    choices.set_settings({"worktree.prepare": {repository: "npm ci"}}, env=env)
+    context, screen = _screen(env, qtbot)
+    choices.set_settings({"worktree.prepare": {peer: ""}}, env=env)
+    with qtbot.waitSignal(context.stale, timeout=5000):
+        screen.preparation_rows[repository][1].click()
+    assert list(screen.preparation_rows) == [peer]
+    assert _stored(env, "worktree.prepare") == {peer: ""}
+    assert screen.preparation_card.isEnabled()
+    assert screen.preparation_line.isVisibleTo(screen)
+
+
 def test_stale_save_reloads_the_screen(env: dict[str, str], qtbot: QtBot) -> None:
     context, screen = _screen(env, qtbot)
     choices.set_settings({"worker.network": "on"}, env=env)
@@ -343,7 +563,11 @@ def focus_chain(screen: QWidget, qtbot: QtBot, first: QWidget) -> list[QWidget]:
 def test_every_control_is_reached_with_tab(
     env: dict[str, str], qtbot: QtBot, tmp_path: Path
 ) -> None:
-    choices.set_settings({"sandbox.read": [os.fspath(tmp_path)]}, env=env)
+    repository = str(tmp_path / "repository")
+    choices.set_settings(
+        {"sandbox.read": [os.fspath(tmp_path)], "worktree.prepare": {repository: ""}},
+        env=env,
+    )
     _context, screen = _screen(env, qtbot)
     chain = focus_chain(screen, qtbot, screen.autostart)
     expected = [
@@ -353,6 +577,8 @@ def test_every_control_is_reached_with_tab(
         screen.terminal,
         screen.add_folder,
         screen.path_rows[os.fspath(tmp_path)],
+        screen.add_repository,
+        *screen.preparation_rows[repository],
     ]
     # Tab reaches a segmented control's chosen option; arrows move within it.
     assert [w for w in chain if w in expected] == expected
@@ -398,12 +624,17 @@ def test_add_folder_refuses_ember_private_paths(
 
 
 @pytest.mark.parametrize("width", [576, 1400])
-def test_screen_fits_width(env: dict[str, str], qtbot: QtBot, width: int) -> None:
+def test_screen_fits_width(
+    env: dict[str, str], qtbot: QtBot, tmp_path: Path, width: int
+) -> None:
     from .test_common import assert_screen_fits  # pyrefly: ignore[missing-import]
 
     app = QApplication.instance()
     assert isinstance(app, QApplication)
     theme.apply(app, "light")
+    repository = str(tmp_path / ("repository-" * 20))
+    command = "npm ci && " + "npm run check " * 20
+    choices.set_settings({"worktree.prepare": {repository: command}}, env=env)
     _context, screen = _screen(env, qtbot)
     screen.resize(width, 480)
     screen.show()
