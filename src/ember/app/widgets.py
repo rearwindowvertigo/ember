@@ -48,6 +48,7 @@ from PySide6.QtGui import (
     QTextCharFormat,
     QTextDocument,
     QTextLayout,
+    QWheelEvent,
 )
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -865,6 +866,10 @@ class Picker(QComboBox):
         self.setModel(self._model)
         self.setItemDelegate(_PickerDelegate(self))
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        """Let the parent scroll without changing the chosen item."""
+        event.ignore()
 
     def set_changed(self, changed: bool) -> None:
         """Mark the closed field as different from its setting's default."""
