@@ -381,3 +381,19 @@ def test_answered_owner_failure_has_carry_on_line(run: record.Run, turn: int) ->
     step, text = steps.derive(run, core.MISSING, False, _git)
     assert step == "failed"
     assert text == "next: " + (exits.SEND.format(run=run.id) if turn else exits.START)
+
+
+def test_preparation_failure_retries_saved_start(run: record.Run) -> None:
+    run = replace(
+        run,
+        status=record.FAILED,
+        last_exit=79,
+        turn=0,
+        preparation={"log": "/run with spaces/prepare.log"},
+        start_argv=("emb", "run", "--task-file", "/saved brief.md", "--read-only"),
+    )
+    assert steps.derive(run, core.MISSING, False, _git) == (
+        "failed",
+        "next: inspect '/run with spaces/prepare.log', then "
+        "emb run --task-file '/saved brief.md' --read-only",
+    )

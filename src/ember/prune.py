@@ -1,4 +1,4 @@
-"""Remove ended records and orphaned worktrees, retaining surviving branches."""
+"""Prune ended and abandoned records and orphaned worktrees, retaining branches."""
 
 import contextlib
 import fcntl
@@ -16,13 +16,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
-from ember import paths
+from ember import paths, prepare
 from ember.flows import lock as flow_lock
 from ember.flows import record as flows
 from ember.panels import record as panels
 from ember.runs import record as runs
 from ember.runs import worktrees
-from ember.runs.core import worktree_removal_reason
+from ember.runs.core import abandon_start, worktree_removal_reason
 
 _RECORD_ERRORS = (
     runs.RecordError,
@@ -44,6 +44,7 @@ class Entry:
     kind: str
     data: dict[str, Any]
     children: set[str] = field(default_factory=set)
+    abandoned: bool = False
 
 
 @dataclass
@@ -68,15 +69,19 @@ class Result:
     branches: list[dict[str, str]] = field(default_factory=list)
     worktrees: list[dict[str, str]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    failed: list[dict[str, str]] = field(default_factory=list)
 
     def to_json(self) -> dict[str, list[dict[str, str]]]:
-        """Return the command's four JSON fields."""
-        return dict(
+        """Return pruning results, including abandoned starts when found."""
+        result = dict(
             removed=self.removed,
             skipped=self.skipped,
             branches=self.branches,
             worktrees=self.worktrees,
         )
+        if self.failed:
+            result["failed"] = self.failed
+        return result
 
 
 def _run_ids(value: object) -> set[str]:
@@ -152,7 +157,11 @@ def _folder_run_ids(ident: str, env: Mapping[str, str], errors: list[str]) -> se
     return {item for item in found if runs.is_run_folder(item)}
 
 
-def _ended(entry: Entry, env: Mapping[str, str]) -> str | None:
+def _ended(
+    entry: Entry,
+    env: Mapping[str, str],
+    overrides: Mapping[str, Entry] | None = None,
+) -> str | None:
     """Return a refusal reason, or None when the record has ended."""
     statuses = {
         "run": (runs.CLOSED, runs.FAILED),
@@ -169,7 +178,12 @@ def _ended(entry: Entry, env: Mapping[str, str]) -> str | None:
         role = "task" if entry.kind == "flow" else "member"
         for ident in sorted(entry.children):
             try:
-                member = runs.load(ident, env)
+                if overrides is not None and ident in overrides:
+                    member = runs.from_json(
+                        overrides[ident].data, runs.run_dir(ident, env), env
+                    )
+                else:
+                    member = runs.load(ident, env)
             except runs.RecordMissingError:
                 continue
             except _RECORD_ERRORS as error:
@@ -200,11 +214,12 @@ def select(
     env: Mapping[str, str] | None = None,
     now: float | None = None,
 ) -> Selection:
-    """Select ended records by age or explicit ids, without changing files.
+    """Select ended or abandoned records without changing records or processes.
 
     Explicit ids ignore age. A selected parent includes its ended runs of
     any age. A run named by parents requires every parent to be selected.
-    Missing, unreadable and unfinished explicit ids are returned as skips.
+    Unlocked starting runs are considered failed for selection. Missing,
+    unreadable and other unfinished explicit ids are returned as skips.
     """
     if type(older_than) is not int or older_than < 0:
         raise ValueError("older_than must be a non-negative whole number")
@@ -250,6 +265,25 @@ def select(
             continue
         try:
             entry = _load(ident, env)
+            if entry.kind == "run" and entry.data["status"] == runs.STARTING:
+                # A live start holds this lock before writing its first record.
+                # The preview changes no record and ends no preparation group.
+                try:
+                    with contextlib.ExitStack() as locks:
+                        _hold(entry, locks, env)
+                        entry = _load(ident, env)
+                        if entry.data["status"] == runs.STARTING:
+                            candidate = abandon_start(
+                                runs.from_json(
+                                    entry.data, runs.run_dir(ident, env), env
+                                ),
+                                dry_run=True,
+                            )
+                            entry = Entry(
+                                ident, "run", candidate.to_json(), abandoned=True
+                            )
+                except _BUSY:
+                    pass
             loaded[ident] = entry
             result.named_worktrees.update(_worktree_paths(entry.data))
             if entry.kind == "flow":
@@ -268,8 +302,14 @@ def select(
         if requested is not None and ident not in requested:
             continue
         try:
-            reason = _ended(entry, env)
-            if reason is None and requested is None and not _old(entry, older_than, at):
+            reason = None if entry.abandoned else _ended(entry, env, loaded)
+            # Select abandoned starts using their last recorded activity.
+            age_entry = _load(ident, env) if entry.abandoned else entry
+            if (
+                reason is None
+                and requested is None
+                and not _old(age_entry, older_than, at)
+            ):
                 reason = "younger than the requested age"
             if reason is None:
                 result.records[ident] = entry
@@ -287,7 +327,7 @@ def select(
             child_entry = loaded[child]
             if child_entry.kind != "run":
                 continue
-            reason = _ended(child_entry, env)
+            reason = None if child_entry.abandoned else _ended(child_entry, env, loaded)
             if reason is None:
                 result.records[child] = child_entry
             else:
@@ -545,6 +585,13 @@ def _artifacts(
     Each worktree is the path its record names, wherever it is.
     """
     data = entry.data
+    preparation = data.get("preparation") or {}
+    if (
+        not dry_run
+        and preparation.get("pid") is not None
+        and preparation.get("start") is not None
+    ):
+        prepare.end_group(preparation["pid"], preparation["start"])
     if entry.kind == "panel":
         return
     directory = _checkout(data, entry.kind, env, parents)
@@ -643,7 +690,8 @@ def remove(
 ) -> Result:
     """Prune selected records, reloading under nonblocking locks before removal.
 
-    Dry runs return the same removal candidates without deleting files.
+    Unlocked starting runs are failed and their preparation groups ended.
+    Dry runs list the same candidates without changing records or processes.
     Failures are collected while remaining records are processed.
     """
     env = os.environ if env is None else env
@@ -689,6 +737,17 @@ def remove(
                 entry = _load(ident, env)
                 _hold(entry, locks, env)
                 entry = _load(ident, env)
+                if entry.kind == "run" and entry.data["status"] == runs.STARTING:
+                    failed = abandon_start(
+                        runs.from_json(entry.data, runs.run_dir(ident, env), env),
+                        dry_run=dry_run,
+                    )
+                    entry = Entry(ident, "run", failed.to_json(), abandoned=True)
+                    result.failed.append(
+                        dict(id=ident, reason=failed.last_reason or "")
+                    )
+                if entry.kind == "run":
+                    current.records[ident] = entry
                 if entry.kind == "run" and _ended(entry, env) is not None:
                     current.live_worktrees.update(_worktree_paths(entry.data))
             except runs.RecordMissingError:
@@ -714,8 +773,10 @@ def remove(
             if ident in unavailable:
                 continue
             try:
-                entry = _load(ident, env)
-                reason = _ended(entry, env)
+                abandoned = entry.abandoned
+                if not (dry_run and abandoned):
+                    entry = _load(ident, env)
+                reason = _ended(entry, env, current.records)
                 if entry.kind != "run" and entry.children & unavailable:
                     role = "task" if entry.kind == "flow" else "member"
                     child = min(entry.children & unavailable)
@@ -727,6 +788,7 @@ def remove(
                     reason is None
                     and not parents
                     and record_ids is None
+                    and not abandoned
                     and not _old(entry, older_than, at)
                 ):
                     reason = "younger than the requested age"
@@ -798,6 +860,9 @@ def main(
         print(json.dumps(result.to_json(), indent=2), file=out)
     else:
         verb = "would remove" if dry_run else "removed"
+        for item in result.failed:
+            fail_verb = "would fail" if dry_run else "failed"
+            print(f"{fail_verb} {item['id']}: {item['reason']}", file=out)
         for item in result.removed:
             print(f"{verb} {item['kind']} {item['id']}", file=out)
         for item in result.skipped:

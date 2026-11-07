@@ -1604,3 +1604,83 @@ def test_empty_sandbox_read_is_accepted(
     code, out, err = invoke(env, plan_file, "--brief", "--dir", str(repo))
     assert code == 0, err
     assert str(source) in out
+
+
+def test_preparation_failure_retries_original_gapcheck(
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    driver: StubDriver,
+    tmp_path: Path,
+) -> None:
+    import shlex
+
+    first_code, first_output, first_error = invoke(
+        env,
+        plan_file,
+        "--dir",
+        str(repo),
+        "--engine",
+        "codex",
+        "--model",
+        "m",
+        "--json",
+        "--confirmed",
+        driver=driver,
+    )
+    assert first_code == 0, first_error
+    earlier = tmp_path / "previous result.json"
+    earlier.write_text(first_output)
+    read_one, read_two = tmp_path / "one.md", tmp_path / "two.md"
+    read_one.write_text("First context")
+    read_two.write_text("Second context")
+    choices.set_settings(
+        {"worktree.prepare": {str(repo): "echo failed; exit 4"}}, env=env
+    )
+    choices.claim("gap-prep", env=env)
+    code, output, errors = invoke(
+        env,
+        plan_file,
+        "--dir",
+        str(repo),
+        "--previous",
+        str(earlier),
+        "--engine",
+        "codex",
+        "--model",
+        "m",
+        "--effort",
+        "high",
+        "--read",
+        str(read_one),
+        "--read",
+        str(read_two),
+        "--claim",
+        "gap-prep",
+        "--stall",
+        "1.5",
+        "--window",
+        "--json",
+        "--confirmed",
+        driver=driver,
+    )
+    assert code == 79, errors
+    data = json.loads(output)
+    assert data["run"]["reply"] is None and not data["run"]["closed"]
+    run = record.load(data["run"]["id"], env)
+    assert run.last_exit == 79 and run.status == record.FAILED
+    assert not (tmp_path / "tmux-state" / "sessions" / run.id).exists()
+    assert (run.folder / "prepare.log").read_text() == "failed\n"
+    assert str(run.folder / "prepare.log") in errors
+    lines = [line for line in errors.splitlines() if line.startswith("next:")]
+    assert len(lines) == 1
+    argv = shlex.split(lines[0].removeprefix("next: "))
+    assert argv[:2] == ["emb", "gapcheck"] and "..." not in argv
+    retry = build_parser().parse_args(argv[1:])
+    assert retry.plan == str(plan_file) and retry.previous == str(earlier)
+    assert retry.dir == str(repo) and retry.engine == "codex"
+    assert retry.model == "m" and retry.effort == "high"
+    assert retry.read == [str(read_one), str(read_two)]
+    assert retry.claim == "gap-prep" and retry.stall == 1.5
+    assert retry.window and retry.json and retry.confirmed
+    assert not list(paths.runtime_dir(env).glob("gapcheck-*.md"))

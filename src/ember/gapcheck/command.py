@@ -448,6 +448,30 @@ def _follow(command: str, reply_path: str | None, code: int) -> str:
     return f"next: {prefix}{command} --reply {shlex.quote(reply_path)}"
 
 
+def _preparation_retry(args: argparse.Namespace) -> str:
+    """Repeat the original check after preparation failed before its reviewer."""
+    argv = ["emb", "gapcheck"]
+    for name in (
+        "plan",
+        "previous",
+        "dir",
+        "engine",
+        "model",
+        "effort",
+        "claim",
+        "stall",
+    ):
+        value = getattr(args, name)
+        if value is not None:
+            argv.extend((f"--{name}", str(value)))
+    for path in args.read:
+        argv.extend(("--read", path))
+    for name in ("window", "json", "confirmed"):
+        if getattr(args, name):
+            argv.append(f"--{name}")
+    return "next: " + shlex.join(argv)
+
+
 @contextlib.contextmanager
 def _stop_signals_interrupt() -> Iterator[None]:
     """Treat SIGTERM and SIGHUP as SIGINT while the reviewer run is started.
@@ -492,6 +516,7 @@ def _run(
     output, errors = io.StringIO(), io.StringIO()
     temporary: Path | None = None
     created = False
+    code = 0
     try:
         try:
             root = paths.runtime_dir(env)
@@ -532,7 +557,14 @@ def _run(
             if created and temporary is not None:
                 temporary.unlink(missing_ok=True)
         finally:
-            err.write(errors.getvalue())
+            diagnostics = errors.getvalue()
+            if code == exits.PREPARATION_FAILED:
+                diagnostics = "".join(
+                    line
+                    for line in diagnostics.splitlines(keepends=True)
+                    if not line.startswith("next:")
+                )
+            err.write(diagnostics)
     first = output.getvalue().splitlines()
     match = re.fullmatch(r"run ([a-z0-9][a-z0-9-]{5,63})", first[0]) if first else None
     if match is None:
@@ -718,7 +750,12 @@ def main(
             )
             if result is None:
                 if code:
-                    print(_follow(command, None, code), file=err)
+                    print(
+                        _preparation_retry(args)
+                        if code == exits.PREPARATION_FAILED
+                        else _follow(command, None, code),
+                        file=err,
+                    )
                 return code
             reply_path = result["run"]["reply"]
         code = code or (INVALID_REPLY if result["parse_error"] else 0)
@@ -742,7 +779,11 @@ def main(
             )
         if code:
             print(
-                problem.follow if problem else _follow(command, reply_path, code),
+                _preparation_retry(args)
+                if code == exits.PREPARATION_FAILED
+                else problem.follow
+                if problem
+                else _follow(command, reply_path, code),
                 file=err,
             )
         return code

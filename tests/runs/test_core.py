@@ -63,6 +63,8 @@ def _core(
     *,
     stall: float = 0.1,
     quiet: bool = False,
+    admit: Callable[[record.Run], None] | None = None,
+    prepare_stop: threading.Event | None = None,
 ) -> Core:
     chosen = driver or _driver(env)
     return Core(
@@ -71,6 +73,8 @@ def _core(
         poll_seconds=0.02,
         stall_minutes=stall,
         quiet=quiet,
+        admit=admit,
+        prepare_stop=prepare_stop,
     )
 
 
@@ -1734,15 +1738,16 @@ def test_failed_start_calls_driver_close_and_keeps_the_start_error(
     assert "disk full" in (record.load(run_id, env).last_reason or "")
 
 
-def test_settings_database_error_is_1(
+def test_preparation_settings_database_error_is_69(
     tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     path = paths.settings_db_path(env)
     path.unlink()
     path.write_bytes(b"not a database at all, just bytes" * 10)
-    assert _start(_core(env), repo, _brief(tmp_path, "Task\n")) == 1
+    assert _start(_core(env), repo, _brief(tmp_path, "Task\n")) == 69
     err = capsys.readouterr().err
     assert "settings database" in err
+    assert "worktree.prepare" in err
     assert err.splitlines()[-1].startswith("owner: ")
 
 
@@ -4264,3 +4269,435 @@ def test_failed_delivery_restores_only_unresolved_owner_wait(
         assert captured.err.splitlines()[-1] == exits.line(code, "send", run=run.id)
     else:
         assert "next:" not in captured.err
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize("command", [None, "", "printf 'ready\\n'"])
+def test_preparation_before_admission_and_session(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    read_only: bool,
+    command: str | None,
+) -> None:
+    if command is not None:
+        choices.set_settings({"worktree.prepare": {str(repo): command}}, env=env)
+    seen = []
+
+    def admit(run: record.Run) -> None:
+        assert Path(run.worktree).is_dir()
+        assert not session_folder(tmp_path, run.id).exists()
+        assert run.turn == 0
+        if command:
+            assert run.preparation is not None
+            assert run.preparation["state"] == "ok"
+            assert run.preparation["exit"] == 0
+            assert run.preparation["pid"] > 1
+            assert run.preparation["start"] > 0
+            log = Path(run.preparation["log"])
+            assert log.read_text() == "ready\n"
+            assert stat.S_IMODE(log.stat().st_mode) == 0o600
+        else:
+            assert run.preparation is None
+            assert "preparation" not in run.to_json()
+            assert "start_argv" not in run.to_json()
+            assert not (run.folder / "prepare.log").exists()
+        seen.append(run.id)
+
+    core_ = _core(env, admit=admit)
+    options = StartOptions(
+        "claude", str(repo), _brief(tmp_path, "Task"), read_only=read_only
+    )
+    assert core_.execute(lambda: core_.start(options)) == 0
+    run_id = _run_id(capsys.readouterr().out)
+    assert seen == [run_id]
+    assert session_folder(tmp_path, run_id).exists()
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize(
+    ("command", "message"),
+    [("echo broken >&2; exit 12", "exited 12"), (": > stray", "stray")],
+)
+def test_preparation_failure_keeps_tree_until_close(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    read_only: bool,
+    command: str,
+    message: str,
+) -> None:
+    choices.set_settings({"worktree.prepare": {str(repo): command}}, env=env)
+    core_ = _core(env)
+    assert _start(core_, repo, _brief(tmp_path, "Task"), read_only=read_only) == 79
+    output = capsys.readouterr()
+    run_id = _run_id(output.out)
+    run = record.load(run_id, env)
+    assert run.status == record.FAILED and run.turn == 0
+    assert run.turn_state is None and run.last_exit == 79
+    assert run.preparation is not None and run.preparation["state"] == "failed"
+    assert message in output.err
+    assert str(run.folder / "prepare.log") in output.err
+    assert Path(run.worktree).exists()
+    assert not session_folder(tmp_path, run_id).exists()
+    next_line = core_.step(run, core.MISSING)[1]
+    assert next_line is not None and next_line in output.err
+    assert core_.execute(lambda: core_.close(run_id)) == 0
+    assert not Path(run.worktree).exists()
+    assert record.load(run_id, env).status == record.CLOSED
+    if run.branch:
+        assert git(repo, "rev-parse", run.branch, env=env) == run.base
+
+
+def test_preparation_retry_saves_brief_and_options(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    choices.set_settings({"worktree.prepare": {str(repo): "exit 1"}}, env=env)
+    choices.claim("prep-claim", env=env)
+    brief = _brief(tmp_path, "Saved task\n", "brief with spaces.md")
+    core_ = _core(env, quiet=True, stall=3)
+    assert (
+        _start(
+            core_,
+            repo,
+            brief,
+            model="sonnet",
+            effort="high",
+            read_only=True,
+            read=(str(tmp_path),),
+            trailers=("Reviewed-By: Lead",),
+            claim="prep-claim",
+            window=True,
+        )
+        == 79
+    )
+    output = capsys.readouterr()
+    run = record.load(_run_id(output.out), env)
+    Path(brief).unlink()
+    argv = list(run.start_argv)
+    assert argv[:2] == ["emb", "run"]
+    assert argv[argv.index("--task-file") + 1] == str(run.folder / record.BRIEF_NAME)
+    assert (run.folder / record.BRIEF_NAME).read_text() == "Saved task\n"
+    for flag, value in (
+        ("--engine", "claude"),
+        ("--dir", str(repo)),
+        ("--model", "sonnet"),
+        ("--effort", "high"),
+        ("--read", str(tmp_path)),
+        ("--trailer", "Reviewed-By: Lead"),
+        ("--claim", "prep-claim"),
+        ("--stall", "3.0"),
+    ):
+        assert argv[argv.index(flag) + 1] == value
+    assert all(flag in argv for flag in ("--window", "--read-only", "--quiet"))
+    assert shlex.join(argv) in output.err
+
+
+def test_preparation_lookup_error_refuses_before_artifacts(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ember import prepare
+
+    def unavailable(*args: object, **kwargs: object) -> None:
+        raise prepare.PreparationError("cannot inspect /missing-checkout")
+
+    monkeypatch.setattr(prepare, "lookup", unavailable)
+    assert _start(_core(env), repo, _brief(tmp_path, "Task")) == 69
+    output = capsys.readouterr()
+    assert "cannot inspect /missing-checkout" in output.err
+    assert "run " not in output.out
+    assert not record.list_runs(env)[0]
+
+
+def test_preparation_admission_refusal_starts_no_session(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    choices.set_settings({"worktree.prepare": {str(repo): "true"}}, env=env)
+    core_ = _core(env)
+
+    def refuse(run: record.Run) -> None:
+        assert run.preparation is not None and run.preparation["state"] == "ok"
+        raise RunError(79, "parent halted admission", run=run.id)
+
+    options = StartOptions("claude", str(repo), _brief(tmp_path, "Task"))
+    core_.admit = refuse
+    assert core_.execute(lambda: core_.start(options)) == 79
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    assert run.status == record.FAILED and run.turn == 0
+    assert not session_folder(tmp_path, run.id).exists()
+
+
+def test_send_and_recover_never_prepare(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ember import prepare
+
+    choices.set_settings({"worktree.prepare": {str(repo): "true"}}, env=env)
+    core_ = _core(env)
+    assert _start(core_, repo, _brief(tmp_path, "Task")) == 0
+    run_id = _run_id(capsys.readouterr().out)
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("send or recover reached preparation")
+
+    monkeypatch.setattr(prepare, "lookup", forbidden)
+    monkeypatch.setattr(prepare, "run", forbidden)
+    assert core_.execute(lambda: core_.send(run_id, _brief(tmp_path, "Again"))) == 0
+    assert core_.execute(lambda: core_.recover(run_id)) == 0
+
+
+@pytest.mark.parametrize("failure", ["timeout", "cancel", "shutdown", "exception"])
+def test_preparation_interruption_records_failure_and_ends_group(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+) -> None:
+    import signal
+
+    from ember import prepare
+
+    choices.set_settings({"worktree.prepare": {str(repo): "/bin/sleep 60"}}, env=env)
+    original = prepare.run
+    stopped = threading.Event()
+    groups = []
+
+    def run_prepare(*args: Any, **kwargs: Any) -> prepare.Result:  # noqa: ANN401
+        original_started = kwargs["started"]
+
+        def started(pid: int, start: int) -> None:
+            original_started(pid, start)
+            groups.append(pid)
+            saved = record.list_runs(env)[0][0]
+            assert saved.preparation is not None
+            assert saved.preparation["state"] == "running"
+            assert (saved.preparation["pid"], saved.preparation["start"]) == (
+                pid,
+                start,
+            )
+            assert not session_folder(tmp_path, saved.id).exists()
+            if failure == "cancel":
+                stopped.set()
+            elif failure == "shutdown":
+                os.kill(os.getpid(), signal.SIGTERM)
+            elif failure == "exception":
+                raise OSError("cannot persist preparation identity")
+
+        kwargs.update(started=started, timeout=0.05)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(prepare, "run", run_prepare)
+    core_ = _core(env)
+    options = StartOptions("claude", str(repo), _brief(tmp_path, "Task"))
+    core_.prepare_stop = stopped
+    assert core_.execute(lambda: core_.start(options)) == 79
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    assert run.preparation is not None
+    expected = {
+        "timeout": "timeout",
+        "cancel": "interrupted",
+        "shutdown": "interrupted",
+        "exception": "failed",
+    }[failure]
+    assert run.preparation["state"] == expected
+    assert groups and prepare.start_ticks(groups[0]) is None
+    assert not session_folder(tmp_path, run.id).exists()
+    assert Path(run.worktree).exists()
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_close_ends_recorded_preparation_group(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    force: bool,
+) -> None:
+    from ember import prepare
+
+    choices.set_settings({"worktree.prepare": {str(repo): "exit 1"}}, env=env)
+    core_ = _core(env)
+    assert _start(core_, repo, _brief(tmp_path, "Task")) == 79
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    with subprocess.Popen(["sleep", "60"], start_new_session=True) as process:
+        try:
+            ticks = prepare.start_ticks(process.pid)
+            assert ticks is not None
+            record.update(
+                run,
+                {
+                    "preparation": {
+                        "state": "running",
+                        "command": "sleep 60",
+                        "log": str(run.folder / "prepare.log"),
+                        "pid": process.pid,
+                        "start": ticks,
+                    }
+                },
+            )
+            assert core_.execute(lambda: core_.close(run.id, force=force)) == 0
+            assert process.wait(timeout=5) == -9
+            assert not Path(run.worktree).exists()
+        finally:
+            process.kill()
+
+
+@pytest.mark.parametrize("kind", ["editing", "read-only", "gapcheck"])
+@pytest.mark.parametrize("command", ["true", "exit 1"])
+def test_start_holds_command_lock_from_record_creation_through_admission(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    command: str,
+) -> None:
+    choices.set_settings({"worktree.prepare": {str(repo): command}}, env=env)
+    original = record.save
+    observed = []
+    admitted = []
+
+    def locked(run: record.Run) -> None:
+        with pytest.raises(RunError) as error, _core(env)._turn_lock(run.id):
+            pytest.fail("start released its command lock")
+        assert error.value.code == 75
+
+    def save(run: record.Run) -> None:
+        exists = (run.folder / record.RECORD_NAME).exists()
+        if not exists or record.load(run.id, env).status == record.STARTING:
+            locked(run)
+        if not exists:
+            observed.append(run.id)
+        original(run)
+
+    def admit(run: record.Run) -> None:
+        locked(run)
+        admitted.append(run.id)
+
+    monkeypatch.setattr(record, "save", save)
+    core_ = _core(env, admit=admit)
+    code = _start(
+        core_,
+        repo,
+        _brief(tmp_path, "Task"),
+        read_only=kind != "editing",
+        parent=record.parent("gapcheck") if kind == "gapcheck" else None,
+    )
+    assert code == (0 if command == "true" else 79)
+    assert len(observed) == 1
+    assert admitted == (observed if code == 0 else [])
+    with _core(env)._turn_lock(observed[0]):
+        pass
+
+
+@pytest.mark.parametrize("kind", ["editing", "read-only", "gapcheck"])
+@pytest.mark.parametrize("force", [False, True])
+def test_close_fails_abandoned_start_and_ends_its_preparation(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    kind: str,
+    force: bool,
+) -> None:
+    from ember import prepare
+
+    choices.set_settings({"worktree.prepare": {str(repo): "exit 1"}}, env=env)
+    core_ = _core(env)
+    assert (
+        _start(
+            core_,
+            repo,
+            _brief(tmp_path, "Task"),
+            read_only=kind != "editing",
+            parent=record.parent("gapcheck") if kind == "gapcheck" else None,
+        )
+        == 79
+    )
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    with subprocess.Popen(["/bin/sleep", "60"], start_new_session=True) as process:
+        try:
+            ticks = prepare.start_ticks(process.pid)
+            assert ticks is not None
+            record.update(
+                run,
+                {
+                    "status": record.STARTING,
+                    "last_exit": None,
+                    "preparation": {
+                        "state": "running",
+                        "command": "/bin/sleep 60",
+                        "log": str(run.folder / "prepare.log"),
+                        "pid": process.pid,
+                        "start": ticks,
+                    },
+                },
+            )
+            assert core_.execute(lambda: core_.close(run.id, force=force)) == 0
+            assert process.wait(timeout=5) == -9
+            closed = record.load(run.id, env)
+            assert closed.status == record.CLOSED and closed.last_exit == 79
+            assert "abandoned" in (closed.last_reason or "")
+            assert "preparation" in (closed.last_reason or "")
+            assert not Path(run.worktree).exists()
+        finally:
+            process.kill()
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_close_leaves_a_locked_start_and_its_preparation_alone(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    force: bool,
+) -> None:
+    from ember import prepare
+
+    choices.set_settings({"worktree.prepare": {str(repo): "exit 1"}}, env=env)
+    core_ = _core(env)
+    assert _start(core_, repo, _brief(tmp_path, "Task")) == 79
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    with subprocess.Popen(["/bin/sleep", "60"], start_new_session=True) as process:
+        try:
+            ticks = prepare.start_ticks(process.pid)
+            assert ticks is not None
+            record.update(
+                run,
+                {
+                    "status": record.STARTING,
+                    "preparation": {
+                        "state": "running",
+                        "command": "/bin/sleep 60",
+                        "log": str(run.folder / "prepare.log"),
+                        "pid": process.pid,
+                        "start": ticks,
+                    },
+                },
+            )
+            before = (run.folder / record.RECORD_NAME).read_bytes()
+            with _core(env)._turn_lock(run.id):
+                assert core_.execute(lambda: core_.close(run.id, force=force)) == 75
+            assert process.poll() is None
+            assert (run.folder / record.RECORD_NAME).read_bytes() == before
+            assert Path(run.worktree).is_dir()
+        finally:
+            process.kill()

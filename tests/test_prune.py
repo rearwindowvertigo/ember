@@ -3,7 +3,8 @@ import json
 import os
 import shlex
 import subprocess
-from collections.abc import Mapping
+import sys
+from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -444,10 +445,10 @@ def test_prune_uses_recorded_checkout_without_discovering_from_worktree(
 
 
 @pytest.mark.parametrize("status", runs.STATUSES)
-def test_only_ended_runs(env: dict[str, str], status: str) -> None:
+def test_only_ended_or_abandoned_runs(env: dict[str, str], status: str) -> None:
     record = run(env, status=status)
     result = prune.remove(0, env=env, now=NOW)
-    ended = status in ("closed", "failed")
+    ended = status in ("closed", "failed", "starting")
     assert (record.id in ids(result)) == ended
     assert record.folder.exists() != ended
     assert result.errors == []
@@ -1109,7 +1110,15 @@ def test_cancelled_flow_with_open_task_has_no_worktree_command(
     )
     flows.save(parent, env)
     independent = run(env)
-    assert prune.main(0, dry_run=dry_run, as_json=True, env=env) == 0
+    root = paths.runtime_dir(env)
+    locks = paths.ensure_private_dir(root / "locks", root=root)
+    held = (
+        prune._file_lock(locks / f"{child.id}.lock")
+        if status == runs.STARTING
+        else contextlib.nullcontext()
+    )
+    with held:
+        assert prune.main(0, dry_run=dry_run, as_json=True, env=env) == 0
     captured = capsys.readouterr()
     result = json.loads(captured.out)
     assert result["removed"] == [dict(id=independent.id, kind="run")]
@@ -1563,3 +1572,232 @@ def test_prune_keeps_pending_runs(
     assert result.skipped[0]["id"] == child.id
     expected = pending if pending != "session" else "still running"
     assert expected in result.skipped[0]["reason"]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_prune_ends_recorded_preparation_group(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch, dry_run: bool
+) -> None:
+    from ember import prepare
+
+    child = run(
+        env,
+        preparation={
+            "state": "running",
+            "command": "sleep 60",
+            "log": "/run/prepare.log",
+            "pid": 123,
+            "start": 456,
+        },
+    )
+    calls = []
+    monkeypatch.setattr(prepare, "end_group", lambda *identity: calls.append(identity))
+    result = prune.remove(0, [child.id], env=env, now=NOW, dry_run=dry_run)
+    assert not result.errors
+    assert {"id": child.id, "kind": "run"} in result.removed
+    assert calls == ([] if dry_run else [(123, 456)])
+
+
+@contextlib.contextmanager
+def live_preparation() -> Iterator[subprocess.Popen[bytes]]:
+    with subprocess.Popen(["/bin/sleep", "60"], start_new_session=True) as process:
+        try:
+            yield process
+        finally:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def starting_run(
+    env: dict[str, str], process: subprocess.Popen[bytes], kind: str
+) -> runs.Run:
+    from ember import prepare
+
+    ticks = prepare.start_ticks(process.pid)
+    assert ticks is not None
+    return run(
+        env,
+        status=runs.STARTING,
+        turn=0,
+        turn_state=None,
+        ended_at=None,
+        updated_at=0.0,
+        last_exit=None,
+        read_only=kind != "editing",
+        parent={"command": "gapcheck", "id": None, "pid": 0, "start": 0}
+        if kind == "gapcheck"
+        else None,
+        preparation={
+            "state": "running",
+            "command": "/bin/sleep 60",
+            "log": "/run/prepare.log",
+            "pid": process.pid,
+            "start": ticks,
+        },
+    )
+
+
+@contextlib.contextmanager
+def held_command_lock(child: runs.Run) -> Iterator[None]:
+    root = paths.runtime_dir(child.env)
+    locks = paths.ensure_private_dir(root / "locks", root=root)
+    script = (
+        "import fcntl, sys; "
+        "stream = open(sys.argv[1], 'a'); "
+        "fcntl.flock(stream, fcntl.LOCK_EX); "
+        "print('locked', flush=True); sys.stdin.read()"
+    )
+    with subprocess.Popen(
+        [sys.executable, "-c", script, str(locks / f"{child.id}.lock")],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    ) as holder:
+        try:
+            assert holder.stdout is not None
+            assert holder.stdout.readline() == "locked\n"
+            yield
+        finally:
+            holder.kill()
+            holder.wait(timeout=5)
+
+
+@pytest.mark.parametrize("kind", ["editing", "read-only", "gapcheck"])
+@pytest.mark.parametrize("scoped", [False, True])
+def test_prune_fails_abandoned_preparation_under_command_lock(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch, kind: str, scoped: bool
+) -> None:
+    with live_preparation() as process:
+        child = starting_run(env, process, kind)
+        saved = []
+        original = runs.save
+
+        def save(failed: runs.Run) -> None:
+            root = paths.runtime_dir(env)
+            with (
+                pytest.raises(BlockingIOError),
+                prune._file_lock(root / "locks" / f"{child.id}.lock"),
+            ):
+                pass
+            with (
+                pytest.raises(BlockingIOError),
+                prune._file_lock(child.folder / runs.LOCK_NAME),
+            ):
+                pass
+            assert process.wait(timeout=5) == -9
+            saved.append(failed)
+            original(failed)
+
+        monkeypatch.setattr(runs, "save", save)
+        result = prune.remove(1, [child.id] if scoped else None, env=env, now=NOW)
+        assert not result.errors and not result.skipped
+        assert len(saved) == 1
+        failed = saved[0]
+        assert failed.status == runs.FAILED and failed.last_exit == 79
+        assert "abandoned" in (failed.last_reason or "")
+        assert "preparation" in (failed.last_reason or "")
+        assert failed.last_start_failure and failed.ended_at is not None
+        assert failed.preparation is not None
+        assert failed.preparation["state"] == "interrupted"
+        assert {"id": child.id, "kind": "run"} in result.removed
+        assert result.failed == [{"id": child.id, "reason": failed.last_reason}]
+        assert not child.folder.exists()
+
+
+@pytest.mark.parametrize("kind", ["editing", "read-only", "gapcheck"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_prune_keeps_starting_preparation_with_command_lock_in_another_process(
+    env: dict[str, str], kind: str, dry_run: bool
+) -> None:
+    with live_preparation() as process:
+        child = starting_run(env, process, kind)
+        before = (child.folder / runs.RECORD_NAME).read_bytes()
+        with held_command_lock(child):
+            result = prune.remove(0, [child.id], env=env, now=NOW, dry_run=dry_run)
+        assert not result.errors and not result.removed and not result.failed
+        assert process.poll() is None
+        assert (child.folder / runs.RECORD_NAME).read_bytes() == before
+        assert runs.load(child.id, env).status == runs.STARTING
+
+
+@pytest.mark.parametrize("kind", ["editing", "read-only", "gapcheck"])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_prune_previews_abandoned_preparation_without_ending_it(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str], kind: str, as_json: bool
+) -> None:
+    with live_preparation() as process:
+        child = starting_run(env, process, kind)
+        before = (child.folder / runs.RECORD_NAME).read_bytes()
+        assert prune.main(0, dry_run=True, as_json=as_json, env=env) == 0
+        output = capsys.readouterr()
+        assert not output.err and process.poll() is None
+        assert (child.folder / runs.RECORD_NAME).read_bytes() == before
+        if as_json:
+            data = json.loads(output.out)
+            assert data["failed"][0]["id"] == child.id
+            assert "abandoned" in data["failed"][0]["reason"]
+            assert {"id": child.id, "kind": "run"} in data["removed"]
+        else:
+            assert (
+                f"would fail {child.id}: abandoned worktree preparation" in output.out
+            )
+            assert f"would remove run {child.id}" in output.out
+
+
+def test_prune_abandons_start_but_keeps_a_live_worker_session(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ember import tmux
+
+    with live_preparation() as process:
+        child = starting_run(env, process, "read-only")
+        monkeypatch.setattr(tmux, "exists", lambda *args, **kwargs: True)
+        monkeypatch.setattr(tmux, "pane_dead", lambda *args, **kwargs: False)
+        result = prune.remove(0, [child.id], env=env)
+        assert not result.errors and not result.removed
+        assert process.wait(timeout=5) == -9
+        failed = runs.load(child.id, env)
+        assert failed.status == runs.FAILED and failed.last_exit == 79
+        assert "still running" in result.skipped[0]["reason"]
+
+
+def test_prune_abandoned_start_checks_process_identity(env: dict[str, str]) -> None:
+    with live_preparation() as process:
+        child = starting_run(env, process, "editing")
+        assert child.preparation is not None
+        runs.save(
+            replace(
+                child,
+                preparation={
+                    **child.preparation,
+                    "start": child.preparation["start"] + 1,
+                },
+            )
+        )
+        result = prune.remove(0, [child.id], env=env)
+        assert not result.errors and child.id in ids(result)
+        assert process.poll() is None
+
+
+@pytest.mark.parametrize("kind", ["flow", "panel"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_prune_ended_parent_with_abandoned_preparation(
+    env: dict[str, str], kind: str, dry_run: bool
+) -> None:
+    with live_preparation() as process:
+        child = starting_run(env, process, "read-only")
+        if kind == "panel":
+            parent_id = panel(env, child)["id"]
+        else:
+            parent = flow(env, status="cancelled")
+            parent["tasks"][0]["writer_run"] = child.id
+            flows.save(parent, env)
+            parent_id = parent["id"]
+        result = prune.remove(0, [parent_id], env=env, dry_run=dry_run)
+        assert not result.errors and not result.skipped
+        assert child.id in ids(result) and parent_id in ids(result)
+        if dry_run:
+            assert process.poll() is None
+            assert runs.load(child.id, env).status == runs.STARTING
+        else:
+            assert process.wait(timeout=5) == -9

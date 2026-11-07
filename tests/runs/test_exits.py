@@ -4,7 +4,7 @@ import pytest
 
 from ember.runs import exits
 
-CODES = (1, 64, 65, 66, 69, 70, 71, 72, 73, 74, 75, 76, 77, 80, 84, 124)
+CODES = (1, 64, 65, 66, 69, 70, 71, 72, 73, 74, 75, 76, 77, 79, 80, 84, 124)
 
 
 def test_table_has_every_code() -> None:
@@ -23,6 +23,13 @@ def test_every_line_is_next_or_owner(code: int) -> None:
 def test_zero_has_no_line() -> None:
     assert exits.line(0) is None
     assert exits.emit(0) is None
+
+
+def test_preparation_failure_names_log_and_new_start() -> None:
+    assert exits.PREPARATION_FAILED == 79
+    assert exits.line(
+        79, log="/run/prepare.log", retry="emb run --task-file /brief"
+    ) == ("next: inspect /run/prepare.log, then emb run --task-file /brief")
 
 
 def test_placeholders_and_blanks() -> None:
