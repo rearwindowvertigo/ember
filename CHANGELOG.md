@@ -13,7 +13,6 @@
 
 ### Fixed
 
-* **app:** fit the collapsed sidebar's count inside its pill ([60abf61](https://github.com/rearwindowvertigo/ember/commit/60abf6132169b6174712eda6f7e48bec307b6994))
 * **app:** keep the collapsed sidebar's count pill off the row icon ([25d5453](https://github.com/rearwindowvertigo/ember/commit/25d5453831fc5f8793b4c375e58c934805610de5))
 
 ## [0.16.0](https://github.com/rearwindowvertigo/ember/compare/v0.15.0...v0.16.0) (2026-11-06)
