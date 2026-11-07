@@ -130,11 +130,27 @@ def test_lookup_existing_non_repository_is_error(
         prepare.lookup(_common(repo, env), env=env)
 
 
-def test_lookup_settings_corruption_is_error(repo: Path, env: dict[str, str]) -> None:
+@pytest.mark.parametrize("command", [None, "", "npm ci"])
+def test_lookup_ignores_unrelated_settings_corruption(
+    repo: Path, env: dict[str, str], command: str | None
+) -> None:
+    entries = {} if command is None else {str(repo): command}
+    choices.set_settings({"worktree.prepare": entries}, env=env)
+    with sqlite3.connect(paths.settings_db_path(env)) as conn:
+        conn.execute(
+            "INSERT INTO settings(key, value) VALUES ('panel.members', 'false')"
+        )
+    assert prepare.lookup(_common(repo, env), env=env) == command
+
+
+@pytest.mark.parametrize("value", ["broken", "false"])
+def test_lookup_settings_corruption_is_error(
+    repo: Path, env: dict[str, str], value: str
+) -> None:
     choices.set_settings({"worktree.prepare": {}}, env=env)
     with sqlite3.connect(paths.settings_db_path(env)) as conn:
         conn.execute(
-            "UPDATE settings SET value = 'broken' WHERE key = 'worktree.prepare'"
+            "UPDATE settings SET value = ? WHERE key = 'worktree.prepare'", (value,)
         )
     with pytest.raises(prepare.PreparationError, match="cannot read worktree.prepare"):
         prepare.lookup(repo / ".git", env=env)

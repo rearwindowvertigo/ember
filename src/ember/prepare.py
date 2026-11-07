@@ -99,17 +99,21 @@ def lookup(common: str | Path, *, env: Mapping[str, str] | None = None) -> str |
         Entries whose checkout no longer exists are skipped.
 
     Raises:
-        PreparationError: Settings or an existing checkout cannot be inspected,
-            or several entries match the repository.
+        PreparationError: The settings database cannot be read, worktree.prepare
+            cannot be read or is invalid, an existing configured checkout cannot
+            be inspected, or several entries match the repository.
     """
     try:
         reply = choices.read(env=env)
     except db.DatabaseError as error:
         raise PreparationError(f"cannot read worktree.prepare: {error}") from error
-    if reply["source_error"]:
-        raise PreparationError(
-            "cannot read worktree.prepare: " + "; ".join(reply["errors"])
-        )
+    errors = [
+        error
+        for error in reply["errors"]
+        if error.startswith("setting worktree.prepare:")
+    ]
+    if errors:
+        raise PreparationError("cannot read worktree.prepare: " + "; ".join(errors))
     entries = reply["answers"]["worktree.prepare"]["value"]
     command: str | None = None
     try:
