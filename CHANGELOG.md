@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.20.1](https://github.com/rearwindowvertigo/ember/compare/v0.20.0...v0.20.1) (2026-11-08)
+
+
+### Fixed
+
+* align Settings list-row buttons with the controls above them ([a44922c](https://github.com/rearwindowvertigo/ember/commit/a44922cb0c2041c8564d28add27d6426771b1be3))
+* create run, flow and panel folders with their records in one step ([6aff7ca](https://github.com/rearwindowvertigo/ember/commit/6aff7ca3c1ebfd121037be12e4a7e42fe91876d3))
+* open info tips in dialogs under their icon ([1aa566c](https://github.com/rearwindowvertigo/ember/commit/1aa566c550dd5563b7e60acebaecb2063c0cdcb8))
+* use a short private /tmp folder for Codex runs and keep /tmp writable ([e8ee0da](https://github.com/rearwindowvertigo/ember/commit/e8ee0da21850c57179f8e84b3703821ddae07d3a))
+
 ## [0.20.0](https://github.com/rearwindowvertigo/ember/compare/v0.19.0...v0.20.0) (2026-11-08)
 
 
