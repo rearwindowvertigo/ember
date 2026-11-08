@@ -1,3 +1,5 @@
+import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, call
@@ -364,25 +366,42 @@ def test_quit_uses_a_tray_token_without_showing_the_main_window(
     shown: bool,
     token: str,
 ) -> None:
-    """Use the token on a shown window or an invisible helper before quitting."""
+    """Use the token on a shown window, or on a helper once the desktop shows it."""
     window, _context, quit_app = _window(env, qtbot)
     if shown:
         window.show()
     helper = QWidget()
     qtbot.addWidget(helper)
     calls = Mock()
+
+    def token_now() -> str:
+        return QProcessEnvironment.systemEnvironment().value("XDG_ACTIVATION_TOKEN")
+
+    def record(name: str, wrapped: Callable[[], None]) -> Callable[[], None]:
+        def recorded() -> None:
+            getattr(calls, name)(token_now())
+            wrapped()
+
+        return recorded
+
+    def wait_for(condition: Callable[[], bool], msecs: int) -> bool:
+        calls.wait(msecs, condition())
+        return True
+
     calls.attach_mock(Mock(return_value=helper), "create")
-    calls.attach_mock(Mock(wraps=helper.show), "show")
-    calls.attach_mock(Mock(wraps=helper.activateWindow), "activate_helper")
-    calls.attach_mock(Mock(wraps=helper.hide), "hide")
-    calls.attach_mock(Mock(wraps=window.activateWindow), "activate_main")
     calls.attach_mock(Mock(wraps=QCoreApplication.processEvents), "process_events")
     calls.attach_mock(Mock(wraps=quit_app), "quit")
     monkeypatch.setattr(window_module, "QWidget", calls.create)
-    monkeypatch.setattr(helper, "show", calls.show)
-    monkeypatch.setattr(helper, "activateWindow", calls.activate_helper)
-    monkeypatch.setattr(helper, "hide", calls.hide)
-    monkeypatch.setattr(window, "activateWindow", calls.activate_main)
+    monkeypatch.setattr(window_module, "wait_for", wait_for)
+    monkeypatch.setattr(window_module, "exposed", lambda widget: widget is helper)
+    monkeypatch.setattr(helper, "show", record("show", helper.show))
+    monkeypatch.setattr(
+        helper, "activateWindow", record("activate_helper", helper.activateWindow)
+    )
+    monkeypatch.setattr(helper, "hide", record("hide", helper.hide))
+    monkeypatch.setattr(
+        window, "activateWindow", record("activate_main", window.activateWindow)
+    )
     monkeypatch.setattr(QCoreApplication, "processEvents", calls.process_events)
     monkeypatch.setattr(window, "_quit", calls.quit)
     show_main = Mock(wraps=window.show)
@@ -404,10 +423,11 @@ def test_quit_uses_a_tray_token_without_showing_the_main_window(
     if token and not shown:
         assert calls.mock_calls == [
             call.create(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint),
-            call.show(),
-            call.activate_helper(),
-            call.process_events(),
-            call.hide(),
+            call.show(""),
+            call.wait(window_module.EXPOSE_WAIT_MS, True),
+            call.activate_helper(token),
+            call.wait(window_module.ACTIVATE_SETTLE_MS, False),
+            call.hide(token),
             call.quit(),
         ]
         assert helper.size().width() == helper.size().height() == 1
@@ -415,12 +435,36 @@ def test_quit_uses_a_tray_token_without_showing_the_main_window(
         assert helper.windowOpacity() == 0
     elif token:
         assert calls.mock_calls == [
-            call.activate_main(),
+            call.activate_main(token),
             call.process_events(),
             call.quit(),
         ]
     else:
         assert calls.mock_calls == [call.quit()]
+
+
+def test_wait_for_returns_when_the_condition_holds_or_time_runs_out(
+    qtbot: QtBot,
+) -> None:
+    checks: list[int] = []
+
+    def third_check() -> bool:
+        checks.append(1)
+        return len(checks) == 3
+
+    assert window_module.wait_for(third_check, 5_000)
+    assert len(checks) == 3
+    clock = time.monotonic()
+    assert not window_module.wait_for(lambda: False, 50)
+    assert 0.04 <= time.monotonic() - clock < 2
+
+
+def test_exposed_reads_the_native_window(qtbot: QtBot) -> None:
+    widget = QWidget()
+    qtbot.addWidget(widget)
+    assert not window_module.exposed(widget)
+    widget.show()
+    qtbot.waitUntil(lambda: window_module.exposed(widget))
 
 
 @pytest.mark.parametrize("mode", ["light", "dark"])

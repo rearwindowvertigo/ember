@@ -21,7 +21,9 @@ from typing import cast
 
 from PySide6.QtCore import (
     QCoreApplication,
+    QElapsedTimer,
     QEvent,
+    QEventLoop,
     QProcessEnvironment,
     QSize,
     Qt,
@@ -72,6 +74,15 @@ NAV_COUNT_SIZE = 18
 
 SIDEBAR_BREAKPOINT = 960
 """Window widths below this show the sidebar's icon-only rows."""
+
+TOKEN = "XDG_ACTIVATION_TOKEN"
+"""The variable that holds a tray menu click's activation token."""
+
+EXPOSE_WAIT_MS = 1_000
+"""The longest Quit waits for the desktop to show its token helper window."""
+
+ACTIVATE_SETTLE_MS = 100
+"""How long Quit keeps the token helper window after using the token."""
 
 RESTART_TITLE = "Ember {version} is installed."
 """The restart alert's text, after an upgrade while Ember runs."""
@@ -315,6 +326,34 @@ def put_first_in_tab_order(container: QWidget, button: QWidget) -> None:
         return
     for widget in reversed(before):
         QWidget.setTabOrder(button, widget)
+
+
+def exposed(widget: QWidget) -> bool:
+    """Return whether the desktop shows the widget's native window."""
+    handle = widget.windowHandle()
+    return handle is not None and handle.isExposed()
+
+
+def wait_for(condition: Callable[[], bool], msecs: int) -> bool:
+    """Process events until `condition` holds or `msecs` pass.
+
+    Args:
+        condition: Checked before each round of events.
+        msecs: The longest wait in milliseconds.
+
+    Returns:
+        Whether the condition held.
+    """
+    clock = QElapsedTimer()
+    clock.start()
+    while not condition():
+        left = msecs - clock.elapsed()
+        if left <= 0:
+            return False
+        QCoreApplication.processEvents(
+            QEventLoop.ProcessEventsFlag.AllEvents, min(20, int(left))
+        )
+    return True
 
 
 class MainWindow(QMainWindow):
@@ -712,9 +751,14 @@ class MainWindow(QMainWindow):
         the desktop shows a busy cursor until a window uses it. A shown
         window uses it before Ember quits; when hidden, a separate invisible
         window uses it instead.
+
+        Qt's Wayland plugin uses the token as soon as a window opens, before
+        the desktop shows that window, and GNOME ignores a token used on a
+        window it has not shown. So the helper opens without the token, and
+        the token goes back and is used once the helper is shown.
         """
         self._save_state()
-        token = QProcessEnvironment.systemEnvironment().value("XDG_ACTIVATION_TOKEN")
+        token = QProcessEnvironment.systemEnvironment().value(TOKEN)
         if token:
             if self.isVisible():
                 self.activateWindow()
@@ -726,9 +770,12 @@ class MainWindow(QMainWindow):
                 helper.setFixedSize(1, 1)
                 helper.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
                 helper.setWindowOpacity(0)
+                os.unsetenv(TOKEN)
                 helper.show()
+                wait_for(lambda: exposed(helper), EXPOSE_WAIT_MS)
+                os.putenv(TOKEN, token)
                 helper.activateWindow()
-                QCoreApplication.processEvents()
+                wait_for(lambda: False, ACTIVATE_SETTLE_MS)
                 helper.hide()
         self._quit()
 
