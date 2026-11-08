@@ -1784,6 +1784,8 @@ class OverviewScreen(QWidget):
                 )
         wanted = {}
         for key, group in groups.items():
+            if key in saved.denied_hidden:
+                continue
             reports = sorted(group.values(), key=_DenialReport.sort_key)
             occurrences = sorted(f"{report.run.id}:{report.turn}" for report in reports)
             if set(occurrences).issubset(saved.denied_dismissals.get(key, [])):
@@ -1824,6 +1826,12 @@ class OverviewScreen(QWidget):
                     ),
                 )
             )
+            actions.append(
+                (
+                    "Don't show again",
+                    lambda _checked=False, p=key: self._hide_denial(p),
+                )
+            )
             if item["reason"] == "secret location":
                 text = "This folder holds credentials."
             elif item["reason"] == "protected":
@@ -1851,6 +1859,13 @@ class OverviewScreen(QWidget):
         state.save(
             dataclasses.replace(saved, denied_dismissals=dismissals), self.context.env
         )
+        self.check_denials()
+
+    def _hide_denial(self, path: str) -> None:
+        """Hide every denial notice for this resolved folder until shown again."""
+        saved = state.load(self.context.env)
+        hidden = sorted({*saved.denied_hidden, path})
+        state.save(dataclasses.replace(saved, denied_hidden=hidden), self.context.env)
         self.check_denials()
 
     def _allow_reading(self, path: str) -> None:

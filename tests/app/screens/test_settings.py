@@ -1,5 +1,6 @@
 import os
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -10,7 +11,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QLabel, QStyle, QWidget
 from pytestqt.qtbot import QtBot
 
 from ember import choices
-from ember.app import theme
+from ember.app import state, theme
 from ember.app.context import AppContext
 from ember.app.screens import settings as settings_module
 from ember.app.screens.settings import OTHER, PreparationCommandDialog, SettingsScreen
@@ -728,6 +729,8 @@ def test_every_control_is_reached_with_tab(
         {"sandbox.read": [os.fspath(tmp_path)], "worktree.prepare": {repository: ""}},
         env=env,
     )
+    hidden = [str(tmp_path / "hidden-a"), str(tmp_path / "hidden-b")]
+    state.save(state.AppState(denied_hidden=hidden), env)
     context, screen = _screen(env, qtbot)
     for _ in range(2):
         screen.show()
@@ -744,6 +747,8 @@ def test_every_control_is_reached_with_tab(
         expected = [
             screen.autostart,
             screen.theme.buttons()[0],
+            screen.tip_rows["Hidden notices"].info,
+            *(screen.hidden_rows[path] for path in hidden),
             screen.network,
             screen.terminal,
             screen.add_folder,
@@ -765,7 +770,7 @@ def test_settings_rows_are_names_with_info_icons(
     env: dict[str, str], qtbot: QtBot
 ) -> None:
     _context, screen = _screen(env, qtbot)
-    names = ["Start at login", "Theme", "Worker network", "Terminal"]
+    names = ["Start at login", "Theme", "Hidden notices", "Worker network", "Terminal"]
     names.extend(["Sandbox read paths", "Repositories"])
     assert screen.tip_rows["Worker network"].info.toolTip() == (
         "Lets Codex workers and Claude's web tools reach the network. "
@@ -782,6 +787,52 @@ def test_settings_rows_are_names_with_info_icons(
     while widget is not None and not widget.focusPolicy() & Qt.FocusPolicy.TabFocus:
         widget = widget.nextInFocusChain()
     assert widget is screen.autostart
+
+
+def test_show_again_clears_only_the_selected_folders_hiding_and_dismissal(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    first, other = "/home/owner/.tools", "/home/owner/.other"
+    saved = state.AppState(
+        width=1234,
+        height=789,
+        screen="settings",
+        finished_open=True,
+        denied_dismissals={first: ["run:1"], other: ["run:2"]},
+        denied_hidden=[first, other],
+        sidebar_hidden=True,
+    )
+    state.save(saved, env)
+    _context, screen = _screen(env, qtbot)
+    assert set(screen.hidden_rows) == {first, other}
+    assert all(button.text() == "Show again" for button in screen.hidden_rows.values())
+    screen.hidden_rows[first].click()
+    assert state.load(env) == replace(
+        saved, denied_hidden=[other], denied_dismissals={other: ["run:2"]}
+    )
+    assert list(screen.hidden_rows) == [other]
+    screen.hidden_rows[other].click()
+    assert screen.hidden_rows == {}
+    assert state.load(env).denied_hidden == []
+    assert state.load(env).denied_dismissals == {}
+    assert [
+        text.text()
+        for text in screen.hidden_box.findChildren(QLabel)
+        if text.isVisibleTo(screen)
+    ] == ["No folders hidden."]
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_add_repository_uses_the_add_folder_icon(
+    env: dict[str, str], qtbot: QtBot, qapp: QApplication, mode: str
+) -> None:
+    _context, screen = _screen(env, qtbot)
+    theme.apply(qapp, mode)
+    repository_icon = screen.add_repository.icon()
+    assert not repository_icon.isNull()
+    assert repository_icon.pixmap(16, 16).toImage() == (
+        screen.add_folder.icon().pixmap(16, 16).toImage()
+    )
 
 
 def test_add_folder_refuses_ember_private_paths(
@@ -812,12 +863,14 @@ def test_screen_fits_width(
     repository = str(tmp_path / ("repository-" * 20))
     command = "npm ci && " + "npm run check " * 20
     choices.set_settings({"worktree.prepare": {repository: command}}, env=env)
+    state.save(state.AppState(denied_hidden=[repository]), env)
     _context, screen = _screen(env, qtbot)
     screen.resize(width, 480)
     screen.show()
     qtbot.wait(50)
     assert screen.width() == width
     assert_screen_fits(screen)
+    assert list(screen.hidden_rows) == [repository]
 
 
 def test_rows_shrink_stack_and_return(env: dict[str, str], qtbot: QtBot) -> None:

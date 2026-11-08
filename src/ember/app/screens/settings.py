@@ -8,6 +8,7 @@ The app's controller writes or removes the autostart entry after
 not.
 """
 
+import dataclasses
 import os
 import shlex
 from collections.abc import Callable
@@ -30,7 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from ember import choices, sandbox, terminals
-from ember.app import icons, theme, widgets
+from ember.app import icons, state, theme, widgets
 from ember.app.screens.common import (
     ToneLine,
     TooltipRow,
@@ -230,6 +231,20 @@ class SettingsScreen(QWidget):
             "Light or dark. System follows the desktop's light or dark mode.",
             self.theme,
         )
+        self._row(
+            column,
+            "Hidden notices",
+            "Denied-folder notices hidden with Don't show again. "
+            "Show again restores notices for that folder. "
+            "Run status, flow status and WARNING lines still report denials.",
+            QWidget(),
+        )
+        self.hidden_box = QWidget()
+        self.hidden_layout = QVBoxLayout(self.hidden_box)
+        self.hidden_layout.setContentsMargins(0, 0, 0, 0)
+        self.hidden_layout.setSpacing(8)
+        column.addWidget(self.hidden_box)
+        self.hidden_rows: dict[str, QPushButton] = {}
         return card
 
     def _workers(self) -> widgets.Card:
@@ -299,6 +314,10 @@ class SettingsScreen(QWidget):
         card, column = titled_card("Worktree preparation")
         self.preparation_card = card
         self.add_repository = widgets.button("Add repository", "secondary", size="sm")
+        widgets.set_icon(
+            self.add_repository,
+            icons.icon("folder-plus", theme.color("text-primary"), 16),
+        )
         self.add_repository.clicked.connect(self._add_repository)
         self._row(
             column,
@@ -321,12 +340,14 @@ class SettingsScreen(QWidget):
     def _draw_icons(self, *_args: object) -> None:
         color = theme.color("text-primary")
         widgets.set_icon(self.add_folder, icons.icon("folder-plus", color, 16))
+        widgets.set_icon(self.add_repository, icons.icon("folder-plus", color, 16))
         for remove in self.path_rows.values():
             remove.setIcon(icons.icon("x", color, 16))
 
     # Drawing
 
     def _redraw(self, *_args: object) -> None:
+        self._draw_hidden_notices()
         answers: dict[str, Any] = self.context.settings().get("answers", {})
         if not answers:
             return
@@ -351,6 +372,39 @@ class SettingsScreen(QWidget):
         )
         for name, key in SETTING_KEYS.items():
             self.tip_rows[name].set_changed(self.context.setting_changed(key))
+
+    def _draw_hidden_notices(self) -> None:
+        """List the folders whose denial notices the owner has hidden."""
+        clear_layout(self.hidden_layout)
+        self.hidden_rows = {}
+        hidden = state.load(self.context.env).denied_hidden
+        if not hidden:
+            self.hidden_layout.addWidget(label("No folders hidden.", "secondary"))
+        for path in hidden:
+            row = QWidget()
+            line = QHBoxLayout(row)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(8)
+            text = label(path, "secondary")
+            text.setFont(theme.font("code"))
+            text.setTextFormat(Qt.TextFormat.PlainText)
+            text.setWordWrap(True)
+            text.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            line.addWidget(text, 1)
+            show = widgets.button("Show again", "secondary", size="sm")
+            show.setAccessibleName(f"Show notices again for {path}")
+            show.clicked.connect(lambda _checked=False, p=path: self._show_notices(p))
+            line.addWidget(show)
+            self.hidden_layout.addWidget(row)
+            self.hidden_rows[path] = show
+        chain_tab_order(
+            [
+                self.tip_rows["Hidden notices"].info,
+                *self.hidden_rows.values(),
+                self.tip_rows["Worker network"].info,
+            ]
+        )
 
     def _draw_terminal(self, value: str) -> None:
         env = self.context.env
@@ -450,6 +504,25 @@ class SettingsScreen(QWidget):
             self.preparation_rows[repository] = (edit, remove)
 
     # Saving
+
+    def _show_notices(self, path: str) -> None:
+        """Restore notices for the folder, including dismissed reports."""
+        saved = state.load(self.context.env)
+        state.save(
+            dataclasses.replace(
+                saved,
+                denied_hidden=[
+                    folder for folder in saved.denied_hidden if folder != path
+                ],
+                denied_dismissals={
+                    folder: reports
+                    for folder, reports in saved.denied_dismissals.items()
+                    if folder != path
+                },
+            ),
+            self.context.env,
+        )
+        self._draw_hidden_notices()
 
     def _reset(self, key: str) -> None:
         """Clear a saved setting and apply its confirmed default."""

@@ -1980,7 +1980,11 @@ def test_denial_notice_confirms_and_saves_read_permission(
     assert notice.reports_label.isVisible()
     notice.runs_toggle.click()
     assert not notice.reports_label.isVisible()
-    assert [b.text() for b in notice.buttons] == ["Allow reading", "Dismiss"]
+    assert [b.text() for b in notice.buttons] == [
+        "Allow reading",
+        "Dismiss",
+        "Don't show again",
+    ]
     # Redrawing an unchanged notice keeps its buttons and keyboard focus.
     screen.check_denials()
     assert next(iter(screen.denied_notices.values())) is notice
@@ -2001,7 +2005,7 @@ def test_denial_notice_confirms_and_saves_read_permission(
 
 
 @pytest.mark.parametrize("reason", ["secret location", "protected"])
-def test_restricted_denial_notice_has_only_dismiss(
+def test_restricted_denial_notice_has_no_allow_reading(
     context: AppContext,
     qtbot: QtBot,
     env: dict[str, str],
@@ -2016,7 +2020,7 @@ def test_restricted_denial_notice_has_only_dismiss(
         context.runs.reload()
     screen = screen_for(context, qtbot)
     notice = next(iter(screen.denied_notices.values()))
-    assert [b.text() for b in notice.buttons] == ["Dismiss"]
+    assert [b.text() for b in notice.buttons] == ["Dismiss", "Don't show again"]
     assert ("credentials" in notice.offer_label.text()) is (reason == "secret location")
     notice.buttons[0].click()
     assert screen.denied_notices == {}
@@ -2031,6 +2035,88 @@ def test_restricted_denial_notice_has_only_dismiss(
     with qtbot.waitSignal(context.runs.reloaded):
         context.runs.reload()
     qtbot.waitUntil(lambda: len(screen.denied_notices) == 1)
+
+
+@pytest.mark.parametrize("reason", ["hidden", "secret location", "protected"])
+@pytest.mark.parametrize("parent", ["run", "flow", "panel"])
+def test_dont_show_again_hides_resolved_folder_for_later_reports(
+    context: AppContext,
+    qtbot: QtBot,
+    env: dict[str, str],
+    reason: str,
+    parent: str,
+) -> None:
+    folder = Path(env["HOME"]) / ".toolchain"
+    folder.mkdir()
+    alias = folder.with_name("alias")
+    alias.symlink_to(folder, target_is_directory=True)
+    other = folder.with_name("other")
+    run = write_run(make_run(env, LIVE_A))
+    if parent == "flow":
+        flow = make_flow(env)
+        flow["tasks"][0]["writer_run"] = run.id
+        flow_record.save(flow, env)
+    elif parent == "panel":
+        make_panel(env, members=[make_member(run=run.id)])
+    _write_denial(run, alias, reason=reason)
+    outcome = record.outcome_path(run, run.turn).read_bytes()
+    with qtbot.waitSignal(context.settings_changed):
+        context.reload_settings()
+    with qtbot.waitSignal(context.runs.reloaded):
+        context.runs.reload()
+    screen = screen_for(context, qtbot)
+    before = context.runs.runs()
+    records = (screen.records.flows(), screen.records.panels())
+    screen.denied_notices[str(folder)].buttons[-1].click()
+    assert screen.denied_notices == {}
+    assert state.load(env).denied_hidden == [str(folder)]
+    assert state.load(env).denied_dismissals == {}
+    assert context.runs.runs() == before
+    assert (screen.records.flows(), screen.records.panels()) == records
+    assert record.outcome_path(run, run.turn).read_bytes() == outcome
+    assert record.run_denials(run)
+    screen.close()
+    screen = screen_for(context, qtbot)
+    assert screen.denied_notices == {}
+    later = write_run(replace(run, turn=2, updated_at=run.updated_at + 1))
+    _write_denial(later, folder, reason=reason)
+    new_run = write_run(make_run(env, LIVE_B))
+    _write_denial(new_run, alias, reason=reason)
+    unrelated = write_run(make_run(env, DONE_A))
+    _write_denial(unrelated, other)
+    with qtbot.waitSignal(context.runs.reloaded):
+        context.runs.reload()
+    qtbot.waitUntil(lambda: list(screen.denied_notices) == [str(other)])
+    assert len(context.runs.live()) == 3
+
+
+def test_settings_show_again_restores_dismissed_denial_notice(
+    context: AppContext, qtbot: QtBot, env: dict[str, str]
+) -> None:
+    from ember.app.screens.settings import SettingsScreen
+
+    folder = Path(env["HOME"]) / ".toolchain"
+    run = write_run(make_run(env, LIVE_A))
+    _write_denial(run, folder)
+    with qtbot.waitSignal(context.settings_changed):
+        context.reload_settings()
+    with qtbot.waitSignal(context.runs.reloaded):
+        context.runs.reload()
+    screen = screen_for(context, qtbot)
+    settings = SettingsScreen(context)
+    qtbot.addWidget(settings)
+    assert settings.hidden_rows == {}
+    screen.denied_notices[str(folder)].buttons[-1].click()
+    saved = state.load(env)
+    state.save(replace(saved, denied_dismissals={str(folder): [f"{run.id}:1"]}), env)
+    screen.hide()
+    settings.shown()
+    settings.hidden_rows[str(folder)].click()
+    assert state.load(env).denied_hidden == []
+    assert state.load(env).denied_dismissals == {}
+    screen.show()
+    screen.shown()
+    assert list(screen.denied_notices) == [str(folder)]
 
 
 def test_showing_overview_rechecks_paths_allowed_while_hidden(
@@ -2084,7 +2170,10 @@ def test_denial_notice_keeps_strongest_reason_across_turns(
     screen = screen_for(context, qtbot)
     assert len(screen.denied_notices) == 1
     notice = next(iter(screen.denied_notices.values()))
-    assert [action.text() for action in notice.buttons] == ["Dismiss"]
+    assert [action.text() for action in notice.buttons] == [
+        "Dismiss",
+        "Don't show again",
+    ]
     assert ("holds credentials" in notice.offer_label.text()) is (
         expected == "secret location"
     )
@@ -2243,7 +2332,10 @@ def test_unrelated_offer_is_removed_before_coverage_and_merging(
         context.runs.reload()
     screen = screen_for(context, qtbot)
     notice = screen.denied_notices[str(folder)]
-    assert [button.text() for button in notice.buttons] == ["Dismiss"]
+    assert [button.text() for button in notice.buttons] == [
+        "Dismiss",
+        "Don't show again",
+    ]
     assert notice.offer_label.text() == (
         "No folder can be offered for automatic read permission."
     )
@@ -2285,6 +2377,7 @@ def test_related_offers_remain_available_unless_covered(
         assert [button.text() for button in notice.buttons] == [
             "Allow reading",
             "Dismiss",
+            "Don't show again",
         ]
         assert (
             notice.offer_label.text() == f"Allow reading {offered} for future workers."
@@ -2422,7 +2515,10 @@ def test_home_file_denial_notice_uses_recorded_reason(
         assert notice.offer_label.text() == (
             "No folder can be offered for automatic read permission."
         )
-        assert [button.text() for button in notice.buttons] == ["Dismiss"]
+        assert [button.text() for button in notice.buttons] == [
+            "Dismiss",
+            "Don't show again",
+        ]
 
 
 @pytest.mark.parametrize("width", [576, 1400])
