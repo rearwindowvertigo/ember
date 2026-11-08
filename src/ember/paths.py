@@ -1,7 +1,8 @@
 """Where Ember keeps its files, and how it creates them privately.
 
-Locations follow the XDG Base Directory Specification. Ember's folders are
-mode 700 and its private files mode 600, whatever the umask.
+Locations follow the XDG Base Directory Specification, except run temporary
+folders in `/tmp`. Ember's folders are mode 700 and its private files mode 600,
+whatever the umask.
 
 Every function that reads the environment takes an optional `env` mapping,
 which defaults to `os.environ`.
@@ -12,6 +13,7 @@ import fcntl
 import hashlib
 import os
 import pwd
+import re
 import shutil
 import stat
 from collections.abc import Iterable, Iterator, Mapping
@@ -28,6 +30,13 @@ FILE_MODE = 0o600
 
 RUNTIME_FALLBACK_ROOT = Path("/run/user")
 """The folder holding `<uid>/` when `XDG_RUNTIME_DIR` is not usable."""
+
+
+RUN_TMP_ROOT = Path("/tmp")
+"""The base for short, private Codex run temporary folders."""
+
+RUN_TMP_PATTERN = re.compile(r"ember-[0-9a-f]{6}\Z")
+"""The exact names reserved for Codex run temporary folders."""
 
 
 WORKTREES_NAME = "worktrees"
@@ -164,35 +173,59 @@ def ensure_worker_cache_dir(env: Mapping[str, str] | None = None) -> Path:
     return ensure_private_dir(worker_cache_dir(env), root=cache_dir(env))
 
 
-def tmp_dir(env: Mapping[str, str] | None = None) -> Path:
-    """Return the parent of sandboxed Codex runs' temporary folders."""
-    return cache_dir(env) / "tmp"
+def run_tmp_dir(
+    run_id: str,
+    env: Mapping[str, str] | None = None,
+    *,
+    base: Path | None = None,
+) -> Path:
+    """Return `/tmp/ember-<6 hex>` without resolving its final entry.
 
-
-def run_tmp_dir(run_id: str, env: Mapping[str, str] | None = None) -> Path:
-    """Return a run's temporary folder without resolving its final entry.
+    Args:
+        run_id: A run id ending in its six hexadecimal digits.
+        env: The environment; the temporary base does not depend on it.
+        base: The temporary base; `None` uses `/tmp`.
 
     Raises:
-        ValueError: The id is empty, `.` or `..`, or contains `/` or NUL.
+        ValueError: The id contains `/` or NUL, or has no six-hex suffix.
     """
-    if run_id in ("", ".", "..") or "/" in run_id or "\0" in run_id:
+    suffix = run_id.rsplit("-", 1)[-1]
+    if "/" in run_id or "\0" in run_id or not re.fullmatch(r"[0-9a-f]{6}", suffix):
         raise ValueError(f"{run_id!r} is not a run id")
-    return tmp_dir(env) / run_id
+    return (RUN_TMP_ROOT if base is None else base) / f"ember-{suffix}"
 
 
-def ensure_run_tmp_dir(run_id: str, env: Mapping[str, str] | None = None) -> Path:
-    """Create a run's temporary folder and its Ember parents at mode 700.
+def ensure_run_tmp_dir(
+    run_id: str,
+    env: Mapping[str, str] | None = None,
+    *,
+    base: Path | None = None,
+) -> Path:
+    """Create a new run temporary folder at mode 700, refusing existing entries.
+
+    The base must exist. No existing entry is followed or modified.
 
     Raises:
-        NotADirectoryError: An entry from Ember's cache folder down is a
-            symlink or not a folder.
-        OSError: A folder cannot be created.
+        FileExistsError: An entry, including a symlink, already exists.
+        OSError: The folder cannot be created.
         ValueError: The run id is invalid.
     """
-    return ensure_private_dir(run_tmp_dir(run_id, env), root=cache_dir(env))
+    folder = run_tmp_dir(run_id, env, base=base)
+    fd = os.open(folder.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.mkdir(folder.name, mode=DIR_MODE, dir_fd=fd)
+        os.chmod(folder.name, DIR_MODE, dir_fd=fd, follow_symlinks=False)
+    finally:
+        os.close(fd)
+    return folder
 
 
-def remove_run_tmp_dir(run_id: str, env: Mapping[str, str] | None = None) -> bool:
+def remove_run_tmp_dir(
+    run_id: str,
+    env: Mapping[str, str] | None = None,
+    *,
+    base: Path | None = None,
+) -> bool:
     """Remove a run's temporary entry without following symlinks out of it.
 
     Return whether an entry was removed. Missing folders need no removal.
@@ -203,7 +236,7 @@ def remove_run_tmp_dir(run_id: str, env: Mapping[str, str] | None = None) -> boo
         OSError: An entry cannot be removed or its parent is a symlink.
         ValueError: The run id is invalid.
     """
-    folder = run_tmp_dir(run_id, env)
+    folder = run_tmp_dir(run_id, env, base=base)
     try:
         fd = os.open(folder.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except FileNotFoundError:

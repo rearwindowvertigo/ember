@@ -620,17 +620,20 @@ The workers' cache folder is `worker` in Ember's cache folder,
 shared by every sandboxed run and kept between runs. A sandboxed run creates
 it at the start; it is writable in every sandboxed run, read-only runs
 included. Each sandboxed Codex run, editing or read-only, gets a temporary folder at
-`$XDG_CACHE_HOME/ember/tmp/<run id>` (default `~/.cache/ember/tmp/<run id>`).
-The folder and its `tmp` parent have mode 700. Ember creates it before the
-session starts and exits 69 if it cannot. The Codex profile makes it writable,
-sets `TMPDIR` to it through `shell_environment_policy.set`, and makes the
-shared `/tmp` read-only. Both sandboxes deny every other entry of the `tmp`
-parent by name. Ember removes the folder on close, worktree removal or record
-pruning. An unscoped prune also removes temporary folders no record names,
-only when every record could be read. Removal does not follow symlinks out
-of the folder. With `sandbox.codex` off, Ember creates no temporary folder
-and sets no `TMPDIR`. Bubblewrap mounts a private empty `/tmp` for each
-worker and gets no run temporary folder.
+`/tmp/ember-<6 hex>`, using the six-hex suffix of the run id.
+The folder has mode 700. Ember creates it before the session starts and
+exits 69 if any entry already exists there, including a symlink, or creation
+fails. The error names the folder. The Codex profile makes it writable and
+sets `TMPDIR` to it through `shell_environment_policy.set`. The shared `/tmp`
+stays writable. Codex walks `/tmp` and denies every other entry matching
+`ember-<6 hex>` by name. Ember removes the folder on close, worktree removal
+or record pruning. An unscoped prune also removes matching folders no record
+names, only when owned by the current user, not symlinks, and every record
+could be read. It also sweeps unrecorded entries in
+`$XDG_CACHE_HOME/ember/tmp` from 0.20.0 under the same record-readability rule.
+Removal does not follow symlinks out of the folder. With `sandbox.codex` off,
+Ember creates no temporary folder and sets no `TMPDIR`. Bubblewrap mounts a
+private empty `/tmp` for each worker and gets no run temporary folder.
 Every sandboxed worker, the engine itself for OpenCode and Claude
 and the commands Codex runs, gets these variables, which replace any value
 the owner set:

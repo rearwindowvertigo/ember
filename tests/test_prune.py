@@ -1827,20 +1827,21 @@ def test_prune_sweeps_unrecorded_temporary_entries(
 ) -> None:
     live = run(env, status=runs.WAITING, ended_at=None)
     kept = paths.ensure_run_tmp_dir(live.id, env)
-    orphaned = paths.ensure_run_tmp_dir("orphan", env)
+    orphaned = paths.ensure_run_tmp_dir("codex-20260101-000000-aabbcc", env)
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "keep").write_text("keep")
-    link = orphaned.parent / "link"
+    link = orphaned.parent / "ember-112233"
     link.symlink_to(outside, target_is_directory=True)
     (orphaned / "link").symlink_to(outside, target_is_directory=True)
     result = prune.remove(0, env=env, dry_run=dry_run)
     assert not result.errors
     assert kept.is_dir()
     assert orphaned.exists() == dry_run
-    assert os.path.lexists(link) == dry_run
+    assert link.is_symlink()
     assert (outside / "keep").read_text() == "keep"
-    assert {str(orphaned), str(link)} <= ids(result)
+    assert str(orphaned) in ids(result)
+    assert str(link) not in ids(result)
 
 
 @pytest.mark.parametrize("unreadable", [False, True])
@@ -1848,7 +1849,7 @@ def test_prune_keeps_unrecorded_temporary_folders_when_scoped_or_unreadable(
     env: dict[str, str], unreadable: bool
 ) -> None:
     child = run(env)
-    folder = paths.ensure_run_tmp_dir("orphan", env)
+    folder = paths.ensure_run_tmp_dir("codex-20260101-000000-aabbcc", env)
     if unreadable:
         (child.folder / runs.RECORD_NAME).write_text("{")
     result = prune.remove(0, None if unreadable else [child.id], env=env)
@@ -1858,8 +1859,8 @@ def test_prune_keeps_unrecorded_temporary_folders_when_scoped_or_unreadable(
 
 
 def test_prune_temporary_sweep_respects_age(env: dict[str, str]) -> None:
-    old = paths.ensure_run_tmp_dir("old", env)
-    young = paths.ensure_run_tmp_dir("young", env)
+    old = paths.ensure_run_tmp_dir("codex-20260101-000000-aabbcc", env)
+    young = paths.ensure_run_tmp_dir("codex-20260101-000000-ddeeff", env)
     os.utime(old, (0, 0))
     os.utime(young, (NOW, NOW))
     result = prune.remove(1, env=env, now=NOW)
@@ -1871,11 +1872,88 @@ def test_prune_temporary_sweep_respects_age(env: dict[str, str]) -> None:
 def test_prune_temporary_sweep_refuses_symlinked_parent(
     env: dict[str, str], tmp_path: Path
 ) -> None:
-    parent = paths.tmp_dir(env)
-    parent.parent.mkdir(parents=True)
+    parent = paths.RUN_TMP_ROOT
+    parent.rmdir()
     outside = tmp_path / "outside"
     (outside / "orphan").mkdir(parents=True)
     parent.symlink_to(outside, target_is_directory=True)
     result = prune.remove(0, env=env)
     assert result.errors
     assert (outside / "orphan").is_dir()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_prune_temporary_sweep_keeps_nonmatching_and_foreign_entries(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch, dry_run: bool
+) -> None:
+    root = paths.RUN_TMP_ROOT
+    for name in (
+        "ember-aabbcc",
+        "ember-12345",
+        "ember-1234567",
+        "ember-ABCDEF",
+        "other",
+    ):
+        (root / name).mkdir()
+    (root / "ember-112233").write_text("keep")
+    # All files belong to the real uid; simulate a different pruning uid.
+    monkeypatch.setattr(os, "getuid", lambda: 987654)
+    result = prune.remove(0, env=env, dry_run=dry_run)
+    assert not result.errors
+    assert not ids(result)
+    assert (root / "ember-aabbcc").is_dir()
+
+
+def test_prune_temporary_sweep_only_removes_matching_folders(
+    env: dict[str, str],
+) -> None:
+    root = paths.RUN_TMP_ROOT
+    for name in (
+        "ember-aabbcc",
+        "ember-12345",
+        "ember-1234567",
+        "ember-ABCDEF",
+        "other",
+    ):
+        (root / name).mkdir()
+    (root / "ember-112233").write_text("keep")
+    result = prune.remove(0, env=env)
+    assert not result.errors
+    assert ids(result) == {str(root / "ember-aabbcc")}
+    assert {entry.name for entry in root.iterdir()} == {
+        "ember-12345",
+        "ember-1234567",
+        "ember-ABCDEF",
+        "other",
+        "ember-112233",
+    }
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("mode", ["unscoped", "scoped", "unreadable"])
+def test_prune_sweeps_020_cache_temporary_entries(
+    env: dict[str, str], tmp_path: Path, dry_run: bool, mode: str
+) -> None:
+    child = run(env, status=runs.WAITING, ended_at=None)
+    root = paths.cache_dir(env) / "tmp"
+    root.mkdir(parents=True)
+    kept = root / child.id
+    kept.mkdir()
+    orphan = root / "codex-20260101-000000-aabbcc"
+    orphan.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("keep")
+    link = root / "codex-20260101-000000-ddeeff"
+    link.symlink_to(outside, target_is_directory=True)
+    if mode == "unreadable":
+        (child.folder / runs.RECORD_NAME).write_text("{")
+    result = prune.remove(
+        0, [child.id] if mode == "scoped" else None, env=env, dry_run=dry_run
+    )
+    assert bool(result.errors) == (mode == "unreadable")
+    assert kept.is_dir()
+    removed = mode == "unscoped" and not dry_run
+    assert orphan.exists() is not removed
+    assert link.is_symlink() is not removed
+    assert (outside / "keep").read_text() == "keep"

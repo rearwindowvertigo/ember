@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -585,38 +586,79 @@ def _sweep_tmp(
     readable: bool,
 ) -> None:
     """Remove unrecorded temporary entries only when every record was readable."""
-    root = paths.tmp_dir(env)
+    short_names = {f"ember-{ident.rsplit('-', 1)[-1]}" for ident in named}
+    for root, reserved, short in (
+        (paths.RUN_TMP_ROOT, short_names, True),
+        (paths.cache_dir(env) / "tmp", named, False),
+    ):
+        _sweep_tmp_root(
+            root,
+            reserved,
+            older_than,
+            at,
+            result,
+            dry_run=dry_run,
+            readable=readable,
+            short=short,
+        )
+
+
+def _sweep_tmp_root(
+    root: Path,
+    named: set[str],
+    older_than: int,
+    at: float,
+    result: Result,
+    *,
+    dry_run: bool,
+    readable: bool,
+    short: bool,
+) -> None:
+    """Sweep one temporary base without following its symlinks."""
     try:
-        if root.is_symlink():
-            raise OSError(f"{root} is a symlink, not a folder")
-        entries = sorted(root.iterdir())
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except FileNotFoundError:
         return
     except OSError as error:
         result.errors.append(f"{root}: {error}")
         return
-    for entry in entries:
-        if entry.name in named:
-            continue
-        try:
-            if not readable:
-                result.skipped.append(
-                    dict(
-                        id=str(entry),
-                        reason="cannot establish ownership: unreadable records",
+    try:
+        for name in sorted(os.listdir(fd)):
+            if name in named or (short and not paths.RUN_TMP_PATTERN.fullmatch(name)):
+                continue
+            entry = root / name
+            try:
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if info.st_uid != os.getuid():
+                    continue
+                if short and not stat.S_ISDIR(info.st_mode):
+                    continue
+                if not readable:
+                    result.skipped.append(
+                        dict(
+                            id=str(entry),
+                            reason="cannot establish ownership: unreadable records",
+                        )
                     )
-                )
-                continue
-            if older_than and at - entry.lstat().st_mtime < older_than * 86400:
-                result.skipped.append(
-                    dict(id=str(entry), reason="younger than the requested age")
-                )
-                continue
-            if dry_run or paths.remove_run_tmp_dir(entry.name, env):
+                    continue
+                if older_than and at - info.st_mtime < older_than * 86400:
+                    result.skipped.append(
+                        dict(id=str(entry), reason="younger than the requested age")
+                    )
+                    continue
+                if not dry_run:
+                    if stat.S_ISDIR(info.st_mode):
+                        shutil.rmtree(name, dir_fd=fd)
+                    else:
+                        os.unlink(name, dir_fd=fd)
                 result.removed.append(dict(id=str(entry), kind="tmp"))
-        except (OSError, ValueError) as error:
-            result.errors.append(f"{entry}: {error}")
-            result.skipped.append(dict(id=str(entry), reason=str(error)))
+            except OSError as error:
+                result.errors.append(f"{entry}: {error}")
+                result.skipped.append(dict(id=str(entry), reason=str(error)))
+    except OSError as error:
+        result.errors.append(f"{root}: {error}")
+    finally:
+        os.close(fd)
 
 
 def _artifacts(
