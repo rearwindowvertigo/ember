@@ -1958,6 +1958,8 @@ def test_denial_notice_confirms_and_saves_read_permission(
     folder.mkdir()
     run = write_run(make_run(env, LIVE_A))
     _write_denial(run, folder, allow=str(folder))
+    stamp = datetime.datetime(2026, 11, 5, 14, 35).timestamp()
+    os.utime(record.outcome_path(run, run.turn), (stamp, stamp))
     with qtbot.waitSignal(context.settings_changed):
         context.reload_settings()
     with qtbot.waitSignal(context.runs.reloaded):
@@ -1966,7 +1968,18 @@ def test_denial_notice_confirms_and_saves_read_permission(
     assert len(screen.denied_notices) == 1
     notice = next(iter(screen.denied_notices.values()))
     assert notice.title_label.text() == f"A worker could not read {folder}"
-    assert run.id in notice.text_label.text()
+    assert notice.text_label.text() == (
+        "1 report · 0 flows, 0 panels, 1 standalone run"
+        " · first 2026-11-05 · latest 2026-11-05 14:35 (local)"
+    )
+    assert notice.offer_label.text() == f"Allow reading {folder} for future workers."
+    assert run.id in notice.reports_label.text()
+    assert not notice.runs_toggle.isChecked()
+    assert not notice.reports_label.isVisible()
+    notice.runs_toggle.click()
+    assert notice.reports_label.isVisible()
+    notice.runs_toggle.click()
+    assert not notice.reports_label.isVisible()
     assert [b.text() for b in notice.buttons] == ["Allow reading", "Dismiss"]
     # Redrawing an unchanged notice keeps its buttons and keyboard focus.
     screen.check_denials()
@@ -2004,7 +2017,7 @@ def test_restricted_denial_notice_has_only_dismiss(
     screen = screen_for(context, qtbot)
     notice = next(iter(screen.denied_notices.values()))
     assert [b.text() for b in notice.buttons] == ["Dismiss"]
-    assert ("credentials" in notice.text_label.text()) is (reason == "secret location")
+    assert ("credentials" in notice.offer_label.text()) is (reason == "secret location")
     notice.buttons[0].click()
     assert screen.denied_notices == {}
     screen.check_denials()
@@ -2072,12 +2085,253 @@ def test_denial_notice_keeps_strongest_reason_across_turns(
     assert len(screen.denied_notices) == 1
     notice = next(iter(screen.denied_notices.values()))
     assert [action.text() for action in notice.buttons] == ["Dismiss"]
-    assert ("holds credentials" in notice.text_label.text()) is (
+    assert ("holds credentials" in notice.offer_label.text()) is (
         expected == "secret location"
     )
-    assert ("protected from workers" in notice.text_label.text()) is (
+    assert ("protected from workers" in notice.offer_label.text()) is (
         expected == "protected"
     )
+
+
+def test_denial_reports_count_distinct_sources_and_keep_expansion(
+    context: AppContext, qtbot: QtBot, env: dict[str, str]
+) -> None:
+    folder = Path(env["HOME"]) / ".toolchain"
+    folder.mkdir()
+    alias = folder.with_name("alias")
+    alias.symlink_to(folder, target_is_directory=True)
+    runs = [
+        write_run(make_run(env, run_id, claim="test-claim"))
+        for run_id in (LIVE_A, LIVE_B, DONE_A, DONE_B)
+    ]
+    first = datetime.datetime(2026, 11, 5, 10).timestamp()
+    last = datetime.datetime(2026, 11, 7, 18, 42).timestamp()
+    for run, stamp in zip(runs, (last, last, first + 60, first), strict=True):
+        _write_denial(run, folder, allow=str(folder))
+        os.utime(record.outcome_path(run, 1), (stamp, stamp))
+    flow = make_flow(env)
+    flow["tasks"][0].update(writer_run=LIVE_A, review_run=LIVE_B)
+    flow_record.save(flow, env)
+    make_panel(env, members=[make_member(run=DONE_A)])
+    # Two aliases in one turn are one report for the resolved folder.
+    outcome = record.outcome_path(runs[-1], 1)
+    value = json.loads(outcome.read_text())
+    value["denied_paths"].append(
+        {"path": str(alias), "reason": "hidden", "allow_path": str(alias)}
+    )
+    outcome.write_text(json.dumps(value))
+    os.utime(outcome, (first, first))
+    with qtbot.waitSignal(context.settings_changed):
+        context.reload_settings()
+    with qtbot.waitSignal(context.runs.reloaded):
+        context.runs.reload()
+    screen = screen_for(context, qtbot)
+    notice = screen.denied_notices[str(folder)]
+    assert notice.text_label.text() == (
+        "4 reports · 1 flow, 1 panel, 1 standalone run"
+        " · first 2026-11-05 · latest 2026-11-07 18:42 (local)"
+    )
+    lines = notice.reports_label.text().splitlines()
+    assert len(lines) == 4
+    assert [next(run.id for run in runs if run.id in line) for line in lines] == [
+        LIVE_B,
+        LIVE_A,
+        DONE_A,
+        DONE_B,
+    ]
+    assert all("claim test-claim" in line and "turn 1" in line for line in lines)
+    assert all(
+        f"Flow · project · claim test-claim · {FLOW}" in line for line in lines[:2]
+    )
+    assert f"Panel · 1 member · claim test-claim · {PANEL}" in lines[2]
+    assert " · Run · claim test-claim · " in lines[3]
+    notice.runs_toggle.click()
+    screen.check_denials()
+    assert screen.denied_notices[str(folder)] is notice
+    assert notice.reports_label.isVisible()
+
+    later = write_run(replace(runs[-1], turn=2))
+    _write_denial(later, folder, allow=str(folder))
+    os.utime(record.outcome_path(later, 2), (last + 60, last + 60))
+    with qtbot.waitSignal(context.runs.reloaded):
+        context.runs.reload()
+    screen.check_denials()
+    updated = screen.denied_notices[str(folder)]
+    assert updated is not notice
+    assert updated.text_label.text().startswith(
+        "5 reports · 1 flow, 1 panel, 1 standalone run"
+    )
+    assert updated.runs_toggle.isChecked()
+    assert updated.reports_label.isVisible()
+    assert f"{DONE_B} · turn 2" in updated.reports_label.text().splitlines()[0]
+    updated.runs_toggle.click()
+    # A changed timestamp redraws the notice without reopening the list.
+    os.utime(record.outcome_path(later, 2), (last + 120, last + 120))
+    screen.check_denials()
+    assert not screen.denied_notices[str(folder)].runs_toggle.isChecked()
+
+
+@pytest.mark.parametrize("all_unknown", [False, True])
+def test_denial_report_missing_mtimes_sort_last(
+    context: AppContext,
+    qtbot: QtBot,
+    env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    all_unknown: bool,
+) -> None:
+    folder = Path(env["HOME"]) / ".toolchain"
+    runs = [write_run(make_run(env, run_id, turn=2)) for run_id in (LIVE_A, LIVE_B)]
+    for run in runs:
+        for turn in (1, 2):
+            _write_denial(replace(run, turn=turn), folder)
+            stamp = datetime.datetime(2026, 11, 5, 10, 30).timestamp()
+            os.utime(record.outcome_path(run, turn), (stamp, stamp))
+    stat = Path.stat
+    missing = {
+        record.outcome_path(run, turn)
+        for run in runs
+        for turn in (1, 2)
+        if all_unknown or (run.id, turn) == (LIVE_B, 1)
+    }
+
+    def missing_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if path in missing:
+            raise FileNotFoundError(path)
+        return stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", missing_stat)
+    with qtbot.waitSignal(context.settings_changed):
+        context.reload_settings()
+    with qtbot.waitSignal(context.runs.reloaded):
+        context.runs.reload()
+    screen = screen_for(context, qtbot)
+    notice = screen.denied_notices[str(folder)]
+    lines = notice.reports_label.text().splitlines()
+    expected = (
+        [(LIVE_B, 1), (LIVE_B, 2), (LIVE_A, 1), (LIVE_A, 2)]
+        if all_unknown
+        else [(LIVE_B, 2), (LIVE_A, 1), (LIVE_A, 2), (LIVE_B, 1)]
+    )
+    assert all(
+        f"{run_id} · turn {turn}" in line
+        for line, (run_id, turn) in zip(lines, expected, strict=True)
+    )
+    assert lines[-1].startswith("time unknown · ")
+    assert ("first time unknown · latest time unknown" in notice.text_label.text()) is (
+        all_unknown
+    )
+
+
+@pytest.mark.parametrize("later_valid", [False, True])
+def test_unrelated_offer_is_removed_before_coverage_and_merging(
+    context: AppContext, qtbot: QtBot, env: dict[str, str], later_valid: bool
+) -> None:
+    folder = Path(env["HOME"]) / ".toolchain"
+    folder.mkdir()
+    unrelated = folder.with_name("readable")
+    unrelated.mkdir()
+    alias = folder.with_name("unrelated-alias")
+    alias.symlink_to(unrelated, target_is_directory=True)
+    run = write_run(make_run(env, LIVE_A))
+    _write_denial(run, folder, allow=str(alias))
+    if later_valid:
+        later = write_run(replace(run, turn=2))
+        _write_denial(later, folder, allow=str(folder))
+    with qtbot.waitSignal(context.settings_changed):
+        context.save_settings({"sandbox.read": [str(unrelated)]})
+    with qtbot.waitSignal(context.runs.reloaded):
+        context.runs.reload()
+    screen = screen_for(context, qtbot)
+    notice = screen.denied_notices[str(folder)]
+    assert [button.text() for button in notice.buttons] == ["Dismiss"]
+    assert notice.offer_label.text() == (
+        "No folder can be offered for automatic read permission."
+    )
+    assert notice.text_label.text().startswith(
+        "2 reports" if later_valid else "1 report"
+    )
+
+
+@pytest.mark.parametrize("relationship", ["equal", "inside", "contains", "alias"])
+@pytest.mark.parametrize("covered", [False, True])
+def test_related_offers_remain_available_unless_covered(
+    context: AppContext,
+    qtbot: QtBot,
+    env: dict[str, str],
+    relationship: str,
+    covered: bool,
+) -> None:
+    folder = Path(env["HOME"]) / ".toolchain"
+    (folder / "child").mkdir(parents=True)
+    hidden, offered = folder, folder
+    if relationship == "inside":
+        offered = folder / "child"
+    elif relationship == "contains":
+        hidden = folder / "child"
+    elif relationship == "alias":
+        offered = folder.with_name("alias")
+        offered.symlink_to(folder, target_is_directory=True)
+    run = write_run(make_run(env, LIVE_A))
+    _write_denial(run, hidden, allow=str(offered))
+    with qtbot.waitSignal(context.settings_changed):
+        context.save_settings({"sandbox.read": [str(offered)] if covered else []})
+    with qtbot.waitSignal(context.runs.reloaded):
+        context.runs.reload()
+    screen = screen_for(context, qtbot)
+    if covered:
+        assert screen.denied_notices == {}
+    else:
+        notice = screen.denied_notices[str(hidden)]
+        assert [button.text() for button in notice.buttons] == [
+            "Allow reading",
+            "Dismiss",
+        ]
+        assert (
+            notice.offer_label.text() == f"Allow reading {offered} for future workers."
+        )
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_denial_notice_wraps_paths_and_reports_at_640_pixels(
+    context: AppContext, qtbot: QtBot, env: dict[str, str], mode: str
+) -> None:
+    from .test_common import assert_screen_fits  # pyrefly: ignore[missing-import]
+
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    theme.apply(app, mode)
+    folder = Path(env["HOME"]) / ("long-folder-" * 18) / ("<path>" * 35)
+    folder.mkdir(parents=True)
+    other = folder.with_name("other")
+    other.mkdir()
+    for run_id, denied in ((LIVE_A, folder), (LIVE_B, other)):
+        run = write_run(make_run(env, run_id, claim="long-claim-" * 20))
+        _write_denial(run, denied, allow=str(denied))
+    with qtbot.waitSignal(context.settings_changed):
+        context.reload_settings()
+    with qtbot.waitSignal(context.runs.reloaded):
+        context.runs.reload()
+    screen = screen_for(context, qtbot)
+    screen.resize(640, 900)
+    qtbot.wait(50)
+    assert screen.width() == 640
+    assert_screen_fits(screen)
+    notice = screen.denied_notices[str(folder)]
+    other_notice = screen.denied_notices[str(other)]
+    notice.runs_toggle.click()
+    qtbot.wait(50)
+    assert notice.reports_label.isVisible()
+    assert not other_notice.reports_label.isVisible()
+    assert_screen_fits(screen)
+    for label in (notice.title_label, notice.reports_label, notice.offer_label):
+        assert label.textFormat() == Qt.TextFormat.PlainText
+        assert label.wordWrap()
+        assert label.heightForWidth(label.width()) > label.fontMetrics().height()
+    action_top = notice.buttons[0].mapTo(notice, notice.buttons[0].rect().topLeft()).y()
+    offer_bottom = notice.offer_label.mapTo(
+        notice, notice.offer_label.rect().bottomLeft()
+    ).y()
+    assert action_top > offer_bottom
 
 
 def test_orphaned_badge(env: dict[str, str], context: AppContext, qtbot: QtBot) -> None:
@@ -2165,11 +2419,9 @@ def test_home_file_denial_notice_uses_recorded_reason(
         assert len(screen.denied_notices) == 1
         notice = next(iter(screen.denied_notices.values()))
         assert notice.title_label.text() == f"A worker could not read {file}"
-        assert (
-            "No folder can be offered because each folder that holds it "
-            "also holds private files." in notice.text_label.text()
+        assert notice.offer_label.text() == (
+            "No folder can be offered for automatic read permission."
         )
-        assert "Add a folder by hand" not in notice.text_label.text()
         assert [button.text() for button in notice.buttons] == ["Dismiss"]
 
 
