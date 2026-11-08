@@ -424,7 +424,12 @@ def test_codex_args(env: dict[str, str], home: Path, tmp_path: Path) -> None:
     _tree(home, ".ssh/key", "src/proj/", ".config/ember/settings.db")
     worktree = home / "src/proj"
     common = tmp_path / "repo.git"
-    args = sandbox.codex_args(worktree, common, env=env)
+    args = sandbox.codex_args(
+        worktree,
+        common,
+        temporary=paths.run_tmp_dir("codex-20260101-000000-aabbcc", env),
+        env=env,
+    )
     config = _profile(args)
     assert config["default_permissions"] == "ember"
     profile = config["permissions"]["ember"]
@@ -446,7 +451,11 @@ def test_codex_args_keep_the_workers_cache_writable(
 ) -> None:
     _tree(home, ".cache/uv/", ".cache/ember/sandbox.json")
     args = sandbox.codex_args(
-        home / "wt", home / "wt/.git", read_only=read_only, env=env
+        home / "wt",
+        home / "wt/.git",
+        read_only=read_only,
+        temporary=paths.run_tmp_dir("codex-20260101-000000-aabbcc", env),
+        env=env,
     )
     config = _profile(args)
     cache = home / ".cache/ember/worker"
@@ -457,7 +466,7 @@ def test_codex_args_keep_the_workers_cache_writable(
     assert filesystem[str(home / ".cache/ember/sandbox.json")] == "deny"
     assert config["shell_environment_policy"]["set"] == {
         **sandbox.worker_cache_env(env),
-        "TMPDIR": str(paths.run_tmp_dir("wt", env)),
+        "TMPDIR": str(paths.run_tmp_dir("codex-20260101-000000-aabbcc", env)),
     }
 
 
@@ -466,16 +475,21 @@ def test_codex_args_legacy_read_only_and_network(
 ) -> None:
     config = _profile(
         sandbox.codex_args(
-            home / "wt", home / "wt/.git", read_only=True, network=True, env=env
+            home / "wt",
+            home / "wt/.git",
+            read_only=True,
+            network=True,
+            temporary=paths.run_tmp_dir("codex-20260101-000000-aabbcc", env),
+            env=env,
         )
     )
     profile = config["permissions"]["ember"]
     assert profile["extends"] == ":read-only"
     assert profile["network"]["enabled"] is True
     assert profile["filesystem"][str(home / "wt")] == "read"
-    assert profile["filesystem"][":slash_tmp"] == "read"
+    assert ":slash_tmp" not in profile["filesystem"]
     assert config["shell_environment_policy"]["set"]["TMPDIR"] == str(
-        paths.run_tmp_dir("wt", env)
+        paths.run_tmp_dir("codex-20260101-000000-aabbcc", env)
     )
 
 
@@ -493,11 +507,15 @@ def test_sandbox_workers_use_private_tmp(
     if engine == "codex":
         config = _profile(
             sandbox.codex_args(
-                worktree, worktree / ".git", read_only=read_only, env=env
+                worktree,
+                worktree / ".git",
+                read_only=read_only,
+                temporary=paths.run_tmp_dir("codex-20260101-000000-aabbcc", env),
+                env=env,
             )
         )
-        assert config["permissions"]["ember"]["filesystem"][":slash_tmp"] == "read"
-        temporary = paths.run_tmp_dir("wt", env)
+        assert ":slash_tmp" not in config["permissions"]["ember"]["filesystem"]
+        temporary = paths.run_tmp_dir("codex-20260101-000000-aabbcc", env)
         assert config["shell_environment_policy"]["set"]["TMPDIR"] == str(temporary)
         assert config["permissions"]["ember"]["filesystem"][str(temporary)] == "write"
     else:
@@ -535,7 +553,13 @@ def test_codex_args_denies_ember_folders_outside_home(
         "XDG_STATE_HOME": str(state_home),
     }
     filesystem = _profile(
-        sandbox.codex_args(home / "wt", home / "wt/.git", [str(tmp_path)], env=env)
+        sandbox.codex_args(
+            home / "wt",
+            home / "wt/.git",
+            [str(tmp_path)],
+            temporary=paths.run_tmp_dir("codex-20260101-000000-aabbcc", env),
+            env=env,
+        )
     )["permissions"]["ember"]["filesystem"]
     assert filesystem[str(config_home / "ember")] == "deny"
     assert filesystem[str(state_home / "ember")] == "deny"
@@ -571,7 +595,11 @@ def test_sandbox_creates_worktrees_folder_before_walking_it(
     assert not root.exists()
     if engine == "codex":
         args = sandbox.codex_args(
-            tmp_path / "repo", tmp_path / "repo/.git", [tmp_path], env=env
+            tmp_path / "repo",
+            tmp_path / "repo/.git",
+            [tmp_path],
+            temporary=paths.run_tmp_dir("codex-20260101-000000-aabbcc", env),
+            env=env,
         )
         filesystem = _profile(args)["permissions"]["ember"]["filesystem"]
         assert str(root) not in filesystem
@@ -604,6 +632,7 @@ def test_codex_args_hides_worktrees_except_own(
         tmp_path / "repo/.git",
         [tmp_path] if broad_read else [],
         read_only=read_only,
+        temporary=paths.run_tmp_dir("codex-20260101-000000-aabbcc", env),
         env=env,
     )
     filesystem = _profile(args)["permissions"]["ember"]["filesystem"]
@@ -628,7 +657,12 @@ def test_codex_args_keeps_protected_folders_hidden_inside_own_worktree(
     env["XDG_STATE_HOME"] = str(own / "state")
     for folder in (paths.config_dir(env), paths.state_dir(env)):
         folder.mkdir(parents=True)
-    args = sandbox.codex_args(own, tmp_path / "repo/.git", env=env)
+    args = sandbox.codex_args(
+        own,
+        tmp_path / "repo/.git",
+        temporary=paths.run_tmp_dir("codex-20260101-000000-aabbcc", env),
+        env=env,
+    )
     filesystem = _profile(args)["permissions"]["ember"]["filesystem"]
     assert str(root) not in filesystem
     assert filesystem[str(own)] == "write"
@@ -638,9 +672,14 @@ def test_codex_args_keeps_protected_folders_hidden_inside_own_worktree(
 
 def test_codex_args_unicode_path(env: dict[str, str], home: Path) -> None:
     worktree = home / "wt-é"
-    filesystem = _profile(sandbox.codex_args(worktree, worktree / ".git", env=env))[
-        "permissions"
-    ]["ember"]["filesystem"]
+    filesystem = _profile(
+        sandbox.codex_args(
+            worktree,
+            worktree / ".git",
+            temporary=paths.run_tmp_dir("codex-20260101-000000-aabbcc", env),
+            env=env,
+        )
+    )["permissions"]["ember"]["filesystem"]
     assert filesystem[str(worktree)] == "write"
 
 
@@ -2039,66 +2078,99 @@ def test_startup_and_hidden_denials_merge_without_read_offer(reverse: bool) -> N
     assert sandbox.merge_denial(first, second) == startup
 
 
-@pytest.mark.parametrize("engine", ["codex", "opencode", "claude"])
 @pytest.mark.parametrize("read_only", [False, True])
 def test_profiles_deny_other_runs_temporary_folders(
-    env: dict[str, str], home: Path, tmp_path: Path, engine: str, read_only: bool
+    env: dict[str, str], home: Path, tmp_path: Path, read_only: bool
 ) -> None:
-    env["XDG_CACHE_HOME"] = str(tmp_path / "cache")
-    folders = [paths.ensure_run_tmp_dir(name, env) for name in ("first", "second")]
-    alias = home / "cache-alias"
-    alias.symlink_to(Path(env["XDG_CACHE_HOME"]), target_is_directory=True)
+    folders = [
+        paths.ensure_run_tmp_dir(f"codex-20260101-000000-{suffix}", env)
+        for suffix in ("aabbcc", "ddeeff")
+    ]
+    unrelated = paths.RUN_TMP_ROOT / "keep"
+    unrelated.mkdir()
+    (unrelated / "file").write_text("keep")
+    alias = home / "tmp-alias"
+    alias.symlink_to(paths.RUN_TMP_ROOT, target_is_directory=True)
     common = tmp_path / "repo.git"
     common.mkdir()
-    # A broad read path, including its symlink alias, cannot expose siblings.
-    read = [Path(env["XDG_CACHE_HOME"]), alias]
+    read = [paths.RUN_TMP_ROOT, alias]
     for own in folders:
         worktree = paths.worktrees_dir(env) / own.name
         worktree.mkdir(parents=True)
-        if engine == "codex":
-            config = _profile(
-                sandbox.codex_args(worktree, common, read, read_only=read_only, env=env)
+        config = _profile(
+            sandbox.codex_args(
+                worktree, common, read, read_only=read_only, temporary=own, env=env
             )
-            filesystem = config["permissions"]["ember"]["filesystem"]
-            other = next(folder for folder in folders if folder != own)
-            assert filesystem[str(own)] == "write"
-            assert filesystem[str(other)] == "deny"
-            assert filesystem[":slash_tmp"] == "read"
-            assert config["shell_environment_policy"]["set"]["TMPDIR"] == str(own)
-            snapshot = sandbox.hidden_snapshot(
-                worktree, common, read, temporary=own, env=env
-            )
-            assert str(other) in {entry["path"] for entry in snapshot["hidden"]}
-            denial = sandbox.denied_paths(f"{other}/file: Permission denied", snapshot)
-            assert denial == [
-                dict(path=str(other), reason="protected", allow_path=None)
-            ]
-        else:
-            wrap = (
-                sandbox.opencode_wrap if engine == "opencode" else sandbox.claude_wrap
-            )
-            args = wrap(
-                ["x"], worktree=worktree, common=common, read=read,
-                read_only=read_only, env=env,
-            )  # fmt: skip
-            masks = {args[i + 1] for i, arg in enumerate(args) if arg == "--tmpfs"}
-            for folder in folders:
-                assert str(folder) in masks
-                assert str(alias / "ember/tmp" / folder.name) in masks
-            assert "TMPDIR" not in dict(_pairs(args, "--setenv"))
+        )
+        filesystem = config["permissions"]["ember"]["filesystem"]
+        other = next(folder for folder in folders if folder != own)
+        assert filesystem[str(own)] == "write"
+        assert filesystem[str(other)] == "deny"
+        assert ":slash_tmp" not in filesystem
+        assert not any(
+            unrelated.is_relative_to(path)
+            for path, access in filesystem.items()
+            if access == "deny"
+        )
+        assert config["shell_environment_policy"]["set"]["TMPDIR"] == str(own)
+        snapshot = sandbox.hidden_snapshot(
+            worktree, common, read, temporary=own, env=env
+        )
+        assert str(other) in {entry["path"] for entry in snapshot["hidden"]}
+        assert sandbox.denied_paths(f"{other}/file: Permission denied", snapshot) == [
+            dict(path=str(other), reason="protected", allow_path=None)
+        ]
+        assert sandbox.denied_paths(f"{own}/file: Permission denied", snapshot) == []
 
 
-@pytest.mark.parametrize("temporary", [None, "own"])
+@pytest.mark.parametrize("alias", [False, True])
 def test_kept_path_cannot_open_another_runs_temporary_folder(
-    env: dict[str, str], home: Path, temporary: str | None
+    env: dict[str, str], home: Path, alias: bool
 ) -> None:
-    own = paths.ensure_run_tmp_dir("own", env)
-    other = paths.ensure_run_tmp_dir("other", env)
+    own = paths.ensure_run_tmp_dir("codex-20260101-000000-aabbcc", env)
+    other = paths.ensure_run_tmp_dir("codex-20260101-000000-ddeeff", env)
+    read = other
+    if alias:
+        read = home / "alias"
+        read.symlink_to(other, target_is_directory=True)
     worktree = home / "wt"
     with pytest.raises(sandbox.KeptPathError):
-        sandbox.check_kept(
-            worktree, worktree / ".git", [other], env=env,
-            temporary=own if temporary else None,
-        )  # fmt: skip
-    if temporary:
-        sandbox.check_kept(worktree, worktree / ".git", [own], env=env, temporary=own)
+        sandbox.check_kept(worktree, worktree / ".git", [read], env=env, temporary=own)
+    sandbox.check_kept(worktree, worktree / ".git", [own], env=env, temporary=own)
+    sandbox.check_kept(
+        worktree,
+        worktree / ".git",
+        [paths.RUN_TMP_ROOT / "unrelated"],
+        env=env,
+        temporary=own,
+    )
+
+
+def test_codex_default_temporary_folder_uses_worktree_suffix(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    worktree = tmp_path / "codex-20260101-000000-aabbcc"
+    config = _profile(sandbox.codex_args(worktree, worktree / ".git", env=env))
+    temporary = paths.RUN_TMP_ROOT / "ember-aabbcc"
+    assert config["shell_environment_policy"]["set"]["TMPDIR"] == str(temporary)
+    filesystem = config["permissions"]["ember"]["filesystem"]
+    assert filesystem[str(temporary)] == "write"
+    assert ":slash_tmp" not in filesystem
+
+
+@pytest.mark.parametrize("engine", ["opencode", "claude"])
+def test_bubblewrap_does_not_walk_codex_temporary_folders(
+    env: dict[str, str], home: Path, engine: str
+) -> None:
+    folder = paths.ensure_run_tmp_dir("codex-20260101-000000-aabbcc", env)
+    wrap = sandbox.opencode_wrap if engine == "opencode" else sandbox.claude_wrap
+    args = wrap(
+        ["x"],
+        worktree=home / "wt",
+        common=home / "wt/.git",
+        read=[paths.RUN_TMP_ROOT],
+        env=env,
+    )
+    assert ("--tmpfs", "/tmp") in zip(args, args[1:], strict=False)
+    assert str(folder) not in args
+    assert "TMPDIR" not in dict(_pairs(args, "--setenv"))

@@ -442,15 +442,16 @@ def test_check_worktree_path_accepts_a_folder_with_invalid_git_metadata(
     paths.check_worktree_path(paths.worktree_path("run-1", env), [], env)
 
 
-def test_run_tmp_dir_uses_the_cache_base(home: Path, tmp_path: Path) -> None:
-    assert (
-        paths.run_tmp_dir("run", {"HOME": str(home)}) == home / ".cache/ember/tmp/run"
-    )
-    env = {"HOME": str(home), "XDG_CACHE_HOME": str(tmp_path / "cache")}
-    assert paths.run_tmp_dir("run", env) == tmp_path / "cache/ember/tmp/run"
+def test_run_tmp_dir_uses_short_suffix(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(paths, "RUN_TMP_ROOT", Path("/tmp"))
+    assert paths.run_tmp_dir(
+        "codex-20261108-031019-f00121", {"HOME": str(home)}
+    ) == Path("/tmp/ember-f00121")
 
 
-@pytest.mark.parametrize("ident", ["", ".", "..", "a/b", "a\0b"])
+@pytest.mark.parametrize("ident", ["", ".", "..", "a/b", "a\0b", "run", "12345g"])
 def test_run_tmp_dir_refuses_invalid_ids(home: Path, ident: str) -> None:
     with pytest.raises(ValueError):
         paths.run_tmp_dir(ident, {"HOME": str(home)})
@@ -458,28 +459,40 @@ def test_run_tmp_dir_refuses_invalid_ids(home: Path, ident: str) -> None:
 
 def test_ensure_run_tmp_dir_sets_private_modes(home: Path) -> None:
     env = {"HOME": str(home)}
-    parent = paths.tmp_dir(env)
-    parent.mkdir(parents=True)
+    parent = paths.RUN_TMP_ROOT
     parent.chmod(0o777)
-    first = paths.ensure_run_tmp_dir("editing", env)
-    second = paths.ensure_run_tmp_dir("review", env)
+    before = os.umask(0o777)
+    try:
+        first = paths.ensure_run_tmp_dir("codex-20260101-000000-aabbcc", env)
+        second = paths.ensure_run_tmp_dir("codex-20260101-000000-ddeeff", env)
+    finally:
+        os.umask(before)
     assert first != second
-    assert all(_mode(folder) == 0o700 for folder in (first, second, parent))
+    assert all(_mode(folder) == 0o700 for folder in (first, second))
+    assert _mode(parent) == 0o777
 
 
-@pytest.mark.parametrize("level", ["parent", "run"])
-def test_ensure_run_tmp_dir_refuses_symlinks(
-    home: Path, tmp_path: Path, level: str
+@pytest.mark.parametrize("kind", ["folder", "file", "symlink", "dangling"])
+def test_ensure_run_tmp_dir_refuses_existing_entries(
+    home: Path, tmp_path: Path, kind: str
 ) -> None:
     env = {"HOME": str(home)}
     target = tmp_path / "outside"
     target.mkdir(mode=0o755)
-    link = paths.tmp_dir(env) if level == "parent" else paths.run_tmp_dir("run", env)
-    link.parent.mkdir(parents=True)
-    link.symlink_to(target, target_is_directory=True)
-    with pytest.raises(NotADirectoryError):
-        paths.ensure_run_tmp_dir("run", env)
+    folder = paths.run_tmp_dir("codex-20260101-000000-aabbcc", env)
+    if kind == "folder":
+        folder.mkdir(mode=0o755)
+    elif kind == "file":
+        folder.write_text("keep")
+    else:
+        folder.symlink_to(target if kind == "symlink" else target / "missing")
+    with pytest.raises(FileExistsError):
+        paths.ensure_run_tmp_dir("codex-20260101-000000-aabbcc", env)
     assert _mode(target) == 0o755
+    if kind == "folder":
+        assert _mode(folder) == 0o755
+    elif kind == "file":
+        assert folder.read_text() == "keep"
 
 
 @pytest.mark.parametrize("link_at_root", [False, True])
@@ -487,22 +500,22 @@ def test_remove_run_tmp_dir_does_not_follow_symlinks(
     home: Path, tmp_path: Path, link_at_root: bool
 ) -> None:
     env = {"HOME": str(home)}
+    ident = "codex-20260101-000000-aabbcc"
     outside = tmp_path / "outside"
     outside.mkdir()
     sentinel = outside / "keep"
     sentinel.write_text("keep")
-    folder = paths.run_tmp_dir("run", env)
-    folder.parent.mkdir(parents=True)
+    folder = paths.run_tmp_dir(ident, env)
     if link_at_root:
         folder.symlink_to(outside, target_is_directory=True)
     else:
         folder.mkdir()
         (folder / "link").symlink_to(outside, target_is_directory=True)
         (folder / "file").write_text("temporary")
-    assert paths.remove_run_tmp_dir("run", env)
+    assert paths.remove_run_tmp_dir(ident, env)
     assert not os.path.lexists(folder)
     assert sentinel.read_text() == "keep"
-    assert not paths.remove_run_tmp_dir("run", env)
+    assert not paths.remove_run_tmp_dir(ident, env)
 
 
 def test_remove_run_tmp_dir_refuses_a_symlinked_parent(
@@ -510,10 +523,19 @@ def test_remove_run_tmp_dir_refuses_a_symlinked_parent(
 ) -> None:
     env = {"HOME": str(home)}
     outside = tmp_path / "outside"
-    (outside / "run").mkdir(parents=True)
-    parent = paths.tmp_dir(env)
-    parent.parent.mkdir(parents=True)
+    (outside / "ember-aabbcc").mkdir(parents=True)
+    parent = paths.RUN_TMP_ROOT
+    parent.rmdir()
     parent.symlink_to(outside, target_is_directory=True)
     with pytest.raises(OSError):
-        paths.remove_run_tmp_dir("run", env)
-    assert (outside / "run").is_dir()
+        paths.remove_run_tmp_dir("codex-20260101-000000-aabbcc", env)
+    assert (outside / "ember-aabbcc").is_dir()
+
+
+def test_run_temporary_helpers_accept_a_private_base(tmp_path: Path) -> None:
+    ident = "codex-20260101-000000-aabbcc"
+    folder = paths.ensure_run_tmp_dir(ident, base=tmp_path)
+    assert folder == tmp_path / "ember-aabbcc"
+    assert paths.run_tmp_dir(ident, base=tmp_path) == folder
+    assert paths.remove_run_tmp_dir(ident, base=tmp_path)
+    assert not folder.exists()

@@ -1023,10 +1023,16 @@ class Core:
         read_effective = tuple(
             dict.fromkeys([*answers["sandbox.read"]["value"], *read])
         )
-        self._check_kept(engine, provider, worktree, common, read_effective)
-        self._check_codex_config(engine, provider, worktree, common)
-        self._require_sandbox(engine, provider)
-        self._create_worker_cache(provider)
+        self._create_run_tmp(run_id, provider)
+        try:
+            self._check_kept(engine, provider, worktree, common, read_effective)
+            self._check_codex_config(engine, provider, worktree, common)
+            self._require_sandbox(engine, provider)
+            self._create_worker_cache(provider)
+        except BaseException:
+            if provider == sandbox.CODEX:
+                paths.remove_run_tmp_dir(run_id, self.env)
+            raise
         now = time.time()
         with self._turn_lock(run_id):
             run = Run(
@@ -1074,7 +1080,6 @@ class Core:
                 self.last_run_id = run.id
                 self._say(f"run {run_id}")
                 self._warn(worker.line())
-                self._create_run_tmp(run)
                 if run.read_only:
                     short_base = (
                         self._git_out(top, "rev-parse", "--short", base) or base[:12]
@@ -1225,19 +1230,19 @@ class Core:
                 files=files,
             )
 
-    def _create_run_tmp(self, run: Run) -> None:
+    def _create_run_tmp(self, run_id: str, provider: str) -> None:
         """Create a sandboxed Codex run's temporary folder or refuse with 69."""
-        if run.sandbox != sandbox.CODEX:
+        if provider != sandbox.CODEX:
             return
         try:
-            paths.ensure_run_tmp_dir(run.id, self.env)
+            paths.ensure_run_tmp_dir(run_id, self.env)
         except (OSError, ValueError) as error:
-            folder = paths.run_tmp_dir(run.id, self.env)
+            folder = paths.run_tmp_dir(run_id, self.env)
             raise RunError(
                 exits.UNAVAILABLE,
                 f"cannot create the run's temporary folder {folder}: {error}",
                 "fix",
-                fix=f"make {folder} a folder you can write, or set XDG_CACHE_HOME",
+                fix=f"ensure {folder} is absent and its parent is writable",
             ) from error
 
     def _launch(

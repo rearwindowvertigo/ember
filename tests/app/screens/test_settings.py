@@ -6,13 +6,21 @@ from threading import Event
 from typing import Any
 
 import pytest
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QStyle, QWidget
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, Qt, QTimer
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QLabel,
+    QPushButton,
+    QStyle,
+    QWidget,
+)
 from pytestqt.qtbot import QtBot
 
 from ember import choices
 from ember.app import state, theme
 from ember.app.context import AppContext
+from ember.app.screens import common
 from ember.app.screens import settings as settings_module
 from ember.app.screens.settings import OTHER, PreparationCommandDialog, SettingsScreen
 
@@ -881,6 +889,92 @@ def test_rows_shrink_stack_and_return(env: dict[str, str], qtbot: QtBot) -> None
     theme.apply(app, "light")
     _context, screen = _screen(env, qtbot)
     assert_rows_reflow(screen, list(screen.tip_rows.values()), qtbot)
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+@pytest.mark.parametrize("changed", [False, True])
+def test_list_actions_follow_control_edges_and_stacked_layout(
+    env: dict[str, str], qtbot: QtBot, qapp: QApplication, mode: str, changed: bool
+) -> None:
+    theme.apply(qapp, mode)
+    path, repository, hidden = "/srv/read", "/srv/repository", "/srv/hidden"
+    choices.set_settings(
+        {"sandbox.read": [path], "worktree.prepare": {repository: "npm ci"}},
+        env=env,
+    )
+    state.save(state.AppState(denied_hidden=[hidden]), env)
+    _context, screen = _screen(env, qtbot)
+    for row in screen.tip_rows.values():
+        row.set_changed(changed)
+
+    def right(widget: QWidget) -> int:
+        return widget.mapTo(screen, widget.rect().topRight()).x()
+
+    screen.show()
+    for width in (1400, 576, 1400):
+        screen.resize(width, 900)
+        stacked = width == 576
+        qtbot.wait(30)
+        qtbot.waitUntil(
+            lambda stacked=stacked: all(
+                row.stacked == stacked for row in screen.tip_rows.values()
+            )
+        )
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
+        edit, remove = screen.preparation_rows[repository]
+        if stacked:
+            assert right(screen.path_rows[path]) == right(screen.paths_box)
+            assert right(screen.hidden_rows[hidden]) == right(screen.hidden_box)
+            assert edit.mapTo(screen, QPoint()).x() == (
+                screen.preparation_box.mapTo(screen, QPoint()).x()
+            )
+            assert edit.geometry().right() < remove.geometry().left()
+            for layout in (
+                screen.paths_layout,
+                screen.preparation_layout,
+                screen.hidden_layout,
+            ):
+                assert layout.contentsMargins().right() == 0
+        else:
+            assert {
+                right(screen.add_folder),
+                right(screen.path_rows[path]),
+                right(remove),
+                right(screen.hidden_rows[hidden]),
+            } == {right(screen.add_folder)}
+
+    reset = screen.tip_rows["Theme"].reset
+    assert reset is not None
+    reset_width = reset.sizeHint().width()
+    font = reset.font()
+    font.setPixelSize(reset.fontInfo().pixelSize() + 4)
+    reset.setFont(font)
+    assert reset.sizeHint().width() > reset_width
+    common.align_controls(screen.tip_rows.values())
+    qtbot.wait(30)
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
+    assert {
+        right(screen.add_folder),
+        right(screen.path_rows[path]),
+        right(screen.preparation_rows[repository][1]),
+        right(screen.hidden_rows[hidden]),
+    } == {right(screen.add_folder)}
+
+
+@pytest.mark.parametrize("width", [576, 1400])
+def test_empty_read_paths_keep_the_full_width(
+    env: dict[str, str], qtbot: QtBot, width: int
+) -> None:
+    _context, screen = _screen(env, qtbot)
+    screen.resize(width, 900)
+    screen.show()
+    qtbot.wait(30)
+    assert screen.path_rows == {}
+    assert screen.paths_box.findChildren(QPushButton) == []
+    texts = screen.paths_box.findChildren(QLabel)
+    assert [text.text() for text in texts] == ["No folders added."]
+    assert screen.paths_layout.contentsMargins().right() == 0
+    assert texts[0].width() == screen.paths_box.width()
 
 
 @pytest.mark.parametrize(

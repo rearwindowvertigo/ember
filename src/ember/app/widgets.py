@@ -253,7 +253,17 @@ class TipPopup(QWidget):
         self.owner: QWidget | None = None
 
     def show_for(self, owner: QWidget, text: str) -> None:
-        """Show `text` under `owner`, wrapped at `TIP_WIDTH` when it is wider."""
+        """Show `text` under `owner`, wrapped at `TIP_WIDTH` when it is wider.
+
+        Attach the native popup to the owner's window before showing it.
+        """
+        self.winId()
+        handle = self.windowHandle()
+        parent = owner.window().windowHandle()
+        if handle is not None and handle.transientParent() != parent:
+            if self.isVisible():
+                self.hide()
+            handle.setTransientParent(parent)
         self.owner = owner
         shown = tip_text(text)
         wide = shown != text

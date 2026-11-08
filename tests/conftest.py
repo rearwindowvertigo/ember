@@ -8,6 +8,17 @@ from pathlib import Path
 
 import pytest
 
+from ember import paths
+
+
+@pytest.fixture(autouse=True)
+def private_run_tmp_root(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep run temporary folders inside each test's private state."""
+    folder = tmp_path_factory.mktemp("run-tmp")
+    monkeypatch.setattr(paths, "RUN_TMP_ROOT", folder)
+
 
 @pytest.fixture(autouse=True)
 def private_password_home(
