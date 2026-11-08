@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.19.0](https://github.com/rearwindowvertigo/ember/compare/v0.18.0...v0.19.0) (2026-11-08)
+
+
+### Added
+
+* let the owner stop notices for a denied folder ([de7d0dd](https://github.com/rearwindowvertigo/ember/commit/de7d0dd4bcc09d7f6a584047b4259e634b5947b5))
+
+
+### Fixed
+
+* align controls of rows without Reset ([91015b9](https://github.com/rearwindowvertigo/ember/commit/91015b970a664bd354f07e462cb22598cfa27e47))
+* follow Settings row and dialog conventions in worktree preparation ([6db0cb8](https://github.com/rearwindowvertigo/ember/commit/6db0cb85d7378047b1236799dfeea8671a64b665))
+* keep keyboard focus on the selected segment after Reset ([ee57c55](https://github.com/rearwindowvertigo/ember/commit/ee57c5537fb5192bc63192c0a81b61015c4cb11c))
+* keep the mouse wheel from changing drop-down values ([952fae5](https://github.com/rearwindowvertigo/ember/commit/952fae552f5189096b4d72d47f18595627be2696))
+* offer the folder a denied path resolves into, and drop recorded offers outside the denied folder ([c27b31a](https://github.com/rearwindowvertigo/ember/commit/c27b31a8f48f468325a6c3a2d61f0a1d903c3694))
+* shorten the denied-folder notice on Overview ([d4ea637](https://github.com/rearwindowvertigo/ember/commit/d4ea6374874659e62438999095a7de753357749f))
+* show dark-mode warnings with an amber edge ([1560787](https://github.com/rearwindowvertigo/ember/commit/156078770b94fa894c2c2b60a7b652e76e3988d4))
+
 ## [0.18.0](https://github.com/rearwindowvertigo/ember/compare/v0.17.0...v0.18.0) (2026-11-07)
 
 
