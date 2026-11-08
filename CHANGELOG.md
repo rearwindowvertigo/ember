@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.1](https://github.com/rearwindowvertigo/ember/compare/v0.21.0...v0.21.1) (2026-11-08)
+
+
+### Fixed
+
+* do not report runs a resumable flow or panel still holds as orphaned ([588e0ce](https://github.com/rearwindowvertigo/ember/commit/588e0ce0bfd95af8517814c810d32f50ac1fdb11)), closes [#222](https://github.com/rearwindowvertigo/ember/issues/222)
+
 ## [0.21.0](https://github.com/rearwindowvertigo/ember/compare/v0.20.1...v0.21.0) (2026-11-08)
 
 
