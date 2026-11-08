@@ -9,7 +9,7 @@ import datetime
 import time
 from collections.abc import Callable, Iterable, Sequence
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QBoxLayout,
@@ -353,6 +353,9 @@ class TooltipRow(QWidget):
     `align_controls` sizes so a screen's controls share one column.
     """
 
+    fitted = Signal(bool, int)
+    """The stacked state and shared Reset reservation after fitting."""
+
     def __init__(self, name: str, tooltip: str, control: QWidget) -> None:
         """Lay out the row.
 
@@ -458,7 +461,7 @@ class TooltipRow(QWidget):
         return max(theme.PICKER_MIN_WIDTH if minimum else CONTROL_COLUMN, width)
 
     def fit(self, width: int, stacked: bool, reset_width: int) -> None:
-        """Set the common column width and put the control beside or below its name."""
+        """Fit the control beside or below its name and emit the shared reservation."""
         self.stacked = stacked
         self.box.setDirection(
             QBoxLayout.Direction.TopToBottom
@@ -480,6 +483,7 @@ class TooltipRow(QWidget):
                 Qt.AlignmentFlag.AlignLeft if stacked else Qt.AlignmentFlag.AlignRight,
             )
         self.slot.setFixedWidth(width)
+        self.fitted.emit(stacked, reset_width)
 
 
 class _ControlFit(QObject):

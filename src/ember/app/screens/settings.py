@@ -193,6 +193,7 @@ class SettingsScreen(QWidget):
         layout.addWidget(self._general())
         layout.addWidget(self._workers())
         layout.addWidget(self._preparation())
+        self.tip_rows["Sandbox read paths"].fitted.connect(self._fit_lists)
         align_controls(self.tip_rows.values())
         layout.addStretch(1)
         context.settings_changed.connect(self._redraw)
@@ -335,7 +336,22 @@ class SettingsScreen(QWidget):
         self.preparation_line = ToneLine("warning")
         column.addWidget(self.preparation_line)
         self.preparation_rows: dict[str, tuple[QPushButton, QPushButton]] = {}
+        self.preparation_buttons: list[QHBoxLayout] = []
         return card
+
+    def _fit_lists(self, stacked: bool, reset_width: int) -> None:
+        """Align list actions with controls when settings sit beside their names."""
+        for layout, populated in (
+            (self.paths_layout, bool(self.path_rows)),
+            (self.preparation_layout, bool(self.preparation_rows)),
+            (self.hidden_layout, bool(self.hidden_rows)),
+        ):
+            inset = reset_width if populated and not stacked else 0
+            layout.setContentsMargins(0, 0, inset, 0)
+        for buttons in self.preparation_buttons:
+            buttons.setAlignment(
+                Qt.AlignmentFlag.AlignLeft if stacked else Qt.AlignmentFlag.AlignRight
+            )
 
     def _draw_icons(self, *_args: object) -> None:
         color = theme.color("text-primary")
@@ -379,6 +395,7 @@ class SettingsScreen(QWidget):
         self.hidden_rows = {}
         hidden = state.load(self.context.env).denied_hidden
         if not hidden:
+            self.hidden_layout.setContentsMargins(0, 0, 0, 0)
             self.hidden_layout.addWidget(label("No folders hidden.", "secondary"))
         for path in hidden:
             row = QWidget()
@@ -440,6 +457,7 @@ class SettingsScreen(QWidget):
         clear_layout(self.paths_layout)
         self.path_rows = {}
         if not paths:
+            self.paths_layout.setContentsMargins(0, 0, 0, 0)
             self.paths_layout.addWidget(label(NO_PATHS, "secondary"))
             return
         color = theme.color("text-primary")
@@ -467,7 +485,9 @@ class SettingsScreen(QWidget):
     def _draw_preparation(self, commands: dict[str, str]) -> None:
         clear_layout(self.preparation_layout)
         self.preparation_rows = {}
+        self.preparation_buttons = []
         if not commands:
+            self.preparation_layout.setContentsMargins(0, 0, 0, 0)
             self.preparation_layout.addWidget(
                 label("No repositories added.", "secondary")
             )
@@ -498,8 +518,13 @@ class SettingsScreen(QWidget):
                 lambda _checked=False, path=repository: self._remove_preparation(path)
             )
             buttons.addWidget(remove)
-            buttons.addStretch(1)
+            buttons.setAlignment(
+                Qt.AlignmentFlag.AlignLeft
+                if self.tip_rows["Repositories"].stacked
+                else Qt.AlignmentFlag.AlignRight
+            )
             column.addLayout(buttons)
+            self.preparation_buttons.append(buttons)
             self.preparation_layout.addWidget(row)
             self.preparation_rows[repository] = (edit, remove)
 
