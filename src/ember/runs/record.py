@@ -845,21 +845,25 @@ def update(
 
 
 def is_run_folder(name: str) -> bool:
-    """Return whether a folder in the runs folder holds a run, not a flow or panel.
+    """Return whether a folder name can hold a published run record.
 
     Args:
         name: The folder's name.
 
     Returns:
-        False for a flow or panel folder, True otherwise.
+        False for temporary creation, flow or panel folders, True otherwise.
     """
-    return not (_FLOW_ID.fullmatch(name) or _PANEL_ID.fullmatch(name))
+    return not (
+        name.startswith(paths.CREATION_TMP_PREFIX)
+        or _FLOW_ID.fullmatch(name)
+        or _PANEL_ID.fullmatch(name)
+    )
 
 
 def list_runs(
     env: Mapping[str, str] | None = None,
 ) -> tuple[list[Run], list[RecordError]]:
-    """Read every run's record, skipping flow and panel folders.
+    """Read run records, skipping temporary creation, flow and panel folders.
 
     Args:
         env: The environment; `None` reads `os.environ`.

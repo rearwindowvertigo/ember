@@ -204,6 +204,19 @@ def test_list_runs_skips_panel_folders(env: dict[str, str]) -> None:
     assert record.list_runs(env) == ([run], [])
 
 
+def test_list_runs_skips_unpublished_records(env: dict[str, str]) -> None:
+    run = _run(env)
+    record.save(run)
+    with paths.create_record_dir(
+        paths.runs_dir(env) / record.new_id("codex"), root=paths.state_dir(env)
+    ) as temporary:
+        assert not record.is_run_folder(temporary.name)
+        with pytest.raises(record.RecordError, match="not a valid run id"):
+            record.check_id(temporary.name)
+        (temporary / record.RECORD_NAME).write_text("{}")
+        assert record.list_runs(env) == ([run], [])
+
+
 def test_record_without_base_branch_loads(env: dict[str, str]) -> None:
     run = _run(env)
     document = run.to_json()

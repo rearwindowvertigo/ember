@@ -1,4 +1,5 @@
 import json
+import os
 import stat
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -142,6 +143,56 @@ def test_create_does_not_overwrite(
     with pytest.raises(record.FlowError, match="already exists"):
         record.create(flow, "changed", env)
     assert "example" in (created / record.PLAN_NAME).read_text()
+    assert list(created.parent.iterdir()) == [created]
+
+
+def test_creation_is_invisible_until_complete(
+    flow: dict[str, Any], env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = runs.write_private
+    observed: list[str] = []
+
+    def write(path: Path, text: str) -> None:
+        original(path, text)
+        observed.append(path.name)
+        assert path.parent.parent == paths.runs_dir(env)
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+        assert not record.folder(flow["id"], env).exists()
+        assert record.list_flows(env) == ([], [])
+        assert runs.list_runs(env) == ([], [])
+
+    monkeypatch.setattr(runs, "write_private", write)
+    directory = record.create(flow, "{}\n", env)
+    assert observed == [record.PLAN_NAME, record.FLOW_NAME]
+    assert {item.name for item in directory.iterdir()} == {
+        record.PLAN_NAME,
+        record.FLOW_NAME,
+        record.EVENTS_NAME,
+    }
+    assert record.list_flows(env) == ([flow], [])
+    assert list(directory.parent.iterdir()) == [directory]
+
+
+@pytest.mark.parametrize(
+    "name", [record.PLAN_NAME, record.FLOW_NAME, record.EVENTS_NAME]
+)
+def test_creation_failure_removes_unpublished_files(
+    flow: dict[str, Any],
+    env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    original = paths.open_private_file
+
+    def open_file(path: Path, flags: int = os.O_RDWR) -> int:
+        if path.name == name or path.name.startswith(f".{name}."):
+            raise OSError("write failed")
+        return original(path, flags)
+
+    monkeypatch.setattr(paths, "open_private_file", open_file)
+    with pytest.raises(OSError, match="write failed"):
+        record.create(flow, "{}", env)
+    assert list(paths.runs_dir(env).iterdir()) == []
 
 
 def test_save_atomic(flow: dict[str, Any], created: Path, env: dict[str, str]) -> None:

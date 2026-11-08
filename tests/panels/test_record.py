@@ -6,6 +6,8 @@ from typing import Any
 
 import pytest
 
+from ember import paths
+from ember.flows import record as flows
 from ember.panels import record
 from ember.runs import record as runs
 from runs.stub_engine import make_env  # pyrefly: ignore[missing-import]
@@ -80,6 +82,62 @@ def test_id_and_private_artifacts(tmp_path: Path) -> None:
     assert (folder / "brief.md").read_text() == "brief\n"
     assert (folder / "members/1.log").read_text() == "first\nsecond\n"
     assert record.load(ident, env) == data
+    assert list(folder.parent.iterdir()) == [folder]
+
+
+def test_creation_is_invisible_until_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = make_env(tmp_path)
+    data = panel()
+    original = runs.write_private
+    observed: list[str] = []
+
+    def write(path: Path, text: str) -> None:
+        original(path, text)
+        observed.append(path.name)
+        assert path.parent.parent == paths.runs_dir(env)
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+        assert not record.folder(data["id"], env).exists()
+        assert record.list_panels(env) == ([], [])
+        assert flows.list_flows(env) == ([], [])
+        assert runs.list_runs(env) == ([], [])
+
+    monkeypatch.setattr(runs, "write_private", write)
+    directory = record.create(data, "question\n", "brief\n", env)
+    assert observed == ["question.md", "brief.md", "panel.json", "summary.md"]
+    assert {item.name for item in directory.iterdir()} == {
+        "members",
+        "question.md",
+        "brief.md",
+        "panel.json",
+        "summary.md",
+    }
+    assert (directory / "summary.md").read_text() == record.summary_text(
+        data, "question\n", {}
+    )
+    assert record.list_panels(env) == ([data], [])
+    assert list(directory.parent.iterdir()) == [directory]
+
+
+@pytest.mark.parametrize(
+    "name", ["question.md", "brief.md", "panel.json", "summary.md"]
+)
+def test_creation_failure_removes_unpublished_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    env = make_env(tmp_path)
+    original = runs.write_private
+
+    def write(path: Path, text: str) -> None:
+        original(path, text)
+        if path.name == name:
+            raise OSError("write failed")
+
+    monkeypatch.setattr(runs, "write_private", write)
+    with pytest.raises(OSError, match="write failed"):
+        record.create(panel(), "q", "b", env)
+    assert list(paths.runs_dir(env).iterdir()) == []
 
 
 @pytest.mark.parametrize(

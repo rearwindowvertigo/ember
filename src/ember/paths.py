@@ -16,6 +16,7 @@ import pwd
 import re
 import shutil
 import stat
+import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 
@@ -27,6 +28,9 @@ DIR_MODE = 0o700
 
 FILE_MODE = 0o600
 """The mode of every private file Ember creates."""
+
+CREATION_TMP_PREFIX = ".creating-"
+"""The reserved prefix for unpublished record folders in the runs folder."""
 
 RUNTIME_FALLBACK_ROOT = Path("/run/user")
 """The folder holding `<uid>/` when `XDG_RUNTIME_DIR` is not usable."""
@@ -501,6 +505,31 @@ def _make_folder(folder: Path) -> bool:
         return False
     folder.chmod(DIR_MODE)
     return True
+
+
+@contextlib.contextmanager
+def create_record_dir(directory: Path, *, root: Path) -> Iterator[Path]:
+    """Build a private record folder and publish it with one rename.
+
+    The temporary folder is in the destination's parent. Existing destination
+    entries are refused, and unpublished files are removed on failure.
+
+    Yields:
+        The mode 700 temporary folder in which to write the initial files.
+    """
+    ensure_private_dir(directory.parent, root=root)
+    if os.path.lexists(directory):
+        raise FileExistsError(f"{directory} already exists")
+    temporary = Path(tempfile.mkdtemp(prefix=CREATION_TMP_PREFIX, dir=directory.parent))
+    try:
+        temporary.chmod(DIR_MODE)
+        yield temporary
+        if os.path.lexists(directory):
+            raise FileExistsError(f"{directory} already exists")
+        os.rename(temporary, directory)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
 
 
 def open_private_file(path: Path, flags: int = os.O_RDWR) -> int:

@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from ember import choices, engines, paths, processes, sandbox
+from ember import choices, engines, paths, processes, prune, sandbox
 from ember.engines import Driver, LaunchSpec, models, opencode2, status
 from ember.engines.codex import CodexDriver, codex_home
 from ember.engines.opencode import OpenCodeDriver
@@ -117,6 +117,132 @@ def _events(tmp_path: Path, run_id: str) -> list[dict[str, str]]:
 
 
 # Starting an editing run
+
+
+@pytest.mark.parametrize("name", [record.BRIEF_NAME, record.RECORD_NAME])
+@pytest.mark.parametrize("read_only", [False, True])
+def test_start_publishes_brief_and_record_together(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+    read_only: bool,
+) -> None:
+    original = record.write_private
+    written = threading.Event()
+    release = threading.Event()
+    brief = "Task\n\nKeep this brief unchanged.\n"
+    task_file = _brief(tmp_path, brief)
+
+    def write(path: Path, text: str) -> None:
+        original(path, text)
+        if path.parent.name.startswith(paths.CREATION_TMP_PREFIX) and path.name == name:
+            written.set()
+            assert release.wait(10)
+
+    monkeypatch.setattr(record, "write_private", write)
+    core_ = _core(env)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(_start, core_, repo, task_file, read_only=read_only)
+        try:
+            assert written.wait(10)
+            assert record.list_runs(env) == ([], [])
+            assert prune.select(0, env=env).records == {}
+            result = prune.remove(0, env=env)
+            assert not result.errors and not result.removed
+            (temporary,) = paths.runs_dir(env).iterdir()
+            assert temporary.name.startswith(paths.CREATION_TMP_PREFIX)
+            assert stat.S_IMODE(temporary.stat().st_mode) == 0o700
+            assert (temporary / record.BRIEF_NAME).read_text() == brief
+            names = {record.BRIEF_NAME}
+            if name == record.RECORD_NAME:
+                names.add(record.RECORD_NAME)
+                saved = (temporary / name).read_text()
+                data = json.loads(saved)
+                initial = record.from_json(data, record.run_dir(data["id"], env), env)
+                assert saved == json.dumps(initial.to_json(), indent=2) + "\n"
+                assert not initial.folder.exists()
+            assert {item.name for item in temporary.iterdir()} == names
+            assert all(
+                stat.S_IMODE(item.stat().st_mode) == 0o600
+                for item in temporary.iterdir()
+            )
+        finally:
+            release.set()
+        code = pending.result(timeout=10)
+    assert code == 0, capsys.readouterr().err
+    (run,), errors = record.list_runs(env)
+    assert not errors and run.folder == record.run_dir(run.id, env)
+    assert (run.folder / record.BRIEF_NAME).read_text() == brief
+    assert list(paths.runs_dir(env).iterdir()) == [run.folder]
+
+
+@pytest.mark.parametrize("name", [record.BRIEF_NAME, record.RECORD_NAME])
+@pytest.mark.parametrize("error_type", [OSError, KeyboardInterrupt])
+@pytest.mark.parametrize("engine", ["claude", "codex"])
+def test_start_creation_failure_removes_unpublished_folder(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+    error_type: type[BaseException],
+    engine: str,
+) -> None:
+    original = record.write_private
+    if engine == "codex":
+        choices.set_settings({"sandbox.codex": "on"}, env=env)
+        monkeypatch.setattr(sandbox, "require", lambda engine, env=None: None)
+
+    def write(path: Path, text: str) -> None:
+        original(path, text)
+        if path.parent.name.startswith(paths.CREATION_TMP_PREFIX) and path.name == name:
+            raise error_type("creation failed")
+
+    monkeypatch.setattr(record, "write_private", write)
+    driver = _driver(env, engine)
+    core_ = _core(env, driver)
+    code = _start(
+        core_, repo, _brief(tmp_path, "Task\n"), engine=engine,
+        model="gpt-5" if engine == "codex" else "opus",
+    )  # fmt: skip
+    assert code == (exits.INTERRUPTED if error_type is KeyboardInterrupt else 1)
+    err = capsys.readouterr().err
+    assert ("interrupted" if code == exits.INTERRUPTED else "creation failed") in err
+    assert core_.last_run_id is None
+    assert not driver.commands
+    assert list(paths.runs_dir(env).iterdir()) == []
+    assert record.list_runs(env) == ([], [])
+    assert not paths.worktrees_dir(env).exists()
+    assert not list(paths.RUN_TMP_ROOT.iterdir())
+
+
+@pytest.mark.parametrize("populated", [False, True])
+def test_start_refuses_existing_record_folder(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    populated: bool,
+) -> None:
+    ident = "claude-20260101-000000-aabbcc"
+    monkeypatch.setattr(record, "new_id", lambda engine: ident)
+    directory = record.make_run_dir(ident, env)
+    if populated:
+        (directory / record.RECORD_NAME).write_text("keep")
+    driver = _driver(env)
+    assert _start(_core(env, driver), repo, _brief(tmp_path, "Task\n")) == 1
+    assert "already exists" in capsys.readouterr().err
+    assert list(paths.runs_dir(env).iterdir()) == [directory]
+    if populated:
+        assert (directory / record.RECORD_NAME).read_text() == "keep"
+    else:
+        assert list(directory.iterdir()) == []
+    assert not driver.commands
 
 
 @pytest.mark.parametrize("dry_run", [False, True])

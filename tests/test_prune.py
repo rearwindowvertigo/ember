@@ -21,6 +21,44 @@ from ember.runs import record as runs
 NOW = 1_000_000.0
 
 
+@pytest.mark.parametrize("age", [0, 3600, 3601])
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("scoped", [False, True])
+def test_prune_sweeps_creation_folders_after_one_hour(
+    env: dict[str, str], age: int, dry_run: bool, scoped: bool
+) -> None:
+    root = paths.runs_dir(env)
+    folder = paths.ensure_private_dir(
+        root / f"{paths.CREATION_TMP_PREFIX}abandoned", root=paths.state_dir(env)
+    )
+    (folder / runs.RECORD_NAME).write_text("{}")
+    os.utime(folder, (NOW - age, NOW - age))
+    assert prune.select(0, env=env, now=NOW).errors == []
+    assert runs.list_runs(env) == ([], [])
+    assert flows.list_flows(env) == ([], [])
+    assert panels.list_panels(env) == ([], [])
+    result = prune.remove(30, [] if scoped else None, env=env, now=NOW, dry_run=dry_run)
+    assert not result.errors
+    candidate = age > 3600 and not scoped
+    assert result.removed == ([dict(id=str(folder), kind="tmp")] if candidate else [])
+    assert folder.exists() == (not candidate or dry_run)
+
+
+def test_prune_creation_sweep_keeps_symlinks(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    root = paths.ensure_private_dir(paths.runs_dir(env), root=paths.state_dir(env))
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("keep")
+    link = root / f"{paths.CREATION_TMP_PREFIX}link"
+    link.symlink_to(outside, target_is_directory=True)
+    os.utime(link, (0, 0), follow_symlinks=False)
+    result = prune.remove(0, env=env, now=NOW)
+    assert not result.errors and not result.removed
+    assert link.is_symlink() and (outside / "keep").read_text() == "keep"
+
+
 @pytest.fixture
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     def git(

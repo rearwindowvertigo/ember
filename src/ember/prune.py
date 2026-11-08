@@ -233,17 +233,20 @@ def select(
         names = sorted(
             item.name
             for item in root.iterdir()
-            if item.is_symlink()
-            or (
-                item.is_dir()
-                and (
-                    re.fullmatch(r"[a-z0-9-]+-\d{8}-\d{6}-[0-9a-f]{6}", item.name)
-                    or any(
-                        (item / name).exists()
-                        for name in (
-                            runs.RECORD_NAME,
-                            flows.FLOW_NAME,
-                            panels.PANEL_NAME,
+            if not item.name.startswith(paths.CREATION_TMP_PREFIX)
+            and (
+                item.is_symlink()
+                or (
+                    item.is_dir()
+                    and (
+                        re.fullmatch(r"[a-z0-9-]+-\d{8}-\d{6}-[0-9a-f]{6}", item.name)
+                        or any(
+                            (item / name).exists()
+                            for name in (
+                                runs.RECORD_NAME,
+                                flows.FLOW_NAME,
+                                panels.PANEL_NAME,
+                            )
                         )
                     )
                 )
@@ -587,9 +590,10 @@ def _sweep_tmp(
 ) -> None:
     """Remove unrecorded temporary entries only when every record was readable."""
     short_names = {f"ember-{ident.rsplit('-', 1)[-1]}" for ident in named}
-    for root, reserved, short in (
-        (paths.RUN_TMP_ROOT, short_names, True),
-        (paths.cache_dir(env) / "tmp", named, False),
+    for root, reserved, short, creation in (
+        (paths.RUN_TMP_ROOT, short_names, True, False),
+        (paths.cache_dir(env) / "tmp", named, False, False),
+        (paths.runs_dir(env), set(), False, True),
     ):
         _sweep_tmp_root(
             root,
@@ -600,6 +604,7 @@ def _sweep_tmp(
             dry_run=dry_run,
             readable=readable,
             short=short,
+            creation=creation,
         )
 
 
@@ -613,6 +618,7 @@ def _sweep_tmp_root(
     dry_run: bool,
     readable: bool,
     short: bool,
+    creation: bool = False,
 ) -> None:
     """Sweep one temporary base without following its symlinks."""
     try:
@@ -626,12 +632,16 @@ def _sweep_tmp_root(
         for name in sorted(os.listdir(fd)):
             if name in named or (short and not paths.RUN_TMP_PATTERN.fullmatch(name)):
                 continue
+            if creation and not name.startswith(paths.CREATION_TMP_PREFIX):
+                continue
             entry = root / name
             try:
                 info = os.stat(name, dir_fd=fd, follow_symlinks=False)
                 if info.st_uid != os.getuid():
                     continue
-                if short and not stat.S_ISDIR(info.st_mode):
+                if (short or creation) and not stat.S_ISDIR(info.st_mode):
+                    continue
+                if creation and at - info.st_mtime <= 3600:
                     continue
                 if not readable:
                     result.skipped.append(
@@ -641,7 +651,11 @@ def _sweep_tmp_root(
                         )
                     )
                     continue
-                if older_than and at - info.st_mtime < older_than * 86400:
+                if (
+                    not creation
+                    and older_than
+                    and at - info.st_mtime < older_than * 86400
+                ):
                     result.skipped.append(
                         dict(id=str(entry), reason="younger than the requested age")
                     )
