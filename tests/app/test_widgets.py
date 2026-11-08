@@ -19,6 +19,7 @@ from PySide6.QtGui import (
     QIcon,
     QPaintEvent,
     QTextLayout,
+    QWindow,
 )
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
@@ -973,6 +974,61 @@ def test_info_tip_stays_open_after_tab_key_release(qtbot: QtBot) -> None:
         assert _popup_shows(info)
     finally:
         info.hide_tip()
+
+
+def test_tip_popup_follows_owners_between_windows(
+    qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = QWidget()
+    dialog = QDialog(host)
+    for window in (host, dialog):
+        qtbot.addWidget(window)
+    main_info = widgets.InfoTip("Command", "Main command")
+    dialog_info = widgets.InfoTip("Command", "Dialog command")
+    QVBoxLayout(host).addWidget(main_info)
+    QVBoxLayout(dialog).addWidget(dialog_info)
+    host.show()
+    dialog.show()
+    popup = widgets.TipPopup()
+    qtbot.addWidget(popup)
+    monkeypatch.setattr(widgets, "_popup", popup)
+    assert popup.windowHandle() is None
+    main_info.show_tip()
+    handle = popup.windowHandle()
+    assert handle is not None
+    assert host.windowHandle() is not None
+    assert dialog.windowHandle() is not None
+    assert handle.transientParent() == host.windowHandle()
+    assert _popup_shows(main_info)
+    set_parent = handle.setTransientParent
+    parents: list[QWindow] = []
+
+    def set_parent_while_hidden(parent: QWindow) -> None:
+        assert not popup.isVisible()
+        parents.append(parent)
+        set_parent(parent)
+
+    monkeypatch.setattr(handle, "setTransientParent", set_parent_while_hidden)
+    for info, window in ((dialog_info, dialog), (main_info, host)):
+        assert popup.isVisible()
+        info.show_tip()
+        assert _popup_shows(info)
+        assert handle.transientParent() == window.windowHandle()
+    assert parents == [dialog.windowHandle(), host.windowHandle()]
+
+
+def test_tip_popup_shows_for_owner_without_window_handle(qtbot: QtBot) -> None:
+    host = QWidget()
+    qtbot.addWidget(host)
+    info = widgets.InfoTip("Command", "Command details")
+    QVBoxLayout(host).addWidget(info)
+    popup = widgets.TipPopup()
+    qtbot.addWidget(popup)
+    assert host.windowHandle() is None
+    popup.show_for(info, info.toolTip())
+    assert popup.isVisible()
+    assert popup.owner is info
+    assert popup.text() == info.toolTip()
 
 
 def test_tip_popup_is_rounded_and_wraps_at_the_tip_width(
