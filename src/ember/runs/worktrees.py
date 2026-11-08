@@ -4,6 +4,7 @@ import shlex
 import subprocess
 from pathlib import Path
 
+from ember import paths
 from ember.runs.record import Run
 
 
@@ -57,6 +58,8 @@ def remove_detached(run: Run, *, dry_run: bool = False) -> bool:
     entry = next((item for item in entries if item[0] == f"worktree {folder}"), None)
     if entry is None:
         if not folder.exists():
+            if not dry_run:
+                paths.remove_run_tmp_dir(run.id, run.env)
             return False
         raise OSError(f"{folder} is not a registered worktree of {common}")
     if "detached" not in entry:
@@ -73,4 +76,5 @@ def remove_detached(run: Run, *, dry_run: bool = False) -> bool:
         raise OSError(f"kept locked worktree {folder}")
     if not dry_run:
         _git(run, common, "worktree", "remove", "--", str(folder))
+        paths.remove_run_tmp_dir(run.id, run.env)
     return True

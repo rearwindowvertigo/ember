@@ -12,6 +12,7 @@ import fcntl
 import hashlib
 import os
 import pwd
+import shutil
 import stat
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
@@ -161,6 +162,64 @@ def ensure_worker_cache_dir(env: Mapping[str, str] | None = None) -> Path:
         OSError: A folder cannot be created.
     """
     return ensure_private_dir(worker_cache_dir(env), root=cache_dir(env))
+
+
+def tmp_dir(env: Mapping[str, str] | None = None) -> Path:
+    """Return the parent of sandboxed Codex runs' temporary folders."""
+    return cache_dir(env) / "tmp"
+
+
+def run_tmp_dir(run_id: str, env: Mapping[str, str] | None = None) -> Path:
+    """Return a run's temporary folder without resolving its final entry.
+
+    Raises:
+        ValueError: The id is empty, `.` or `..`, or contains `/` or NUL.
+    """
+    if run_id in ("", ".", "..") or "/" in run_id or "\0" in run_id:
+        raise ValueError(f"{run_id!r} is not a run id")
+    return tmp_dir(env) / run_id
+
+
+def ensure_run_tmp_dir(run_id: str, env: Mapping[str, str] | None = None) -> Path:
+    """Create a run's temporary folder and its Ember parents at mode 700.
+
+    Raises:
+        NotADirectoryError: An entry from Ember's cache folder down is a
+            symlink or not a folder.
+        OSError: A folder cannot be created.
+        ValueError: The run id is invalid.
+    """
+    return ensure_private_dir(run_tmp_dir(run_id, env), root=cache_dir(env))
+
+
+def remove_run_tmp_dir(run_id: str, env: Mapping[str, str] | None = None) -> bool:
+    """Remove a run's temporary entry without following symlinks out of it.
+
+    Return whether an entry was removed. Missing folders need no removal.
+    The parent is opened without following a symlink, and removal is relative
+    to that descriptor. A symlink at the run's name is unlinked itself.
+
+    Raises:
+        OSError: An entry cannot be removed or its parent is a symlink.
+        ValueError: The run id is invalid.
+    """
+    folder = run_tmp_dir(run_id, env)
+    try:
+        fd = os.open(folder.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return False
+    try:
+        try:
+            info = os.stat(folder.name, dir_fd=fd, follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                shutil.rmtree(folder.name, dir_fd=fd)
+            else:
+                os.unlink(folder.name, dir_fd=fd)
+        except FileNotFoundError:
+            return False
+    finally:
+        os.close(fd)
+    return True
 
 
 def runtime_dir(

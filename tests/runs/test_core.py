@@ -2215,8 +2215,10 @@ def test_sandbox_permissions_allow_detached_review_builds(
         assert profile["extends"] == (":workspace" if writable else ":read-only")
         assert profile["filesystem"][str(worktree)] == ("write" if writable else "read")
         assert profile["filesystem"][str(common)] == "read"
-        assert profile["filesystem"]["/tmp"] == "write"
-        assert "TMPDIR" not in config["shell_environment_policy"]["set"]
+        assert profile["filesystem"][":slash_tmp"] == "read"
+        temporary = paths.run_tmp_dir(saved.id, env)
+        assert config["shell_environment_policy"]["set"]["TMPDIR"] == str(temporary)
+        assert profile["filesystem"][str(temporary)] == "write"
         assert profile["filesystem"][str(worktree / ".git")] == "read"
     else:
         mounts = list(
@@ -4701,3 +4703,104 @@ def test_close_leaves_a_locked_start_and_its_preparation_alone(
             assert Path(run.worktree).is_dir()
         finally:
             process.kill()
+
+
+def test_codex_runs_create_distinct_temporary_folders_before_launch(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    choices.set_settings({"sandbox.codex": "on"}, env=env)
+    monkeypatch.setattr(sandbox, "require", lambda engine, env=None: None)
+    folders: list[Path] = []
+    runs: list[record.Run] = []
+    core_ = _core(env, _driver(env, "codex"))
+
+    def inspect(spec: LaunchSpec, run: record.Run, common: Path) -> LaunchSpec:
+        folder = paths.run_tmp_dir(run.id, env)
+        assert folder.is_dir()
+        assert stat.S_IMODE(folder.stat().st_mode) == 0o700
+        assert stat.S_IMODE(folder.parent.stat().st_mode) == 0o700
+        folders.append(folder)
+        runs.append(run)
+        return spec
+
+    # The stub engine runs directly; generated permission options are checked
+    # by test_sandbox_permissions_allow_detached_review_builds.
+    monkeypatch.setattr(core_, "_sandboxed", inspect)
+    brief = _brief(tmp_path, "Task\n")
+    for read_only in (False, True):
+        assert (
+            _start(
+                core_, repo, brief, engine="codex", model="gpt-5", read_only=read_only
+            )
+            == 0
+        ), capsys.readouterr().err
+    assert len(set(folders)) == 2
+    for run, folder in zip(runs, folders, strict=True):
+        outside = tmp_path / f"outside-{run.id}"
+        outside.mkdir()
+        (outside / "keep").write_text("keep")
+        (folder / "link").symlink_to(outside, target_is_directory=True)
+        (folder / "temporary").write_text("remove")
+        assert core_.close(run.id) == 0
+        assert not folder.exists()
+        # Closing also succeeds when the temporary folder is already gone.
+        assert core_.close(run.id) == 0
+        assert (outside / "keep").read_text() == "keep"
+        assert Path(run.worktree).exists() is not run.read_only
+        # A repeated close also clears a leftover folder.
+        paths.ensure_run_tmp_dir(run.id, env)
+        assert core_.close(run.id) == 0
+        assert not folder.exists()
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_codex_off_creates_no_temporary_folder_and_closes_if_missing(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    read_only: bool,
+) -> None:
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("unsandboxed Codex tried to create a temporary folder")
+
+    monkeypatch.setattr(paths, "ensure_run_tmp_dir", forbidden)
+    core_ = _core(env, _driver(env, "codex"))
+    assert _start(
+        core_, repo, _brief(tmp_path, "Task\n"), engine="codex", model="gpt-5",
+        read_only=read_only,
+    ) == 0, capsys.readouterr().err  # fmt: skip
+    run = record.load(core_.last_run_id or "", env)
+    assert not paths.tmp_dir(env).exists()
+    assert "TMPDIR" not in (run.folder / core.LAUNCH_NAME).read_text()
+    assert core_.close(run.id) == 0
+    assert not paths.tmp_dir(env).exists()
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_codex_temporary_folder_creation_failure_is_69(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    read_only: bool,
+) -> None:
+    choices.set_settings({"sandbox.codex": "on"}, env=env)
+    monkeypatch.setattr(sandbox, "require", lambda engine, env=None: None)
+    parent = paths.tmp_dir(env)
+    parent.parent.mkdir(parents=True, exist_ok=True)
+    parent.write_text("not a folder")
+    driver = _driver(env, "codex")
+    assert _start(
+        _core(env, driver), repo, _brief(tmp_path, "Task\n"), engine="codex",
+        model="gpt-5", read_only=read_only,
+    ) == 69  # fmt: skip
+    assert "cannot create the run's temporary folder" in capsys.readouterr().err
+    assert not driver.commands
+    assert not paths.worktrees_dir(env).exists()

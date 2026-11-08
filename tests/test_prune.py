@@ -1801,3 +1801,81 @@ def test_prune_ended_parent_with_abandoned_preparation(
             assert runs.load(child.id, env).status == runs.STARTING
         else:
             assert process.wait(timeout=5) == -9
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_prune_removes_run_temporary_folder_with_record(
+    env: dict[str, str], tmp_path: Path, dry_run: bool
+) -> None:
+    child = run(env)
+    folder = paths.ensure_run_tmp_dir(child.id, env)
+    (folder / "file").write_text("temporary")
+    outside = tmp_path / "keep"
+    outside.write_text("keep")
+    (folder / "link").symlink_to(outside)
+    result = prune.remove(0, [child.id], env=env, dry_run=dry_run)
+    assert not result.errors
+    assert dict(id=str(folder), kind="tmp") in result.removed
+    assert folder.exists() == dry_run
+    assert child.folder.exists() == dry_run
+    assert outside.read_text() == "keep"
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_prune_sweeps_unrecorded_temporary_entries(
+    env: dict[str, str], tmp_path: Path, dry_run: bool
+) -> None:
+    live = run(env, status=runs.WAITING, ended_at=None)
+    kept = paths.ensure_run_tmp_dir(live.id, env)
+    orphaned = paths.ensure_run_tmp_dir("orphan", env)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep").write_text("keep")
+    link = orphaned.parent / "link"
+    link.symlink_to(outside, target_is_directory=True)
+    (orphaned / "link").symlink_to(outside, target_is_directory=True)
+    result = prune.remove(0, env=env, dry_run=dry_run)
+    assert not result.errors
+    assert kept.is_dir()
+    assert orphaned.exists() == dry_run
+    assert os.path.lexists(link) == dry_run
+    assert (outside / "keep").read_text() == "keep"
+    assert {str(orphaned), str(link)} <= ids(result)
+
+
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_prune_keeps_unrecorded_temporary_folders_when_scoped_or_unreadable(
+    env: dict[str, str], unreadable: bool
+) -> None:
+    child = run(env)
+    folder = paths.ensure_run_tmp_dir("orphan", env)
+    if unreadable:
+        (child.folder / runs.RECORD_NAME).write_text("{")
+    result = prune.remove(0, None if unreadable else [child.id], env=env)
+    assert folder.is_dir()
+    assert str(folder) not in ids(result)
+    assert bool(result.errors) == unreadable
+
+
+def test_prune_temporary_sweep_respects_age(env: dict[str, str]) -> None:
+    old = paths.ensure_run_tmp_dir("old", env)
+    young = paths.ensure_run_tmp_dir("young", env)
+    os.utime(old, (0, 0))
+    os.utime(young, (NOW, NOW))
+    result = prune.remove(1, env=env, now=NOW)
+    assert not result.errors
+    assert not old.exists()
+    assert young.is_dir()
+
+
+def test_prune_temporary_sweep_refuses_symlinked_parent(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    parent = paths.tmp_dir(env)
+    parent.parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    (outside / "orphan").mkdir(parents=True)
+    parent.symlink_to(outside, target_is_directory=True)
+    result = prune.remove(0, env=env)
+    assert result.errors
+    assert (outside / "orphan").is_dir()
