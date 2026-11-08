@@ -4370,8 +4370,9 @@ A notice says `A worker could not read <path>` for each reported hidden
 path, grouped by resolved folder, except entries with reason `startup file`.
 Before checking coverage by `sandbox.read` or merging reports, the app
 validates each recorded `allow_path`: after resolving symlinks, it must
-equal, contain or lie inside the recorded hidden path. A relative path,
-an unresolvable symlink or an unrelated offer is treated as no offer.
+equal, contain or lie inside the recorded hidden path. An unresolvable
+symlink or an unrelated offer is treated as no offer. A turn outcome whose
+`allow_path` is relative is not read, so it adds no report.
 A report is omitted when its valid offered folder, or its matched path
 when none is offered, is already covered by `sandbox.read`.
 
