@@ -173,14 +173,17 @@ those messages with one direct question, such as whether to send anyway.
 `--force` records the messages as accepted.
 
 A run started by `emb gapcheck`, `emb panel` or a flow records that command
-as its `parent`. A flow task run is not orphaned while its flow waits for
-the lead. Its status line, `WARNING:` and Overview say it waits for the
-lead's answer to the flow, with no recover-and-close `next:` line. Answer
-the flow; do not recover and close the task run.
-Otherwise, when the command ends without collecting the run, the run
-shows `orphaned: true` in `emb run --status --json`, with a `WARNING:` and a
-`next:` line. Report each orphaned run to the owner; follow `next:` only when
-this session started its parent command.
+as its `parent`. A flow or panel run is not orphaned while its flow or
+panel still lists it and can run again: `parent_state` in
+`emb run --status --json` says `live`, `lead` or `resume`. At `lead` the
+status line, `WARNING:` and Overview say it waits for the lead's answer to
+the flow: answer the flow. At `resume` they say it waits for the flow to
+resume or the panel to recover, and `next:` is `emb flow --resume <id>` or
+`emb panel --recover <id>`. Do not recover and close such a run; its
+parent collects it. When no running or resumable parent holds the run, it
+shows `orphaned: true`, with a `WARNING:` and a recover-and-close `next:`
+line. Report each orphaned or waiting run to the owner; follow `next:`
+only when this session started its parent command.
 
 The run record's `last_screen_change_at` is the epoch time when a wait
 loop last observed a changed screen. `emb run --status <run> --json`

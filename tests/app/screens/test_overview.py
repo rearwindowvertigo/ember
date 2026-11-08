@@ -2517,8 +2517,16 @@ def test_flow_wait_badge(
     flow["status"] = "failed"
     flow_record.save(flow, env)
     screen.refresh()
-    assert (row.badge.text(), row.badge.tone()) == ("Orphaned", "warning")
+    assert (row.badge.text(), row.badge.tone()) == ("Waiting for Claude", "warning")
     assert waiting not in row.detail_label.text()
+    assert row.detail_label.text().startswith(
+        f"Waiting for flow {FLOW} to resume (last updated "
+    )
+    flow["status"] = "done"
+    flow_record.save(flow, env)
+    screen.refresh()
+    assert (row.badge.text(), row.badge.tone()) == ("Orphaned", "warning")
+    assert "Waiting" not in row.detail_label.text()
 
 
 @pytest.mark.parametrize("parent", ["run", "flow", "panel"])

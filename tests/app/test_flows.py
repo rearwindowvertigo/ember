@@ -174,24 +174,6 @@ def test_plan_wave_without_tasks() -> None:
     assert flows.plan_wave({"plan_waves": [["a"]], "tasks": []}) is None
 
 
-def test_lock_parser_and_identity(tmp_path: Path) -> None:
-    path = tmp_path / "lock"
-    path.touch()
-    held = flows.held_locks(
-        lock_line(path) + "2: FLOCK ADVISORY WRITE 1 0a:ff:42 0 EOF\n"
-        "3: POSIX ADVISORY WRITE 1 00:01:3 0 EOF\n"
-        "4: -> FLOCK ADVISORY WRITE 1 00:01:4 0 EOF\n"
-        "5: FLOCK bad\n6: FLOCK ADVISORY WRITE 1 invalid 0 EOF\n"
-        "7: FLOCK ADVISORY WRITE 1 zz:01:2 0 EOF\n"
-    )
-    assert len(held) == 2
-    assert (10, 255, 42) in held
-    assert flows.lock_held(path, held) is True
-    assert flows.lock_held(path, set()) is False
-    assert flows.lock_held(tmp_path / "absent", held) is False
-    assert flows.lock_held(path, None) is None
-
-
 def test_missing_records_create_nothing(env: dict[str, str], proc_locks: Path) -> None:
     result = flows.read(env, proc_locks=proc_locks)
     assert result.flows == result.panels == []

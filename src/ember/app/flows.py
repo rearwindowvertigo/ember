@@ -1,6 +1,5 @@
 """Read flow and panel records while the app runs, without taking locks."""
 
-import os
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -12,6 +11,7 @@ from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal
 from ember import paths, prune
 from ember.app.tasks import TaskRunner
 from ember.flows import record as flow_record
+from ember.locks import PROC_LOCKS, held_locks, lock_held
 from ember.panels import record as panel_record
 
 BACKSTOP_MS = 60_000
@@ -30,7 +30,6 @@ ACTIVE_TASK = (
 RUNNER_FLOW = ("starting", "running", "checking")
 ENDED_FLOW = flow_record.ENDED
 ENDED_PANEL = ("done", "incomplete")
-PROC_LOCKS = Path("/proc/locks")
 
 
 @dataclass(frozen=True)
@@ -73,34 +72,6 @@ def plan_wave(flow: Mapping[str, Any]) -> tuple[int, int] | None:
         if active.intersection(waves[index]):
             return index + 1, len(waves)
     return None
-
-
-def held_locks(text: str) -> set[tuple[int, int, int]]:
-    """Parse device and inode numbers from granted FLOCK entries."""
-    held = set()
-    for line in text.splitlines():
-        fields = line.split()
-        if len(fields) < 6 or fields[1] != "FLOCK":
-            continue
-        try:
-            major, minor, inode = fields[5].split(":")
-            held.add((int(major, 16), int(minor, 16), int(inode)))
-        except ValueError:
-            continue
-    return held
-
-
-def lock_held(path: Path, held: set[tuple[int, int, int]] | None) -> bool | None:
-    """Read a lock file's identity without opening or creating it."""
-    if held is None:
-        return None
-    try:
-        info = path.stat()
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return None
-    return (os.major(info.st_dev), os.minor(info.st_dev), info.st_ino) in held
 
 
 def _selected(

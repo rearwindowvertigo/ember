@@ -679,48 +679,230 @@ def parent(command: str, parent_id: str | None = None) -> dict[str, Any] | None:
     return {"command": command, "id": parent_id, "pid": found[0], "start": found[1]}
 
 
+OPEN = (STARTING, RUNNING, WAITING)
+"""The statuses of a run that a parent command may still collect."""
+
+PARENT_NONE = "none"
+PARENT_LIVE = "live"
+PARENT_LEAD = "lead"
+PARENT_RESUME = "resume"
+PARENT_ORPHANED = "orphaned"
+PARENT_UNKNOWN = "unknown"
+PARENT_STATES = (
+    PARENT_NONE,
+    PARENT_LIVE,
+    PARENT_LEAD,
+    PARENT_RESUME,
+    PARENT_ORPHANED,
+    PARENT_UNKNOWN,
+)
+"""The values of `ParentState.state`."""
+
+
+@dataclass(frozen=True)
+class ParentState:
+    """Who holds an open run now, read from its parent's record and lock.
+
+    `state` is one of `PARENT_STATES`:
+
+    - `none`: the run is not open, or `emb run` started it.
+    - `live`: a process of the parent command is running and holds the run.
+    - `lead`: the parent flow is stopped for the lead's answer.
+    - `resume`: the parent flow or panel still lists the run and can collect
+      it once it is resumed or recovered, but no process of it is running.
+    - `orphaned`: no running or resumable parent holds the run.
+    - `unknown`: the parent record exists but cannot be read.
+    """
+
+    state: str
+    command: str | None = None
+    id: str | None = None
+    status: str | None = None
+    """The parent record's status, for `lead` and `resume`."""
+    ended_at: float | None = None
+    """When the parent record ended, or else when it last changed, for `resume`."""
+    ended: bool = False
+    """Whether `ended_at` is the parent's end rather than its last change."""
+    error: str | None = None
+    """Why the parent record cannot be read, for `unknown`."""
+
+
+def _flow_runs(flow: Mapping[str, Any]) -> set[str]:
+    """Return the runs a flow collects or closes when it runs again."""
+    found = set()
+    for task in flow["tasks"]:
+        effect = task.get("answer_effect") or {}
+        for value in (
+            task.get("writer_run"),
+            task.get("reviewer_run"),
+            effect.get("run"),
+            effect.get("preparation_run"),
+        ):
+            if isinstance(value, str):
+                found.add(value)
+    return found
+
+
+def _panel_runs(panel: Mapping[str, Any]) -> set[str]:
+    """Return the runs `emb panel --recover` collects."""
+    from ember.panels import record as panels
+
+    return {
+        member["run"]
+        for member in panel["members"]
+        if member["run"] and member["status"] in (*panels.UNFINISHED, "pending")
+    }
+
+
+def parent_state(run: Run, proc_locks: Path | None = None) -> ParentState:
+    """Return who holds an open run, without writing or locking anything.
+
+    A gap check, and a parent with no id, owns its run only while the
+    process that started it runs. A flow or a panel owns a run while its
+    record lists the run as one it collects again; then its lifetime lock
+    or the starting process says whether a process of it runs now. A done
+    flow and a done panel resume nothing. A process id reused by another
+    process does not count, because the start time is compared too.
+
+    Args:
+        run: The run.
+        proc_locks: The kernel's lock table; `None` reads `/proc/locks`.
+
+    Returns:
+        The parent state.
+    """
+    if run.parent is None or run.status not in OPEN:
+        return ParentState(PARENT_NONE)
+    from ember import locks
+
+    command, parent_id = run.parent["command"], run.parent["id"]
+    starter = processes.running((run.parent["pid"], run.parent["start"]))
+    fallback = ParentState(
+        PARENT_LIVE if starter else PARENT_ORPHANED, command, parent_id
+    )
+    if parent_id is None or command not in ("flow", "panel"):
+        return fallback
+    if command == "flow":
+        from ember.flows import record as flows
+
+        if not flows.is_flow_id(parent_id):
+            return fallback
+        try:
+            owner = flows.load(parent_id, run.env)
+        except flows.FlowMissingError:
+            return fallback
+        except flows.FlowError as error:
+            if starter:
+                return fallback
+            return ParentState(PARENT_UNKNOWN, command, parent_id, error=str(error))
+        listed = run.id in _flow_runs(owner)
+        resumable = owner["status"] != "done"
+    else:
+        from ember.panels import record as panels
+
+        if not panels.is_panel_id(parent_id):
+            return fallback
+        try:
+            owner = panels.load(parent_id, run.env)
+        except panels.PanelMissingError:
+            return fallback
+        except panels.PanelError as error:
+            if starter:
+                return fallback
+            return ParentState(PARENT_UNKNOWN, command, parent_id, error=str(error))
+        listed = run.id in _panel_runs(owner)
+        resumable = owner["status"] != "done"
+    if not listed:
+        return fallback
+    status = owner["status"]
+    if command == "flow" and status == "stopped":
+        return ParentState(PARENT_LEAD, command, parent_id, status)
+    held = locks.lifetime_held(
+        parent_id, run.env, locks.PROC_LOCKS if proc_locks is None else proc_locks
+    )
+    if starter or held:
+        return ParentState(PARENT_LIVE, command, parent_id, status)
+    if not resumable:
+        return ParentState(PARENT_ORPHANED, command, parent_id, status)
+    ended = owner.get("ended_at") is not None
+    return ParentState(
+        PARENT_RESUME,
+        command,
+        parent_id,
+        status,
+        owner["ended_at"] if ended else owner["updated_at"],
+        ended,
+    )
+
+
+def _ago(seconds: float) -> str:
+    """Return an age in minutes, hours or days: "1 min", "5 h", "3 days"."""
+    minutes = max(1, int(seconds // 60))
+    if minutes < 60:
+        return f"{minutes} min"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours} h"
+    return f"{hours // 24} days"
+
+
+def parent_wait(state: ParentState, now: float | None = None) -> str | None:
+    """Describe what a held run waits for, or `None` when it waits for nothing.
+
+    Args:
+        state: The run's parent state.
+        now: The current time; `None` reads the clock.
+
+    Returns:
+        "waiting for the lead's answer to flow <id>", or "waiting for flow
+        <id> to resume (failed 3 days ago)" or "waiting for panel <id> to
+        recover (last updated 5 min ago)"; `None` for every other state.
+    """
+    if state.state == PARENT_LEAD:
+        return f"waiting for the lead's answer to flow {state.id}"
+    if state.state != PARENT_RESUME or state.ended_at is None:
+        return None
+    verb = "resume" if state.command == "flow" else "recover"
+    age = _ago((time.time() if now is None else now) - state.ended_at)
+    when = f"{state.status} {age} ago" if state.ended else f"last updated {age} ago"
+    return f"waiting for {state.command} {state.id} to {verb} ({when})"
+
+
+def parent_next(state: ParentState) -> str | None:
+    """Return the command that lets a held run's parent collect it again."""
+    if state.state == PARENT_RESUME:
+        if state.command == "flow":
+            return f"emb flow --resume {state.id}"
+        return f"emb panel --recover {state.id}"
+    if state.state == PARENT_UNKNOWN:
+        return f"emb {state.command} --status {state.id}"
+    return None
+
+
 def waiting_for_flow(run: Run) -> str | None:
     """Return the parent flow id when an open run awaits the lead's flow answer.
 
-    Missing or unreadable flow records do not establish a lead stop.
+    The flow must list the run as one it collects again. Missing or
+    unreadable flow records do not establish a lead stop.
     """
-    if (
-        run.status not in (STARTING, RUNNING, WAITING)
-        or run.parent is None
-        or run.parent["command"] != "flow"
-        or run.parent["id"] is None
-    ):
-        return None
-    from ember.flows import record as flows
-
-    try:
-        flow = flows.load(run.parent["id"], run.env)
-    except flows.FlowError:
-        return None
-    return flow["id"] if flow["status"] == "stopped" else None
+    state = parent_state(run)
+    return state.id if state.state == PARENT_LEAD else None
 
 
 def orphaned(run: Run) -> bool:
-    """Return whether a run's parent command ended and left the run uncollected.
+    """Return whether no running or resumable parent holds an open run.
 
-    A run started by `emb run` has no parent and is never orphaned. A process
-    id reused by another process does not count as the parent, because the
-    start time is compared too. A flow stopped for the lead retains its runs.
+    A run started by `emb run` has no parent and is never orphaned. A flow
+    or a panel that lists the run and can still run again holds it, also
+    while no process of it runs; `parent_state` describes the rules.
 
     Args:
         run: The run.
 
     Returns:
-        True when the run is starting, running or waiting, it records a
-        parent, and that parent process is no longer running, unless its flow
-        is stopped for the lead.
+        True when `parent_state(run).state` is `orphaned`.
     """
-    if run.parent is None or run.status not in (STARTING, RUNNING, WAITING):
-        return False
-    return (
-        not processes.running((run.parent["pid"], run.parent["start"]))
-        and waiting_for_flow(run) is None
-    )
+    return parent_state(run).state == PARENT_ORPHANED
 
 
 def load(run_id: str, env: Mapping[str, str] | None = None) -> Run:
