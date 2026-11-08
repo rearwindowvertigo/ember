@@ -3622,10 +3622,8 @@ def test_diagnostic_the_worker_was_given_is_not_a_denial(
         read = (str(evidence),)
     else:
         (repo / "notes.md").write_text(f"{line}\n")
-        subprocess.run(["git", "-C", str(repo), "add", "notes.md"], check=True)
-        subprocess.run(
-            ["git", "-C", str(repo), "commit", "-q", "-m", "notes"], check=True
-        )
+        git(repo, "add", "notes.md", env=env)
+        git(repo, "commit", "-q", "-m", "notes", env=env)
     brief = _brief(tmp_path, f"Task\n@reply {line}\n")
     core_ = _core(env)
     assert _start(core_, repo, brief, read=read) == 0
