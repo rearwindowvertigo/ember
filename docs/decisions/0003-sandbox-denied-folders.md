@@ -1,6 +1,6 @@
 # ADR 0003: Sandbox denied folders
 
-- Status: Accepted, 2026-11-03.
+- Status: Accepted, 2026-11-03. Amended by ADR 0006, 2026-11-08.
 - Release: Ember 0.13.0.
 - Issue: #106.
 

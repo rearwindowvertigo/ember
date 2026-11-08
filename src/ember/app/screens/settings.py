@@ -393,7 +393,14 @@ class SettingsScreen(QWidget):
         """List the folders whose denial notices the owner has hidden."""
         clear_layout(self.hidden_layout)
         self.hidden_rows = {}
-        hidden = state.load(self.context.env).denied_hidden
+        hidden = [
+            *(self.context.setting("sandbox.hidden_notices") or []),
+            *(
+                path
+                for path in state.load(self.context.env).denied_hidden
+                if path not in (self.context.setting("sandbox.hidden_notices") or [])
+            ),
+        ]
         if not hidden:
             self.hidden_layout.setContentsMargins(0, 0, 0, 0)
             self.hidden_layout.addWidget(label("No folders hidden.", "secondary"))
@@ -531,7 +538,20 @@ class SettingsScreen(QWidget):
     # Saving
 
     def _show_notices(self, path: str) -> None:
-        """Restore notices for the folder, including dismissed reports."""
+        """Restore notices for the folder, including dismissed reports.
+
+        The folder leaves `sandbox.hidden_notices`, so later reports of it
+        print owner actions again.
+        """
+        hidden = list(self.context.setting("sandbox.hidden_notices") or [])
+        if path in hidden:
+            self._save(
+                {
+                    "sandbox.hidden_notices": [
+                        folder for folder in hidden if folder != path
+                    ]
+                }
+            )
         saved = state.load(self.context.env)
         state.save(
             dataclasses.replace(

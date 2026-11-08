@@ -19,6 +19,10 @@ variables in `WORKER_CACHE_VARIABLES` for tools that do not follow it.
 Each sandboxed Codex run has a mode 700 temporary folder at `/tmp/ember-<6 hex>`,
 using the run id's suffix, with `TMPDIR` set through `shell_environment_policy.set`,
 including for read-only runs. Start refuses an existing entry with exit 69.
+The commands Codex runs also get `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and
+`XDG_STATE_HOME` set to `config`, `data` and `state` in that folder, with a
+symlink to each kept path inside the owner's matching base, and an
+`XDG_DATA_DIRS` without entries in the home folder. `HOME` is unchanged.
 The shared `/tmp` stays writable. Codex profiles deny every other entry matching
 `ember-<6 hex>` there by name. Ember removes the folder on close or worktree
 removal; prune removes it with the record and sweeps unrecorded folders owned
@@ -39,12 +43,14 @@ Every function that reads the environment takes an optional `env` mapping,
 which defaults to `os.environ`.
 """
 
+import contextlib
 import fcntl
 import json
 import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -245,6 +251,115 @@ def worker_cache_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
         (variable, str(root / folder)) for variable, folder in WORKER_CACHE_VARIABLES
     )
     return result
+
+
+WORKER_HOME_FOLDERS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("XDG_CONFIG_HOME", "config", (".config",)),
+    ("XDG_DATA_HOME", "data", (".local", "share")),
+    ("XDG_STATE_HOME", "state", (".local", "state")),
+)
+"""Each XDG base a Codex worker's commands get in the run's temporary folder.
+
+Each entry is the variable, the folder's name inside the run's temporary
+folder, and the default base relative to the home folder.
+"""
+
+DEFAULT_DATA_DIRS = ("/usr/local/share/", "/usr/share/")
+"""The XDG Base Directory specification's default `XDG_DATA_DIRS`."""
+
+
+def worker_home_env(
+    temporary: Path, env: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """Return the XDG variables that give a Codex worker's commands own folders.
+
+    `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME` name folders in
+    the run's temporary folder. `XDG_DATA_DIRS` keeps the owner's entries
+    outside the home folder, or the specification's default when none remain.
+
+    Args:
+        temporary: The run's temporary folder.
+        env: The environment; `None` reads `os.environ`.
+
+    Returns:
+        The four variables.
+    """
+    env = _env(env)
+    home = paths.home_dir(env)
+    homes = {home, home.resolve()}
+    result = {
+        variable: str(Path(temporary) / name)
+        for variable, name, _ in WORKER_HOME_FOLDERS
+    }
+    entries = [
+        entry
+        for entry in env.get("XDG_DATA_DIRS", "").split(os.pathsep)
+        if entry
+        and Path(entry).is_absolute()
+        and not any(
+            Path(variant).is_relative_to(folder)
+            for variant in (Path(entry), Path(entry).resolve())
+            for folder in homes
+        )
+    ]
+    result["XDG_DATA_DIRS"] = os.pathsep.join(entries or DEFAULT_DATA_DIRS)
+    return result
+
+
+def prepare_worker_homes(
+    temporary: Path, kept: Iterable[Path], env: Mapping[str, str] | None = None
+) -> None:
+    """Create a Codex run's XDG folders and link the kept paths they hold.
+
+    Each folder of `WORKER_HOME_FOLDERS` is created at mode 700 in the run's
+    temporary folder. A kept path inside the owner's matching base, such as
+    git's configuration folder or a read path in `~/.local/share`, gets a
+    symlink at the same relative place, so tools find it through the new
+    base. A kept path inside another linked one gets no link of its own.
+    Nothing is done when the temporary folder is missing or is a symlink.
+    Existing entries are left as they are, and an entry that cannot be
+    created is skipped.
+
+    Args:
+        temporary: The run's temporary folder.
+        kept: The run's kept paths, from `kept_paths`.
+        env: The environment; `None` reads `os.environ`.
+    """
+    env = _env(env)
+    try:
+        if not stat.S_ISDIR(os.lstat(temporary).st_mode):
+            return
+    except OSError:
+        return
+    home = paths.home_dir(env)
+    kept = sorted(set(kept), key=lambda path: (len(path.parts), str(path)))
+    for variable, name, default in WORKER_HOME_FOLDERS:
+        folder = Path(temporary) / name
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(folder, mode=paths.DIR_MODE)
+        if folder.is_symlink() or not folder.is_dir():
+            continue
+        base = _xdg(home, env, variable, *default)
+        linked: list[Path] = []
+        for path in kept:
+            relative = next(
+                (
+                    path.relative_to(root)
+                    for root in dict.fromkeys((base, base.resolve()))
+                    if path != root and path.is_relative_to(root)
+                ),
+                None,
+            )
+            if relative is None or not path.exists():
+                continue
+            if any(relative.is_relative_to(done) for done in linked):
+                continue
+            link = folder / relative
+            with contextlib.suppress(OSError):
+                link.parent.mkdir(mode=paths.DIR_MODE, parents=True, exist_ok=True)
+                if not os.path.lexists(link):
+                    os.symlink(path, link)
+                linked.append(relative)
 
 
 def _worker_cache(env: Mapping[str, str]) -> Path:
@@ -683,15 +798,68 @@ def merge_denial(first: Mapping[str, Any], second: Mapping[str, Any]) -> dict[st
     }
 
 
-def denied_paths(text: str, snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
+DENIAL_PATTERN = r"permission denied|operation not permitted|\bEACCES\b"
+"""The diagnostics, matched without case, that make a line a denial candidate."""
+
+QUOTED_MINIMUM = 16
+"""The shortest supplied diagnostic, in characters, that marks a line quoted."""
+
+
+def _normal(line: str) -> str:
+    return " ".join(line.split()).casefold()
+
+
+def supplied_diagnostics(texts: Iterable[str]) -> set[str]:
+    """Return the denial diagnostics in text Ember gave the worker.
+
+    Each line of `texts` that matches `DENIAL_PATTERN` and names an absolute
+    or `~/` path is kept with its whitespace collapsed and its case folded,
+    when it is at least `QUOTED_MINIMUM` characters long after that. A line
+    without a path, such as a bare `Permission denied`, is left out, so it
+    cannot mark every real denial as quoted.
+
+    Args:
+        texts: Text the worker received, such as its brief, its turn messages
+            and files it was given to read.
+
+    Returns:
+        The normalized diagnostic lines.
+    """
+    found: set[str] = set()
+    for text in texts:
+        for line in text.splitlines():
+            if re.search(DENIAL_PATTERN, line, re.I) and re.search(
+                r"(?:^|[\s\"'`(=:])(?:/|~/)[^\s/]", line
+            ):
+                normal = _normal(line)
+                if len(normal) >= QUOTED_MINIMUM:
+                    found.add(normal)
+    return found
+
+
+def denied_paths(
+    text: str, snapshot: Mapping[str, Any], quoted: Iterable[str] = ()
+) -> list[dict[str, Any]]:
     """Find fully stated denied paths using the sandbox's launch-time inventory.
 
     Absolute and `~/` paths can occur on the error line or a neighboring
     diagnostic line. `~/` uses the home folder recorded at launch. Both given
     and resolved names are checked; relative paths are not resolved or reported.
+    An error line that contains one of `quoted`, compared after collapsing
+    whitespace and folding case, is text the worker read, not a denial it
+    met, and is skipped.
+
+    Args:
+        text: The worker's output, reply or screen.
+        snapshot: The run's launch-time inventory, from `hidden_snapshot`.
+        quoted: Diagnostics Ember gave the worker, from `supplied_diagnostics`.
+
+    Returns:
+        One entry per resolved hidden path: `path`, `reason` and `allow_path`.
     """
     found: dict[str, dict[str, Any]] = {}
-    error_pattern = r"permission denied|operation not permitted|\bEACCES\b"
+    error_pattern = DENIAL_PATTERN
+    supplied = [line for line in quoted if line]
 
     def json_text(value: object, *, path_field: bool = False) -> str:
         """Keep diagnostic strings from structured output without its field names."""
@@ -773,6 +941,8 @@ def denied_paths(text: str, snapshot: Mapping[str, Any]) -> list[dict[str, Any]]
 
     for index, line in enumerate(lines):
         if not re.search(error_pattern, line, re.I):
+            continue
+        if supplied and any(item in _normal(line) for item in supplied):
             continue
         names = path_names(line)
         if not names and relative_operand(line):
@@ -948,8 +1118,10 @@ def codex_args(
     The workers' cache folder is writable, also in a read-only run, and the
     commands Codex runs get the variables of `worker_cache_env` through
     `shell_environment_policy.set`, together with `TMPDIR` pointing to the
-    run's writable temporary folder. The shared `/tmp` stays writable;
-    other matching run temporary entries are denied.
+    run's writable temporary folder and the XDG variables of
+    `worker_home_env`, whose folders `prepare_worker_homes` creates there.
+    The Codex process itself keeps the owner's environment. The shared
+    `/tmp` stays writable; other matching run temporary entries are denied.
     The cache folder is created when it is missing.
 
     Args:
@@ -997,9 +1169,15 @@ def codex_args(
         for path, access in filesystem.items()
     )
     extends = ":read-only" if read_only else ":workspace"
+    prepare_worker_homes(temporary, kept, env)
+    values = {
+        **worker_cache_env(env),
+        **worker_home_env(temporary, env),
+        "TMPDIR": str(temporary),
+    }
     variables = [
         option
-        for name, value in {**worker_cache_env(env), "TMPDIR": str(temporary)}.items()
+        for name, value in values.items()
         for option in (
             "-c",
             f"shell_environment_policy.set.{name}="
