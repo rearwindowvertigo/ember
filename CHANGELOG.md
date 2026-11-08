@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.0](https://github.com/rearwindowvertigo/ember/compare/v0.19.0...v0.20.0) (2026-11-08)
+
+
+### Added
+
+* give each Codex run its own temporary folder ([d2eedc8](https://github.com/rearwindowvertigo/ember/commit/d2eedc83581531ee2ed5e1efa8a80945e42e16e3))
+
 ## [0.19.0](https://github.com/rearwindowvertigo/ember/compare/v0.18.0...v0.19.0) (2026-11-08)
 
 
