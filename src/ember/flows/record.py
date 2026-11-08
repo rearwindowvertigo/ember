@@ -357,17 +357,27 @@ def _validate(flow_id: str, flow: object) -> None:
 def create(
     flow: Mapping[str, Any], plan_text: str, env: Mapping[str, str] | None = None
 ) -> Path:
-    """Create a private flow folder, its original plan, record and first event."""
+    """Publish a private flow folder with its plan, record and first event."""
     flow = dict(flow)
     flow_id = flow["id"]
     directory = folder(flow_id, env)
     _validate(flow_id, flow)
-    if directory.exists():
-        raise FlowError(flow_id, "the flow folder already exists")
-    record.make_run_dir(flow_id, env)
-    record.write_private(directory / PLAN_NAME, plan_text)
-    record.write_private(directory / FLOW_NAME, json.dumps(dict(flow), indent=2) + "\n")
-    append_event(flow_id, {"kind": "flow", "status": "starting", "reason": None}, env)
+    try:
+        with paths.create_record_dir(directory, root=paths.state_dir(env)) as temporary:
+            record.write_private(temporary / PLAN_NAME, plan_text)
+            record.write_private(
+                temporary / FLOW_NAME, json.dumps(dict(flow), indent=2) + "\n"
+            )
+            _append(
+                flow_id,
+                EVENTS_NAME,
+                "seq",
+                {"kind": "flow", "status": "starting", "reason": None},
+                env,
+                directory=temporary,
+            )
+    except FileExistsError as error:
+        raise FlowError(flow_id, "the flow folder already exists") from error
     return directory
 
 
@@ -507,9 +517,11 @@ def _append(
     field: str,
     value: Mapping[str, Any],
     env: Mapping[str, str] | None,
+    *,
+    directory: Path | None = None,
 ) -> dict[str, Any]:
     """Allocate a number, repair the tail and append under the log's lock."""
-    directory = folder(flow_id, env)
+    directory = folder(flow_id, env) if directory is None else directory
     path = directory / name
     fd = paths.open_private_file(path, os.O_RDWR | os.O_APPEND)
     try:

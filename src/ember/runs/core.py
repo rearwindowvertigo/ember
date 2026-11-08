@@ -932,6 +932,7 @@ class Core:
 
         The command lock is held before the run record exists, throughout
         preparation and session admission, until the first turn finishes.
+        The run folder is published with its brief and initial record together.
 
         Args:
             options: The run's options.
@@ -1070,13 +1071,21 @@ class Core:
                 commits=(),
                 subject=subject,
                 parent=options.parent,
-                folder=record.make_run_dir(run_id, self.env),
+                folder=record.run_dir(run_id, self.env),
                 env=self.env,
             )
             started = time.monotonic()
             try:
-                record.write_private(run.folder / record.BRIEF_NAME, brief)
-                record.save(run)
+                with paths.create_record_dir(
+                    run.folder, root=paths.state_dir(self.env)
+                ) as temporary:
+                    record.write_private(temporary / record.BRIEF_NAME, brief)
+                    record.save(replace(run, folder=temporary))
+            except BaseException:
+                if provider == sandbox.CODEX:
+                    paths.remove_run_tmp_dir(run_id, self.env)
+                raise
+            try:
                 self.last_run_id = run.id
                 self._say(f"run {run_id}")
                 self._warn(worker.line())

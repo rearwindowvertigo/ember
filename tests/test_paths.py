@@ -3,6 +3,7 @@ import pwd
 import stat
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -37,6 +38,54 @@ def test_absolute_variable_is_used(
     base = tmp_path / "base"
     env = {"HOME": str(home), variable: str(base)}
     assert function(env) == base / "ember"
+
+
+@pytest.mark.parametrize("kind", ["folder", "file", "symlink", "dangling"])
+@pytest.mark.parametrize("late", [False, True])
+def test_record_creation_refuses_existing_destination(
+    tmp_path: Path, kind: str, late: bool
+) -> None:
+    directory = tmp_path / "record"
+
+    def occupy() -> None:
+        if kind == "folder":
+            directory.mkdir()
+        elif kind == "file":
+            directory.write_text("keep")
+        else:
+            target = tmp_path / "target"
+            if kind == "symlink":
+                target.mkdir()
+            directory.symlink_to(target, target_is_directory=True)
+
+    if not late:
+        occupy()
+    with (
+        pytest.raises(FileExistsError),
+        paths.create_record_dir(directory, root=tmp_path) as temporary,
+    ):
+        (temporary / "record.json").write_text("{}")
+        occupy()
+    assert os.path.lexists(directory)
+    assert not list(tmp_path.glob(f"{paths.CREATION_TMP_PREFIX}*"))
+    if kind == "file":
+        assert directory.read_text() == "keep"
+    elif kind == "folder":
+        assert list(directory.iterdir()) == []
+    else:
+        assert directory.is_symlink()
+
+
+def test_record_creation_rename_failure_removes_temporary_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(os, "rename", Mock(side_effect=OSError("rename failed")))
+    with (
+        pytest.raises(OSError, match="rename failed"),
+        paths.create_record_dir(tmp_path / "record", root=tmp_path) as temporary,
+    ):
+        (temporary / "record.json").write_text("{}")
+    assert list(tmp_path.iterdir()) == []
 
 
 DEFAULTS = [

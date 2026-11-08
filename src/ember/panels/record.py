@@ -239,22 +239,22 @@ def create(
     brief: str,
     env: Mapping[str, str] | None = None,
 ) -> Path:
-    """Create the private panel artifacts while the caller holds its lock."""
+    """Publish the private panel artifacts while the caller holds its lock."""
     panel = dict(panel)
     panel_id = panel["id"]
     directory = folder(panel_id, env)
     _validate(panel_id, panel)
-    paths.ensure_private_dir(directory.parent, root=paths.state_dir(env))
     try:
-        directory.mkdir(mode=0o700)
+        with paths.create_record_dir(directory, root=paths.state_dir(env)) as temporary:
+            paths.ensure_private_dir(temporary / MEMBERS_DIR, root=temporary)
+            record.write_private(temporary / QUESTION_NAME, question)
+            record.write_private(temporary / BRIEF_NAME, brief)
+            record.write_private(
+                temporary / PANEL_NAME, json.dumps(panel, indent=2) + "\n"
+            )
+            _write_summary(panel, temporary)
     except FileExistsError as error:
         raise PanelError(panel_id, "the panel folder already exists") from error
-    record.make_run_dir(panel_id, env)
-    paths.ensure_private_dir(directory / MEMBERS_DIR, root=directory)
-    record.write_private(directory / QUESTION_NAME, question)
-    record.write_private(directory / BRIEF_NAME, brief)
-    record.write_private(directory / PANEL_NAME, json.dumps(panel, indent=2) + "\n")
-    write_summary(panel, env)
     return directory
 
 
@@ -400,7 +400,11 @@ def write_summary(
     env: Mapping[str, str] | None = None,
 ) -> Path:
     """Atomically write a summary, retaining readable replies of failed members."""
-    directory = folder(panel["id"], env)
+    return _write_summary(panel, folder(panel["id"], env))
+
+
+def _write_summary(panel: Mapping[str, Any], directory: Path) -> Path:
+    """Write the summary into a published or temporary panel folder."""
     question = (directory / QUESTION_NAME).read_text(encoding="utf-8")
     replies: dict[int, str] = {}
     for member in panel["members"]:
