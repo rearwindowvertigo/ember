@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 from pytestqt.qtbot import QtBot
 
-from ember import paths, prune, sandbox
+from ember import choices, paths, prune, sandbox
 from ember.app import flows, state, theme, tray
 from ember.app.context import AppContext
 from ember.app.screens import overview
@@ -2067,9 +2067,11 @@ def test_dont_show_again_hides_resolved_folder_for_later_reports(
     screen = screen_for(context, qtbot)
     before = context.runs.runs()
     records = (screen.records.flows(), screen.records.panels())
-    screen.denied_notices[str(folder)].buttons[-1].click()
+    with qtbot.waitSignal(context.settings_changed):
+        screen.denied_notices[str(folder)].buttons[-1].click()
     assert screen.denied_notices == {}
-    assert state.load(env).denied_hidden == [str(folder)]
+    assert context.setting("sandbox.hidden_notices") == [str(folder)]
+    assert state.load(env).denied_hidden == []
     assert state.load(env).denied_dismissals == {}
     assert context.runs.runs() == before
     assert (screen.records.flows(), screen.records.panels()) == records
@@ -2106,17 +2108,64 @@ def test_settings_show_again_restores_dismissed_denial_notice(
     settings = SettingsScreen(context)
     qtbot.addWidget(settings)
     assert settings.hidden_rows == {}
-    screen.denied_notices[str(folder)].buttons[-1].click()
+    with qtbot.waitSignal(context.settings_changed):
+        screen.denied_notices[str(folder)].buttons[-1].click()
     saved = state.load(env)
     state.save(replace(saved, denied_dismissals={str(folder): [f"{run.id}:1"]}), env)
     screen.hide()
     settings.shown()
-    settings.hidden_rows[str(folder)].click()
+    with qtbot.waitSignal(context.settings_changed):
+        settings.hidden_rows[str(folder)].click()
+    assert context.setting("sandbox.hidden_notices") == []
     assert state.load(env).denied_hidden == []
     assert state.load(env).denied_dismissals == {}
     screen.show()
     screen.shown()
     assert list(screen.denied_notices) == [str(folder)]
+
+
+@pytest.mark.parametrize("spelling", ["trailing slash", "alias", "parent"])
+def test_hidden_notice_setting_matches_resolved_folders(
+    context: AppContext, qtbot: QtBot, env: dict[str, str], spelling: str
+) -> None:
+    folder = Path(env["HOME"]) / ".toolchain"
+    (folder / "bin").mkdir(parents=True)
+    alias = folder.with_name("alias")
+    alias.symlink_to(folder, target_is_directory=True)
+    denied = folder / "bin" if spelling == "parent" else folder
+    run = write_run(make_run(env, LIVE_A))
+    _write_denial(run, denied)
+    value = {
+        "trailing slash": f"{folder}/",
+        "alias": str(alias),
+        "parent": str(folder),
+    }[spelling]
+    choices.set_settings({"sandbox.hidden_notices": [value]}, env=env)
+    with qtbot.waitSignal(context.settings_changed):
+        context.reload_settings()
+    with qtbot.waitSignal(context.runs.reloaded):
+        context.runs.reload()
+    screen = screen_for(context, qtbot)
+    assert screen.denied_notices == {}
+
+
+def test_folders_hidden_in_the_state_file_move_into_the_setting(
+    context: AppContext, qtbot: QtBot, env: dict[str, str]
+) -> None:
+    folder = Path(env["HOME"]) / ".toolchain"
+    run = write_run(make_run(env, LIVE_A))
+    _write_denial(run, folder)
+    state.save(replace(state.load(env), denied_hidden=[str(folder)]), env)
+    with qtbot.waitSignal(context.settings_changed):
+        context.reload_settings()
+    with qtbot.waitSignal(context.runs.reloaded):
+        context.runs.reload()
+    with qtbot.waitSignal(context.settings_changed):
+        screen = screen_for(context, qtbot)
+    assert screen.denied_notices == {}
+    assert context.setting("sandbox.hidden_notices") == [str(folder)]
+    qtbot.waitUntil(lambda: state.load(env).denied_hidden == [])
+    assert screen.denied_notices == {}
 
 
 def test_showing_overview_rechecks_paths_allowed_while_hidden(

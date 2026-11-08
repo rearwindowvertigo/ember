@@ -503,6 +503,16 @@ def _keys() -> dict[str, Key]:
     )
     keys.append(
         Key(
+            "sandbox.hidden_notices",
+            _STANDING,
+            _absolute_paths,
+            _constant([]),
+            is_list=True,
+            pattern="absolute paths, comma-separated",
+        )
+    )
+    keys.append(
+        Key(
             "terminal",
             _STANDING,
             _command_line,
@@ -517,6 +527,9 @@ def _keys() -> dict[str, Key]:
 
 KEYS: dict[str, Key] = _keys()
 """Every settings key, in display order."""
+
+PATH_LISTS = ("sandbox.read", "sandbox.hidden_notices")
+"""Path-list keys whose command-line value may also be a JSON string list."""
 
 
 def _get_key(name: str, layer: str) -> Key:
@@ -555,7 +568,8 @@ def parse_value(name: str, text: str) -> object:
     Args:
         name: The key.
         text: The text after `=`; lists are comma-separated. `sandbox.read`
-            also accepts a JSON string list for paths containing commas.
+            and `sandbox.hidden_notices` also accept a JSON string list for
+            paths containing commas.
             `worktree.prepare` accepts a JSON object.
 
     Returns:
@@ -574,13 +588,11 @@ def parse_value(name: str, text: str) -> object:
             raise InvalidChoiceError("worktree.prepare is not valid JSON") from error
         validate_value(name, value)
         return value
-    if name == "sandbox.read" and text.startswith("["):
+    if name in PATH_LISTS and text.startswith("["):
         try:
             value = json.loads(text)
         except ValueError as error:
-            raise InvalidChoiceError(
-                "sandbox.read is not a JSON string list"
-            ) from error
+            raise InvalidChoiceError(f"{name} is not a JSON string list") from error
         return _string_list(value)
     if key.is_list:
         return text.split(",") if text else []

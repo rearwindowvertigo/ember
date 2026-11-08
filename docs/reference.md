@@ -68,12 +68,13 @@ empty list.
 | `sandbox.codex` | `on`, `off` | `on` when `bwrap` is on `PATH` or the `codex` on `PATH` has a bundled `bwrap`, else `off` | standing |
 | `sandbox.opencode`, `sandbox.claude` | `on`, `off` | `on` when `bwrap` is on `PATH`, else `off` | standing |
 | `sandbox.read` | List of absolute paths, no duplicates; paths inside Ember's configuration or state folders are refused | `[]` | standing |
+| `sandbox.hidden_notices` | List of absolute paths, no duplicates; resolved denied folders whose notices are hidden and whose denials need no owner answer | `[]` | standing |
 | `terminal` | A non-empty command line in shell syntax | `xdg-terminal-exec` | standing |
 | `app.autostart` | `on`, `off` | `on` | standing |
 | `app.theme` | `system`, `light`, `dark` | `system` | standing |
 
-`sandbox.read` accepts a JSON array of strings or a comma-separated list
-at the terminal. Use a shell-quoted JSON array for paths containing commas
+`sandbox.read` and `sandbox.hidden_notices` accept a JSON array of strings
+or a comma-separated list at the terminal. Use a shell-quoted JSON array for paths containing commas
 or quotes. Settings and `emb choices` check given and resolved paths when
 refusing Ember's configuration and state folders.
 
@@ -632,7 +633,28 @@ names, only when owned by the current user, not symlinks, and every record
 could be read. It also sweeps unrecorded entries in
 `$XDG_CACHE_HOME/ember/tmp` from 0.20.0 under the same record-readability rule.
 Removal does not follow symlinks out of the folder. With `sandbox.codex` off,
-Ember creates no temporary folder and sets no `TMPDIR`. Bubblewrap mounts a
+Ember creates no temporary folder and sets no `TMPDIR`.
+
+The commands a sandboxed Codex run executes also get their own XDG base
+folders in that temporary folder. The Codex process keeps the owner's
+environment, and `HOME` is unchanged:
+
+| Variable | Value |
+|---|---|
+| `XDG_CONFIG_HOME` | `config` in the run's temporary folder |
+| `XDG_DATA_HOME` | `data` in it |
+| `XDG_STATE_HOME` | `state` in it |
+| `XDG_DATA_DIRS` | The owner's entries outside the home folder, or `/usr/local/share/:/usr/share/` when none remain |
+
+Ember creates the three folders at mode 700 before each launch. Each kept
+path inside the owner's matching base gets a symlink at the same relative
+place: git's configuration folder becomes `config/git`, and a read path
+such as `~/.local/share/pipx` becomes `data/pipx`. A kept path inside
+another linked one gets no link of its own, missing kept paths get none,
+and existing entries are left as they are. Tools that write their own
+configuration, data or state, such as Chrome's crash reporter in
+`$XDG_CONFIG_HOME/google-chrome`, write there instead of a hidden folder.
+The folders go with the temporary folder. Bubblewrap mounts a
 private empty `/tmp` for each worker and gets no run temporary folder.
 Every sandboxed worker, the engine itself for OpenCode and Claude
 and the commands Codex runs, gets these variables, which replace any value
@@ -664,6 +686,15 @@ absolute or home-relative (`~/`) path. It matches the path against the
 hidden paths saved at launch, including their given and resolved names;
 later settings changes do not reclassify the turn. A failure without a
 printed path, or with only a working-directory-relative path, is not detected.
+
+A diagnostic the worker was given is not a denial. Ember collects the
+lines that match those patterns and name an absolute or `~/` path, at
+least 16 characters long, from the run's brief, every turn message, the
+files under the run's `--read` paths and the tracked files of its
+worktree. An output line that contains one of them, compared after
+collapsing whitespace and ignoring case, is skipped. Read paths are
+resolved and walked without following symlinks inside them, up to 2,000
+files of at most 1 MiB each.
 
 Each turn's `denied_paths` is a list of objects:
 
@@ -719,7 +750,10 @@ A failed turn prints the unqualified line above. The `WARNING:` line and
 `denied_paths` entry are unchanged by this qualification.
 A startup, secret or protected warning appends `(startup file)`,
 `(secret location)` or `(protected)`.
-Startup-file denials receive no `owner:` line. A `hidden` denial with
+Startup-file denials receive no `owner:` line. Nor does a denial whose
+resolved path lies inside a folder in `sandbox.hidden_notices`: its
+`WARNING:` line and `denied_paths` entry stay, and it records no owner
+wait. A `hidden` denial with
 `allow_path: null` receives `owner: <path> is hidden; no folder can be
 offered because each folder that holds it also holds private files`, with no `sandbox.read`
 suggestion. Protected runtime and other worker worktree paths also receive
@@ -1043,6 +1077,7 @@ UTC. It is also the tmux session's name.
 | `last_reason` | string or null | Its message, or the paths a read-only turn changed |
 | `owner_wait` | list of strings | Pending `owner:` lines; empty when absent from an older record |
 | `owner_read` | list of strings | Suggested `sandbox.read` values in owner-line order; an empty string for an action without one; empty when absent from an older record |
+| `owner_denied` | list of strings | Resolved denied paths in owner-line order; an empty string for an action that is not a denial; empty when absent from an older record, which then clears only through `owner_read` or `--answered` |
 | `answered_at` | number or null | Epoch seconds when `--answered` ended the wait; null before an answer or when absent from an older record |
 | `commits` | list of strings | The run's commits, oldest first |
 | `subject` | string | The brief's first non-empty line |
@@ -1104,9 +1139,12 @@ also works on a closed run. With nothing pending or a parent run, it
 exits 0 and prints the current status next line when one applies; an
 unknown run exits 64 with `next: emb run --status`.
 
-A denial-only wait also ends when `sandbox.read` contains every value
-the pending owner lines suggested: each `allow_path`, or the denied path
-when that was suggested instead. Other actions need `--answered`.
+A denial-only wait also ends when the owner has decided every pending
+denial: its suggested value (the `allow_path`, or the denied path when
+that was suggested instead) is in `sandbox.read`, or its resolved denied
+path lies inside a folder in `sandbox.hidden_notices` after resolving
+symlinks. The second covers a denial with no suggested value. Other
+actions need `--answered`.
 Waiting does not refuse `--send`, `--recover`, `--close` or `emb merge`.
 A later turn's result replaces the earlier turn's wait. Runs started by
 flows, panels or gap checks do not record owner waits; their parent steps
@@ -4413,9 +4451,14 @@ offered folder says `No folder can be offered for automatic read permission.`
 These notices have no Allow reading button. Older records that classify a
 startup file as `hidden` still show this notice.
 Dismiss hides the path until a later run or turn reports it again.
-Don't show again hides notices for that resolved folder, including every
-later report, until Show again in Settings, Hidden notices. Both actions
-persist in the app's state file. Hiding notices leaves run status, flow
+Don't show again adds that resolved folder to `sandbox.hidden_notices`.
+It hides notices for the folder and every folder inside it, compared
+after resolving symlinks, including every later report, until Show
+again in Settings, Hidden notices removes it. A later denial inside that
+folder prints no `owner:` line and records no owner wait. Dismiss persists
+in the app's state file. Folders hidden in the state file's `denied_hidden`
+list move into `sandbox.hidden_notices` when Overview next checks denials,
+and the list is emptied after the save. Hiding notices leaves run status, flow
 status and `WARNING:` lines reporting denials. Hidden folders add no
 Overview notice and nothing to the sidebar count, which counts live runs,
 flows and panels only.
@@ -4574,7 +4617,7 @@ Settings has three groups. Each change saves at once.
 |---|---|---|---|
 | General | Start at login | `app.autostart` | Switch |
 | General | Theme | `app.theme` | System, Light, Dark; applies at once |
-| General | Hidden notices | App state: `denied_hidden` | One row per hidden folder with Show again |
+| General | Hidden notices | `sandbox.hidden_notices` | One row per hidden folder with Show again |
 | Workers | Worker network | `worker.network` | Switch |
 | Workers | Terminal | `terminal` | Picker; Other command shows a text field |
 | Workers | Sandbox read paths | `sandbox.read` | One row per folder with a remove button; Add folder |

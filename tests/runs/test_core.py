@@ -3599,6 +3599,127 @@ def test_sandbox_denial_is_recorded_warned_and_allowed_on_next_launch(
     assert sandbox.denied_paths(text, next_run.sandbox_paths) == []
 
 
+@pytest.mark.parametrize("source", ["read", "tracked"])
+def test_diagnostic_the_worker_was_given_is_not_a_denial(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    source: str,
+) -> None:
+    """A denial line read from a supplied file is not recorded or held."""
+    folder = Path(env["HOME"]) / ".toolchain"
+    folder.mkdir()
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    line = f"touch: setting times of '{folder}/list': Permission denied"
+    read: tuple[str, ...] = ()
+    if source == "read":
+        evidence = tmp_path / "evidence"
+        evidence.mkdir()
+        (evidence / "notes.md").write_text(f"# Notes\n\n    {line}\n")
+        read = (str(evidence),)
+    else:
+        (repo / "notes.md").write_text(f"{line}\n")
+        subprocess.run(["git", "-C", str(repo), "add", "notes.md"], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-q", "-m", "notes"], check=True
+        )
+    brief = _brief(tmp_path, f"Task\n@reply {line}\n")
+    core_ = _core(env)
+    assert _start(core_, repo, brief, read=read) == 0
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert record.load_outcome(run, 1)["denied_paths"] == []
+    assert "was denied" not in err
+    assert "owner:" not in err
+    assert run.owner_wait == ()
+
+
+@pytest.mark.parametrize("when", ["before", "during"])
+def test_hidden_notice_folder_needs_no_owner_answer(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    when: str,
+) -> None:
+    """A folder in Settings, Hidden notices is reported but holds no run."""
+    folder = Path(env["HOME"]) / ".toolchain"
+    folder.mkdir()
+    alias = folder.with_name("alias")
+    alias.symlink_to(folder, target_is_directory=True)
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    if when == "before":
+        choices.set_settings({"sandbox.hidden_notices": [str(alias)]}, env=env)
+    brief = _brief(tmp_path, f"Task\n@reply cat: {folder}/python: Permission denied\n")
+    core_ = _core(env)
+    assert _start(core_, repo, brief) == 0
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    item = {"path": str(folder), "reason": "hidden", "allow_path": str(folder)}
+    assert record.load_outcome(run, 1)["denied_paths"] == [item]
+    assert err.count(f"WARNING: {run.id} was denied {folder}") == 1
+    if when == "before":
+        assert "owner:" not in err
+        assert run.owner_wait == ()
+    else:
+        assert core_.step(run)[0] == "owner"
+        choices.set_settings({"sandbox.hidden_notices": [str(folder)]}, env=env)
+        assert core_.step(run)[0] != "owner"
+        assert record.load(run.id, env).owner_wait == ()
+
+
+def test_hiding_a_child_folder_keeps_the_parent_denial_wait(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Only a hidden folder holding the denied path decides that denial."""
+    folder = Path(env["HOME"]) / ".toolchain"
+    (folder / "cache").mkdir(parents=True)
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    brief = _brief(tmp_path, f"Task\n@reply cat: {folder}/python: Permission denied\n")
+    core_ = _core(env)
+    assert _start(core_, repo, brief) == 0
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    assert run.owner_denied == (str(folder.resolve()),)
+    choices.set_settings({"sandbox.hidden_notices": [str(folder / "cache")]}, env=env)
+    assert core_.step(run)[0] == "owner"
+    assert record.load(run.id, env).owner_wait != ()
+
+
+def test_hiding_a_denial_without_an_offer_ends_its_wait(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A hidden denial that offers no folder is decided by Hidden notices."""
+    rc = Path(env["HOME"]) / ".toolrc"
+    rc.write_text("x")
+    monkeypatch.setattr(sandbox, "require", lambda *args, **kwargs: None)
+    choices.set_settings({"sandbox.claude": "on"}, env=env)
+    brief = _brief(tmp_path, f"Task\n@reply cat: {rc}: Permission denied\n")
+    core_ = _core(env)
+    assert _start(core_, repo, brief) == 0
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert f"owner: {rc} is hidden; no folder can be offered" in err
+    assert run.owner_read == ("",)
+    assert core_.step(run)[0] == "owner"
+    choices.set_settings({"sandbox.hidden_notices": [str(rc)]}, env=env)
+    assert core_.step(run)[0] != "owner"
+    assert record.load(run.id, env).owner_wait == ()
+
+
 @pytest.mark.parametrize("retry_succeeds", [False, True])
 def test_denials_union_all_capacity_attempts_with_one_warning_each(
     tmp_path: Path,

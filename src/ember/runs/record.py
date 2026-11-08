@@ -169,6 +169,9 @@ class Run:
     owner_read: tuple[str, ...] = ()
     """One suggested sandbox.read value per owner line, or an empty string."""
 
+    owner_denied: tuple[str, ...] = ()
+    """One resolved denied path per owner line, or an empty string."""
+
     answered_at: float | None = None
     """When the lead recorded the owner's answer, or None."""
 
@@ -278,6 +281,7 @@ _TYPES: dict[str, tuple[tuple[type, ...], bool]] = {
     "last_start_failure": ((bool,), False),
     "owner_wait": ((list,), False),
     "owner_read": ((list,), False),
+    "owner_denied": ((list,), False),
     "answered_at": ((int, float), True),
     "commits": ((list,), False),
     "subject": (_STR, False),
@@ -539,6 +543,7 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
     value = {
         "owner_wait": [],
         "owner_read": [],
+        "owner_denied": [],
         "answered_at": None,
         "last_variant": None,
         "last_start_failure": False,

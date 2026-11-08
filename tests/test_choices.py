@@ -177,6 +177,7 @@ def test_defaults(env: dict[str, str]) -> None:
         "sandbox.opencode": "off",
         "sandbox.claude": "off",
         "sandbox.read": [],
+        "sandbox.hidden_notices": [],
         "terminal": "xdg-terminal-exec",
         "app.autostart": "on",
         "app.theme": "system",

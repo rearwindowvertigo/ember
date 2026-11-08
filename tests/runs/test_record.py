@@ -92,7 +92,8 @@ def test_save_and_load_round_trip(env: dict[str, str]) -> None:
         "updated_at", "ended_at", "last_exit", "last_reason", "commits",
         "subject", "main", "common", "detached", "last_screen_change_at",
         "capacity_retries", "capacity_wait", "sandbox_paths", "parent",
-        "opencode_id_format", "owner_wait", "owner_read", "answered_at", "last_variant",
+        "opencode_id_format", "owner_wait", "owner_read", "owner_denied", "answered_at",
+        "last_variant",
         "last_start_failure",
     }  # fmt: skip
     assert [entry.name for entry in folder.iterdir()] == ["run.json"]

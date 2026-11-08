@@ -445,6 +445,114 @@ def test_codex_args(env: dict[str, str], home: Path, tmp_path: Path) -> None:
     assert filesystem[env["XDG_RUNTIME_DIR"]] == "deny"
 
 
+def test_worker_home_env_names_run_folders_and_drops_home_data_dirs(
+    env: dict[str, str], home: Path, tmp_path: Path
+) -> None:
+    temporary = tmp_path / "ember-aabbcc"
+    env["XDG_DATA_DIRS"] = os.pathsep.join(
+        [str(home / ".local/share/flatpak/exports/share"), "/usr/share/", "relative"]
+    )
+    assert sandbox.worker_home_env(temporary, env) == {
+        "XDG_CONFIG_HOME": str(temporary / "config"),
+        "XDG_DATA_HOME": str(temporary / "data"),
+        "XDG_STATE_HOME": str(temporary / "state"),
+        "XDG_DATA_DIRS": "/usr/share/",
+    }
+
+
+@pytest.mark.parametrize(
+    "value", [None, "", "/home-only"], ids=["unset", "empty", "only-home"]
+)
+def test_worker_home_env_defaults_data_dirs(
+    env: dict[str, str], home: Path, tmp_path: Path, value: str | None
+) -> None:
+    if value == "/home-only":
+        value = str(home / ".local/share")
+    if value is not None:
+        env["XDG_DATA_DIRS"] = value
+    result = sandbox.worker_home_env(tmp_path / "ember-aabbcc", env)
+    assert result["XDG_DATA_DIRS"] == "/usr/local/share/:/usr/share/"
+
+
+def test_prepare_worker_homes_links_kept_paths_in_owner_bases(
+    env: dict[str, str], home: Path, tmp_path: Path
+) -> None:
+    _tree(home, ".config/git/config", ".local/share/pipx/venvs/", ".local/bin/")
+    temporary = tmp_path / "ember-aabbcc"
+    temporary.mkdir(mode=0o700)
+    kept = sandbox.kept_paths(
+        home,
+        home / "wt",
+        home / "wt/.git",
+        [home / ".local/share/pipx", home / ".local/share/pipx/venvs"],
+        env=env,
+        temporary=temporary,
+    )
+    sandbox.prepare_worker_homes(temporary, kept, env)
+    for name in ("config", "data", "state"):
+        assert stat.S_IMODE((temporary / name).stat().st_mode) == 0o700
+    assert os.readlink(temporary / "config/git") == str(home / ".config/git")
+    assert (temporary / "config/git/config").read_text() == "x"
+    assert os.readlink(temporary / "data/pipx") == str(home / ".local/share/pipx")
+    assert sorted(p.name for p in (temporary / "data").iterdir()) == ["pipx"]
+    assert list((temporary / "state").iterdir()) == []
+    # A second call leaves the existing links as they are.
+    sandbox.prepare_worker_homes(temporary, kept, env)
+    assert os.readlink(temporary / "config/git") == str(home / ".config/git")
+
+
+def test_prepare_worker_homes_follows_owner_xdg_config_home(
+    env: dict[str, str], home: Path, tmp_path: Path
+) -> None:
+    config = tmp_path / "elsewhere"
+    (config / "git").mkdir(parents=True)
+    env["XDG_CONFIG_HOME"] = str(config)
+    temporary = tmp_path / "ember-aabbcc"
+    temporary.mkdir()
+    kept = sandbox.kept_paths(home, home / "wt", home / "wt/.git", env=env)
+    sandbox.prepare_worker_homes(temporary, kept, env)
+    assert os.readlink(temporary / "config/git") == str(config / "git")
+
+
+def test_prepare_worker_homes_skips_missing_kept_paths(
+    env: dict[str, str], home: Path, tmp_path: Path
+) -> None:
+    temporary = tmp_path / "ember-aabbcc"
+    temporary.mkdir()
+    kept = sandbox.kept_paths(home, home / "wt", home / "wt/.git", env=env)
+    sandbox.prepare_worker_homes(temporary, kept, env)
+    assert list((temporary / "config").iterdir()) == []
+
+
+@pytest.mark.parametrize("kind", ["missing", "symlink"])
+def test_prepare_worker_homes_needs_a_real_folder(
+    env: dict[str, str], home: Path, tmp_path: Path, kind: str
+) -> None:
+    temporary = tmp_path / "ember-aabbcc"
+    target = tmp_path / "target"
+    target.mkdir()
+    if kind == "symlink":
+        temporary.symlink_to(target)
+    sandbox.prepare_worker_homes(temporary, [home / ".config/git"], env)
+    assert list(target.iterdir()) == []
+    assert kind == "symlink" or not temporary.exists()
+
+
+def test_codex_args_prepares_worker_homes(
+    env: dict[str, str], home: Path, tmp_path: Path
+) -> None:
+    _tree(home, ".config/git/config")
+    temporary = paths.run_tmp_dir("codex-20260101-000000-aabbcc", env)
+    temporary.mkdir()
+    args = sandbox.codex_args(
+        home / "wt", home / "wt/.git", temporary=temporary, env=env
+    )
+    variables = _profile(args)["shell_environment_policy"]["set"]
+    assert variables["XDG_CONFIG_HOME"] == str(temporary / "config")
+    assert "HOME" not in variables
+    assert (temporary / "config/git").is_symlink()
+
+
 @pytest.mark.parametrize("read_only", [False, True])
 def test_codex_args_keep_the_workers_cache_writable(
     env: dict[str, str], home: Path, read_only: bool
@@ -464,9 +572,11 @@ def test_codex_args_keep_the_workers_cache_writable(
     assert filesystem[str(cache)] == "write"
     assert filesystem[str(home / ".cache/uv")] == "deny"
     assert filesystem[str(home / ".cache/ember/sandbox.json")] == "deny"
+    temporary = paths.run_tmp_dir("codex-20260101-000000-aabbcc", env)
     assert config["shell_environment_policy"]["set"] == {
         **sandbox.worker_cache_env(env),
-        "TMPDIR": str(paths.run_tmp_dir("codex-20260101-000000-aabbcc", env)),
+        **sandbox.worker_home_env(temporary, env),
+        "TMPDIR": str(temporary),
     }
 
 
@@ -1536,7 +1646,9 @@ def test_symlink_denial_owner_line_suggests_resolved_folder(
         f"owner: {qualification}Settings, Sandbox read paths; emb choices --set "
         + shlex.quote("sandbox.read=" + json.dumps([str(tool)]))
     )
-    wait_owner.assert_called_once_with(run, owner, str(tool))
+    wait_owner.assert_called_once_with(
+        run, owner, str(tool), str((home / ".local/share/pipx").resolve())
+    )
 
 
 @pytest.mark.parametrize(
@@ -1772,6 +1884,34 @@ def test_denial_path_can_be_in_neighboring_diagnostic_line(
         {"path": str(folder), "reason": "hidden", "allow_path": str(folder)}
     ]
     assert sandbox.denied_paths(f"'{folder}'\n\nPermission denied", snapshot) == []
+
+
+def test_supplied_diagnostics_keep_only_lines_naming_a_path() -> None:
+    texts = [
+        "Intro\n    touch: '/home/x/.local/share/a/mimeapps.list': Permission denied\n",
+        "Permission denied\nEACCES: permission denied, open ~/.config/tool/x\n",
+        "cat: rel/path: Permission denied\nx /a: EACCES\n",
+    ]
+    assert sandbox.supplied_diagnostics(texts) == {
+        "touch: '/home/x/.local/share/a/mimeapps.list': permission denied",
+        "eacces: permission denied, open ~/.config/tool/x",
+    }
+
+
+def test_quoted_diagnostic_is_not_a_denial(env: dict[str, str], home: Path) -> None:
+    folder = home / ".toolchain"
+    folder.mkdir()
+    snapshot = _denial_snapshot(env, home)
+    line = f"touch: setting times of '{folder}/list': Permission denied"
+    quoted = sandbox.supplied_diagnostics([f"Evidence:\n      {line}\n"])
+    item = {"path": str(folder), "reason": "hidden", "allow_path": str(folder)}
+    # Read back with a line-number prefix and other spacing, it is still quoted.
+    shown = f"   12\t{line.upper().replace(' ', '  ')}"
+    assert sandbox.denied_paths(shown, snapshot, quoted) == []
+    assert sandbox.denied_paths(line, snapshot) == [item]
+    # Another diagnostic about the same path is still a denial.
+    other = f"cat: {folder}/python: Permission denied"
+    assert sandbox.denied_paths(f"{shown}\n{other}", snapshot, quoted) == [item]
 
 
 @pytest.mark.parametrize("spelling", ["absolute", "home"])

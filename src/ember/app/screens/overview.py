@@ -1165,6 +1165,7 @@ class OverviewScreen(QWidget):
         self.denied_area.setSpacing(8)
         layout.addLayout(self.denied_area)
         self.denied_notices: dict[str, _DeniedNotice] = {}
+        self._moving_hidden = False
         self._denied_dialog: _PruneDialog | None = None
 
         self.unreadable_alert = Alert("info", unreadable_line(0))
@@ -1750,6 +1751,15 @@ class OverviewScreen(QWidget):
         if not self.context.settings_ready():
             return
         saved = state.load(self.context.env)
+        if saved.denied_hidden:
+            self._move_hidden_notices(saved.denied_hidden)
+        hidden = [
+            Path(path).resolve()
+            for path in (
+                *(self.context.setting("sandbox.hidden_notices") or []),
+                *saved.denied_hidden,
+            )
+        ]
         reads = [
             Path(path).resolve() for path in self.context.setting("sandbox.read") or []
         ]
@@ -1784,7 +1794,7 @@ class OverviewScreen(QWidget):
                 )
         wanted = {}
         for key, group in groups.items():
-            if key in saved.denied_hidden:
+            if any(Path(key).is_relative_to(folder) for folder in hidden):
                 continue
             reports = sorted(group.values(), key=_DenialReport.sort_key)
             occurrences = sorted(f"{report.run.id}:{report.turn}" for report in reports)
@@ -1862,11 +1872,46 @@ class OverviewScreen(QWidget):
         self.check_denials()
 
     def _hide_denial(self, path: str) -> None:
-        """Hide every denial notice for this resolved folder until shown again."""
-        saved = state.load(self.context.env)
-        hidden = sorted({*saved.denied_hidden, path})
-        state.save(dataclasses.replace(saved, denied_hidden=hidden), self.context.env)
-        self.check_denials()
+        """Hide every notice for this resolved folder until shown again.
+
+        The folder is saved in `sandbox.hidden_notices`, so runs that report it
+        later print no owner action and wait for no owner answer.
+        """
+        hidden = list(self.context.setting("sandbox.hidden_notices") or [])
+        if path not in hidden:
+            self.context.save_settings({"sandbox.hidden_notices": [*hidden, path]})
+
+    def _move_hidden_notices(self, folders: list[str]) -> None:
+        """Move folders hidden in the app's state file into the setting.
+
+        The state file's list is emptied once the setting holds every folder.
+        """
+        if self._moving_hidden:
+            return
+        self._moving_hidden = True
+        hidden = list(self.context.setting("sandbox.hidden_notices") or [])
+        merged = [*hidden, *(path for path in folders if path not in hidden)]
+
+        def moved(snapshot: dict[str, Any] | Exception) -> None:
+            """Empty the state file's list after a successful save."""
+            self._moving_hidden = False
+            if isinstance(snapshot, Exception):
+                return
+            saved = state.load(self.context.env)
+            state.save(
+                dataclasses.replace(
+                    saved,
+                    denied_hidden=[
+                        path for path in saved.denied_hidden if path not in merged
+                    ],
+                ),
+                self.context.env,
+            )
+
+        if merged == hidden:
+            moved({})
+            return
+        self.context.save_settings({"sandbox.hidden_notices": merged}, result=moved)
 
     def _allow_reading(self, path: str) -> None:
         """Confirm the folder's read permission for every future worker."""

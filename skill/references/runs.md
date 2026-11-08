@@ -326,7 +326,18 @@ not permitted` or `EACCES` naming an absolute or `~/` path. It keeps the
 union across capacity attempts, deduplicated by resolved hidden path, and
 prints one `WARNING: <run> was denied <path>` per path per turn. No detected
 denials gives `[]`; an older outcome without the field also gives `[]`.
-A broken outcome gives null, which is unknown.
+A broken outcome gives null, which is unknown. A diagnostic line found in
+the run's brief, its turn messages, its `--read` files or its worktree's
+tracked files is text the worker read, and is not recorded.
+A denial inside a folder in Settings, Hidden notices
+(`sandbox.hidden_notices`) keeps its `WARNING:` line and entry but prints
+no `owner:` line and records no owner wait: report it without waiting.
+
+Each sandboxed Codex run's commands get `XDG_CONFIG_HOME`, `XDG_DATA_HOME`
+and `XDG_STATE_HOME` in the run's temporary folder, with symlinks to kept
+and read paths inside the owner's matching bases. A tool that writes its
+own configuration, data or state, such as Chrome, writes there; what it
+writes lasts for the run only. `HOME` is unchanged.
 
 When an `owner:` line offers reading, give the owner
 the `Settings, Sandbox read paths; emb choices --set ...` action.
@@ -338,8 +349,8 @@ addable secret location's matched path. Never run it, edit the settings
 database, add a path to `sandbox.read`, or bypass the denial with `--read`
 yourself.
 
-A finished turn with pending owner actions (denied paths, or any printed
-`owner:` line) prints no carry-on `next:` line. Start, `--send` and `--recover`
+A finished turn with pending owner actions (any printed `owner:` line,
+including one for a denied path) prints no carry-on `next:` line. Start, `--send` and `--recover`
 exit 84 when they would otherwise exit 0 with a pending owner wait. Each
 pending `owner:` line prints on standard error, including when recovery has
 nothing left to collect; the recorded turn exit stays unchanged. Put these
@@ -391,11 +402,15 @@ reason. Other workers' worktrees and `$XDG_RUNTIME_DIR` are `protected`,
 have no Allow reading button and receive no `sandbox.read` suggestion.
 Dismiss lasts until a later run or turn reports the path again. Permission
 changes apply to newly started runs; an existing run keeps its launch paths.
-Don't show again hides notices for that resolved folder for every later
-report, saved in the app's state file. Settings, Hidden notices lists each
-hidden folder with Show again, which removes both the hiding and any
-Dismiss entry for that folder. Run status, flow status and `WARNING:` lines
-still report denials. Hidden folders add no Overview notice; the sidebar
+Don't show again adds that resolved folder to the `sandbox.hidden_notices`
+setting: it hides notices for every later report, and a later denial
+inside the folder prints no `owner:` line and records no owner wait.
+Adding it also ends a pending denial-only wait for that folder. Settings,
+Hidden notices lists each hidden folder with Show again, which removes it
+from the setting and removes any Dismiss entry for that folder. Run status,
+flow status and `WARNING:` lines still report denials. Never set
+`sandbox.hidden_notices` yourself; when the owner answers that a folder
+needs no change, point them to Don't show again. Hidden folders add no Overview notice; the sidebar
 count counts live runs, flows and panels only.
 A tool failure without a printed path, or with only a working-directory-relative
 path, is not detected.

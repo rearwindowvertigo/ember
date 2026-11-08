@@ -23,6 +23,7 @@ import secrets
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -54,6 +55,12 @@ INCOMPLETE_REASONS = ("sign-in failure", "engine failure", "provider error", "no
 
 GIT_TIMEOUT = 120
 """Seconds each git command may take."""
+
+SUPPLIED_FILES = 2000
+"""The most files under a run's read paths read for quoted diagnostics."""
+
+SUPPLIED_BYTES = 1024 * 1024
+"""The largest read-path file, in bytes, read for quoted diagnostics."""
 
 HOOK_REFUSAL_NAME = "hook-refusal.txt"
 """The full stdout and stderr of the run's refused commit."""
@@ -324,6 +331,26 @@ def first_message(run_id: str, brief: str) -> str:
         The line naming Claude as the brief's author, a blank line, the brief.
     """
     return f"{BRIEF_LINE.format(id=run_id)}\n\n{brief}"
+
+
+def _walk_files(root: Path) -> Iterator[Path]:
+    """Yield regular files at or under `root`, without following symlinks."""
+    try:
+        info = root.lstat()
+    except OSError:
+        return
+    if stat.S_ISREG(info.st_mode):
+        yield root
+        return
+    if not stat.S_ISDIR(info.st_mode):
+        return
+    for folder, names, files in os.walk(root):
+        names.sort()
+        for name in sorted(files):
+            path = Path(folder) / name
+            with contextlib.suppress(OSError):
+                if stat.S_ISREG(path.lstat().st_mode):
+                    yield path
 
 
 class Core:
@@ -1426,6 +1453,7 @@ class Core:
             turn_state=record.SENT,
             owner_wait=(),
             owner_read=(),
+            owner_denied=(),
             answered_at=None,
             reply=None,
             expected_head=None
@@ -1617,6 +1645,7 @@ class Core:
                     last_variant="uncertain",
                     owner_wait=(),
                     owner_read=(),
+                    owner_denied=(),
                     answered_at=None,
                 )
                 self._warn_denial_owners(run, exits.PROVIDER_ERROR)
@@ -1939,6 +1968,7 @@ class Core:
             last_variant=variant,
             owner_wait=(),
             owner_read=(),
+            owner_denied=(),
             answered_at=None,
         )
         saved = self._saved_outcome(run)
@@ -1998,10 +2028,11 @@ class Core:
                 engines.DriverError, tmux.TmuxError, OSError, paths.RuntimeDirError
             ):
                 output.append(self._attempt_screen(run, driver))
+            quoted = sandbox.supplied_diagnostics(self._supplied_texts(run))
             detected = [
                 item
                 for text in output
-                for item in sandbox.denied_paths(text, run.sandbox_paths)
+                for item in sandbox.denied_paths(text, run.sandbox_paths, quoted)
             ]
             identities = {
                 item["path"]: item["resolved"]
@@ -2045,10 +2076,65 @@ class Core:
         }
         self._write_outcome(run, data)
 
+    def _supplied_texts(self, run: Run) -> Iterator[str]:
+        """Yield text Ember gave the worker, so quoted diagnostics are not denials.
+
+        The brief, every turn message, the files under the run's own read
+        paths and the lines of tracked worktree files that match
+        `sandbox.DENIAL_PATTERN`. Each read path is resolved, then walked
+        without following symlinks inside it, up to `SUPPLIED_FILES` files
+        of at most `SUPPLIED_BYTES` bytes each; unreadable or binary files
+        are skipped.
+        """
+        for path in (
+            run.folder / record.BRIEF_NAME,
+            *sorted(run.folder.glob("turn-*.prompt.md")),
+        ):
+            with contextlib.suppress(OSError, UnicodeError):
+                yield path.read_text(encoding="utf-8")
+        files = 0
+        for root in run.read:
+            for path in _walk_files(Path(root).resolve()):
+                if files >= SUPPLIED_FILES:
+                    break
+                files += 1
+                with contextlib.suppress(OSError, UnicodeError):
+                    if path.stat().st_size <= SUPPLIED_BYTES:
+                        yield path.read_text(encoding="utf-8")
+        if run.worktree and Path(run.worktree).is_dir():
+            with contextlib.suppress(RunError):
+                result = self._git(
+                    run.worktree,
+                    "grep",
+                    "-I",
+                    "-h",
+                    "-i",
+                    "-E",
+                    "-e",
+                    sandbox.DENIAL_PATTERN,
+                )
+                if result.returncode == 0:
+                    yield result.stdout
+
+    def _hidden_notices(self) -> list[Path]:
+        """Return the resolved folders in Settings, Hidden notices."""
+        with contextlib.suppress(db.DatabaseError):
+            values = choices.read(env=self.env)["answers"]["sandbox.hidden_notices"]
+            return [Path(path).resolve() for path in values["value"]]
+        return []
+
     def _warn_denial_owners(self, run: Run, code: int) -> None:
-        """Print denied-path owner actions after the turn's exit is recorded."""
+        """Print denied-path owner actions after the turn's exit is recorded.
+
+        A denial of a path inside a folder in Settings, Hidden notices has no
+        owner action: the owner has already decided that folder.
+        """
+        hidden = self._hidden_notices()
         for item in self._saved_outcome(run).get("denied_paths", []):
             if item["reason"] == "startup file":
+                continue
+            target = Path(item["path"]).resolve()
+            if any(target.is_relative_to(folder) for folder in hidden):
                 continue
             text = None
             read = None
@@ -2092,9 +2178,15 @@ class Core:
                         + text.removeprefix("owner: ")
                     )
                 self._warn(text)
-                run = self._wait_owner(run, text, read)
+                run = self._wait_owner(run, text, read, str(target))
 
-    def _wait_owner(self, run: Run, text: str, read: str | None = None) -> Run:
+    def _wait_owner(
+        self,
+        run: Run,
+        text: str,
+        read: str | None = None,
+        denied: str | None = None,
+    ) -> Run:
         """Store a printed owner action for an unparented run."""
         if run.parent is not None:
             return run
@@ -2106,24 +2198,46 @@ class Core:
             {
                 "owner_wait": (*current.owner_wait, text),
                 "owner_read": (*current.owner_read, read or ""),
+                "owner_denied": (*current.owner_denied, denied or ""),
                 "answered_at": None,
             },
             allow_closed=True,
         )
 
     def _owner_state(self, run: Run) -> Run:
-        """End a denial wait once every suggested read value is configured."""
-        if run.parent is not None or not run.owner_wait or not run.owner_read:
+        """End a denial wait once the owner has decided every denied path.
+
+        A denial's owner line is decided when its suggested read value is in
+        `sandbox.read`, or when its resolved denied path lies inside a folder
+        in Settings, Hidden notices. An owner line without a denied path or a
+        suggested value, such as a failure, needs `--answered`.
+        """
+        if run.parent is not None or not run.owner_wait:
             return run
-        if len(run.owner_read) != len(run.owner_wait) or not all(run.owner_read):
+        count = len(run.owner_wait)
+        if len(run.owner_read) != count:
             return run
+        denied = run.owner_denied if len(run.owner_denied) == count else ("",) * count
         try:
-            reads = choices.read(env=self.env)["answers"]["sandbox.read"]["value"]
+            answers = choices.read(env=self.env)["answers"]
         except db.DatabaseError:
             return run
-        if all(path in reads for path in run.owner_read):
+        reads = answers["sandbox.read"]["value"]
+        hidden = [
+            Path(path).resolve() for path in answers["sandbox.hidden_notices"]["value"]
+        ]
+
+        def decided(read: str, path: str) -> bool:
+            """Return whether the owner allowed the offer or hid the denied path."""
+            if path and any(Path(path).resolve().is_relative_to(f) for f in hidden):
+                return True
+            return bool(read) and read in reads
+
+        if all(decided(*pair) for pair in zip(run.owner_read, denied, strict=True)):
             return record.update(
-                run, {"owner_wait": (), "owner_read": ()}, allow_closed=True
+                run,
+                {"owner_wait": (), "owner_read": (), "owner_denied": ()},
+                allow_closed=True,
             )
         return run
 
@@ -2133,7 +2247,12 @@ class Core:
         if run.parent is None and run.owner_wait:
             record.update(
                 run,
-                {"owner_wait": (), "owner_read": (), "answered_at": time.time()},
+                {
+                    "owner_wait": (),
+                    "owner_read": (),
+                    "owner_denied": (),
+                    "answered_at": time.time(),
+                },
                 allow_closed=True,
             )
         return exits.OK
@@ -2384,6 +2503,7 @@ class Core:
                 "expected_head": run.expected_head,
                 "owner_wait": run.owner_wait,
                 "owner_read": run.owner_read,
+                "owner_denied": run.owner_denied,
                 "answered_at": run.answered_at,
             }
             run = self._turn_sent(run, turn, text)
