@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.2](https://github.com/rearwindowvertigo/ember/compare/v0.21.1...v0.21.2) (2026-11-08)
+
+
+### Fixed
+
+* **app:** use the tray token on Quit only once the helper window is shown ([2df7fde](https://github.com/rearwindowvertigo/ember/commit/2df7fde44ef7af3a06e5da4f1600574ee195e837)), closes [#225](https://github.com/rearwindowvertigo/ember/issues/225)
+
 ## [0.21.1](https://github.com/rearwindowvertigo/ember/compare/v0.21.0...v0.21.1) (2026-11-08)
 
 
