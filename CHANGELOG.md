@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.21.0](https://github.com/rearwindowvertigo/ember/compare/v0.20.1...v0.21.0) (2026-11-08)
+
+
+### Added
+
+* **sandbox:** give Codex worker commands their own XDG folders ([00394fb](https://github.com/rearwindowvertigo/ember/commit/00394fb9c99a5574b292deb84eaed1805d9528d5)), closes [#217](https://github.com/rearwindowvertigo/ember/issues/217)
+* **sandbox:** let the owner answer a denied folder once for later runs ([00394fb](https://github.com/rearwindowvertigo/ember/commit/00394fb9c99a5574b292deb84eaed1805d9528d5))
+
+
+### Fixed
+
+* **sandbox:** do not record a denial the worker only read in a supplied file ([00394fb](https://github.com/rearwindowvertigo/ember/commit/00394fb9c99a5574b292deb84eaed1805d9528d5))
+
 ## [0.20.1](https://github.com/rearwindowvertigo/ember/compare/v0.20.0...v0.20.1) (2026-11-08)
 
 
