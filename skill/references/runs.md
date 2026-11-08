@@ -304,6 +304,11 @@ Each entry has `{path, reason, allow_path}`. `path` is the hidden path
 matched at launch, or the resolved startup file inside a hidden folder;
 `allow_path` is the folder Overview may offer, or null. Reasons are `hidden`,
 `startup file`, `secret location` and `protected`.
+The offered folder is built from the path that matched the hidden entry,
+using the resolved target when a symlink reaches a hidden path, and must
+contain the denied path after resolving symlinks. Secret, protected and
+configuration checks apply to that folder. The `owner:` line and
+`sandbox.read` suggestion use that offer.
 Ember checks the output and screen for `Permission denied`, `Operation
 not permitted` or `EACCES` naming an absolute or `~/` path. It keeps the
 union across capacity attempts, deduplicated by resolved hidden path, and
@@ -345,19 +350,41 @@ turn's only denials. A tool that needs a startup file's settings can still
 fail; the owner can add the file by hand. Older records keep their stored
 reasons: a startup file recorded as `hidden` still shows a notice.
 
-Overview's Allow reading appears only for `allow_path`, after confirmation
-that every future worker can read the folder and none can change it.
-For a `hidden` denial with `allow_path: null`, the notice and `owner:` line
-name the hidden path and say no folder can be offered because each folder that holds it
-also holds private files. They give no `sandbox.read` suggestion.
-Secret locations, including credentials and browser profiles, have Dismiss
-only. Folders inside `$XDG_CONFIG_HOME` are never offered; the owner can
+Overview groups notices by resolved folder. Its summary gives the report
+count, distinct flows, panels and standalone runs, the first report date
+and the latest report time in local time, including for a single report.
+Show runs starts collapsed and lists one report per resolved folder, run
+and turn, newest first, with the local time, kind, claim when present,
+flow or panel when present, run and turn. Times come from turn outcome
+files' modification times; missing times show as `time unknown` and sort
+last, with ties sorted by run id and turn. Expansion is kept across
+refreshes. Before read-path coverage checks and merging, a recorded offer
+must equal, contain or lie inside the recorded hidden path after resolving
+symlinks; an invalid offer is treated as no offer.
+
+Overview's Allow reading appears only for `allow_path`, with a separate
+line naming the folder future workers can read. Adding it requires
+confirmation that every future worker can read the folder and none can
+change it.
+For a `hidden` denial with no valid offer, the notice says `No folder can
+be offered for automatic read permission.` A `hidden` denial recorded with
+`allow_path: null` has an `owner:` line saying no folder can be offered
+because each folder that holds the path also holds private files, with no
+`sandbox.read` suggestion. Secret locations, including credentials and
+browser profiles, and protected paths have no Allow reading button.
+Folders inside `$XDG_CONFIG_HOME` are never offered; the owner can
 add them and other secret locations by hand in Settings, Sandbox read paths.
 Ember's configuration and state folders cannot be added; report the printed
 reason. Other workers' worktrees and `$XDG_RUNTIME_DIR` are `protected`,
 have no Allow reading button and receive no `sandbox.read` suggestion.
 Dismiss lasts until a later run or turn reports the path again. Permission
 changes apply to newly started runs; an existing run keeps its launch paths.
+Don't show again hides notices for that resolved folder for every later
+report, saved in the app's state file. Settings, Hidden notices lists each
+hidden folder with Show again, which removes both the hiding and any
+Dismiss entry for that folder. Run status, flow status and `WARNING:` lines
+still report denials. Hidden folders add no Overview notice; the sidebar
+count counts live runs, flows and panels only.
 A tool failure without a printed path, or with only a working-directory-relative
 path, is not detected.
 

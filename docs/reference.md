@@ -662,7 +662,10 @@ Each turn's `denied_paths` is a list of objects:
 | `allow_path` | The folder Overview may offer for reading, or null |
 
 `allow_path` is the deepest folder holding the denied path that contains
-no secret or protected location. Given and resolved paths are checked.
+no secret or protected location. It is built from the path that matched
+the hidden entry, using the resolved target when a symlink reaches a
+hidden path. The offered folder contains that denied path after resolving
+symlinks. Given and resolved paths are checked.
 No folder inside `$XDG_CONFIG_HOME` is offered. A hidden file can have
 `allow_path: null`. Reports are deduplicated by resolved hidden path
 across every attempt of the turn, including capacity retries. A restricted
@@ -4364,23 +4367,50 @@ runs, flows and panels. Above the sections, an alert names each enabled
 engine whose sandbox setting gives it no sandbox, with Open Engines.
 
 A notice says `A worker could not read <path>` for each reported hidden
-path whose offered folder (or matched path when none is offered) is not
-already covered by `sandbox.read`, except entries with reason `startup file`.
-It names the run and its flow or panel when present. Allow reading appears
-only for a non-null `allow_path`.
-Its confirmation says `Every future worker can read <folder>. No worker
+path, grouped by resolved folder, except entries with reason `startup file`.
+Before checking coverage by `sandbox.read` or merging reports, the app
+validates each recorded `allow_path`: after resolving symlinks, it must
+equal, contain or lie inside the recorded hidden path. A relative path,
+an unresolvable symlink or an unrelated offer is treated as no offer.
+A report is omitted when its valid offered folder, or its matched path
+when none is offered, is already covered by `sandbox.read`.
+
+Each notice has one summary line: the report count, distinct flows, panels
+and standalone runs, the first report date and the latest report date and
+time in local time. One report uses the same summary with `1 report`.
+Show runs starts collapsed and lists one report per line, newest first,
+with its local time, kind, claim when present, flow or panel when present,
+run and turn. A report is one resolved folder, run and turn. Times come
+from each turn outcome file's modification time. Missing times show as
+`time unknown` and sort last; ties sort by run id and turn. Show runs keeps
+its expanded or collapsed state across refreshes of a visible notice.
+Paths wrap and actions sit below the text; the notice fits a 640-pixel
+window with the report list open or closed.
+
+Allow reading appears only for a non-null `allow_path`. A separate line
+says `Allow reading <folder> for future workers.` Its confirmation says
+`Every future worker can read <folder>. No worker
 can change it.` Confirming adds that folder to `sandbox.read`; newly
 started runs use it. The app checks the folder's eligibility again on
 confirmation.
 
 A secret location's notice says the folder holds credentials; a protected
-location's says it is protected from workers. Both have Dismiss only.
-A `hidden` notice without an offered folder says `No folder can be offered
-because each folder that holds it also holds private files.` It has Dismiss only and gives no
-`sandbox.read` suggestion. Older records that classify a startup file as
-`hidden` still show this notice.
+location's says it is protected from workers. A `hidden` notice without an
+offered folder says `No folder can be offered for automatic read permission.`
+These notices have no Allow reading button. Older records that classify a
+startup file as `hidden` still show this notice.
 Dismiss hides the path until a later run or turn reports it again.
-Dismissals persist in the app's state file.
+Don't show again hides notices for that resolved folder, including every
+later report, until Show again in Settings, Hidden notices. Both actions
+persist in the app's state file. Hiding notices leaves run status, flow
+status and `WARNING:` lines reporting denials. Hidden folders add no
+Overview notice and nothing to the sidebar count, which counts live runs,
+flows and panels only.
+
+In the dark theme, warning alerts use the neutral card fill with a solid
+1-pixel amber border (`#f2a600`) and an amber icon. Warning badges use the
+neutral subtle fill with amber text. In the light theme, warning alerts
+and badges use a pale amber fill.
 
 Live has one line naming the non-zero counts of unreadable runs, flows and
 panels; the line is hidden when every count is zero.
@@ -4531,6 +4561,7 @@ Settings has three groups. Each change saves at once.
 |---|---|---|---|
 | General | Start at login | `app.autostart` | Switch |
 | General | Theme | `app.theme` | System, Light, Dark; applies at once |
+| General | Hidden notices | App state: `denied_hidden` | One row per hidden folder with Show again |
 | Workers | Worker network | `worker.network` | Switch |
 | Workers | Terminal | `terminal` | Picker; Other command shows a text field |
 | Workers | Sandbox read paths | `sandbox.read` | One row per folder with a remove button; Add folder |
@@ -4556,10 +4587,16 @@ configuration and state folders. Adding either of those, a descendant or
 a symlink alias is refused with the reason. The same restriction applies
 to `emb choices --set sandbox.read=...`.
 
+Hidden notices has an info tooltip and lists folders hidden with Don't
+show again. It says `No folders hidden.` when the list is empty. Show again
+removes both the permanent hiding and any Dismiss entry for that folder;
+its reports can then show notices under the Overview rules above.
+
 Worktree preparation has a Repositories row with an info tooltip and Add
-repository on the right. Add repository opens a folder chooser for the
-repository's main checkout, then a Worktree preparation dialog with a title
-heading, wrapped repository path and Command field. The field's info
+repository on the right. Add repository and Add folder use the folder-plus
+icon. Add repository opens a folder chooser for the repository's main
+checkout, then a Worktree preparation dialog with a title heading, wrapped
+repository path and Command field. The field's info
 tooltip explains that the command runs in each new worktree outside the
 worker sandbox before any worker or check starts, and empty means no
 preparation. Cancel is the default button; Cancel and Escape save nothing.
@@ -4575,7 +4612,7 @@ Preparation runs as described under `emb run`.
 
 | File | Holds |
 |---|---|
-| `$XDG_STATE_HOME/ember/app.json` | The window's `width`, `height`, last `screen` and `sidebar_hidden` (defaults to `false`), and Overview's `finished_open` and `denied_dismissals` (resolved paths to dismissed run-and-turn occurrences), mode 600; content that cannot be read gives the defaults |
+| `$XDG_STATE_HOME/ember/app.json` | The window's `width`, `height`, last `screen` and `sidebar_hidden` (defaults to `false`), and Overview's `finished_open`, `denied_dismissals` (resolved paths to dismissed run-and-turn occurrences) and `denied_hidden` (resolved folders hidden with Don't show again), mode 600; content that cannot be read gives the defaults |
 | `$XDG_RUNTIME_DIR/ember/app.sock` | The single-instance socket |
 | `$XDG_CONFIG_HOME/autostart/io.github.rearwindowvertigo.Ember.desktop` | The autostart entry while `app.autostart` is on, mode 600: `Exec=<absolute path of emb> app --hidden`. When `emb` is not on `PATH` nothing is written, and the app prints the reason to standard error and shows it in Settings |
 
