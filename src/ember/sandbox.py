@@ -1,7 +1,7 @@
 """Worker sandboxes: the provider per engine, the deny list and its checks.
 
-A sandboxed worker sees the machine read-only except its worktree, `/tmp`
-and the workers' cache folder, and does not see the home folder apart from
+A sandboxed worker sees the machine read-only except its worktree, its temporary
+folder and the workers' cache folder, and does not see the home folder apart from
 the paths it needs: the worktree, the repository's common git folder, `~/.local/bin`,
 `~/.local/lib`, git's configuration, the workers' cache folder, the engine's
 own folders and the run's read paths. The whole of `$XDG_RUNTIME_DIR` is
@@ -16,8 +16,13 @@ The workers' cache folder, `paths.worker_cache_dir()`, is writable outside
 the worktree. `worker_cache_env` gives the variables that point tools' caches
 into that folder: `XDG_CACHE_HOME`, and the
 variables in `WORKER_CACHE_VARIABLES` for tools that do not follow it.
-Ember does not set `TMPDIR`. Bubblewrap mounts a private empty `/tmp` for
-each worker; the Codex profile makes `/tmp` writable, including for read-only runs.
+Each sandboxed Codex run has a mode 700 temporary folder at
+`$XDG_CACHE_HOME/ember/tmp/<run id>`, writable with `TMPDIR` set to it through
+`shell_environment_policy.set`, including for read-only runs. Its profile makes
+the shared `/tmp` read-only. Both sandboxes deny every other entry of the
+temporary folder's parent by name. Ember removes the folder on close or worktree
+removal; prune removes it with the record and sweeps unrecorded folders.
+Bubblewrap mounts a private empty `/tmp` for each worker and gets no run folder.
 
 Each engine has one switch, `sandbox.<engine>`, `on` or `off`. Codex's
 sandbox is its own: it receives the deny list as a permission profile named
@@ -260,6 +265,7 @@ def kept_paths(
     read: Iterable[str | Path] = (),
     *,
     env: Mapping[str, str] | None = None,
+    temporary: Path | None = None,
 ) -> list[Path]:
     """Return the paths a sandboxed worker keeps.
 
@@ -273,6 +279,7 @@ def kept_paths(
         read: The run's read paths.
         env: The environment, for `XDG_CONFIG_HOME` and the workers' cache
             folder; `None` reads `os.environ`.
+        temporary: The Codex run's temporary folder, or `None` for bubblewrap.
 
     Returns:
         The kept paths, sorted.
@@ -286,6 +293,7 @@ def kept_paths(
         paths.worker_cache_dir(env),
         Path(worktree),
         Path(common),
+        *([temporary] if temporary is not None else []),
         *(Path(path) for path in read),
     ]
     return sorted(
@@ -382,6 +390,18 @@ def deny_list(
         }
         by_target[target] = entry
     return sorted(by_target.values(), key=str)
+
+
+def _walk_folders(
+    worktree: Path, env: Mapping[str, str], temporary: Path | None = None
+) -> dict[Path, list[Path]]:
+    """Walk worktrees and temporary folders even inside broader kept paths."""
+    return {
+        paths.worktrees_dir(env).resolve(): [worktree, worktree.resolve()],
+        paths.tmp_dir(env).resolve(): (
+            [temporary, temporary.resolve()] if temporary is not None else []
+        ),
+    }
 
 
 def _protected(env: Mapping[str, str]) -> list[Path]:
@@ -550,6 +570,7 @@ def hidden_snapshot(
     *,
     engine: str = "codex",
     binary: Path | None = None,
+    temporary: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Record hidden paths, startup files and their resolved names at launch."""
@@ -557,7 +578,7 @@ def hidden_snapshot(
     home = paths.home_dir(env)
     worktrees = paths.ensure_worktrees_dir(env)
     runtime = _runtime_base(env)
-    kept = kept_paths(home, worktree, common, read, env=env)
+    kept = kept_paths(home, worktree, common, read, env=env, temporary=temporary)
     if engine != "codex":
         folders = (
             claude_folders(home, env)
@@ -574,7 +595,7 @@ def hidden_snapshot(
         kept,
         runtime,
         protected=_protected(env),
-        walk={worktrees: [worktree, worktree.resolve()]},
+        walk=_walk_folders(worktree, env, temporary),
     )
     return {
         "hidden": [
@@ -587,9 +608,9 @@ def hidden_snapshot(
         ],
         "secret": _variants(secret_paths(env)),
         "startup": _variants(home / name for name in STARTUP_HOME_FILES),
-        "protected": _variants([runtime, worktrees]),
+        "protected": _variants([runtime, worktrees, paths.tmp_dir(env)]),
         "config": _variants([_git_config_dir(home, env).parent]),
-        "own": _variants([worktree]),
+        "own": _variants([worktree, *([temporary] if temporary is not None else [])]),
         "home": str(home),
     }
 
@@ -824,12 +845,14 @@ def check_kept(
     read: Iterable[str | Path] = (),
     *,
     env: Mapping[str, str] | None = None,
+    temporary: Path | None = None,
 ) -> None:
     """Refuse a sandbox whose kept path lies inside one of Ember's own folders.
 
     The sandbox hides Ember's configuration and state folders even where a
     kept path holds them. Entries in the worktrees folder are denied by name
-    except the worker's own worktree.
+    except the worker's own worktree. Entries in the temporary folders parent
+    are denied except the Codex run's own folder.
     Every kept path is checked, as given and with symlinks resolved: the
     worktree, the common git folder, the read paths and the others
     `kept_paths` lists, the workers' cache folder among them.
@@ -839,6 +862,7 @@ def check_kept(
         common: The repository's common git folder.
         read: The run's read paths.
         env: The environment; `None` reads `os.environ`.
+        temporary: The Codex run's temporary folder, or `None` for bubblewrap.
 
     Raises:
         KeptPathError: A kept path is one of Ember's folders or inside one;
@@ -850,7 +874,7 @@ def check_kept(
     entries = [
         *given,
         *(path.resolve() for path in given),
-        *kept_paths(home, worktree, common, read, env=env),
+        *kept_paths(home, worktree, common, read, env=env, temporary=temporary),
     ]
     protected = [
         folder
@@ -859,6 +883,7 @@ def check_kept(
     ]
     worktrees = paths.worktrees_dir(env).resolve()
     own = Path(worktree).resolve()
+    tmp = paths.tmp_dir(env).resolve()
     for entry in dict.fromkeys(entries):
         for folder in protected:
             if entry.is_relative_to(folder):
@@ -866,6 +891,10 @@ def check_kept(
         target = entry.resolve()
         if target.is_relative_to(worktrees) and not target.is_relative_to(own):
             raise KeptPathError(entry, worktrees)
+        if target.is_relative_to(tmp) and (
+            temporary is None or not target.is_relative_to(temporary.resolve())
+        ):
+            raise KeptPathError(entry, tmp)
 
 
 def _runtime_base(env: Mapping[str, str]) -> Path:
@@ -879,6 +908,7 @@ def codex_args(
     *,
     read_only: bool = False,
     network: bool = False,
+    temporary: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Return the Codex `-c` options that define and select Ember's profile.
@@ -888,7 +918,9 @@ def codex_args(
     writable profile. Codex's own protection of git folders stays in place.
     The workers' cache folder is writable, also in a read-only run, and the
     commands Codex runs get the variables of `worker_cache_env` through
-    `shell_environment_policy.set`. `/tmp` is writable in every profile.
+    `shell_environment_policy.set`, together with `TMPDIR` pointing to the
+    run's writable temporary folder. The shared `/tmp` is read-only through
+    the `:slash_tmp` entry.
     The cache folder is created when it is missing.
 
     Args:
@@ -897,6 +929,8 @@ def codex_args(
         read: The run's read paths.
         read_only: Protect a legacy read-only run's source checkout.
         network: The worker has network.
+        temporary: The run's temporary folder; defaults to the folder named
+            by the worktree's final component in `paths.tmp_dir()`.
         env: The environment; `None` reads `os.environ`.
 
     Returns:
@@ -908,19 +942,23 @@ def codex_args(
     env = _env(env)
     home = paths.home_dir(env)
     cache = _worker_cache(env)
-    worktrees = paths.ensure_worktrees_dir(env)
-    kept = kept_paths(home, worktree, common, read, env=env)
+    paths.ensure_worktrees_dir(env)
+    if temporary is None:
+        temporary = paths.run_tmp_dir(Path(worktree).name, env)
+    kept = kept_paths(home, worktree, common, read, env=env, temporary=temporary)
     denied = deny_list(
         home,
         kept,
         _runtime_base(env),
         protected=_protected(env),
-        walk={worktrees: [Path(worktree), Path(worktree).resolve()]},
+        walk=_walk_folders(Path(worktree), env, temporary),
     )
     filesystem = {str(path): "deny" for path in denied}
     for path in dict.fromkeys((cache, cache.resolve())):
         filesystem[str(path)] = "write"
-    filesystem["/tmp"] = "write"
+    filesystem[":slash_tmp"] = "read"
+    for path in dict.fromkeys((temporary, temporary.resolve())):
+        filesystem[str(path)] = "write"
     for path in dict.fromkeys((Path(worktree), Path(worktree).resolve())):
         filesystem[str(path)] = "read" if read_only else "write"
     filesystem[str(common)] = "read"
@@ -933,7 +971,7 @@ def codex_args(
     extends = ":read-only" if read_only else ":workspace"
     variables = [
         option
-        for name, value in worker_cache_env(env).items()
+        for name, value in {**worker_cache_env(env), "TMPDIR": str(temporary)}.items()
         for option in (
             "-c",
             f"shell_environment_policy.set.{name}="
@@ -1158,7 +1196,7 @@ def _wrap(
     """
     home = paths.home_dir(env)
     cache = _worker_cache(env)
-    worktrees = paths.ensure_worktrees_dir(env)
+    paths.ensure_worktrees_dir(env)
     args = [
         "bwrap",
         "--ro-bind", "/", "/",
@@ -1215,7 +1253,7 @@ def _wrap(
         kept,
         _runtime_base(env),
         protected=_protected(env),
-        walk={worktrees: [Path(worktree), Path(worktree).resolve()]},
+        walk=_walk_folders(Path(worktree), env),
     )
     for path in denied:
         if path.is_dir() or path == _runtime_base(env):
@@ -1536,6 +1574,8 @@ def _codex_probe(
             **env,
             "PATH": os.pathsep.join([str(folder), env.get("PATH", "")]),
         }
+    temporary = worktree.parent / "tmp"
+    temporary.mkdir(mode=paths.DIR_MODE)
     probe.argv = [
         codex,
         "sandbox",
@@ -1544,6 +1584,7 @@ def _codex_probe(
             common,
             answers["sandbox.read"]["value"],
             network=answers["worker.network"]["value"] == "on",
+            temporary=temporary,
             env=env,
         ),
         PROBE_COMMAND,

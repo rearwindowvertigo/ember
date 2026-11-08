@@ -440,3 +440,80 @@ def test_check_worktree_path_accepts_a_folder_with_invalid_git_metadata(
         )
     env = {"XDG_DATA_HOME": str(tmp_path)}
     paths.check_worktree_path(paths.worktree_path("run-1", env), [], env)
+
+
+def test_run_tmp_dir_uses_the_cache_base(home: Path, tmp_path: Path) -> None:
+    assert (
+        paths.run_tmp_dir("run", {"HOME": str(home)}) == home / ".cache/ember/tmp/run"
+    )
+    env = {"HOME": str(home), "XDG_CACHE_HOME": str(tmp_path / "cache")}
+    assert paths.run_tmp_dir("run", env) == tmp_path / "cache/ember/tmp/run"
+
+
+@pytest.mark.parametrize("ident", ["", ".", "..", "a/b", "a\0b"])
+def test_run_tmp_dir_refuses_invalid_ids(home: Path, ident: str) -> None:
+    with pytest.raises(ValueError):
+        paths.run_tmp_dir(ident, {"HOME": str(home)})
+
+
+def test_ensure_run_tmp_dir_sets_private_modes(home: Path) -> None:
+    env = {"HOME": str(home)}
+    parent = paths.tmp_dir(env)
+    parent.mkdir(parents=True)
+    parent.chmod(0o777)
+    first = paths.ensure_run_tmp_dir("editing", env)
+    second = paths.ensure_run_tmp_dir("review", env)
+    assert first != second
+    assert all(_mode(folder) == 0o700 for folder in (first, second, parent))
+
+
+@pytest.mark.parametrize("level", ["parent", "run"])
+def test_ensure_run_tmp_dir_refuses_symlinks(
+    home: Path, tmp_path: Path, level: str
+) -> None:
+    env = {"HOME": str(home)}
+    target = tmp_path / "outside"
+    target.mkdir(mode=0o755)
+    link = paths.tmp_dir(env) if level == "parent" else paths.run_tmp_dir("run", env)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target, target_is_directory=True)
+    with pytest.raises(NotADirectoryError):
+        paths.ensure_run_tmp_dir("run", env)
+    assert _mode(target) == 0o755
+
+
+@pytest.mark.parametrize("link_at_root", [False, True])
+def test_remove_run_tmp_dir_does_not_follow_symlinks(
+    home: Path, tmp_path: Path, link_at_root: bool
+) -> None:
+    env = {"HOME": str(home)}
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "keep"
+    sentinel.write_text("keep")
+    folder = paths.run_tmp_dir("run", env)
+    folder.parent.mkdir(parents=True)
+    if link_at_root:
+        folder.symlink_to(outside, target_is_directory=True)
+    else:
+        folder.mkdir()
+        (folder / "link").symlink_to(outside, target_is_directory=True)
+        (folder / "file").write_text("temporary")
+    assert paths.remove_run_tmp_dir("run", env)
+    assert not os.path.lexists(folder)
+    assert sentinel.read_text() == "keep"
+    assert not paths.remove_run_tmp_dir("run", env)
+
+
+def test_remove_run_tmp_dir_refuses_a_symlinked_parent(
+    home: Path, tmp_path: Path
+) -> None:
+    env = {"HOME": str(home)}
+    outside = tmp_path / "outside"
+    (outside / "run").mkdir(parents=True)
+    parent = paths.tmp_dir(env)
+    parent.parent.mkdir(parents=True)
+    parent.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError):
+        paths.remove_run_tmp_dir("run", env)
+    assert (outside / "run").is_dir()

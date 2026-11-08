@@ -70,10 +70,20 @@ This decision covers the worktrees Ember creates for runs and flows.
    checked as in item 5, is created when a sandboxed run starts (exit 69 when
    it cannot be), and is writable in the Codex profile and in `bwrap`, for
    read-only runs too. It is shared by every sandboxed run and kept between
-   runs. Ember does not set `TMPDIR` for workers or create a per-run
-   temporary folder. Bubblewrap mounts a private empty `/tmp` for each
-   worker. The Codex profile makes `/tmp` writable, including for read-only
-   runs.
+   runs. Every sandboxed Codex run, editing or read-only, also gets a
+   temporary folder at `$XDG_CACHE_HOME/ember/tmp/<run id>` (default
+   `~/.cache/ember/tmp/<run id>`). The folder and its `tmp` parent have mode
+   700. It is outside Ember's configuration and state folders, is a kept path
+   checked as in item 5, and is created before the session starts (exit 69
+   when it cannot be). The Codex profile makes it writable, sets `TMPDIR` to
+   it through `shell_environment_policy.set`, and makes the shared `/tmp`
+   read-only. Both sandboxes walk the `tmp` parent and deny every other entry
+   by name. Ember removes the folder when the worktree is removed or the run
+   is closed, and when prune removes the run record. An unscoped prune sweeps
+   temporary folders no record names only when every record could be read.
+   Removal never follows symlinks out of the `tmp` parent. With `sandbox.codex`
+   off, Ember creates no temporary folder and sets no `TMPDIR`. Bubblewrap
+   keeps its private empty `/tmp` and gets no run temporary folder.
 10. Every sandboxed worker gets `XDG_CACHE_HOME` set to the workers' cache
     folder, and the variables below set to folders inside it, replacing any value the owner
     set. Codex receives them as `shell_environment_policy.set` options;

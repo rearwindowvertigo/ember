@@ -1,4 +1,4 @@
-"""Prune ended and abandoned records and orphaned worktrees, retaining branches."""
+"""Prune ended records, orphaned worktrees and temporary folders, keeping branches."""
 
 import contextlib
 import fcntl
@@ -56,6 +56,7 @@ class Selection:
     flow_bases: dict[str, str | None] = field(default_factory=dict)
     live_worktrees: set[str] = field(default_factory=set)
     named_worktrees: set[str] = field(default_factory=set)
+    named_tmp_ids: set[str] = field(default_factory=set)
     skipped: list[dict[str, str]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -285,6 +286,9 @@ def select(
                 except _BUSY:
                     pass
             loaded[ident] = entry
+            result.named_tmp_ids.update(entry.children)
+            if entry.kind == "run":
+                result.named_tmp_ids.add(ident)
             result.named_worktrees.update(_worktree_paths(entry.data))
             if entry.kind == "flow":
                 result.flow_bases[entry.data["branch"]] = entry.data.get("base_branch")
@@ -570,6 +574,51 @@ def _sweep_orphans(
             result.skipped.append(dict(id=str(folder), reason=str(error)))
 
 
+def _sweep_tmp(
+    older_than: int,
+    at: float,
+    env: Mapping[str, str],
+    named: set[str],
+    result: Result,
+    *,
+    dry_run: bool,
+    readable: bool,
+) -> None:
+    """Remove unrecorded temporary entries only when every record was readable."""
+    root = paths.tmp_dir(env)
+    try:
+        if root.is_symlink():
+            raise OSError(f"{root} is a symlink, not a folder")
+        entries = sorted(root.iterdir())
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        result.errors.append(f"{root}: {error}")
+        return
+    for entry in entries:
+        if entry.name in named:
+            continue
+        try:
+            if not readable:
+                result.skipped.append(
+                    dict(
+                        id=str(entry),
+                        reason="cannot establish ownership: unreadable records",
+                    )
+                )
+                continue
+            if older_than and at - entry.lstat().st_mtime < older_than * 86400:
+                result.skipped.append(
+                    dict(id=str(entry), reason="younger than the requested age")
+                )
+                continue
+            if dry_run or paths.remove_run_tmp_dir(entry.name, env):
+                result.removed.append(dict(id=str(entry), kind="tmp"))
+        except (OSError, ValueError) as error:
+            result.errors.append(f"{entry}: {error}")
+            result.skipped.append(dict(id=str(entry), reason=str(error)))
+
+
 def _artifacts(
     entry: Entry,
     env: Mapping[str, str],
@@ -795,6 +844,10 @@ def remove(
                 if reason:
                     result.skipped.append(dict(id=ident, reason=reason))
                     continue
+                temporary = (
+                    paths.run_tmp_dir(ident, env) if entry.kind == "run" else None
+                )
+                had_tmp = temporary is not None and os.path.lexists(temporary)
                 artifacts = Result()
                 _artifacts(
                     entry,
@@ -805,6 +858,11 @@ def remove(
                     _parent_checkouts(ident, current.owners, current.records),
                     dry_run=dry_run,
                 )
+                if temporary is not None:
+                    if not dry_run:
+                        paths.remove_run_tmp_dir(ident, env)
+                    if had_tmp:
+                        artifacts.removed.append(dict(id=str(temporary), kind="tmp"))
                 if not dry_run:
                     shutil.rmtree(runs.run_dir(ident, env))
                 result.removed.append(dict(id=ident, kind=entry.kind))
@@ -830,6 +888,7 @@ def remove(
                 result.errors.append(f"{ident}: {error}")
                 result.skipped.append(dict(id=ident, reason=str(error)))
     if record_ids is None:
+        readable = not result.errors
         _sweep_orphans(
             older_than,
             at,
@@ -837,7 +896,16 @@ def remove(
             selection.named_worktrees | current.named_worktrees,
             result,
             dry_run=dry_run,
-            readable=not result.errors,
+            readable=readable,
+        )
+        _sweep_tmp(
+            older_than,
+            at,
+            env,
+            selection.named_tmp_ids | current.named_tmp_ids,
+            result,
+            dry_run=dry_run,
+            readable=readable,
         )
     result.skipped = list({item["id"]: item for item in result.skipped}.values())
     return result

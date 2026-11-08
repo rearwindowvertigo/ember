@@ -277,9 +277,18 @@ network access follows `worker.network` as described below.
 The workers' cache folder,
 `$XDG_CACHE_HOME/ember/worker`, is writable in every
 sandboxed run, including read-only runs, and shared between runs.
-Ember does not set `TMPDIR` for workers or create a per-run temporary
-folder. Bubblewrap mounts a private empty `/tmp` for each worker. The
-Codex profile makes `/tmp` writable, including for read-only runs.
+Each sandboxed Codex run, editing or read-only, gets a temporary folder at
+`$XDG_CACHE_HOME/ember/tmp/<run id>` (default `~/.cache/ember/tmp/<run id>`).
+The folder and its `tmp` parent have mode 700. Ember creates it before the
+session starts and exits 69 if it cannot. The Codex profile makes it writable,
+sets `TMPDIR` to it through `shell_environment_policy.set`, and makes the
+shared `/tmp` read-only. Both sandboxes deny every other entry of the `tmp`
+parent by name. Ember removes the folder on close, worktree removal or record
+pruning. An unscoped prune also removes temporary folders no record names,
+only when every record could be read. Removal does not follow symlinks out
+of the folder. With `sandbox.codex` off, Ember creates no temporary folder
+and sets no `TMPDIR`. Bubblewrap mounts a private empty `/tmp` for each
+worker and gets no run temporary folder.
 `XDG_CACHE_HOME`, `UV_CACHE_DIR`, `UV_PYTHON_INSTALL_DIR`, `PIP_CACHE_DIR`,
 `npm_config_cache` and `GOMODCACHE` point into the workers' cache folder.
 `CARGO_HOME` and

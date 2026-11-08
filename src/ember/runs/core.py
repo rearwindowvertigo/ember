@@ -843,6 +843,7 @@ class Core:
                 run.read_effective,
                 read_only=run.read_only and not run.detached,
                 network=run.network,
+                temporary=paths.run_tmp_dir(run.id, self.env),
                 env=self.env,
             )
             env_vars = dict(spec.env)
@@ -1073,6 +1074,7 @@ class Core:
                 self.last_run_id = run.id
                 self._say(f"run {run_id}")
                 self._warn(worker.line())
+                self._create_run_tmp(run)
                 if run.read_only:
                     short_base = (
                         self._git_out(top, "rev-parse", "--short", base) or base[:12]
@@ -1160,7 +1162,17 @@ class Core:
             return
         cache = paths.worker_cache_dir(self.env)
         try:
-            sandbox.check_kept(Path(worktree), common, read, env=self.env)
+            sandbox.check_kept(
+                Path(worktree),
+                common,
+                read,
+                env=self.env,
+                temporary=(
+                    paths.run_tmp_dir(Path(worktree).name, self.env)
+                    if provider == sandbox.CODEX
+                    else None
+                ),
+            )
         except sandbox.KeptPathError as error:
             read_paths = {Path(item) for item in read}
             read_paths |= {Path(item).resolve() for item in read}
@@ -1213,6 +1225,21 @@ class Core:
                 files=files,
             )
 
+    def _create_run_tmp(self, run: Run) -> None:
+        """Create a sandboxed Codex run's temporary folder or refuse with 69."""
+        if run.sandbox != sandbox.CODEX:
+            return
+        try:
+            paths.ensure_run_tmp_dir(run.id, self.env)
+        except (OSError, ValueError) as error:
+            folder = paths.run_tmp_dir(run.id, self.env)
+            raise RunError(
+                exits.UNAVAILABLE,
+                f"cannot create the run's temporary folder {folder}: {error}",
+                "fix",
+                fix=f"make {folder} a folder you can write, or set XDG_CACHE_HOME",
+            ) from error
+
     def _launch(
         self,
         run: Run,
@@ -1250,6 +1277,11 @@ class Core:
                     run.read_effective,
                     engine=run.engine,
                     binary=Path(binary) if binary else None,
+                    temporary=(
+                        paths.run_tmp_dir(run.id, self.env)
+                        if run.sandbox == sandbox.CODEX
+                        else None
+                    ),
                     env=self.env,
                 ),
             )
@@ -2505,6 +2537,7 @@ class Core:
         A locked starting run is left alone, including with force. Worktrees
         of unstarted preparation runs are removed. Other editing worktrees
         and branches are kept; clean detached worktrees are removed.
+        The run's temporary folder is removed even when its worktree stays.
 
         Args:
             run_id: The run.
@@ -2535,6 +2568,7 @@ class Core:
             if run.status == record.CLOSED:
                 self._end_preparation(run)
                 self._remove_detached(run, command_locked=True)
+                self._remove_run_tmp(run)
                 self._say(f"closed {run_id}")
                 return exits.OK
             if run.status == record.FAILED and run.turn_state == record.SENT:
@@ -2610,7 +2644,15 @@ class Core:
             allow_closed=True,
         )
         self._remove_detached(run, command_locked=command_locked)
+        self._remove_run_tmp(run)
         self._say(f"closed {run.id}")
+
+    def _remove_run_tmp(self, run: Run) -> None:
+        """Remove a closed run's temporary folder and report removal errors."""
+        try:
+            paths.remove_run_tmp_dir(run.id, self.env)
+        except OSError as error:
+            self._warn(f"WARNING: run {run.id}: {error}")
 
     def _remove_detached(self, run: Run, *, command_locked: bool = False) -> None:
         unstarted = run.preparation is not None and run.turn == 0
@@ -2674,6 +2716,7 @@ class Core:
         )
         if removed.returncode:
             raise OSError(removed.stderr.strip() or f"cannot remove {folder}")
+        paths.remove_run_tmp_dir(run.id, self.env)
 
     def _optional_driver(self, engine: str) -> Driver:
         try:
