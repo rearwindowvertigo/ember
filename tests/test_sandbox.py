@@ -1,16 +1,20 @@
 import json
 import os
+import shlex
 import stat
 import subprocess
 import tomllib
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from io import StringIO
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
 from ember import choices, paths, sandbox
+from ember.runs import core, exits, record
 
 
 def _tool(folder: Path, name: str, text: str = "#!/bin/sh\nexit 0\n") -> Path:
@@ -1388,24 +1392,151 @@ def _denial_snapshot(
 @pytest.mark.parametrize(
     "error", ["Permission denied", "Operation not permitted", "EACCES"]
 )
+@pytest.mark.parametrize("operand", ["file", "folder", "missing file"])
 def test_denials_match_hidden_folder_and_offer_deepest_safe_folder(
-    env: dict[str, str], home: Path, error: str
+    env: dict[str, str], home: Path, error: str, operand: str
 ) -> None:
     tool = home / ".toolchain" / "versions" / "3.14"
     tool.mkdir(parents=True)
     binary = tool / "python"
     binary.write_text("")
+    denied = {"file": binary, "folder": tool, "missing file": tool / "missing"}[operand]
     snapshot = _denial_snapshot(env, home)
     expected = [
         {"path": str(home / ".toolchain"), "reason": "hidden", "allow_path": str(tool)}
     ]
-    assert sandbox.denied_paths(f"{error}: '{binary}'", snapshot) == expected
+    assert sandbox.denied_paths(f"{error}: '{denied}'", snapshot) == expected
     assert (
-        sandbox.denied_paths(f"{binary}: {error}\n{binary}: {error}", snapshot)
+        sandbox.denied_paths(f"{denied}: {error}\n{denied}: {error}", snapshot)
         == expected
     )
-    assert sandbox.denied_paths(f"{binary}: file not found", snapshot) == []
+    assert sandbox.denied_paths(f"{denied}: file not found", snapshot) == []
     assert sandbox.denied_paths(f"{error}: /etc/passwd", snapshot) == []
+    assert sandbox.valid_denial_allow_path(home / ".toolchain", tool)
+
+
+@pytest.mark.parametrize(
+    ("restriction", "reason"),
+    [
+        ("none", "hidden"),
+        ("secret", "secret location"),
+        ("protected", "protected"),
+        ("config", "hidden"),
+        ("contains secret", "hidden"),
+    ],
+)
+def test_denial_of_uv_symlink_offers_resolved_pipx_folder_after_safety_checks(
+    env: dict[str, str], home: Path, restriction: str, reason: str
+) -> None:
+    tool = home / ".local/share/pipx/venvs/uv/bin"
+    tool.mkdir(parents=True)
+    binary = tool / "uv"
+    binary.touch()
+    alias = home / ".local/bin/uv"
+    alias.parent.mkdir(parents=True)
+    alias.symlink_to(binary)
+    if restriction == "secret":
+        (home / ".ssh").symlink_to(tool, target_is_directory=True)
+    elif restriction == "protected":
+        env["XDG_RUNTIME_DIR"] = str(tool)
+    elif restriction == "config":
+        env["XDG_CONFIG_HOME"] = str(tool)
+    elif restriction == "contains secret":
+        secret = tool / "credentials"
+        secret.mkdir()
+        (home / ".ssh").symlink_to(secret, target_is_directory=True)
+    snapshot = _denial_snapshot(env, home)
+    for name in (alias, binary):
+        result = sandbox.denied_paths(f"{name}: Permission denied", snapshot)
+        assert len(result) == 1
+        assert result[0]["reason"] == reason
+        assert result[0]["allow_path"] == (str(tool) if restriction == "none" else None)
+        if restriction == "none":
+            assert result[0]["path"] == str(home / ".local/share/pipx")
+            assert sandbox.valid_denial_allow_path(result[0]["path"], str(tool))
+
+
+@pytest.mark.parametrize("code", [exits.OK, exits.PROVIDER_ERROR])
+def test_symlink_denial_owner_line_suggests_resolved_folder(
+    env: dict[str, str], home: Path, monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    tool = home / ".local/share/pipx/venvs/uv/bin"
+    tool.mkdir(parents=True)
+    binary = tool / "uv"
+    binary.touch()
+    alias = home / ".local/bin/uv"
+    alias.parent.mkdir(parents=True)
+    alias.symlink_to(binary)
+    denials = sandbox.denied_paths(
+        f"{alias}: Permission denied", _denial_snapshot(env, home)
+    )
+    run = Mock(spec=record.Run, read_effective=(), read=())
+    err = StringIO()
+    runner = core.Core(env=env, err=err)
+    monkeypatch.setattr(
+        runner, "_saved_outcome", Mock(return_value={"denied_paths": denials})
+    )
+    wait_owner = Mock(return_value=run)
+    monkeypatch.setattr(runner, "_wait_owner", wait_owner)
+    runner._warn_denial_owners(run, code)
+    owner = err.getvalue().strip()
+    qualification = (
+        "the turn finished (exit 0); read access is needed only if "
+        "the worker's report says the work needed the path; "
+        if code == exits.OK
+        else ""
+    )
+    assert owner == (
+        f"owner: {qualification}Settings, Sandbox read paths; emb choices --set "
+        + shlex.quote("sandbox.read=" + json.dumps([str(tool)]))
+    )
+    wait_owner.assert_called_once_with(run, owner, str(tool))
+
+
+@pytest.mark.parametrize(
+    ("hidden", "offered", "valid"),
+    [
+        ("tools", "tools", True),
+        ("tools", "tools/versions/3.14", True),
+        ("tools/versions/3.14", "tools", True),
+        ("tools", "tools-other", False),
+        (".local/share/pipx", ".local/bin", False),
+        ("tools", None, False),
+    ],
+)
+def test_recorded_denial_offer_must_overlap_hidden_path(
+    tmp_path: Path, hidden: str, offered: str | None, valid: bool
+) -> None:
+    allow = None if offered is None else str(tmp_path / offered)
+    assert sandbox.valid_denial_allow_path(str(tmp_path / hidden), allow) is valid
+
+
+@pytest.mark.parametrize("hidden_alias", [False, True])
+@pytest.mark.parametrize("related", [False, True])
+def test_recorded_denial_offer_resolves_symlinks(
+    tmp_path: Path, hidden_alias: bool, related: bool
+) -> None:
+    hidden = tmp_path / "pipx"
+    hidden.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(
+        hidden if related else tmp_path / "unrelated", target_is_directory=True
+    )
+    first, second = (alias, hidden) if hidden_alias else (hidden, alias)
+    assert sandbox.valid_denial_allow_path(first, second) is related
+
+
+@pytest.mark.parametrize("hidden", ["relative", "/absolute"])
+def test_recorded_denial_offer_rejects_relative_paths(hidden: str) -> None:
+    assert not sandbox.valid_denial_allow_path(hidden, "relative")
+    assert not sandbox.valid_denial_allow_path("relative", hidden)
+
+
+def test_recorded_denial_offer_rejects_symlink_loops(tmp_path: Path) -> None:
+    alias = tmp_path / "alias"
+    alias.symlink_to(alias)
+    assert not sandbox.valid_denial_allow_path(alias, tmp_path)
+    assert not sandbox.valid_denial_allow_path(tmp_path, alias)
 
 
 @pytest.mark.parametrize("relative", sandbox.SECRET_HOME_PATHS)

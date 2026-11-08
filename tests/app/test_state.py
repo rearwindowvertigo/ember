@@ -24,6 +24,7 @@ def test_round_trip_is_private(env: dict[str, str]) -> None:
         "screen": "engines",
         "finished_open": False,
         "denied_dismissals": {},
+        "denied_hidden": [],
         "sidebar_hidden": False,
     }
 
@@ -96,3 +97,34 @@ def test_denial_dismissals_survive_restart_and_reject_malformed_values(
         )
     )
     assert state.load(env).denied_dismissals == {"ok": ["run:1"]}
+
+
+def test_hidden_denial_folders_round_trip(env: dict[str, str]) -> None:
+    saved = state.AppState(
+        denied_hidden=["/home/owner/tools"],
+        denied_dismissals={"/home/owner/other": ["run:1"]},
+    )
+    state.save(saved, env)
+    assert state.load(env) == saved
+    assert json.loads(state.state_path(env).read_text())["denied_hidden"] == [
+        "/home/owner/tools"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, []),
+        (True, []),
+        ("/home/owner/tools", []),
+        ({"/home/owner/tools": True}, []),
+        (["/tools", 1, None, {}, [], "", "/other", "/tools"], ["/other", "/tools"]),
+    ],
+)
+def test_hidden_denial_folders_reject_invalid_entries(
+    env: dict[str, str], value: object, expected: list[str]
+) -> None:
+    path = state.state_path(env)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"denied_hidden": value}))
+    assert state.load(env).denied_hidden == expected

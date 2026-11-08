@@ -240,6 +240,85 @@ def test_status_tones_meet_text_contrast(mode: str, tone: str) -> None:
 def test_border_tokens_are_solid() -> None:
     assert theme.TOKENS["border"] == ("#e6e6e6", "#414141")
     assert theme.TOKENS["border-strong"] == ("#cccccc", "#4c4c4c")
+    assert theme.TOKENS["warning-border"] == ("#e6e6e6", "#f2a600")
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+@pytest.mark.parametrize(
+    ("tone", "background"),
+    [
+        ("neutral", "bg-subtle"),
+        ("info", "bg-accent"),
+        ("success", "success-bg"),
+        ("warning", "warning-bg"),
+        ("danger", "danger-bg"),
+        ("incomplete", "incomplete-bg"),
+    ],
+)
+def test_alert_fill_border_and_warning_icon(
+    qapp: QApplication, qtbot: QtBot, mode: str, tone: str, background: str
+) -> None:
+    theme.apply(qapp, mode)
+    alert = widgets.Alert(tone, "Notice", "Details")
+    qtbot.addWidget(alert)
+    alert.resize(320, 100)
+    alert.show()
+    qtbot.waitExposed(alert)
+    image = alert.grab().toImage()
+    border = "border"
+    if tone == "warning" and mode == "dark":
+        background = "bg-card"
+        border = "warning-text"
+    x = image.width() // 2
+    assert image.pixelColor(x, 0).name() == theme.hex_value(border, mode)
+    assert image.pixelColor(x, 1).name() == theme.hex_value(background, mode)
+    if tone == "warning":
+        mark = next(
+            label
+            for label in alert.findChildren(QLabel)
+            if label.accessibleName() == "warning"
+        )
+        icon = mark.pixmap().toImage()
+        assert any(
+            icon.pixelColor(x, y) == theme.color("warning-text", mode)
+            for x in range(icon.width())
+            for y in range(icon.height())
+        )
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+@pytest.mark.parametrize(
+    ("tone", "background", "text"),
+    [
+        ("neutral", "bg-subtle", "text-secondary"),
+        ("info", "bg-accent", "text-accent"),
+        ("success", "success-bg", "success-text"),
+        ("warning", "warning-bg", "warning-text"),
+        ("danger", "danger-bg", "danger-text"),
+        ("incomplete", "incomplete-bg", "incomplete-text"),
+    ],
+)
+def test_badge_fill_and_text(
+    qapp: QApplication,
+    qtbot: QtBot,
+    mode: str,
+    tone: str,
+    background: str,
+    text: str,
+) -> None:
+    theme.apply(qapp, mode)
+    badge = widgets.Badge("Status", tone)
+    qtbot.addWidget(badge)
+    badge.resize(120, 22)
+    badge.show()
+    qtbot.waitExposed(badge)
+    image = badge.grab().toImage()
+    if tone == "warning" and mode == "dark":
+        background = "bg-subtle"
+    assert image.pixelColor(image.width() // 2, 1).name() == theme.hex_value(
+        background, mode
+    )
+    assert badge.palette().color(badge.foregroundRole()) == theme.color(text, mode)
 
 
 @pytest.mark.parametrize("mode", theme.MODES)

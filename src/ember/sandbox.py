@@ -598,6 +598,26 @@ def _inside(candidate: Path, folders: Iterable[str]) -> bool:
     return any(candidate.is_relative_to(folder) for folder in folders)
 
 
+def valid_denial_allow_path(path: str | Path, allow_path: str | Path | None) -> bool:
+    """Check that a recorded offer overlaps its hidden path after resolution.
+
+    The offer may equal, contain or lie inside the hidden path. Missing offers,
+    relative paths and paths whose symlinks cannot be resolved are invalid.
+    This checks the relationship only; secret and protected checks still apply.
+    """
+    if allow_path is None:
+        return False
+    hidden, offered = Path(path), Path(allow_path)
+    if not hidden.is_absolute() or not offered.is_absolute():
+        return False
+    try:
+        hidden = Path(os.path.realpath(hidden, strict=os.path.ALLOW_MISSING))
+        offered = Path(os.path.realpath(offered, strict=os.path.ALLOW_MISSING))
+    except OSError:
+        return False
+    return offered.is_relative_to(hidden) or hidden.is_relative_to(offered)
+
+
 def merge_denial(first: Mapping[str, Any], second: Mapping[str, Any]) -> dict[str, Any]:
     """Merge reports of one resolved hidden path without weakening restrictions.
 
@@ -761,9 +781,17 @@ def denied_paths(text: str, snapshot: Mapping[str, Any]) -> list[dict[str, Any]]
                 reason = "protected"
             elif any(_inside(p, snapshot.get("secret", [])) for p in views):
                 reason = "secret location"
-            folder = candidate if candidate.is_dir() else candidate.parent
-            if candidate == Path(entry["path"]) and entry["directory"]:
-                folder = candidate
+            matched = (
+                candidate
+                if _inside(candidate, (entry["path"], entry["resolved"]))
+                else resolved
+            )
+            folder = matched if matched.is_dir() else matched.parent
+            if (
+                str(matched) in (entry["path"], entry["resolved"])
+                and entry["directory"]
+            ):
+                folder = matched
             forbidden = [*snapshot.get("secret", []), *snapshot.get("protected", [])]
             allow = str(folder)
             if reason != "hidden" or any(
@@ -772,7 +800,7 @@ def denied_paths(text: str, snapshot: Mapping[str, Any]) -> list[dict[str, Any]]
                 for p in (
                     folder,
                     folder.resolve(),
-                    target if folder == candidate else target.parent,
+                    target if folder == matched else target.parent,
                 )
             ):
                 allow = None

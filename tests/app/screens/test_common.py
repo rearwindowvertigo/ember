@@ -1,5 +1,6 @@
 import datetime
 
+import pytest
 from PySide6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
 from pytestqt.qtbot import QtBot
 
@@ -131,6 +132,54 @@ def test_align_controls_gives_rows_one_column(qtbot: QtBot) -> None:
     assert len(right) == 1
 
 
+@pytest.mark.parametrize("mode", ["light", "dark"])
+@pytest.mark.parametrize("changed", [False, True])
+@pytest.mark.parametrize("kind", ["picker", "segmented", "switch", "button"])
+def test_reset_and_no_reset_controls_share_right_edge(
+    qtbot: QtBot, mode: str, changed: bool, kind: str
+) -> None:
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QApplication
+
+    from ember.app import theme, widgets
+
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    theme.apply(app, mode)
+    screen = QWidget()
+    qtbot.addWidget(screen)
+    layout = common.scrolled(screen)
+    card, column = common.titled_card("Settings")
+    layout.addWidget(card)
+    picker = widgets.Picker()
+    picker.add_option("Default", "default")
+    reset_row = common.TooltipRow("A setting with Reset", "Tip", picker)
+    reset_row.enable_reset(lambda: None)
+    reset_row.set_changed(changed)
+    control = {
+        "picker": widgets.Picker,
+        "segmented": lambda: widgets.Segmented((("a", "A"), ("b", "B"))),
+        "switch": widgets.Switch,
+        "button": lambda: widgets.button("Add folder", "secondary", size="sm"),
+    }[kind]()
+    plain_row = common.TooltipRow("A setting without Reset", "Tip", control)
+    rows = [reset_row, plain_row]
+    for row in rows:
+        column.addWidget(row)
+    assert_rows_reflow(screen, rows, qtbot)
+    right = {
+        row.control.mapTo(screen, row.control.rect().topRight()).x() for row in rows
+    }
+    assert len(right) == 1
+    screen.resize(400, 480)
+    qtbot.waitUntil(lambda: all(row.stacked for row in rows))
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
+    assert screen.width() == 400
+    for row in rows:
+        assert row.slot.x() == row.control.x() == 0
+        assert row.slot.y() > row.name.geometry().bottom()
+
+
 def assert_screen_fits(screen: QWidget) -> None:
     """Check the content cap, centring, and every visible child's horizontal bounds."""
     from PySide6.QtCore import QPoint
@@ -198,6 +247,10 @@ def assert_rows_reflow(
     visible = [row for row in rows if row.isVisible()]
     wide = visible[0].slot.width()
     assert not any(row.stacked for row in visible)
+    right = {
+        row.control.mapTo(screen, row.control.rect().topRight()).x() for row in visible
+    }
+    assert len(right) == 1
     last = wide
     shrank = False
     for width in range(1000, 399, -8):
@@ -358,6 +411,70 @@ def test_screen_header_sidebar_button_precedes_title_and_actions(qtbot: QtBot) -
     )
     assert show.geometry().right() < heading.geometry().left()
     assert abs(show.geometry().center().y() - heading.geometry().center().y()) <= 1
+
+
+@pytest.mark.parametrize("activation", ["mouse", "keyboard"])
+@pytest.mark.parametrize("move_elsewhere", [False, True])
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_segmented_reset_focus_after_delayed_confirmation(
+    qtbot: QtBot, activation: str, move_elsewhere: bool, mode: str
+) -> None:
+    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtWidgets import QApplication
+
+    from ember.app import theme, widgets
+
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    theme.apply(app, mode)
+    widgets.install_focus_tracking(app)
+    host = QWidget()
+    qtbot.addWidget(host)
+    layout = QVBoxLayout(host)
+    control = widgets.Segmented((("ask", "Ask each time"), ("flow", "Flow")))
+    control.set_value("flow")
+    row = common.TooltipRow("Work of several tasks", "Tip", control)
+    calls: list[bool] = []
+    row.enable_reset(lambda: calls.append(True))
+    row.set_changed(True)
+    layout.addWidget(row)
+    other = QPushButton("Other")
+    layout.addWidget(other)
+    host.show()
+    qtbot.waitExposed(host)
+    with qtbot.waitActive(host):
+        host.activateWindow()
+    reset = row.reset
+    assert reset is not None
+    if activation == "mouse":
+        qtbot.mouseClick(reset, Qt.MouseButton.LeftButton)
+    else:
+        reset.setFocus(Qt.FocusReason.TabFocusReason)
+        qtbot.keyClick(reset, Qt.Key.Key_Space)
+    assert calls == [True]
+    assert control.value() == "flow"
+    assert reset.isVisible()
+    assert widgets.focus_visible(control.buttons()[1])
+    if move_elsewhere:
+        qtbot.keyClick(control.buttons()[1], Qt.Key.Key_Tab)
+        assert reset.hasFocus()
+        qtbot.keyClick(reset, Qt.Key.Key_Tab)
+        assert widgets.focus_visible(other)
+
+    def confirm() -> None:
+        """Apply the snapshot after the queued clear has completed."""
+        control.set_value("ask")
+        row.set_changed(False)
+
+    QTimer.singleShot(0, confirm)
+    qtbot.waitUntil(lambda: control.value() == "ask")
+    assert reset.isHidden()
+    target = other if move_elsewhere else control.buttons()[0]
+    assert target.hasFocus()
+    assert widgets.focus_visible(target)
+    assert not widgets.focus_visible(control.buttons()[1])
+    if move_elsewhere:
+        assert not any(button.hasFocus() for button in control.buttons())
 
 
 def test_reset_reserves_space_and_returns_keyboard_focus(qtbot: QtBot) -> None:

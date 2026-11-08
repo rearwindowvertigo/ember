@@ -1,7 +1,7 @@
 """The window's size, sidebar visibility and last screen, kept between starts.
 
 The file is `$XDG_STATE_HOME/ember/app.json`, mode 600 in a mode 700 folder:
-`{"width", "height", "screen", "finished_open", "denied_dismissals",
+`{"width", "height", "screen", "finished_open", "denied_dismissals", "denied_hidden",
 "sidebar_hidden"}`.
 Content that cannot be read or is not valid gives the defaults; a write that
 fails is ignored.
@@ -42,6 +42,9 @@ class AppState:
     denied_dismissals: dict[str, list[str]] = field(default_factory=dict)
     """Denied folders dismissed with the run-and-turn occurrences seen then."""
 
+    denied_hidden: list[str] = field(default_factory=list)
+    """Resolved folders whose denial notices stay hidden until shown again."""
+
     sidebar_hidden: bool = False
     """Whether the sidebar is hidden when a screen is shown."""
 
@@ -53,6 +56,7 @@ class AppState:
             "screen": self.screen,
             "finished_open": self.finished_open,
             "denied_dismissals": self.denied_dismissals,
+            "denied_hidden": self.denied_hidden,
             "sidebar_hidden": self.sidebar_hidden,
         }
 
@@ -102,8 +106,13 @@ def load(env: Mapping[str, str] | None = None) -> AppState:
         and isinstance(entries, list)
         and all(isinstance(entry, str) for entry in entries)
     }
+    hidden = value.get("denied_hidden", [])
+    if not isinstance(hidden, list):
+        hidden = []
+    hidden = sorted({path for path in hidden if isinstance(path, str) and path})
     return AppState(
         denied_dismissals=dismissals,
+        denied_hidden=hidden,
         width=_size(value.get("width"), DEFAULT_WIDTH),
         height=_size(value.get("height"), DEFAULT_HEIGHT),
         screen=screen if isinstance(screen, str) and screen else DEFAULT_SCREEN,

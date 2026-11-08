@@ -1024,6 +1024,121 @@ def _card(title: str) -> tuple[Card, QVBoxLayout, QLabel]:
     return card, rows, empty
 
 
+@dataclasses.dataclass(frozen=True)
+class _DenialReport:
+    """One resolved folder reported by a run in a turn."""
+
+    denial: dict[str, Any]
+    run: Run
+    turn: int
+    parent: FlowItem | PanelItem | None
+    reported_at: float | None
+
+    def sort_key(self) -> tuple[bool, float, str, int]:
+        """Sort newest first, then by run and turn, with unknown times last."""
+        return (
+            self.reported_at is None,
+            -self.reported_at if self.reported_at is not None else 0,
+            self.run.id,
+            self.turn,
+        )
+
+    def line(self) -> str:
+        """Name the local report time, kind, claim, parent, run and turn."""
+        parts = [
+            datetime.datetime.fromtimestamp(self.reported_at).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            if self.reported_at is not None
+            else "time unknown",
+            parent_label(self.parent) if self.parent is not None else "Run",
+        ]
+        if self.run.claim:
+            parts.append(f"claim {self.run.claim}")
+        if self.parent is not None:
+            parts.append(item_id(self.parent))
+        parts.extend((self.run.id, f"turn {self.turn}"))
+        return " · ".join(" ".join(part.split()) for part in parts)
+
+
+def _denial_summary(reports: Sequence[_DenialReport]) -> str:
+    """Count distinct sources and show the first and latest local report times."""
+    flows = {
+        item_id(report.parent)
+        for report in reports
+        if isinstance(report.parent, FlowItem)
+    }
+    panels = {
+        item_id(report.parent)
+        for report in reports
+        if isinstance(report.parent, PanelItem)
+    }
+    runs = {report.run.id for report in reports if report.parent is None}
+    stamps = [
+        report.reported_at for report in reports if report.reported_at is not None
+    ]
+    first = latest = "time unknown"
+    if stamps:
+        first = datetime.datetime.fromtimestamp(min(stamps)).strftime("%Y-%m-%d")
+        latest = datetime.datetime.fromtimestamp(max(stamps)).strftime("%Y-%m-%d %H:%M")
+    return (
+        f"{plural(len(reports), 'report')} · {plural(len(flows), 'flow')}, "
+        f"{plural(len(panels), 'panel')}, {plural(len(runs), 'standalone run')}"
+        f" · first {first} · latest {latest} (local)"
+    )
+
+
+class _DeniedNotice(Alert):
+    """A denial summary with a collapsible report list and actions below it."""
+
+    def __init__(
+        self,
+        path: str,
+        reports: Sequence[_DenialReport],
+        explanation: str,
+        actions: Sequence[tuple[str, Callable[[], None]]],
+    ) -> None:
+        super().__init__(
+            "warning",
+            f"A worker could not read {path}",
+            _denial_summary(reports),
+            actions,
+        )
+        outer = self.layout()
+        assert isinstance(outer, QHBoxLayout)
+        body_item = outer.itemAt(1)
+        assert body_item is not None
+        body = body_item.layout()
+        assert isinstance(body, QVBoxLayout)
+        self.runs_toggle = button("Show runs", "secondary", size="sm")
+        self.runs_toggle.setCheckable(True)
+        body.addWidget(self.runs_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        self.reports_label = QLabel("\n".join(report.line() for report in reports))
+        self.reports_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.reports_label.hide()
+        body.addWidget(self.reports_label)
+        self.runs_toggle.toggled.connect(self.reports_label.setVisible)
+        self.offer_label = QLabel(explanation)
+        body.addWidget(self.offer_label)
+        for label in (
+            self.title_label,
+            self.text_label,
+            self.reports_label,
+            self.offer_label,
+        ):
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            label.setWordWrap(True)
+            policy = label.sizePolicy()
+            policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
+            label.setSizePolicy(policy)
+        for action in self.buttons:
+            outer.removeWidget(action)
+        body.addWidget(FittingRow(self.buttons))
+        self.setAccessibleDescription(f"{self.text_label.text()}\n{explanation}")
+
+
 class OverviewScreen(QWidget):
     """The Overview screen: Live and Finished records and their workers."""
 
@@ -1049,7 +1164,7 @@ class OverviewScreen(QWidget):
         self.denied_area = QVBoxLayout()
         self.denied_area.setSpacing(8)
         layout.addLayout(self.denied_area)
-        self.denied_notices: dict[str, Alert] = {}
+        self.denied_notices: dict[str, _DeniedNotice] = {}
         self._denied_dialog: _PruneDialog | None = None
 
         self.unreadable_alert = Alert("info", unreadable_line(0))
@@ -1558,8 +1673,10 @@ class OverviewScreen(QWidget):
     def _chain_focus(self) -> None:
         """Keep Tab in reading order through alerts, records and runs."""
         chain: list[QWidget] = []
-        for alert in (*self.sandbox_alerts.values(), *self.denied_notices.values()):
+        for alert in self.sandbox_alerts.values():
             chain.extend(alert.buttons)
+        for notice in self.denied_notices.values():
+            chain.extend((notice.runs_toggle, *notice.buttons))
         if not self.records_alert.isHidden():
             chain.extend(self.records_alert.buttons)
         filters: list[QWidget] = [
@@ -1636,31 +1753,55 @@ class OverviewScreen(QWidget):
         reads = [
             Path(path).resolve() for path in self.context.setting("sandbox.read") or []
         ]
-        groups: dict[str, list[dict[str, Any]]] = {}
+        groups: dict[str, dict[tuple[str, int], _DenialReport]] = {}
         for run in self.context.runs.runs():
             for item in record.run_denials(run):
                 if item["reason"] == "startup file":
                     continue
+                if not sandbox.valid_denial_allow_path(
+                    item["path"], item["allow_path"]
+                ):
+                    item["allow_path"] = None
                 path = str(Path(item["path"]).resolve())
                 target = Path(item["allow_path"] or item["path"]).resolve()
                 if any(target.is_relative_to(read) for read in reads):
                     continue
-                parent = self._parents.get(run.id)
-                item["source"] = (
-                    f"{parent_label(parent)} · {item_id(parent)} · {run.id}"
-                    if parent is not None
-                    else run.id
+                try:
+                    stamp = record.outcome_path(run, item["turn"]).stat().st_mtime
+                except OSError:
+                    stamp = None
+                reports = groups.setdefault(path, {})
+                key = (run.id, item["turn"])
+                previous = reports.get(key)
+                reports[key] = _DenialReport(
+                    sandbox.merge_denial(previous.denial, item)
+                    if previous is not None
+                    else item,
+                    run,
+                    item["turn"],
+                    self._parents.get(run.id),
+                    stamp,
                 )
-                groups.setdefault(path, []).append(item)
         wanted = {}
-        for key, items in groups.items():
-            occurrences = sorted({f"{item['run']}:{item['turn']}" for item in items})
+        for key, group in groups.items():
+            if key in saved.denied_hidden:
+                continue
+            reports = sorted(group.values(), key=_DenialReport.sort_key)
+            occurrences = sorted(f"{report.run.id}:{report.turn}" for report in reports)
             if set(occurrences).issubset(saved.denied_dismissals.get(key, [])):
                 continue
+            items = [report.denial for report in reports]
             item = items[0]
             for occurrence in items[1:]:
                 item = sandbox.merge_denial(item, occurrence)
-            signature = json.dumps((items, occurrences), sort_keys=True)
+            signature = json.dumps(
+                (
+                    items,
+                    [report.line() for report in reports],
+                    _denial_summary(reports),
+                ),
+                sort_keys=True,
+            )
             existing = self.denied_notices.get(key)
             if (
                 existing is not None
@@ -1685,24 +1826,23 @@ class OverviewScreen(QWidget):
                     ),
                 )
             )
-            sources = "; ".join(dict.fromkeys(i["source"] for i in items))
-            text = f"Reported by {sources}."
-            if item["reason"] == "secret location":
-                text += " This folder holds credentials."
-            elif item["reason"] == "protected":
-                text += " This folder is protected from workers."
-            elif allow is None:
-                text += (
-                    " No folder can be offered because each folder that holds it"
-                    " also holds private files."
+            actions.append(
+                (
+                    "Don't show again",
+                    lambda _checked=False, p=key: self._hide_denial(p),
                 )
-            else:
-                text += f" Allow reading {allow} for future workers."
-            notice = Alert(
-                "warning", f"A worker could not read {item['path']}", text, actions
             )
-            notice.title_label.setTextFormat(Qt.TextFormat.PlainText)
-            notice.text_label.setTextFormat(Qt.TextFormat.PlainText)
+            if item["reason"] == "secret location":
+                text = "This folder holds credentials."
+            elif item["reason"] == "protected":
+                text = "This folder is protected from workers."
+            elif allow is None:
+                text = "No folder can be offered for automatic read permission."
+            else:
+                text = f"Allow reading {allow} for future workers."
+            notice = _DeniedNotice(key, reports, text, actions)
+            if existing is not None:
+                notice.runs_toggle.setChecked(existing.runs_toggle.isChecked())
             notice.setProperty("denied_signature", signature)
             wanted[key] = notice
         for key, notice in self.denied_notices.items():
@@ -1719,6 +1859,13 @@ class OverviewScreen(QWidget):
         state.save(
             dataclasses.replace(saved, denied_dismissals=dismissals), self.context.env
         )
+        self.check_denials()
+
+    def _hide_denial(self, path: str) -> None:
+        """Hide every denial notice for this resolved folder until shown again."""
+        saved = state.load(self.context.env)
+        hidden = sorted({*saved.denied_hidden, path})
+        state.save(dataclasses.replace(saved, denied_hidden=hidden), self.context.env)
         self.check_denials()
 
     def _allow_reading(self, path: str) -> None:

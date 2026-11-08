@@ -8,6 +8,7 @@ The app's controller writes or removes the autostart entry after
 not.
 """
 
+import dataclasses
 import os
 import shlex
 from collections.abc import Callable
@@ -17,18 +18,20 @@ from typing import TYPE_CHECKING, Any
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
 
 from ember import choices, sandbox, terminals
-from ember.app import icons, theme, widgets
+from ember.app import icons, state, theme, widgets
 from ember.app.screens.common import (
     ToneLine,
     TooltipRow,
@@ -89,13 +92,70 @@ def preparation_command(
     parent: QWidget, repository: str, command: str
 ) -> tuple[str, bool]:
     """Ask for a shell command, accepting empty text as no preparation."""
-    return QInputDialog.getText(
-        parent,
-        "Worktree preparation",
-        f"{repository}\nShell command (leave empty for no preparation):",
-        QLineEdit.EchoMode.Normal,
-        command,
+    dialog = PreparationCommandDialog(repository, command, parent)
+    accepted = dialog.exec() == QDialog.DialogCode.Accepted
+    return dialog.command.text(), accepted
+
+
+class PreparationCommandDialog(QDialog):
+    """Edit a repository's preparation command; Cancel is the default."""
+
+    TITLE = "Worktree preparation"
+    EXPLANATION = (
+        "Runs in each new worktree outside the worker sandbox, before any "
+        "worker or check starts. Leave empty for no preparation."
     )
+
+    def __init__(
+        self, repository: str, command: str, parent: QWidget | None = None
+    ) -> None:
+        """Create the dialog with the repository's saved command prefilled."""
+        super().__init__(parent)
+        self.setWindowTitle(self.TITLE)
+        self.setModal(True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
+        self.title = QLabel(self.TITLE)
+        self.title.setFont(theme.font("title"))
+        layout.addWidget(self.title)
+        self.repository = label(repository, "secondary")
+        self.repository.setTextFormat(Qt.TextFormat.PlainText)
+        self.repository.setWordWrap(True)
+        self.repository.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        layout.addWidget(self.repository)
+        heading = QHBoxLayout()
+        heading.setSpacing(4)
+        heading.addWidget(QLabel("Command"))
+        self.info = widgets.InfoTip("Command", self.EXPLANATION)
+        self.info.setAutoDefault(False)
+        heading.addWidget(self.info)
+        heading.addStretch(1)
+        layout.addLayout(heading)
+        self.command = QLineEdit(command)
+        self.command.setAccessibleName("Command")
+        self.command.setPlaceholderText("npm ci")
+        layout.addWidget(self.command)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.cancel_button = widgets.button("Cancel", "secondary")
+        self.cancel_button.clicked.connect(self.reject)
+        self.save_button = widgets.button("Save", "primary")
+        self.save_button.setAutoDefault(True)
+        self.save_button.clicked.connect(self.accept)
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.save_button)
+        layout.addLayout(buttons)
+        self.cancel_button.setAutoDefault(True)
+        self.cancel_button.setDefault(True)
+        self.cancel_button.setFocus(Qt.FocusReason.OtherFocusReason)
+        title_bar = self.fontMetrics().horizontalAdvance(self.TITLE) + 4 * (
+            self.style().pixelMetric(QStyle.PixelMetric.PM_TitleBarHeight)
+        )
+        self.setMinimumWidth(max(480, title_bar))
+        chain_tab_order([self.info, self.command, self.cancel_button, self.save_button])
 
 
 def _words(value: str) -> list[str] | None:
@@ -171,6 +231,20 @@ class SettingsScreen(QWidget):
             "Light or dark. System follows the desktop's light or dark mode.",
             self.theme,
         )
+        self._row(
+            column,
+            "Hidden notices",
+            "Denied-folder notices hidden with Don't show again. "
+            "Show again restores notices for that folder. "
+            "Run status, flow status and WARNING lines still report denials.",
+            QWidget(),
+        )
+        self.hidden_box = QWidget()
+        self.hidden_layout = QVBoxLayout(self.hidden_box)
+        self.hidden_layout.setContentsMargins(0, 0, 0, 0)
+        self.hidden_layout.setSpacing(8)
+        column.addWidget(self.hidden_box)
+        self.hidden_rows: dict[str, QPushButton] = {}
         return card
 
     def _workers(self) -> widgets.Card:
@@ -239,17 +313,20 @@ class SettingsScreen(QWidget):
     def _preparation(self) -> widgets.Card:
         card, column = titled_card("Worktree preparation")
         self.preparation_card = card
-        description = label(
+        self.add_repository = widgets.button("Add repository", "secondary", size="sm")
+        widgets.set_icon(
+            self.add_repository,
+            icons.icon("folder-plus", theme.color("text-primary"), 16),
+        )
+        self.add_repository.clicked.connect(self._add_repository)
+        self._row(
+            column,
+            "Repositories",
             "A shell command Ember runs in each new worktree, outside the worker "
             "sandbox, before any worker or check starts. "
             "Choose the repository's main checkout folder.",
-            "secondary",
+            self.add_repository,
         )
-        description.setWordWrap(True)
-        column.addWidget(description)
-        self.add_repository = widgets.button("Add repository", "secondary", size="sm")
-        self.add_repository.clicked.connect(self._add_repository)
-        column.addWidget(self.add_repository, 0, Qt.AlignmentFlag.AlignLeft)
         self.preparation_box = QWidget()
         self.preparation_layout = QVBoxLayout(self.preparation_box)
         self.preparation_layout.setContentsMargins(0, 0, 0, 0)
@@ -263,12 +340,14 @@ class SettingsScreen(QWidget):
     def _draw_icons(self, *_args: object) -> None:
         color = theme.color("text-primary")
         widgets.set_icon(self.add_folder, icons.icon("folder-plus", color, 16))
+        widgets.set_icon(self.add_repository, icons.icon("folder-plus", color, 16))
         for remove in self.path_rows.values():
             remove.setIcon(icons.icon("x", color, 16))
 
     # Drawing
 
     def _redraw(self, *_args: object) -> None:
+        self._draw_hidden_notices()
         answers: dict[str, Any] = self.context.settings().get("answers", {})
         if not answers:
             return
@@ -286,12 +365,46 @@ class SettingsScreen(QWidget):
             [
                 self.add_folder,
                 *self.path_rows.values(),
+                self.tip_rows["Repositories"].info,
                 self.add_repository,
                 *(button for row in self.preparation_rows.values() for button in row),
             ]
         )
         for name, key in SETTING_KEYS.items():
             self.tip_rows[name].set_changed(self.context.setting_changed(key))
+
+    def _draw_hidden_notices(self) -> None:
+        """List the folders whose denial notices the owner has hidden."""
+        clear_layout(self.hidden_layout)
+        self.hidden_rows = {}
+        hidden = state.load(self.context.env).denied_hidden
+        if not hidden:
+            self.hidden_layout.addWidget(label("No folders hidden.", "secondary"))
+        for path in hidden:
+            row = QWidget()
+            line = QHBoxLayout(row)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(8)
+            text = label(path, "secondary")
+            text.setFont(theme.font("code"))
+            text.setTextFormat(Qt.TextFormat.PlainText)
+            text.setWordWrap(True)
+            text.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            line.addWidget(text, 1)
+            show = widgets.button("Show again", "secondary", size="sm")
+            show.setAccessibleName(f"Show notices again for {path}")
+            show.clicked.connect(lambda _checked=False, p=path: self._show_notices(p))
+            line.addWidget(show)
+            self.hidden_layout.addWidget(row)
+            self.hidden_rows[path] = show
+        chain_tab_order(
+            [
+                self.tip_rows["Hidden notices"].info,
+                *self.hidden_rows.values(),
+                self.tip_rows["Worker network"].info,
+            ]
+        )
 
     def _draw_terminal(self, value: str) -> None:
         env = self.context.env
@@ -391,6 +504,25 @@ class SettingsScreen(QWidget):
             self.preparation_rows[repository] = (edit, remove)
 
     # Saving
+
+    def _show_notices(self, path: str) -> None:
+        """Restore notices for the folder, including dismissed reports."""
+        saved = state.load(self.context.env)
+        state.save(
+            dataclasses.replace(
+                saved,
+                denied_hidden=[
+                    folder for folder in saved.denied_hidden if folder != path
+                ],
+                denied_dismissals={
+                    folder: reports
+                    for folder, reports in saved.denied_dismissals.items()
+                    if folder != path
+                },
+            ),
+            self.context.env,
+        )
+        self._draw_hidden_notices()
 
     def _reset(self, key: str) -> None:
         """Clear a saved setting and apply its confirmed default."""

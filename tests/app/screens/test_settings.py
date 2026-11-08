@@ -1,19 +1,20 @@
 import os
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from threading import Event
 from typing import Any
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QStyle, QWidget
 from pytestqt.qtbot import QtBot
 
 from ember import choices
-from ember.app import theme
+from ember.app import state, theme
 from ember.app.context import AppContext
 from ember.app.screens import settings as settings_module
-from ember.app.screens.settings import OTHER, SettingsScreen
+from ember.app.screens.settings import OTHER, PreparationCommandDialog, SettingsScreen
 
 
 @pytest.fixture
@@ -388,6 +389,166 @@ def test_preparation_cancel_and_unchanged_command_save_nothing(
     assert _stored(env, "worktree.prepare") == {repository: "uv sync"}
 
 
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_preparation_dialog_layout(qapp: QApplication, qtbot: QtBot, mode: str) -> None:
+    theme.apply(qapp, mode)
+    repository = "/srv/" + "long-repository-name/" * 16 + "<checkout>"
+    dialog = PreparationCommandDialog(repository, "npm ci")
+    qtbot.addWidget(dialog)
+    dialog.show()
+    qtbot.waitExposed(dialog)
+    assert dialog.windowTitle() == dialog.title.text() == "Worktree preparation"
+    title_width = dialog.fontMetrics().horizontalAdvance(dialog.windowTitle())
+    title_controls = 4 * dialog.style().pixelMetric(
+        QStyle.PixelMetric.PM_TitleBarHeight
+    )
+    assert dialog.minimumWidth() >= title_width + title_controls
+    assert dialog.title.width() >= dialog.title.sizeHint().width()
+    assert dialog.repository.text() == repository
+    assert dialog.repository.textFormat() == Qt.TextFormat.PlainText
+    assert dialog.repository.property("role") == "secondary"
+    assert dialog.repository.wordWrap()
+    assert dialog.repository.heightForWidth(dialog.repository.width()) > (
+        dialog.repository.fontMetrics().height()
+    )
+    assert dialog.repository.height() >= dialog.repository.heightForWidth(
+        dialog.repository.width()
+    )
+    assert dialog.command.text() == "npm ci"
+    assert dialog.command.accessibleName() == "Command"
+    assert dialog.command.placeholderText() == "npm ci"
+    assert dialog.info.toolTip() == (
+        "Runs in each new worktree outside the worker sandbox, before any "
+        "worker or check starts. Leave empty for no preparation."
+    )
+    assert dialog.cancel_button.isDefault()
+    assert not dialog.save_button.isDefault()
+    assert dialog.focusWidget() is dialog.cancel_button
+    assert dialog.cancel_button.property("kind") == "secondary"
+    assert dialog.save_button.property("kind") == "primary"
+    for child in dialog.findChildren(QWidget):
+        if child.isVisibleTo(dialog):
+            assert dialog.rect().contains(child.mapTo(dialog, child.rect().topLeft()))
+            assert dialog.rect().contains(
+                child.mapTo(dialog, child.rect().bottomRight())
+            )
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+@pytest.mark.parametrize("edit", [False, True])
+@pytest.mark.parametrize("action", ["cancel", "escape", "enter"])
+def test_real_preparation_dialog_cancels_without_saving(
+    env: dict[str, str],
+    qapp: QApplication,
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    edit: bool,
+    action: str,
+) -> None:
+    theme.apply(qapp, mode)
+    repository = str(tmp_path / "repository")
+    before = {repository: "uv sync"} if edit else {}
+    choices.set_settings({"worktree.prepare": before}, env=env)
+    context, screen = _screen(env, qtbot)
+    monkeypatch.setattr(settings_module, "choose_repository", lambda *args: repository)
+    opened: list[PreparationCommandDialog] = []
+
+    def cancel() -> None:
+        dialog = QApplication.activeModalWidget()
+        assert isinstance(dialog, PreparationCommandDialog)
+        opened.append(dialog)
+        try:
+            assert dialog.command.text() == ("uv sync" if edit else "")
+            assert dialog.cancel_button.isDefault()
+            assert dialog.focusWidget() is dialog.cancel_button
+            dialog.command.setText("must not be saved")
+            if action == "cancel":
+                qtbot.mouseClick(dialog.cancel_button, Qt.MouseButton.LeftButton)
+            elif action == "escape":
+                qtbot.keyClick(dialog.command, Qt.Key.Key_Escape)
+            else:
+                qtbot.keyClick(dialog.cancel_button, Qt.Key.Key_Return)
+            assert not dialog.isVisible()
+            assert dialog.result() == QDialog.DialogCode.Rejected
+        finally:
+            dialog.reject()
+
+    QTimer.singleShot(0, cancel)
+    with qtbot.assertNotEmitted(context.settings_changed, wait=100):
+        if edit:
+            screen.preparation_rows[repository][0].click()
+        else:
+            screen.add_repository.click()
+    assert len(opened) == 1
+    assert context.tasks.pending() == 0
+    assert _stored(env, "worktree.prepare") == before
+
+
+@pytest.mark.parametrize("edit", [False, True])
+@pytest.mark.parametrize("command", ["", "npm ci && npm run build"])
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_real_preparation_dialog_saves(
+    env: dict[str, str],
+    qapp: QApplication,
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    edit: bool,
+    command: str,
+    mode: str,
+) -> None:
+    theme.apply(qapp, mode)
+    repository = str(tmp_path / "repository")
+    before = {repository: "uv sync"} if edit else {}
+    choices.set_settings({"worktree.prepare": before}, env=env)
+    context, screen = _screen(env, qtbot)
+    monkeypatch.setattr(settings_module, "choose_repository", lambda *args: repository)
+    opened: list[PreparationCommandDialog] = []
+
+    def save() -> None:
+        dialog = QApplication.activeModalWidget()
+        assert isinstance(dialog, PreparationCommandDialog)
+        opened.append(dialog)
+        try:
+            assert dialog.command.text() == ("uv sync" if edit else "")
+            dialog.command.setText(command)
+            qtbot.mouseClick(dialog.save_button, Qt.MouseButton.LeftButton)
+            assert dialog.result() == QDialog.DialogCode.Accepted
+        finally:
+            if dialog.isVisible():
+                dialog.reject()
+
+    QTimer.singleShot(0, save)
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        if edit:
+            screen.preparation_rows[repository][0].click()
+        else:
+            screen.add_repository.click()
+    assert len(opened) == 1
+    assert _stored(env, "worktree.prepare") == {repository: command}
+    assert screen.preparation_card.isEnabled()
+    assert command or "No preparation" in [
+        text.text() for text in screen.preparation_box.findChildren(QLabel)
+    ]
+
+
+def test_preparation_cancelled_folder_opens_no_dialog(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    context, screen = _screen(env, qtbot)
+    monkeypatch.setattr(settings_module, "choose_repository", lambda *args: "")
+
+    def unexpected(*_args: object) -> None:
+        pytest.fail("a cancelled folder chooser must not open a command dialog")
+
+    monkeypatch.setattr(settings_module, "PreparationCommandDialog", unexpected)
+    screen.add_repository.click()
+    assert context.tasks.pending() == 0
+    assert _stored(env, "worktree.prepare") == {}
+
+
 def test_preparation_add_empty_command(
     env: dict[str, str],
     qtbot: QtBot,
@@ -568,28 +729,49 @@ def test_every_control_is_reached_with_tab(
         {"sandbox.read": [os.fspath(tmp_path)], "worktree.prepare": {repository: ""}},
         env=env,
     )
-    _context, screen = _screen(env, qtbot)
-    chain = focus_chain(screen, qtbot, screen.autostart)
-    expected = [
-        screen.autostart,
-        screen.theme.buttons()[0],
-        screen.network,
-        screen.terminal,
-        screen.add_folder,
-        screen.path_rows[os.fspath(tmp_path)],
-        screen.add_repository,
-        *screen.preparation_rows[repository],
-    ]
-    # Tab reaches a segmented control's chosen option; arrows move within it.
-    assert [w for w in chain if w in expected] == expected
+    hidden = [str(tmp_path / "hidden-a"), str(tmp_path / "hidden-b")]
+    state.save(state.AppState(denied_hidden=hidden), env)
+    context, screen = _screen(env, qtbot)
+    for _ in range(2):
+        screen.show()
+        qtbot.waitUntil(
+            lambda: all(
+                widget.isVisible()
+                for widget in (
+                    *screen.path_rows.values(),
+                    *screen.preparation_rows[repository],
+                )
+            )
+        )
+        chain = focus_chain(screen, qtbot, screen.autostart)
+        expected = [
+            screen.autostart,
+            screen.theme.buttons()[0],
+            screen.tip_rows["Hidden notices"].info,
+            *(screen.hidden_rows[path] for path in hidden),
+            screen.network,
+            screen.terminal,
+            screen.add_folder,
+            screen.path_rows[os.fspath(tmp_path)],
+            screen.tip_rows["Repositories"].info,
+            screen.add_repository,
+            *screen.preparation_rows[repository],
+        ]
+        # Tab reaches a segmented control's chosen option; arrows move within it.
+        assert [w for w in chain if w in expected] == expected
+        info_index = chain.index(screen.tip_rows["Repositories"].info)
+        assert chain[info_index - 1] is screen.path_rows[os.fspath(tmp_path)]
+        assert chain[info_index + 1] is screen.add_repository
+        with qtbot.waitSignal(context.settings_changed, timeout=5000):
+            context.reload_settings()
 
 
 def test_settings_rows_are_names_with_info_icons(
     env: dict[str, str], qtbot: QtBot
 ) -> None:
     _context, screen = _screen(env, qtbot)
-    names = ["Start at login", "Theme", "Worker network", "Terminal"]
-    names.append("Sandbox read paths")
+    names = ["Start at login", "Theme", "Hidden notices", "Worker network", "Terminal"]
+    names.extend(["Sandbox read paths", "Repositories"])
     assert screen.tip_rows["Worker network"].info.toolTip() == (
         "Lets Codex workers and Claude's web tools reach the network. "
         "OpenCode keeps network for its providers."
@@ -605,6 +787,52 @@ def test_settings_rows_are_names_with_info_icons(
     while widget is not None and not widget.focusPolicy() & Qt.FocusPolicy.TabFocus:
         widget = widget.nextInFocusChain()
     assert widget is screen.autostart
+
+
+def test_show_again_clears_only_the_selected_folders_hiding_and_dismissal(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    first, other = "/home/owner/.tools", "/home/owner/.other"
+    saved = state.AppState(
+        width=1234,
+        height=789,
+        screen="settings",
+        finished_open=True,
+        denied_dismissals={first: ["run:1"], other: ["run:2"]},
+        denied_hidden=[first, other],
+        sidebar_hidden=True,
+    )
+    state.save(saved, env)
+    _context, screen = _screen(env, qtbot)
+    assert set(screen.hidden_rows) == {first, other}
+    assert all(button.text() == "Show again" for button in screen.hidden_rows.values())
+    screen.hidden_rows[first].click()
+    assert state.load(env) == replace(
+        saved, denied_hidden=[other], denied_dismissals={other: ["run:2"]}
+    )
+    assert list(screen.hidden_rows) == [other]
+    screen.hidden_rows[other].click()
+    assert screen.hidden_rows == {}
+    assert state.load(env).denied_hidden == []
+    assert state.load(env).denied_dismissals == {}
+    assert [
+        text.text()
+        for text in screen.hidden_box.findChildren(QLabel)
+        if text.isVisibleTo(screen)
+    ] == ["No folders hidden."]
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_add_repository_uses_the_add_folder_icon(
+    env: dict[str, str], qtbot: QtBot, qapp: QApplication, mode: str
+) -> None:
+    _context, screen = _screen(env, qtbot)
+    theme.apply(qapp, mode)
+    repository_icon = screen.add_repository.icon()
+    assert not repository_icon.isNull()
+    assert repository_icon.pixmap(16, 16).toImage() == (
+        screen.add_folder.icon().pixmap(16, 16).toImage()
+    )
 
 
 def test_add_folder_refuses_ember_private_paths(
@@ -635,12 +863,14 @@ def test_screen_fits_width(
     repository = str(tmp_path / ("repository-" * 20))
     command = "npm ci && " + "npm run check " * 20
     choices.set_settings({"worktree.prepare": {repository: command}}, env=env)
+    state.save(state.AppState(denied_hidden=[repository]), env)
     _context, screen = _screen(env, qtbot)
     screen.resize(width, 480)
     screen.show()
     qtbot.wait(50)
     assert screen.width() == width
     assert_screen_fits(screen)
+    assert list(screen.hidden_rows) == [repository]
 
 
 def test_rows_shrink_stack_and_return(env: dict[str, str], qtbot: QtBot) -> None:
