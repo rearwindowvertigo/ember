@@ -43,6 +43,7 @@ from ember.app.screens.common import (
     plural,
     screen_header,
     scrolled,
+    sentence,
     titled_card,
     when,
 )
@@ -88,10 +89,11 @@ BADGES = {
 
 
 def run_badge(run: Run) -> tuple[str, str]:
-    """Return a run's badge, including flow waits and orphaned parents."""
-    if record.waiting_for_flow(run) is not None:
+    """Return a run's badge, including parent waits and orphaned parents."""
+    state = record.parent_state(run).state
+    if state in (record.PARENT_LEAD, record.PARENT_RESUME):
         return BADGES[record.WAITING]
-    key = ORPHANED if record.orphaned(run) else run.status
+    key = ORPHANED if state == record.PARENT_ORPHANED else run.status
     return BADGES.get(key, (run.status, "neutral"))
 
 
@@ -305,17 +307,19 @@ def run_result(run: Run) -> str:
 def run_detail(run: Run, now: float | None = None) -> str:
     """Return "<worker> · <repository folder> · <result> · <times>".
 
-    Flow waits name the awaited answer first. Otherwise the worker leads
+    Parent waits come first: the lead's awaited flow answer, or the flow or
+    panel that must resume to collect the run. Otherwise the worker leads
     the line when the title holds the run's subject.
     """
     folder = PurePosixPath(run.repo).name or run.repo
     times = span_text(run.started_at, run_ended(run), now)
     worker = f"{worker_line(run)} · " if run.subject.strip() else ""
     detail = f"{worker}{folder} · {run_result(run)} · {times}"
-    waiting = record.waiting_for_flow(run)
-    if waiting is not None:
-        return f"Waiting for Claude's answer to flow {waiting} · {detail}"
-    return detail
+    state = record.parent_state(run)
+    if state.state == record.PARENT_LEAD:
+        return f"Waiting for Claude's answer to flow {state.id} · {detail}"
+    wait = record.parent_wait(state, now)
+    return f"{sentence(wait)} · {detail}" if wait else detail
 
 
 def parent_label(parent: FlowItem | PanelItem) -> str:

@@ -4166,6 +4166,66 @@ def test_start_records_the_parent_and_status_reports_an_orphan(
     _core(env).close(run_id, force=True)
 
 
+@pytest.mark.parametrize(
+    ("state", "warning", "next_line"),
+    [
+        (
+            record.ParentState(
+                record.PARENT_RESUME,
+                "flow",
+                "flow-20260101-120000-abcdef",
+                "failed",
+                1.0,
+                ended=True,
+            ),
+            " is waiting for flow flow-20260101-120000-abcdef to resume (failed ",
+            "next: emb flow --resume flow-20260101-120000-abcdef",
+        ),
+        (
+            record.ParentState(
+                record.PARENT_UNKNOWN,
+                "panel",
+                "panel-20260101-120000-abcdef",
+                error="panel.json is not valid JSON",
+            ),
+            ": cannot read its parent panel panel-20260101-120000-abcdef: "
+            "panel.json is not valid JSON",
+            "next: emb panel --status panel-20260101-120000-abcdef",
+        ),
+    ],
+)
+def test_status_names_the_parent_that_holds_the_run(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    state: record.ParentState,
+    warning: str,
+    next_line: str,
+) -> None:
+    started = record.parent(state.command or "flow", state.id)
+    assert started is not None
+    parent = {**started, "start": 1}
+    code = _start(_core(env), repo, _brief(tmp_path, "Task\n"), parent=parent)
+    assert code == 0
+    run_id = _run_id(capsys.readouterr().out)
+    monkeypatch.setattr(record, "parent_state", lambda run, proc_locks=None: state)
+    one = _status(env, run_id, capsys)
+    assert one["orphaned"] is False and one["waiting_for_flow"] is None
+    assert one["parent_state"]["state"] == state.state
+    assert one["parent_state"]["error"] == state.error
+    core_ = _core(env)
+    assert core_.execute(lambda: core_.status(run_id)) == 0
+    out, err = capsys.readouterr()
+    assert f"WARNING: run {run_id}{warning}" in err
+    assert err.splitlines()[-1] == next_line
+    assert "emb run --close" not in err
+    if state.state == record.PARENT_RESUME:
+        assert "status: waiting for flow" in out
+    _core(env).close(run_id, force=True)
+
+
 def test_a_run_started_by_emb_run_has_no_parent(
     tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -2882,8 +2882,8 @@ class Core:
                 for key, value in document.items():
                     if key == "next":
                         continue
-                    if key == "status" and document["waiting_for_flow"]:
-                        value = self._flow_wait(document)
+                    if key == "status" and document["parent_state"]["wait"]:
+                        value = document["parent_state"]["wait"]
                     shown = value if isinstance(value, str) else json.dumps(value)
                     self._say(f"{key}: {shown}")
             return exits.OK
@@ -2899,11 +2899,7 @@ class Core:
             self._say(json.dumps(documents, indent=2))
         else:
             for item in documents:
-                status = (
-                    self._flow_wait(item)
-                    if item["waiting_for_flow"]
-                    else item["status"]
-                )
+                status = item["parent_state"]["wait"] or item["status"]
                 self._say(
                     f"{item['id']}  {status}  {item['session_state']}  "
                     f"turn {item['turn']}  {item['subject']}"
@@ -2912,7 +2908,7 @@ class Core:
 
     def _document(self, run: Run) -> dict[str, Any]:
         run = self._owner_state(run)
-        waiting = record.waiting_for_flow(run)
+        parent = record.parent_state(run)
         turns, errors = record.turn_results(run)
         for error in errors:
             self._warn(f"WARNING: {error}")
@@ -2921,8 +2917,16 @@ class Core:
         return {
             **run.to_json(),
             "session_state": session_state,
-            "orphaned": waiting is None and record.orphaned(run),
-            "waiting_for_flow": waiting,
+            "orphaned": parent.state == record.PARENT_ORPHANED,
+            "waiting_for_flow": (
+                parent.id if parent.state == record.PARENT_LEAD else None
+            ),
+            "parent_state": {
+                "state": parent.state,
+                "wait": record.parent_wait(parent),
+                "next": record.parent_next(parent),
+                "error": parent.error,
+            },
             "turns": turns,
             "step": step,
             "next": next_line,
@@ -2951,33 +2955,37 @@ class Core:
             self._git,
         )
 
-    @staticmethod
-    def _flow_wait(document: dict[str, Any]) -> str:
-        """Describe the lead answer awaited by a run's parent flow."""
-        return f"waiting for the lead's answer to flow {document['waiting_for_flow']}"
-
     def _warn_parent(self, documents: list[dict[str, Any]]) -> None:
-        """Name flow waits and orphaned runs, with recovery only for orphans."""
+        """Name parent waits, unreadable parents and orphaned runs.
+
+        A run its parent can still collect gets that parent's command as its
+        `next:` line; only an orphaned run gets the recover-and-close line.
+        """
         for document in documents:
-            if document["waiting_for_flow"]:
+            run_id = document["id"]
+            held = document["parent_state"]
+            parent = document["parent"]
+            if held["wait"]:
+                self._warn(f"WARNING: run {run_id} is {held['wait']}")
+            elif held["state"] == record.PARENT_UNKNOWN:
                 self._warn(
-                    f"WARNING: run {document['id']} is {self._flow_wait(document)}"
+                    f"WARNING: run {run_id}: cannot read its parent "
+                    f"{parent['command']} {parent['id']}: {held['error']}"
+                )
+            elif document["orphaned"]:
+                starter = " ".join(
+                    part for part in ("emb", parent["command"], parent["id"]) if part
+                )
+                self._warn(
+                    f"WARNING: run {run_id} is orphaned: {starter} ended "
+                    "without collecting it"
+                )
+                self._warn(
+                    f"next: emb run --recover {run_id}, then emb run --close {run_id}"
                 )
                 continue
-            if not document["orphaned"]:
-                continue
-            parent = document["parent"]
-            starter = " ".join(
-                part for part in ("emb", parent["command"], parent["id"]) if part
-            )
-            run_id = document["id"]
-            self._warn(
-                f"WARNING: run {run_id} is orphaned: {starter} ended "
-                "without collecting it"
-            )
-            self._warn(
-                f"next: emb run --recover {run_id}, then emb run --close {run_id}"
-            )
+            if held["next"]:
+                self._warn(f"next: {held['next']}")
 
 
 @contextlib.contextmanager

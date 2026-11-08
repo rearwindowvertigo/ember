@@ -10,6 +10,8 @@ import pytest
 from ember import paths
 from ember.flows import plan
 from ember.flows import record as flows
+from ember.panels import members as panel_members
+from ember.panels import record as panels
 from ember.runs import record
 from ember.runs.record import Run
 
@@ -19,6 +21,7 @@ def env(tmp_path: Path) -> dict[str, str]:
     return {
         "HOME": str(tmp_path / "home"),
         "XDG_STATE_HOME": str(tmp_path / "state"),
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
     }
 
 
@@ -507,12 +510,7 @@ def test_run_without_parent_is_never_orphaned(env: dict[str, str]) -> None:
     assert record.waiting_for_flow(run) is None
 
 
-@pytest.mark.parametrize("status", record.STATUSES)
-@pytest.mark.parametrize("flow_status", flows.FLOW_STATUSES)
-def test_flow_parent_state(
-    env: dict[str, str], tmp_path: Path, status: str, flow_status: str
-) -> None:
-    flow_id = flows.new_id()
+def _flow(env: dict[str, str], tmp_path: Path, status: str) -> dict[str, Any]:
     source = plan.from_json(
         {
             "dir": str(tmp_path),
@@ -524,7 +522,7 @@ def test_flow_parent_state(
     )
     worker = plan.Worker("codex", "model", None, "option")
     flow = flows.new_flow(
-        flow_id,
+        flows.new_id(),
         source,
         top=str(tmp_path),
         main=str(tmp_path),
@@ -535,34 +533,211 @@ def test_flow_parent_state(
         stall_minutes=10,
         claim=None,
     )
-    flow["status"] = flow_status
+    flow["status"] = status
     flows.create(flow, source.text, env)
-    run = replace(
+    return flow
+
+
+def _flow_run(env: dict[str, str], flow: dict[str, Any], status: str) -> Run:
+    return replace(
         _run(env),
         status=status,
-        parent={**_dead_parent(), "command": "flow", "id": flow_id},
+        parent={**_dead_parent(), "command": "flow", "id": flow["id"]},
     )
-    active = status in (record.STARTING, record.RUNNING, record.WAITING)
-    waiting = active and flow_status == "stopped"
-    assert record.waiting_for_flow(run) == (flow_id if waiting else None)
-    assert record.orphaned(run) is (active and not waiting)
 
 
-@pytest.mark.parametrize("state", ["missing", "broken", "invalid", "no-id"])
-def test_unreadable_flow_does_not_exempt_orphan(
-    env: dict[str, str], state: str
+@pytest.mark.parametrize("status", record.STATUSES)
+@pytest.mark.parametrize("flow_status", flows.FLOW_STATUSES)
+@pytest.mark.parametrize("field", ["writer_run", "reviewer_run", None])
+def test_flow_parent_state(
+    env: dict[str, str],
+    tmp_path: Path,
+    status: str,
+    flow_status: str,
+    field: str | None,
 ) -> None:
-    flow_id = flows.new_id()
-    if state == "broken":
-        folder = record.make_run_dir(flow_id, env)
-        (folder / flows.FLOW_NAME).write_text('{"status": "stopped"}')
-    parent_id = {"invalid": "../flow", "no-id": None}.get(state, flow_id)
+    flow = _flow(env, tmp_path, flow_status)
+    run = _flow_run(env, flow, status)
+    if field:
+        flow["tasks"][0][field] = run.id
+        flows.save(flow, env)
+    active = status in record.OPEN
+    listed = active and field is not None
+    expected = (
+        record.PARENT_NONE
+        if not active
+        else record.PARENT_ORPHANED
+        if not listed or flow_status == "done"
+        else record.PARENT_LEAD
+        if flow_status == "stopped"
+        else record.PARENT_RESUME
+    )
+    state = record.parent_state(run)
+    assert state.state == expected
+    assert record.waiting_for_flow(run) == (
+        flow["id"] if expected == record.PARENT_LEAD else None
+    )
+    assert record.orphaned(run) is (expected == record.PARENT_ORPHANED)
+
+
+@pytest.mark.parametrize("key", ["run", "preparation_run"])
+def test_flow_pending_close_holds_the_run(
+    env: dict[str, str], tmp_path: Path, key: str
+) -> None:
+    flow = _flow(env, tmp_path, "failed")
+    run = _flow_run(env, flow, record.WAITING)
+    effect = {"n": 1, "run": None, key: run.id}
+    flow["tasks"][0]["answer_effect"] = effect
+    flows.save(flow, env)
+    assert record.parent_state(run).state == record.PARENT_RESUME
+
+
+def test_resumable_flow_waits_with_its_age(env: dict[str, str], tmp_path: Path) -> None:
+    flow = _flow(env, tmp_path, "failed")
+    run = _flow_run(env, flow, record.WAITING)
+    flow["tasks"][0]["writer_run"] = run.id
+    flow["ended_at"] = 1000.0
+    flows.save(flow, env)
+    state = record.parent_state(run)
+    assert (state.status, state.ended_at, state.ended) == ("failed", 1000.0, True)
+    assert record.parent_wait(state, 1000.0 + 3 * 86400) == (
+        f"waiting for flow {flow['id']} to resume (failed 3 days ago)"
+    )
+    assert record.parent_next(state) == f"emb flow --resume {flow['id']}"
+    flow["status"] = "running"
+    flow["ended_at"] = None
+    flows.save(flow, env)
+    state = record.parent_state(run)
+    assert not state.ended and state.ended_at is not None
+    assert record.parent_wait(state, state.ended_at + 300) == (
+        f"waiting for flow {flow['id']} to resume (last updated 5 min ago)"
+    )
+
+
+@pytest.mark.parametrize(
+    ("seconds", "text"),
+    [
+        (0, "1 min"),
+        (59 * 60, "59 min"),
+        (3600, "1 h"),
+        (47 * 3600, "47 h"),
+        (48 * 3600, "2 days"),
+    ],
+)
+def test_parent_wait_ages(seconds: float, text: str) -> None:
+    state = record.ParentState(
+        record.PARENT_RESUME, "flow", "f", "failed", 0.0, ended=True
+    )
+    assert (
+        record.parent_wait(state, seconds)
+        == f"waiting for flow f to resume (failed {text} ago)"
+    )
+
+
+def test_live_lock_holds_the_run(env: dict[str, str], tmp_path: Path) -> None:
+    from ember.flows import lock
+
+    flow = _flow(env, tmp_path, "running")
+    run = _flow_run(env, flow, record.WAITING)
+    flow["tasks"][0]["writer_run"] = run.id
+    flows.save(flow, env)
+    with lock.hold(flow["id"], env):
+        assert record.parent_state(run).state == record.PARENT_LIVE
+        assert not record.orphaned(run)
+    assert record.parent_state(run).state == record.PARENT_RESUME
+
+
+def test_live_starter_holds_the_run(env: dict[str, str], tmp_path: Path) -> None:
+    flow = _flow(env, tmp_path, "done")
+    parent = record.parent("flow", flow["id"])
+    run = replace(_run(env), status=record.RUNNING, parent=parent)
+    assert record.parent_state(run).state == record.PARENT_LIVE
+
+
+def test_unreadable_lock_table_falls_back_to_the_flow(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    flow = _flow(env, tmp_path, "failed")
+    run = _flow_run(env, flow, record.WAITING)
+    flow["tasks"][0]["writer_run"] = run.id
+    flows.save(flow, env)
+    state = record.parent_state(run, tmp_path / "absent")
+    assert state.state == record.PARENT_RESUME
+
+
+def _panel(
+    env: dict[str, str], tmp_path: Path, status: str, member_status: str, run_id: str
+) -> dict[str, Any]:
+    member = panel_members.Member("codex", "model", None, "option").entry(1)
+    member.update(status=member_status, run=run_id)
+    panel = panels.new_panel(
+        panels.new_id(),
+        dir=str(tmp_path),
+        question_file=str(tmp_path / "question.md"),
+        read=(),
+        claim=None,
+        stall_minutes=10,
+        timeout_minutes=60,
+        members=[member],
+        left_out=[],
+    )
+    panel["status"] = status
+    panels.create(panel, "Question\n", "Brief\n", env)
+    return panel
+
+
+@pytest.mark.parametrize(
+    ("status", "member_status", "expected"),
+    [
+        ("incomplete", "timed out", record.PARENT_RESUME),
+        ("running", "running", record.PARENT_RESUME),
+        ("incomplete", "answered", record.PARENT_ORPHANED),
+        ("done", "interrupted", record.PARENT_ORPHANED),
+    ],
+)
+def test_panel_parent_state(
+    env: dict[str, str],
+    tmp_path: Path,
+    status: str,
+    member_status: str,
+    expected: str,
+) -> None:
+    run = replace(_run(env), status=record.WAITING)
+    panel = _panel(env, tmp_path, status, member_status, run.id)
+    run = replace(run, parent={**_dead_parent(), "command": "panel", "id": panel["id"]})
+    state = record.parent_state(run)
+    assert state.state == expected
+    if expected == record.PARENT_RESUME:
+        assert state.ended_at is not None
+        assert record.parent_next(state) == f"emb panel --recover {panel['id']}"
+        assert record.parent_wait(state, state.ended_at + 60) == (
+            f"waiting for panel {panel['id']} to recover (last updated 1 min ago)"
+        )
+
+
+@pytest.mark.parametrize("state", ["missing", "invalid", "no-id"])
+def test_missing_flow_does_not_exempt_orphan(env: dict[str, str], state: str) -> None:
+    parent_id = {"invalid": "../flow", "no-id": None}.get(state, flows.new_id())
     run = replace(
         _run(env),
         parent={**_dead_parent(), "command": "flow", "id": parent_id},
     )
     assert record.waiting_for_flow(run) is None
     assert record.orphaned(run)
+
+
+def test_unreadable_flow_is_unknown(env: dict[str, str]) -> None:
+    flow_id = flows.new_id()
+    folder = record.make_run_dir(flow_id, env)
+    (folder / flows.FLOW_NAME).write_text('{"status": "stopped"}')
+    run = replace(
+        _run(env),
+        parent={**_dead_parent(), "command": "flow", "id": flow_id},
+    )
+    state = record.parent_state(run)
+    assert state.state == record.PARENT_UNKNOWN and state.error
+    assert not record.orphaned(run)
+    assert record.parent_next(state) == f"emb flow --status {flow_id}"
 
 
 @pytest.mark.parametrize(

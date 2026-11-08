@@ -452,7 +452,7 @@ After exit 0, a start, `--send`, `--recover`, `--close` (including
 `--force`), `--answered` or `--status RUN` prints the run's derived next
 line once on standard error when one applies. `--quiet` does not suppress
 it. Dry runs and status lists print no derived next line. Runs with a
-`parent` have no derived next line; status still prints the orphan
+`parent` have no derived next line; status still prints the parent
 warnings described below.
 
 ### Options
@@ -1091,7 +1091,7 @@ Paths are absolute.
 `--status RUN --json` prints the record with `session_state`: `live`, `dead`
 (the pane's command ended) or `missing` (no session), `orphaned`,
 `waiting_for_flow` (the parent flow id when waiting for its lead answer,
-otherwise null), a `turns` array, `step` and `next`.
+otherwise null), `parent_state`, a `turns` array, `step` and `next`.
 `--status --json` prints a list of these records, oldest first, each with
 `turns`. A run with no recorded turns has `turns: []`; no runs gives `[]`.
 A folder whose `run.json` cannot be read is skipped with a message on
@@ -1174,22 +1174,53 @@ standard error, as text output does. The `--status --json` list includes
 `step` and `next` in each record and prints no next line. `--dry-run --json` has neither field;
 `--json` remains limited to status and dry runs.
 
-`orphaned` is true when the run records a `parent`, is `starting`, `running`
-or `waiting`, and that parent process is no longer running, compared by
-process id and start time, unless its parent flow is stopped for the lead.
-Each orphaned run prints
+`parent_state` says who holds a `starting`, `running` or `waiting` run
+that records a `parent`. Its `state` is one of:
+
+| State | Meaning |
+|---|---|
+| `none` | The run is not open, or `emb run` started it |
+| `live` | A process of the parent command runs |
+| `lead` | The parent flow is `stopped` for the lead and lists the run |
+| `resume` | The parent flow or panel lists the run and can run again, and no process of it runs |
+| `orphaned` | No running or resumable parent holds the run |
+| `unknown` | The parent flow or panel record exists and cannot be read |
+
+A gap check, and a parent with no id, holds its run only while the process
+that started it runs, compared by process id and start time. A flow lists
+a run as a task's `writer_run` or `reviewer_run`, or as the `run` or
+`preparation_run` of a task's pending `answer_effect`. A panel lists the
+`run` of each member that is `pending`, `starting`, `running`, `stalled`,
+`timed out` or `interrupted`. A process of a flow or panel runs when the
+process that started the run runs, or when the parent's lifetime lock is
+held, read from `/proc/locks` without opening the lock. A `done` flow or
+panel resumes nothing. A missing parent record, or an invalid parent id,
+falls back to the starting-process check.
+
+`parent_state` also holds `wait`, `next` and `error`, each a string or
+null. `wait` is `waiting for the lead's answer to flow <id>` for `lead`,
+and `waiting for flow <id> to resume (<status> <age> ago)` or
+`waiting for panel <id> to recover (<status> <age> ago)` for `resume`.
+The age counts from the parent's `ended_at`; a parent without one says
+`last updated <age> ago`, counted from `updated_at`. An age is whole
+minutes (at least 1) under an hour, whole hours under 48 hours, and whole
+days after that. `next` is `emb flow --resume <id>` or
+`emb panel --recover <id>` for `resume`, and `emb <command> --status <id>`
+for `unknown`. `error` is the read failure for `unknown`.
+
+`orphaned` is true when `parent_state.state` is `orphaned`. Each orphaned
+run prints
 `WARNING: run <id> is orphaned: emb <command> [<parent id>] ended without collecting it`
 and `next: emb run --recover <id>, then emb run --close <id>` on standard
-error. Its derived fields remain `step: parent` and `next: null`; the
-orphan recovery line is separate. A run started by `emb run` has no parent
-and is never orphaned.
-
-A starting, running or waiting run whose parent flow has status `stopped`
-has `orphaned: false`. Its text status and `WARNING:` line say
-`waiting for the lead's answer to flow <id>`, with no recover-and-close
-`next:` line. JSON retains the run's recorded `status`. A done, failed or
-cancelled flow does not exempt its runs; neither does a missing or unreadable
-flow record. Gap-check and panel runs still follow the parent-process check.
+error. A run with a `wait` prints `WARNING: run <id> is <wait>`, and its
+text status shows `<wait>` in place of `status`. A run whose parent is
+`unknown` prints
+`WARNING: run <id>: cannot read its parent <command> <id>: <error>`.
+Either then prints `next: <next>` when `next` is not null; neither prints
+the recover-and-close line. JSON retains the run's recorded `status`.
+Derived fields remain `step: parent` and `next: null`; the parent lines
+are separate. A run started by `emb run` has no parent and is never
+orphaned.
 
 `turns` has one entry for every recorded turn number, oldest first, read
 from `turn-<n>.outcome.json`:
@@ -4328,8 +4359,8 @@ ellipsis; the whole text is in the expanded details. Chips are 22 pixels tall wi
 |---|---|---|
 | Starting | A run or flow's `starting` | Grey |
 | Running | `running`, a flow's `checking` | Blue |
-| Waiting for Claude | A run's `waiting`, a flow's `stopped`, or a starting, running or waiting run whose parent flow is stopped for the lead | Amber |
-| Orphaned | A run whose starting command ended without collecting it (`orphaned` in `emb run --status`) | Amber |
+| Waiting for Claude | A run's `waiting`, a flow's `stopped`, or a starting, running or waiting run whose parent state is `lead` or `resume` | Amber |
+| Orphaned | A run whose parent state is `orphaned` in `emb run --status` | Amber |
 | Done | A run's `closed`, a flow or panel's `done` | Green |
 | Incomplete | A panel's `incomplete`, a flow's `cancelled` | Purple |
 | Failed | `failed`, a gone flow runner or panel process | Red |
@@ -4343,7 +4374,9 @@ has not changed for more than sixty seconds stays in Live with Failed and
 the same conditions. A stopped flow needs no runner. An unreadable lock
 table or runtime folder leaves the stored status on screen. A run whose
 parent flow is stopped for the lead says `Waiting for Claude's answer to
-flow <id>` on its second line and is not shown as Orphaned.
+flow <id>` on its second line. A run whose parent state is `resume` starts
+its second line with its `wait` text, such as `Waiting for flow <id> to
+resume (failed 3 days ago)`. Neither is shown as Orphaned.
 
 Worker runs are nested under their parent, in the parent's section, and
 keep their own status chip and controls. Their ids are collected from the
