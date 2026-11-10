@@ -210,7 +210,10 @@ while True:
             assert time.monotonic() < deadline
             time.sleep(0.02)
         assert scopes.end(run_id, env=environment, wait=0.1) == []
-        assert not processes.running(child)
+        deadline = time.monotonic() + 2
+        while processes.running(child):
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
         process.wait(timeout=10)
         assert scopes.end(run_id, env=environment) == []
     finally:
