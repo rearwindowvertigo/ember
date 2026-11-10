@@ -819,6 +819,24 @@ engine's command line pastes nothing. The session runs with no window. With
 window that cannot open prints a `WARNING:` line and the run goes on.
 `--attach` opens a window on a running session at any time.
 
+When `systemd-run` and `systemctl` are on `PATH` and
+`systemctl --user show-environment` succeeds, the pane command runs in its
+own transient systemd user scope, `ember-run-<id>.scope`, through
+`systemd-run --user --scope --quiet --collect --unit <unit> --`.
+The command keeps its environment, working folder and pane process id.
+This also applies to worker runs started by flows and panels.
+If the tools or user manager are unavailable, the run uses process-tree
+signalling only, and start prints one line on standard error, including
+with `--quiet`:
+
+```text
+WARNING: no usable systemd user session; detached processes may outlive the run
+```
+
+If the availability check succeeds but the scope cannot start, the start
+fails with exit 71. Failed-start cleanup attempts to end the scope by name;
+cleanup errors leave the original start error as the reported error.
+
 The first line on standard output is `run <id>`. At start, before the
 first turn, the resolved worker line shown by `--dry-run` is printed on
 standard error, including with `--quiet`.
@@ -975,10 +993,21 @@ new files are ignored is removed. Closing an already closed run tries
 detached-worktree removal again. Read-only records without
 `detached` keep their source checkouts. Before ending the session Ember
 records every process under the session's pane; after, it sends SIGTERM to
-each one still running, then SIGKILL after 2 seconds. This ends processes a
-worker's tools started in a session of their own, such as Codex's
-`codex-linux-sandbox`. A process still running after SIGKILL is named on
-standard error. A command waiting on a run that is
+each one still running, then SIGKILL after 2 seconds. For a scoped run,
+close then signals all processes in `ember-run-<id>.scope`, including its
+nested cgroups, with SIGTERM, then SIGKILL after the same 2-second wait.
+Scope membership includes descendants that called `setsid`, double forked
+or were reparented outside the pane's process tree. Both normal and forced
+close do this. A process still running after SIGKILL is named on standard
+error.
+
+A scope that is already gone is not an error. If the scope cannot be
+inspected or signalled, close prints a `WARNING:` naming the unit and
+`systemctl --user kill <unit>`, and continues recording the run closed and
+removing its temporary folder and eligible worktree. The process tree is
+still signalled. Runs with `scoped: false`, including older records without
+the field, use the process tree only and issue no scope commands on close.
+A command waiting on a run that is
 closed stops with 72, also when the driver fails or the session is missing
 after the close.
 
@@ -1045,6 +1074,7 @@ UTC. It is also the tmux session's name.
 | `effort` | string or null | The effort; null when the engine's default applies |
 | `read_only` | boolean | Whether the run reviews without a branch or Ember commits |
 | `detached` | boolean | Whether Ember owns a detached review worktree; false for a record without this field |
+| `scoped` | boolean | Whether the worker session uses its own systemd user scope, `ember-run-<id>.scope`; false for fallback runs and records without this field |
 | `repo` | string | The top of the checkout `--dir` is in |
 | `main` | string or null | The main checkout at start; null for a bare repository or a record without this field |
 | `common` | string or null | The resolved common git folder at start; null for a record without this field |
