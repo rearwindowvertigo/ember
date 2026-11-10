@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 from pytestqt.qtbot import QtBot
 
 from ember import choices
-from ember.app import state, theme
+from ember.app import state, theme, widgets
 from ember.app.context import AppContext
 from ember.app.screens import common
 from ember.app.screens import settings as settings_module
@@ -922,8 +922,15 @@ def test_list_actions_follow_control_edges_and_stacked_layout(
         )
         QCoreApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
         edit, remove = screen.preparation_rows[repository]
+        path_remove = screen.path_rows[path]
+        pill = path_remove.parentWidget()
+        assert isinstance(pill, widgets.PillRow)
+        assert pill.mapTo(screen, QPoint()).x() == (
+            screen.paths_box.mapTo(screen, QPoint()).x()
+        )
+        assert right(path_remove) == right(pill) - pill.line.contentsMargins().right()
         if stacked:
-            assert right(screen.path_rows[path]) == right(screen.paths_box)
+            assert right(pill) == right(screen.paths_box)
             assert right(screen.hidden_rows[hidden]) == right(screen.hidden_box)
             assert edit.mapTo(screen, QPoint()).x() == (
                 screen.preparation_box.mapTo(screen, QPoint()).x()
@@ -938,7 +945,7 @@ def test_list_actions_follow_control_edges_and_stacked_layout(
         else:
             assert {
                 right(screen.add_folder),
-                right(screen.path_rows[path]),
+                right(pill),
                 right(remove),
                 right(screen.hidden_rows[hidden]),
             } == {right(screen.add_folder)}
@@ -953,12 +960,18 @@ def test_list_actions_follow_control_edges_and_stacked_layout(
     common.align_controls(screen.tip_rows.values())
     qtbot.wait(30)
     QCoreApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
+    pill = screen.path_rows[path].parentWidget()
+    assert isinstance(pill, widgets.PillRow)
     assert {
         right(screen.add_folder),
-        right(screen.path_rows[path]),
+        right(pill),
         right(screen.preparation_rows[repository][1]),
         right(screen.hidden_rows[hidden]),
     } == {right(screen.add_folder)}
+    assert not isinstance(screen.hidden_rows[hidden].parentWidget(), widgets.PillRow)
+    assert not isinstance(
+        screen.preparation_rows[repository][1].parentWidget(), widgets.PillRow
+    )
 
 
 @pytest.mark.parametrize("width", [576, 1400])

@@ -41,6 +41,39 @@ from pytestqt.qtbot import QtBot
 from ember.app import theme, widgets
 
 
+@pytest.mark.parametrize("height", [40, 64])
+def test_pill_row_paints_half_height_radius_and_follows_theme(
+    qtbot: QtBot, qapp: QApplication, height: int
+) -> None:
+    card = widgets.Card()
+    qtbot.addWidget(card)
+    layout = QVBoxLayout(card)
+    layout.setContentsMargins(20, 20, 20, 20)
+    row = widgets.PillRow()
+    row.setFixedHeight(height)
+    layout.addWidget(row)
+    card.resize(360, height + 40)
+    card.show()
+    for mode in ("light", "dark", "light"):
+        theme.apply(qapp, mode)
+        qtbot.wait(10)
+        origin = row.mapTo(card, QPoint())
+        image = (
+            card.grab()
+            .toImage()
+            .copy(origin.x(), origin.y(), row.width(), row.height())
+        )
+        fill = theme.color("bg-subtle", mode)
+        assert image.pixelColor(row.width() // 2, 1) == fill
+        assert image.pixelColor(1, height // 2) == fill
+        assert image.pixelColor(row.width() - 2, height // 2) == fill
+        assert image.pixelColor(height // 10, height // 10) == theme.color(
+            "bg-card", mode
+        )
+        assert image.pixelColor(height // 4, height // 10) == fill
+    assert row.focusPolicy() == Qt.FocusPolicy.NoFocus
+
+
 @pytest.mark.parametrize(
     ("shown", "start", "length", "expected"),
     [

@@ -616,9 +616,8 @@ class MenuScreen(QWidget):
         if not members:
             self.members_layout.addWidget(label(NO_MEMBERS, "secondary"))
         for member in panel["members"]:
-            row = QWidget()
-            line = QHBoxLayout(row)
-            line.setContentsMargins(0, 0, 0, 0)
+            row = widgets.PillRow()
+            line = row.line
             text = member_text(member)
             title = label(text)
             title.setTextFormat(Qt.TextFormat.PlainText)

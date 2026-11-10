@@ -469,10 +469,8 @@ class SettingsScreen(QWidget):
             return
         color = theme.color("text-primary")
         for path in paths:
-            row = QWidget()
-            line = QHBoxLayout(row)
-            line.setContentsMargins(0, 0, 0, 0)
-            line.setSpacing(8)
+            row = widgets.PillRow()
+            line = row.line
             text = QLabel(path)
             text.setFont(theme.font("code"))
             text.setTextFormat(Qt.TextFormat.PlainText)
