@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.22.0](https://github.com/rearwindowvertigo/ember/compare/v0.21.2...v0.22.0) (2026-11-10)
+
+
+### Added
+
+* **flows:** print each task's outside files in watch and status text ([4486199](https://github.com/rearwindowvertigo/ember/commit/4486199a7be6c4ff575da8e76ee475c68ef79212))
+* **flows:** report findings left on merged tasks when a flow is done ([833204f](https://github.com/rearwindowvertigo/ember/commit/833204f14bc2d741e809e689ce08c4dbf3427dc1))
+* **flows:** show the check log tail with a failed flow check ([2d23719](https://github.com/rearwindowvertigo/ember/commit/2d23719e82d5d8cc5a53f49d943d1ea9d1101afb))
+
+
+### Fixed
+
+* **runs:** end every process a run started by running it in a scope ([dc9decc](https://github.com/rearwindowvertigo/ember/commit/dc9deccaa2085e2e8cf4aaf5a77668821033a6b1))
+* **runs:** pass $ unchanged through the systemd-run scope command ([1e7896b](https://github.com/rearwindowvertigo/ember/commit/1e7896b5682235be6e7b9e402924d10ea5325715))
+
 ## [0.21.2](https://github.com/rearwindowvertigo/ember/compare/v0.21.1...v0.21.2) (2026-11-08)
 
 
