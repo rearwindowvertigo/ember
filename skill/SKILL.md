@@ -14,7 +14,7 @@ description: >-
 
 # Ember
 
-Skill version: 0.21.2 <!-- x-release-please-version -->
+Skill version: 0.22.0 <!-- x-release-please-version -->
 
 ## Role
 
