@@ -116,7 +116,8 @@ for coverage and errors as above.
 ## Owner answers
 
 Each gap in `steps` carries an `id` and `ask_owner`, from the owner's Gaps
-Claude asks you about.
+Claude asks you about. Each gap's level is the `harm` field, with values
+`high`, `medium` and `low`. The result has no `severity` field.
 
 Before asking about any gap or recording its answer, check its factual
 premise against the code, record or file that the gap or its default
@@ -173,8 +174,10 @@ With the owner away and no answer possible, work waits. Do not take a
 default for a `high` gap with `ask_owner: true` yourself. Write the answers
 into the failure model, context or task text before `--start` or the
 Workflow. If answers materially change task scope, files, dependencies or
-ordering, repeat the flow dry run with `--previous <last result>` and its printed gap check
-command (the gap check alone for a Workflow, with the same `--previous`).
+ordering, record every answer of the current result first, update the plan
+once with all of them, then run one repeat flow dry run with
+`--previous <last result>` and its printed gap check command (the gap check
+alone for a Workflow, with the same `--previous`).
 Recording answers without such changes needs no repeat. The reviewer finds gaps;
 it decides nothing.
 
