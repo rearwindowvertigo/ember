@@ -61,23 +61,31 @@ checkout.
 2. Write the decisions recorded on GitHub issues to a scratch file outside
    the checkout:
    `gh issue list --state all --limit 1000 --json number,title,comments --jq '.[] | {number, title, decisions: [.comments[].body | select(startswith("Decision"))]} | select(.decisions | length > 0)' > <decisions file>`.
-3. Copy `review-prompt.md` to a scratch file. Replace `{{ENTRY}}` with the
+3. The lead writes every point the entry makes to a scratch file outside
+   the checkout: each friction point, thing that worked, suggested change,
+   bug and efficiency. List them in entry order as `P1` to `Pn`, each with
+   its area (the entry's section number and title, or "Summary") and a
+   one-line quote or close paraphrase.
+4. Copy `review-prompt.md` to a scratch file. Replace `{{ENTRY}}` with the
    absolute path of the reviewed issue's file, `{{EARLIER}}` with the
    scratch folder's absolute path, and `{{DECISIONS}}` with the decisions
-   file's absolute path.
-4. Claim the run (`emb choices --claim --id <id> --skill <version>`), then
+   file's absolute path. Replace `{{POINTS}}` with the points file's
+   absolute path.
+5. Claim the run (`emb choices --claim --id <id> --skill <version>`), then
    run the question as an Ember panel on this checkout:
-   `emb panel --question-file <scratch file> --dir <repository top> --read <scratch folder> --read <decisions file> --claim <id>`.
+   `emb panel --question-file <scratch file> --dir <repository top> --read <scratch folder> --read <decisions file> --read <points file> --claim <id>`.
    The members are the saved `panel.members` unless the owner names others.
-5. Compare the members' answers in the panel's `summary.md`, point by
-   point, and post the review as one comment on the survey issue, starting
-   `Survey review`, with:
+6. Compare the members' answers in the panel's `summary.md`, point by
+   point, keeping `P1` to `Pn` unchanged. Compare added points by member
+   and local number; give them consolidated numbers after `Pn`, with a
+   mapping back to each member's additions. Post the review as one comment
+   on the survey issue, starting `Survey review`, with:
    - the panel id and its members, with any member that failed;
    - one table of every point with the severity, tags and outcome most
      members gave, and each disagreement with each member's answer;
    - the tags, merged where members named the same overlap differently;
    - the proposed changes, each with the members that proposed it.
-6. Put the proposed changes to the owner. File each one the owner accepts
+7. Put the proposed changes to the owner. File each one the owner accepts
    as its own issue, with the labels and milestone `AGENTS.md` describes
    and a line naming the survey issue. Then close the survey issue with a
    comment listing those issues, or saying none was accepted.
