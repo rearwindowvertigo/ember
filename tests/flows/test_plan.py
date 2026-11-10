@@ -446,6 +446,53 @@ def test_non_test_file_warning(
     )
 
 
+@pytest.mark.parametrize(
+    ("files", "warns"),
+    [
+        (["README.md"], False),
+        (["skill/references/flows.md", "skill/references/gap-check.md"], False),
+        (["docs/reference.md"], False),
+        (["docs/guide.rst", "docs/assets/diagram.svg"], False),
+        (["README.md", "docs/guide.rst"], False),
+        (["src/a.py"], True),
+        (["README.md", "src/a.py"], True),
+        (["src/a.py", "docs/reference.md"], True),
+        (["docs/guide.rst", "src/a.py"], True),
+        (["src/docs/guide.rst"], True),
+        (["docs-extra/guide.rst"], True),
+        (["docs.py"], True),
+        (["README.mdx"], True),
+    ],
+)
+def test_documentation_only_test_file_warning(
+    raw: dict[str, Any],
+    tmp_path: Path,
+    env: dict[str, str],
+    files: list[str],
+    warns: bool,
+) -> None:
+    raw.update(check=["true"], failure_model="cases")
+    raw["tasks"][0]["files"] = files
+    assert plan.warnings(parsed(raw, tmp_path), str(tmp_path), env) == (
+        ["a: no test file in its files"] if warns else []
+    )
+
+
+def test_documentation_folder_still_warns(
+    raw: dict[str, Any], tmp_path: Path, env: dict[str, str]
+) -> None:
+    repo = make_repo(tmp_path, env)
+    (repo / "docs").mkdir()
+    (repo / "docs/guide.rst").write_text("Guide\n")
+    git(repo, "add", ".", env=env)
+    git(repo, "commit", "-qm", "docs: add guide", env=env)
+    raw.update(check=["true"], failure_model="cases")
+    raw["tasks"][0]["files"] = ["docs"]
+    assert plan.warnings(parsed(raw, tmp_path), str(repo), env) == [
+        "a: docs is a folder; list the files the task changes"
+    ]
+
+
 def test_resolution_order(
     raw: dict[str, Any], tmp_path: Path, env: dict[str, str]
 ) -> None:

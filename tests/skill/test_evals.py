@@ -385,9 +385,8 @@ def test_shared_document_case_checks_submitted_plan(
     )
     assert [set(wave) for wave in report["waves"]] == [set(wave) for wave in expected]
     assert json.loads((work.eval / "flow-plan.json").read_text()) == document
-    if layout != "shared":
-        assert report["warnings"] == ["reference: no test file in its files"]
-        assert "WARNING: reference: no test file" in result.stderr
+    assert report["warnings"] == []
+    assert "WARNING:" not in result.stderr
     # The checker grades the plan the lead submitted, even after its scratch
     # file is gone; it does not grade a fixture or the lead's final report.
     source.unlink()

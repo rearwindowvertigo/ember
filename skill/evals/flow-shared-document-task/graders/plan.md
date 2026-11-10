@@ -22,5 +22,5 @@ The implementation briefs explicitly leave the reference edits to the
 shared document task; that task describes all three completed changes.
 The implementation tasks retain their own tests and checks. There are no
 section-scoped file declarations and no omitted reference updates.
-Claude reports both waves, reads the warning about the document task
-having no test file, and explains why that task needs no test file.
+Claude reports both waves. The document-only task produces no
+`no test file in its files` warning in the dry run.

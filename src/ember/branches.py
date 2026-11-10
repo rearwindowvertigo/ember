@@ -1363,8 +1363,8 @@ def _merge_title(
     return title
 
 
-def _completed_flow(repo: Repository, branch: str) -> dict[str, Any] | None:
-    """Read a matching flow record, returning only completed flows."""
+def _matching_flow(repo: Repository, branch: str) -> dict[str, Any] | None:
+    """Read a flow record matching the branch and repository identity."""
     match = FLOW_BRANCH.fullmatch(branch)
     if match is None:
         return None
@@ -1397,7 +1397,29 @@ def _completed_flow(repo: Repository, branch: str) -> dict[str, Any] | None:
             f"the flow record {flow_id} is not this branch's in {repo.main}",
             line,
         )
-    return flow if flow["status"] == "done" else None
+    return flow
+
+
+def _completed_flow(repo: Repository, branch: str) -> dict[str, Any] | None:
+    """Read a matching flow record, returning only completed flows."""
+    flow = _matching_flow(repo, branch)
+    return flow if flow is not None and flow["status"] == "done" else None
+
+
+def _unfinished_flow_line(repo: Repository, target: str) -> str | None:
+    """Return an unfinished target flow's next step when its record matches."""
+    try:
+        flow = _matching_flow(repo, target)
+    except BranchError:
+        return None
+    if flow is None or flow["status"] == "done":
+        return None
+    action = (
+        "resume"
+        if flow["status"] == "failed" and flow.get("check_pending")
+        else "status"
+    )
+    return f"next: emb flow --{action} {flow['id']}"
 
 
 def _check_flow_base(
@@ -1947,6 +1969,8 @@ def merge(
     next_line, owner_wait = _merged_run_lines(job, branch)
     if failure is not None:
         next_line = None
+    elif not any(item.action == KEPT for item in job.results if item.branch == branch):
+        next_line = _unfinished_flow_line(repo, target) or next_line
     if as_json:
         document = {
             "branch": branch,

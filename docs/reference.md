@@ -2001,7 +2001,9 @@ Warnings do not refuse a plan:
   is a tree at `base`, read with `git cat-file -t`
 - `<id>: no test file in its files`, when no file is under `test`, `tests`
   or `__tests__`, starts with `test_`, or has a name matching `*_test.*`,
-  `*.test.*` or `*.spec.*`
+  `*.test.*` or `*.spec.*`, unless every file ends in `.md` or has `docs`
+  as its first path component. A task with any other file still gets the
+  warning when it lists no test file.
 - `<where> cites <reference>, which no read path supplies`, once per
   reference at its first citation, where `<where>` is `the context`, `the
   failure model` or `task <id>` (its subject, task text and review focus).
@@ -2682,7 +2684,8 @@ including with `--watch --json`:
 | Lead stop, live runner | `report: lead stop on <task>; the runner is still live for the other tasks; list every printed choice and recommend one` |
 | Lead stop after capacity | `report: capacity on <task>; recommend only the same-worker retry` |
 | Done with latest or retained `lead` or `should` task findings | `report: <lead count> lead and <should count> should findings remain on merged tasks; inspect each before merging` |
-| Exit 82 | `report: tasks unmerged; report every task's status and reason; leave the unmerged work and the flow branch to the owner` |
+| Exit 82, status `failed` with `check_pending` set | `report: the check failed after wave <n>; fix the flow branch, then resume` |
+| Exit 82, every other case | `report: tasks unmerged; report every task's status and reason; leave the unmerged work and the flow branch to the owner` |
 | Exit 72 | `report: the runner is gone; work may still be running` |
 
 Watch prints one report line per delivered stop event. With no new stop
@@ -2692,9 +2695,10 @@ flow-level stop uses the flow id in place of `<task>`. A stop with saved
 The done report counts all latest and retained task findings and prints both
 counts. Zero `lead` and zero `should` findings print no done report line.
 Every user-facing flow command that exits 82 or 72 prints the corresponding
-report line after its action line. Flow `next:` lines remain in place
-when workers have pending owner actions; the single-run owner wait does
-not suppress them.
+report line after its action line. `<n>` is the flow's recorded wave. When
+the flow record cannot be read, exit 82 prints the unmerged-tasks line.
+Flow `next:` lines remain in place when workers have pending owner actions;
+the single-run owner wait does not suppress them.
 
 `--status FLOW --json` prints `flow.json` plus `runner_live` and `check_output`.
 `check_output` has the same string-or-null value as the watch report, including
@@ -3399,14 +3403,29 @@ After successful cleanup, the command derives the next line from the
 newest matching run without a parent and prints it once on standard error
 when non-null, using the rules in `emb run` Status. Cleanup normally closes
 the run, so a contained, closed run with an unfinished claim gives
-`next: emb choices --finish <claim>`. A kept branch, a cleanup failure, or
-no readable matching run without a parent gives no derived next line.
+`next: emb choices --finish <claim>`.
+
+When `TARGET` is `ember/flow/<id>` and its flow record matches the target
+branch and repository identity, a status other than `done` replaces the
+run's next line with the flow's next step:
+
+| Flow state | Next line |
+|---|---|
+| `failed` with `check_pending` set | `next: emb flow --resume <id>` |
+| Every other state except `done` | `next: emb flow --status <id>` |
+
+This flow line also prints when there is no readable matching run without
+a parent. A missing, unreadable or mismatched target flow record, a `done`
+flow or a non-flow target leaves the run's next line in effect. A kept
+branch or a cleanup failure suppresses both the run's and the flow's next
+line. Text and `--json` output use the same next line.
 
 When the newest matching run without a parent has a pending owner wait,
 the command prints each complete pending `owner:` line in recorded order
 on standard error, including with `--json`. It prints no derived `next:`
-line for that run. The wait does not refuse the merge or change a successful
-exit from 0, including when cleanup keeps the branch.
+line for that run; the unfinished target flow's next line still prints
+after successful cleanup. The wait does not refuse the merge or change a
+successful exit from 0, including when cleanup keeps the branch.
 
 A flow branch `ember/flow/<flow id>` follows the run-branch cleanup path
 without a run record, with the worktree its flow record names. Cleanup keeps it while the flow's runner is live, with

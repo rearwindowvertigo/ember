@@ -1,6 +1,6 @@
 """The app's shared widgets.
 
-Painted widgets (`Switch`, `Spinner`) read their colours from `theme` and
+Painted widgets (`Switch`, `Spinner`, `PillRow`) read their colours from `theme` and
 repaint on `theme.signals.changed`. The other widgets are styled by the
 theme's style sheet through dynamic properties.
 """
@@ -1042,6 +1042,26 @@ class Badge(QLabel):
         self.setProperty("tone", _check_tone(tone))
         self.setText(text)
         repolish(self)
+
+
+class PillRow(QWidget):
+    """A full-width row on a `bg-subtle` pill with padded inline content."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        """Create an empty row whose radius follows half its height."""
+        super().__init__(parent)
+        self.line = QHBoxLayout(self)
+        self.line.setContentsMargins(12, 4, 12, 4)
+        self.line.setSpacing(8)
+        theme.signals.changed.connect(self.update)
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: D102
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(theme.color("bg-subtle"))
+        radius = self.height() / 2
+        painter.drawRoundedRect(QRectF(self.rect()), radius, radius)
 
 
 class Card(QFrame):

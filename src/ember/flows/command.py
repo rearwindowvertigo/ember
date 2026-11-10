@@ -1025,9 +1025,14 @@ def _next(flow: Mapping[str, Any], event: str, code: int | None, live: bool) -> 
     )
 
 
-def _exit_reports(code: int | None) -> list[str]:
+def _exit_reports(code: int | None, flow: Mapping[str, Any] | None = None) -> list[str]:
     """Return the settled report lines for a user-facing flow exit."""
     if code == NOT_MERGED:
+        if flow is not None and flow["status"] == "failed" and flow["check_pending"]:
+            return [
+                f"report: the check failed after wave {flow['wave']}; "
+                "fix the flow branch, then resume"
+            ]
         return [
             "report: tasks unmerged; report every task's status and reason; "
             "leave the unmerged work and the flow branch to the owner"
@@ -1198,7 +1203,7 @@ def _watch_result(
             if stops or event == "lead_stop"
             else []
         )
-        + _exit_reports(code)
+        + _exit_reports(code, flow)
         + (_done_reports(flow) if event == "end" else []),
     )
     return result, max([cursor, *(item["seq"] for item in fresh)])
@@ -1422,7 +1427,19 @@ def main(
     except (CommandError, plan.WorkerError, branches.BranchError) as error:
         print(f"emb flow: {error}", file=err)
         print(error.line, file=err)
-        for line in _exit_reports(error.code):
+        flow = None
+        if error.code == NOT_MERGED:
+            flow_id = (
+                args.watch
+                or args.status
+                or args.resume
+                or args.cancel
+                or (args.lead[0] if args.lead else None)
+            )
+            if flow_id:
+                with contextlib.suppress(record.FlowError):
+                    flow = record.load(flow_id, environment)
+        for line in _exit_reports(error.code, flow):
             print(line, file=err)
         return error.code
     except (paths.RuntimeDirError, lock.LockError) as error:

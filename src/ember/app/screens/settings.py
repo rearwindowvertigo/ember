@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
+    QBoxLayout,
     QDialog,
     QFileDialog,
     QHBoxLayout,
@@ -336,7 +337,7 @@ class SettingsScreen(QWidget):
         self.preparation_line = ToneLine("warning")
         column.addWidget(self.preparation_line)
         self.preparation_rows: dict[str, tuple[QPushButton, QPushButton]] = {}
-        self.preparation_buttons: list[QHBoxLayout] = []
+        self.preparation_entries: list[tuple[QBoxLayout, QHBoxLayout]] = []
         return card
 
     def _fit_lists(self, stacked: bool, reset_width: int) -> None:
@@ -348,9 +349,17 @@ class SettingsScreen(QWidget):
         ):
             inset = reset_width if populated and not stacked else 0
             layout.setContentsMargins(0, 0, inset, 0)
-        for buttons in self.preparation_buttons:
+        for entry, buttons in self.preparation_entries:
+            entry.setDirection(
+                QBoxLayout.Direction.TopToBottom
+                if stacked
+                else QBoxLayout.Direction.LeftToRight
+            )
+            entry.setStretch(0, 0 if stacked else 1)
             buttons.setAlignment(
-                Qt.AlignmentFlag.AlignLeft if stacked else Qt.AlignmentFlag.AlignRight
+                Qt.AlignmentFlag.AlignLeft
+                if stacked
+                else Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             )
 
     def _draw_icons(self, *_args: object) -> None:
@@ -469,10 +478,8 @@ class SettingsScreen(QWidget):
             return
         color = theme.color("text-primary")
         for path in paths:
-            row = QWidget()
-            line = QHBoxLayout(row)
-            line.setContentsMargins(0, 0, 0, 0)
-            line.setSpacing(8)
+            row = widgets.PillRow()
+            line = row.line
             text = QLabel(path)
             text.setFont(theme.font("code"))
             text.setTextFormat(Qt.TextFormat.PlainText)
@@ -492,7 +499,7 @@ class SettingsScreen(QWidget):
     def _draw_preparation(self, commands: dict[str, str]) -> None:
         clear_layout(self.preparation_layout)
         self.preparation_rows = {}
-        self.preparation_buttons = []
+        self.preparation_entries = []
         if not commands:
             self.preparation_layout.setContentsMargins(0, 0, 0, 0)
             self.preparation_layout.addWidget(
@@ -500,8 +507,16 @@ class SettingsScreen(QWidget):
             )
         for repository, command in commands.items():
             row = QWidget()
-            column = QVBoxLayout(row)
-            column.setContentsMargins(0, 0, 0, 0)
+            stacked = self.tip_rows["Repositories"].stacked
+            entry = QBoxLayout(
+                QBoxLayout.Direction.TopToBottom
+                if stacked
+                else QBoxLayout.Direction.LeftToRight,
+                row,
+            )
+            entry.setContentsMargins(0, 0, 0, 0)
+            entry.setSpacing(8)
+            column = QVBoxLayout()
             column.setSpacing(4)
             for value in (repository, command or "No preparation"):
                 text = QLabel(value)
@@ -512,6 +527,7 @@ class SettingsScreen(QWidget):
                     Qt.TextInteractionFlag.TextSelectableByMouse
                 )
                 column.addWidget(text)
+            entry.addLayout(column, 0 if stacked else 1)
             buttons = QHBoxLayout()
             edit = widgets.button("Edit", "secondary", size="sm")
             edit.setAccessibleName(f"Edit preparation for {repository}")
@@ -527,11 +543,11 @@ class SettingsScreen(QWidget):
             buttons.addWidget(remove)
             buttons.setAlignment(
                 Qt.AlignmentFlag.AlignLeft
-                if self.tip_rows["Repositories"].stacked
-                else Qt.AlignmentFlag.AlignRight
+                if stacked
+                else Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
             )
-            column.addLayout(buttons)
-            self.preparation_buttons.append(buttons)
+            entry.addLayout(buttons)
+            self.preparation_entries.append((entry, buttons))
             self.preparation_layout.addWidget(row)
             self.preparation_rows[repository] = (edit, remove)
 
