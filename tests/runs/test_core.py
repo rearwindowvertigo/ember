@@ -2054,7 +2054,7 @@ def test_claude_run_records_its_sandbox_network_and_read_paths(
     code = _start(_core(env), repo, _brief(tmp_path, "Task\n"), read=(str(extra),))
     out, err = capsys.readouterr()
     assert code == 0, err
-    assert "WARNING" not in err
+    assert sandbox.none_warning("claude") not in err
     run = record.load(_run_id(out), env)
     assert run.sandbox == "bubblewrap"
     assert run.network is True
@@ -5158,3 +5158,181 @@ def test_codex_existing_temporary_entry_refuses_start_without_setup(
         assert (folder / "keep").read_text() == "keep"
     else:
         assert folder.is_symlink()
+
+
+@pytest.fixture
+def scope_runner(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Enable scopes with a launcher that execs the pane command in place."""
+    monkeypatch.setattr(core.scopes, "available", lambda env=None: True)
+    binary = script_path(env).parent / "systemd-run"
+    binary.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$@" >> "$SCOPE_LOG"\n'
+        'if [ "$SCOPE_FAIL" = yes ]; then exit 1; fi\n'
+        'while [ "$1" != -- ]; do shift; done\n'
+        "shift\n"
+        'exec "$@"\n'
+    )
+    binary.chmod(0o755)
+    env["SCOPE_LOG"] = str(binary.parent / "scope.log")
+    return Path(env["SCOPE_LOG"])
+
+
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("paste", [False, True])
+def test_run_starts_in_scope_and_closes_it(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    scope_runner: Path,
+    paste: bool,
+    force: bool,
+) -> None:
+    ended = []
+    monkeypatch.setattr(
+        core.scopes, "end", lambda run_id, **kwargs: ended.append(run_id) or []
+    )
+    driver = _driver(env, paste=paste)
+    core_ = _core(env, driver)
+    assert _start(core_, repo, _brief(tmp_path, "Task\n")) == 0
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert run.scoped
+    assert "detached processes may outlive" not in err
+    assert scope_runner.read_text().splitlines() == [
+        "--user",
+        "--scope",
+        "--quiet",
+        "--collect",
+        "--unit",
+        core.scopes.unit(run.id),
+        "--",
+        "/bin/sh",
+        str(run.folder / core.LAUNCH_NAME),
+    ]
+    command = json.loads((session_folder(tmp_path, run.id) / "command").read_text())
+    assert command["cwd"] == run.worktree
+    assert command["env"]["STUB_ENGINE"] == "claude"
+    assert core_.close(run.id, force=force) == 0
+    assert ended == [run.id]
+
+
+def test_scope_creation_failure_does_not_launch_worker_or_fall_back(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    scope_runner: Path,
+) -> None:
+    env["SCOPE_FAIL"] = "yes"
+    ended = []
+
+    def end(run_id: str, **kwargs: object) -> list[int]:
+        ended.append(run_id)
+        raise core.scopes.ScopeError("cleanup failed")
+
+    monkeypatch.setattr(core.scopes, "end", end)
+    core_ = _core(env)
+    assert _start(core_, repo, _brief(tmp_path, "Task\n")) == exits.ENGINE_FAILED
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert run.scoped and run.last_start_failure and run.status == record.FAILED
+    assert "cannot start the scope" in err
+    assert "cleanup failed" not in err
+    assert "detached processes may outlive" not in err
+    assert not (run.folder / "stub").exists()
+    assert not session_folder(tmp_path, run.id).exists()
+    assert scope_runner.read_text().splitlines().count("--scope") == 1
+    assert ended == [run.id]
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_scope_close_failure_warns_and_still_ends_tree_and_removes_worktree(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    scope_runner: Path,
+    force: bool,
+) -> None:
+    marker = tmp_path / "detached.pid"
+    core_ = _core(env)
+    assert (
+        _start(
+            core_, repo, _brief(tmp_path, f"Task\n@detach {marker}\n"), read_only=True
+        )
+        == 0
+    )
+    run = record.load(_run_id(capsys.readouterr().out), env)
+    child = processes.tree(int(marker.read_text()))[0]
+    temporary = paths.ensure_run_tmp_dir(run.id, env)
+    (temporary / "worker-file").write_text("temporary")
+
+    def end(run_id: str, **kwargs: object) -> list[int]:
+        assert run_id == run.id
+        raise core.scopes.ScopeError("permission denied")
+
+    monkeypatch.setattr(core.scopes, "end", end)
+    assert core_.close(run.id, force=force) == 0
+    out, err = capsys.readouterr()
+    assert out == f"closed {run.id}\n"
+    assert err.startswith("WARNING:")
+    assert f"systemctl --user kill {core.scopes.unit(run.id)}" in err
+    assert not processes.running(child)
+    assert record.load(run.id, env).status == record.CLOSED
+    assert not Path(run.worktree).exists()
+    assert not temporary.exists()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_fallback_warns_once_at_start_and_closes_without_scope_commands(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    legacy: bool,
+) -> None:
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("tree-only run tried to end a scope")
+
+    monkeypatch.setattr(core.scopes, "end", forbidden)
+    core_ = _core(env)
+    assert _start(core_, repo, _brief(tmp_path, "Task\n")) == 0
+    out, err = capsys.readouterr()
+    assert [
+        line for line in err.splitlines() if "detached processes may outlive" in line
+    ] == [
+        "WARNING: no usable systemd user session; "
+        "detached processes may outlive the run"
+    ]
+    run = record.load(_run_id(out), env)
+    assert not run.scoped
+    if legacy:
+        document = run.to_json()
+        document.pop("scoped")
+        (run.folder / record.RECORD_NAME).write_text(json.dumps(document))
+    assert core_.close(run.id) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_scope_survivors_use_existing_close_report(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    scope_runner: Path,
+) -> None:
+    monkeypatch.setattr(core.scopes, "end", lambda run_id, **kwargs: [123, 456])
+    core_ = _core(env)
+    assert _start(core_, repo, _brief(tmp_path, "Task\n")) == 0
+    run_id = _run_id(capsys.readouterr().out)
+    assert core_.close(run_id) == 0
+    assert capsys.readouterr().err == (
+        f"emb run: {run_id}: processes still running after SIGKILL: 123, 456\n"
+    )

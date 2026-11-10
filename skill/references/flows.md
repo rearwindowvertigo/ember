@@ -41,9 +41,11 @@ owner's Max tasks at once row (`flow.parallel`). The stall time comes from
 Stall after (`flow.stall`) unless you pass `--stall`.
 - `check`: an argv list for the repository's full check. It runs on the
   lead's machine in the flow worktree, outside any worker sandbox, with
-  the runner's environment. Its timeout is `check_timeout`, an integer
-  number of seconds, at least 1, default `1800`. Tests that need a local
-  service, such as a database, can go in this check.
+  the environment of the `emb flow` command that starts the runner:
+  `--start`, every `--resume`, and a `--lead` answer that restarts it. Set
+  variables the check needs in that shell each time. Its timeout is
+  `check_timeout`, an integer number of seconds, at least 1, default `1800`.
+  Tests that need a local service, such as a database, can go in this check.
 - `failure_model`: the cases that must work and those accepted.
 - `context`: only settled decisions and the rules tasks need.
 - `read`: the files that hold each source the plan cites, such as an
@@ -220,7 +222,10 @@ Report the cancellation to the owner with the reason, every kept branch
 entry with its task, role and run id. Cancellation stops the flow runner;
 writer and reviewer turns keep running. It closes no task run and deletes
 no branch or worktree. `emb flow --resume <id>` restarts from the recorded
-task states. A cancelled watch exits 82; `--lead` requires a resume first.
+task states. `--lead` on a cancelled flow requires a resume first.
+Watch exit 82 means the flow failed (including a failed check), was cancelled,
+or ended with tasks unmerged. The watch report's status, `reason` and action
+line tell these cases apart.
 Exit 75 from `--cancel` means the flow had already ended or the 60-second
 deadline from writing `cancel.json` passed with the request still pending;
 follow `next: emb flow --status <id>`.

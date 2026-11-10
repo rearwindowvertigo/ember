@@ -728,6 +728,91 @@ def test_watch_outcomes(
         assert again == expected and json.loads(output)["event"] == "end"
 
 
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("retained", [False, True])
+@pytest.mark.parametrize(("lead", "should"), [(0, 0), (1, 0), (0, 1), (2, 1)])
+def test_watch_done_reports_findings(
+    env: dict[str, str],
+    flow: dict[str, Any],
+    as_json: bool,
+    retained: bool,
+    lead: int,
+    should: int,
+) -> None:
+    for index, severity in enumerate([*(["lead"] * lead), *(["should"] * should)]):
+        flow["tasks"][index % 2]["findings"].append(
+            {"severity": severity, "problem": f"finding {index}", "round": 1}
+        )
+    # A must finding alone does not trigger this report.
+    flow["tasks"][0]["findings"].append({"severity": "must", "problem": "must"})
+    for task in flow["tasks"]:
+        task["reviews"] = [
+            {
+                "review_round": 1,
+                "verdict": "pass",
+                **{
+                    severity: sum(
+                        finding["severity"] == severity for finding in task["findings"]
+                    )
+                    for severity in ("must", "should", "lead")
+                },
+            }
+        ]
+        if retained:
+            task["reviews"].append(
+                {
+                    "review_round": 2,
+                    "verdict": "pass",
+                    "must": 0,
+                    "should": 0,
+                    "lead": 0,
+                }
+            )
+    end(flow, env)
+    reports = (
+        [
+            f"report: {lead} lead and {should} should findings remain on merged tasks; "
+            "inspect each before merging"
+        ]
+        if lead or should
+        else []
+    )
+    options = ["--watch", flow["id"], *(["--json"] if as_json else [])]
+    # The report also appears when the terminal event was already consumed.
+    for _ in range(2):
+        code, out, err = invoke(env, *options)
+        assert code == 0, err
+        assert err.splitlines()[0].startswith("next: review ")
+        assert err.splitlines()[1:] == reports
+        if as_json:
+            assert json.loads(out)["report"] == reports
+        else:
+            assert "report:" not in out
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("status", ["failed", "cancelled", "stopped", "running"])
+def test_watch_other_states_omit_done_findings_report(
+    env: dict[str, str], flow: dict[str, Any], as_json: bool, status: str
+) -> None:
+    flow["tasks"][0]["findings"] = [
+        {"severity": "lead", "problem": "lead finding"},
+        {"severity": "should", "problem": "should finding"},
+    ]
+    flow["status"] = status
+    record.save(flow, env)
+    code, out, err = invoke(
+        env, "--watch", flow["id"], *(["--json"] if as_json else [])
+    )
+    assert code == {"failed": 82, "cancelled": 82, "stopped": 0, "running": 72}[status]
+    assert "findings remain on merged tasks" not in err
+    if as_json:
+        assert all(
+            "findings remain on merged tasks" not in line
+            for line in json.loads(out)["report"]
+        )
+
+
 def test_done_unmerged(env: dict[str, str], flow: dict[str, Any]) -> None:
     flow["status"] = "done"
     flow["tasks"][0]["status"] = "dropped"
@@ -888,6 +973,144 @@ def test_concurrent_watch_delivers_stop_once(
         reports = [json.loads(future.result(timeout=5)[1]) for future in futures]
     assert sum(len(report["stops"]) for report in reports) == 1
     assert record.read_cursor(flow["id"], env) == event["seq"]
+
+
+@pytest.mark.parametrize("mode", ["--watch", "--status"])
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("ended", [False, True])
+@pytest.mark.parametrize("with_outside_files", [False, True])
+def test_task_outside_files(
+    env: dict[str, str],
+    flow: dict[str, Any],
+    mode: str,
+    as_json: bool,
+    ended: bool,
+    with_outside_files: bool,
+) -> None:
+    paths = [
+        ["docs/extra.md", "tests/path with spaces.py", "src/extra.py"],
+        ["another/path.txt"],
+    ]
+    for task, outside_files in zip(flow["tasks"], paths, strict=True):
+        task["outside_files"] = outside_files if with_outside_files else []
+    if ended:
+        end(flow, env)
+    else:
+        stopped(flow, env)
+    code, out, err = invoke(env, mode, flow["id"], *(["--json"] if as_json else []))
+    assert code == 0, err
+    if as_json:
+        tasks = json.loads(out)["tasks"]
+        assert [task["outside_files"] for task in tasks] == (
+            paths if with_outside_files else [[], []]
+        )
+    else:
+        for task in flow["tasks"]:
+            task_block = f"{task['id']} {task['status']}" + (
+                f": {task['reason']}" if task["reason"] else ""
+            )
+            for path in task["outside_files"]:
+                task_block += f"\n  outside file: {path}"
+            assert f"{task_block}\n  latest review:" in out
+        assert out.count("  outside file:") == (4 if with_outside_files else 0)
+    assert "outside file:" not in err
+
+
+@pytest.mark.parametrize("mode", ["--watch", "--status"])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_failed_check_output(
+    env: dict[str, str], flow: dict[str, Any], mode: str, as_json: bool
+) -> None:
+    log = record.folder(flow["id"], env) / "check-1-1.log"
+    lines = [f"check line {number}" for number in range(25)]
+    output = "\n".join(lines) + "\n"
+    flow.update(
+        check_pending=True,
+        checks=[{"wave": 1, "exit": 1, "log": str(log), "at": time.time()}],
+        reason=f"the check failed after wave 1: exit 1, see {log}",
+    )
+    record.append_event(
+        flow["id"],
+        {"kind": "check", "wave": 1, "exit": 1, "log": str(log), "output": output},
+        env,
+    )
+    end(flow, env, 82)
+    # The event's stored tail remains available without the original log file.
+    assert not log.exists()
+    options = [mode, flow["id"], *(["--json"] if as_json else [])]
+    for _ in range(2):
+        code, out, err = invoke(env, *options)
+        assert code == (82 if mode == "--watch" else 0), err
+        if as_json:
+            result = json.loads(out)
+            assert result["check_output"] == "\n".join(lines[-20:]) + "\n"
+            assert str(log) in result["reason"]
+        else:
+            assert str(log) in out
+            assert "check log output:\n" in out
+            assert out.split("check log output:\n", 1)[1].splitlines()[:20] == [
+                f"  {line}" for line in lines[-20:]
+            ]
+            assert "  check line 4\n" not in out
+        assert "check log output:" not in err
+
+
+@pytest.mark.parametrize("mode", ["--watch", "--status"])
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("output", [None, "", " \t\n  \n"])
+def test_check_output_absent(
+    env: dict[str, str],
+    flow: dict[str, Any],
+    mode: str,
+    as_json: bool,
+    output: str | None,
+) -> None:
+    if output is not None:
+        record.append_event(
+            flow["id"], {"kind": "check", "exit": 1, "output": output}, env
+        )
+    end(flow, env, 82)
+    code, out, err = invoke(env, mode, flow["id"], *(["--json"] if as_json else []))
+    assert code == (82 if mode == "--watch" else 0), err
+    if as_json:
+        assert json.loads(out)["check_output"] is None
+    else:
+        assert "check log output:" not in out
+        assert "check_output:" not in out
+
+
+@pytest.mark.parametrize("mode", ["--watch", "--status"])
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("failed_before", [False, True])
+def test_passing_check_clears_output(
+    env: dict[str, str],
+    flow: dict[str, Any],
+    mode: str,
+    as_json: bool,
+    failed_before: bool,
+) -> None:
+    if failed_before:
+        record.append_event(
+            flow["id"],
+            {"kind": "check", "exit": 1, "output": "previous failure\n"},
+            env,
+        )
+        end(flow, env, 82)
+    # A resumed attempt starts a new watch event boundary.
+    record.append_event(flow["id"], {"kind": "flow", "status": "running"}, env)
+    record.append_event(
+        flow["id"], {"kind": "check", "exit": 0, "output": "checks passed\n"}, env
+    )
+    flow.update(check_pending=False, reason=None)
+    end(flow, env)
+    code, out, err = invoke(env, mode, flow["id"], *(["--json"] if as_json else []))
+    assert code == 0, err
+    if as_json:
+        assert json.loads(out)["check_output"] is None
+    else:
+        assert "check log output:" not in out
+        assert "check_output:" not in out
+        assert "previous failure" not in out and "checks passed" not in out
 
 
 def test_status(env: dict[str, str], flow: dict[str, Any]) -> None:
