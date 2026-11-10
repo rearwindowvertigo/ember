@@ -3,12 +3,27 @@
 import os
 import pwd
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import pytest
 
-from ember import paths
+from ember import paths, scopes
+
+
+@pytest.fixture
+def scope_probe() -> Callable[[Mapping[str, str] | None], bool]:
+    """Expose the real availability probe to tests that select a scope mode."""
+    return scopes.available
+
+
+@pytest.fixture(autouse=True)
+def no_user_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+    scope_probe: Callable[[Mapping[str, str] | None], bool],
+) -> None:
+    """Keep tests in tree-only mode unless they explicitly enable scopes."""
+    monkeypatch.setattr(scopes, "available", lambda env=None: False)
 
 
 @pytest.fixture(autouse=True)

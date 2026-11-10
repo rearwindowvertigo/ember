@@ -819,6 +819,24 @@ engine's command line pastes nothing. The session runs with no window. With
 window that cannot open prints a `WARNING:` line and the run goes on.
 `--attach` opens a window on a running session at any time.
 
+When `systemd-run` and `systemctl` are on `PATH` and
+`systemctl --user show-environment` succeeds, the pane command runs in its
+own transient systemd user scope, `ember-run-<id>.scope`, through
+`systemd-run --user --scope --quiet --collect --unit <unit> --`.
+The command keeps its environment, working folder and pane process id.
+This also applies to worker runs started by flows and panels.
+If the tools or user manager are unavailable, the run uses process-tree
+signalling only, and start prints one line on standard error, including
+with `--quiet`:
+
+```text
+WARNING: no usable systemd user session; detached processes may outlive the run
+```
+
+If the availability check succeeds but the scope cannot start, the start
+fails with exit 71. Failed-start cleanup attempts to end the scope by name;
+cleanup errors leave the original start error as the reported error.
+
 The first line on standard output is `run <id>`. At start, before the
 first turn, the resolved worker line shown by `--dry-run` is printed on
 standard error, including with `--quiet`.
@@ -975,10 +993,21 @@ new files are ignored is removed. Closing an already closed run tries
 detached-worktree removal again. Read-only records without
 `detached` keep their source checkouts. Before ending the session Ember
 records every process under the session's pane; after, it sends SIGTERM to
-each one still running, then SIGKILL after 2 seconds. This ends processes a
-worker's tools started in a session of their own, such as Codex's
-`codex-linux-sandbox`. A process still running after SIGKILL is named on
-standard error. A command waiting on a run that is
+each one still running, then SIGKILL after 2 seconds. For a scoped run,
+close then signals all processes in `ember-run-<id>.scope`, including its
+nested cgroups, with SIGTERM, then SIGKILL after the same 2-second wait.
+Scope membership includes descendants that called `setsid`, double forked
+or were reparented outside the pane's process tree. Both normal and forced
+close do this. A process still running after SIGKILL is named on standard
+error.
+
+A scope that is already gone is not an error. If the scope cannot be
+inspected or signalled, close prints a `WARNING:` naming the unit and
+`systemctl --user kill <unit>`, and continues recording the run closed and
+removing its temporary folder and eligible worktree. The process tree is
+still signalled. Runs with `scoped: false`, including older records without
+the field, use the process tree only and issue no scope commands on close.
+A command waiting on a run that is
 closed stops with 72, also when the driver fails or the session is missing
 after the close.
 
@@ -1045,6 +1074,7 @@ UTC. It is also the tmux session's name.
 | `effort` | string or null | The effort; null when the engine's default applies |
 | `read_only` | boolean | Whether the run reviews without a branch or Ember commits |
 | `detached` | boolean | Whether Ember owns a detached review worktree; false for a record without this field |
+| `scoped` | boolean | Whether the worker session uses its own systemd user scope, `ember-run-<id>.scope`; false for fallback runs and records without this field |
 | `repo` | string | The top of the checkout `--dir` is in |
 | `main` | string or null | The main checkout at start; null for a bare repository or a record without this field |
 | `common` | string or null | The resolved common git folder at start; null for a record without this field |
@@ -2600,6 +2630,7 @@ The JSON watch report contains:
 |---|---|
 | `event` | `lead_stop`, `end` or `runner_lost` |
 | `flow`, `status`, `reason` | Flow id and current state |
+| `check_output` | Last 20 lines of the latest check's stored log tail if that check failed; null if the tail is empty or whitespace-only, the latest check passed, or no check has run |
 | `exit` | Null at a lead stop, 0, 79 or 82 at the end, 72 when the runner is lost |
 | `branch`, `worktree`, `tip`, `dir` | Flow branch, worktree, tip and source checkout |
 | `tasks` | Task reports in plan order |
@@ -2622,7 +2653,15 @@ work; the task report includes its worktree.
 
 Text reports print the flow state, one line per task with its reason,
 latest review, finding objects, choices, retained cleanup details and stop events.
+Each task's non-empty `outside_files` prints directly under its task line,
+one indented `outside file: <path>` line per path. An empty list prints nothing.
+These paths print at the existing watch stops and end reports.
 Retained abandoned branches print separately.
+A failed latest check's non-empty log tail prints under `check log output:`,
+with each line indented. At most the last 20 lines of the runner's stored
+4,000-character tail print, without parsing test output. The log path stays
+in the failure reason. An empty or whitespace-only tail, a passing latest
+check or no check prints no log output.
 
 At a lead stop the action says to report every stop and choice to the
 owner, then watch again if a runner is live; otherwise an answer starts
@@ -2640,6 +2679,7 @@ including with `--watch --json`:
 | Lead stop, no live runner | `report: lead stop on <task>; no runner is live and the owner's answer starts it; list every printed choice and recommend one` |
 | Lead stop, live runner | `report: lead stop on <task>; the runner is still live for the other tasks; list every printed choice and recommend one` |
 | Lead stop after capacity | `report: capacity on <task>; recommend only the same-worker retry` |
+| Done with latest or retained `lead` or `should` task findings | `report: <lead count> lead and <should count> should findings remain on merged tasks; inspect each before merging` |
 | Exit 82 | `report: tasks unmerged; report every task's status and reason; leave the unmerged work and the flow branch to the owner` |
 | Exit 72 | `report: the runner is gone; work may still be running` |
 
@@ -2647,21 +2687,30 @@ Watch prints one report line per delivered stop event. With no new stop
 events, it prints one per task currently `stopped` or `conflict`. A
 flow-level stop uses the flow id in place of `<task>`. A stop with saved
 `provider_kind: capacity` prints only the capacity line for that stop.
+The done report counts all latest and retained task findings and prints both
+counts. Zero `lead` and zero `should` findings print no done report line.
 Every user-facing flow command that exits 82 or 72 prints the corresponding
 report line after its action line. Flow `next:` lines remain in place
 when workers have pending owner actions; the single-run owner wait does
 not suppress them.
 
-`--status FLOW --json` prints `flow.json` plus `runner_live`. Each task has
+`--status FLOW --json` prints `flow.json` plus `runner_live` and `check_output`.
+`check_output` has the same string-or-null value as the watch report, including
+after a resume: a passing check replaces an earlier failed check's output
+with null. Text status prints the same bounded tail under `check log output:`
+when present, and omits it otherwise. Each task has
 `latest_review` as in watch reports, and its `findings` objects include
 `round` and `run`, with null for missing values. Text status prints the
 latest review's counts separately and each finding with its round and run.
+Each task's non-empty `outside_files` prints directly under its task line,
+one indented `outside file: <path>` line per path; an empty list prints nothing.
 Each task's `denied_paths` combines retained and current writer and reviewer
 denials, with the run and turn for each entry. Top-level `denied_paths` is their
 union with a `task` id on each entry; flow listings include this union too.
 No denials gives `[]`. Watch task reports include retained `denied_paths`.
 Text status names each denied path, reason, run and turn. Text prints
-every top-level field except `tasks`, then each task's state and reason.
+every top-level field except `tasks` and the separately formatted
+`check_output`, then each task's state and reason.
 `--status` alone lists flows oldest first as
 `<id>  <status>  <n>/<m> merged  <dir>`, or as JSON objects containing `id`,
 `status`, `reason`, `dir`, `branch`, `runner_live`, `merged`, `tasks`

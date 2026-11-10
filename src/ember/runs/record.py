@@ -214,6 +214,9 @@ class Run:
     start_argv: tuple[str, ...] = ()
     """The start command with its saved brief, for a preparation retry."""
 
+    scoped: bool = False
+    """Whether the worker session runs in its own systemd user scope."""
+
     folder: Path = field(default=Path(), compare=False)
     """The run's folder."""
 
@@ -256,6 +259,7 @@ _TYPES: dict[str, tuple[tuple[type, ...], bool]] = {
     "main": (_STR, True),
     "common": (_STR, True),
     "detached": ((bool,), False),
+    "scoped": ((bool,), False),
     "last_screen_change_at": ((int, float), True),
     "parent": ((dict,), True),
     "preparation": ((dict,), True),
@@ -554,6 +558,7 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
         "main": None,
         "common": None,
         "detached": False,
+        "scoped": False,
         "last_screen_change_at": None,
         "parent": None,
         "preparation": None,

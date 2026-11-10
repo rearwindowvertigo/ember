@@ -1037,6 +1037,26 @@ def _exit_reports(code: int | None) -> list[str]:
     return []
 
 
+def _done_reports(flow: Mapping[str, Any]) -> list[str]:
+    """Report latest and retained findings when a flow ends done."""
+    if flow["status"] != "done":
+        return []
+    counts = {
+        severity: sum(
+            finding.get("severity") == severity
+            for task in flow["tasks"]
+            for finding in task["findings"]
+        )
+        for severity in ("lead", "should")
+    }
+    if not any(counts.values()):
+        return []
+    return [
+        f"report: {counts['lead']} lead and {counts['should']} should findings "
+        "remain on merged tasks; inspect each before merging"
+    ]
+
+
 def _stop_reports(
     flow: Mapping[str, Any],
     stops: list[dict[str, Any]],
@@ -1085,6 +1105,25 @@ def _current_events(
         if event.get("kind") == "flow" and event.get("status") == "running":
             boundary = max(boundary, event["seq"] - 1)
     return [event for event in events if event["seq"] > boundary]
+
+
+def _check_output(flow_id: str, env: Mapping[str, str]) -> str | None:
+    """Return at most 20 stored log lines from the latest check if it failed."""
+    latest = next(
+        (
+            event
+            for event in reversed(record.read_events(flow_id, env))
+            if event.get("kind") == "check"
+        ),
+        None,
+    )
+    if latest is None or latest.get("exit") == 0:
+        return None
+    output = latest.get("output", "")
+    if not isinstance(output, str):
+        return None
+    tail = "".join(output.splitlines(keepends=True)[-20:])
+    return tail if tail.strip() else None
 
 
 def _watch_result(
@@ -1149,6 +1188,7 @@ def _watch_result(
         event=event,
         flow=flow_id,
         exit=code,
+        check_output=_check_output(flow_id, env),
         tasks=[_task_report(flow_id, task) for task in flow["tasks"]],
         stops=stops,
         abandoned=flow["abandoned"],
@@ -1158,7 +1198,8 @@ def _watch_result(
             if stops or event == "lead_stop"
             else []
         )
-        + _exit_reports(code),
+        + _exit_reports(code)
+        + (_done_reports(flow) if event == "end" else []),
     )
     return result, max([cursor, *(item["seq"] for item in fresh)])
 
@@ -1168,6 +1209,14 @@ def _task_line(task: Mapping[str, Any]) -> str:
     return f"{task['id']} {task['status']}" + (
         f": {task['reason']}" if task["reason"] else ""
     )
+
+
+def _print_check_output(output: str | None, out: TextIO) -> None:
+    """Print a failed check's stored tail with a log output label."""
+    if output is not None:
+        print("check log output:", file=out)
+        for line in output.splitlines():
+            print(f"  {line}", file=out)
 
 
 def _print_watch(result: dict[str, Any], as_json: bool, out: TextIO) -> None:
@@ -1180,8 +1229,11 @@ def _print_watch(result: dict[str, Any], as_json: bool, out: TextIO) -> None:
         + (f": {result['reason']}" if result["reason"] else ""),
         file=out,
     )
+    _print_check_output(result["check_output"], out)
     for task in result["tasks"]:
         print(_task_line(task), file=out)
+        for path in task["outside_files"]:
+            print(f"  outside file: {path}", file=out)
         print(f"  latest review: {json.dumps(task['latest_review'])}", file=out)
         for finding in task["finding_details"]:
             print(f"  finding: {json.dumps(finding)}", file=out)
@@ -1247,6 +1299,7 @@ def _status(
     if flow_id:
         flow = _load(flow_id, env)
         flow["runner_live"] = lock.live(flow_id, env)
+        flow["check_output"] = _check_output(flow_id, env)
         _denial_status(flow, env)
         for task in flow["tasks"]:
             task["findings"] = _finding_details(task)
@@ -1257,10 +1310,14 @@ def _status(
             for key, value in flow.items():
                 if key == "review_budget":
                     print(f"review_budget: {verdict.budget_text(value)}", file=out)
+                elif key == "check_output":
+                    _print_check_output(value, out)
                 elif key != "tasks":
                     print(f"{key}: {value}", file=out)
             for task in flow["tasks"]:
                 print(_task_line(task), file=out)
+                for path in task["outside_files"]:
+                    print(f"  outside file: {path}", file=out)
                 print(f"  latest review: {json.dumps(task['latest_review'])}", file=out)
                 for finding in task["findings"]:
                     print(f"  finding: {json.dumps(finding)}", file=out)

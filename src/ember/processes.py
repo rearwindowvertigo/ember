@@ -4,7 +4,8 @@ A worker's tools can start processes in a session of their own, such as
 Codex's `codex-linux-sandbox`. Ending a tmux session signals only the
 pane's process group, so those processes survive it. `tree` records the
 pane's descendants before the session ends; `end` signals the ones still
-running afterwards.
+running afterwards. Descendants already reparented outside that tree are
+handled by the run's systemd scope when one is available.
 
 Each process is kept with its start time from `/proc/<pid>/stat`, so a
 process id that was reused by an unrelated process is never signalled.
@@ -20,6 +21,9 @@ Process = tuple[int, int]
 """A process id and its start time in clock ticks since boot."""
 
 PROC = Path("/proc")
+
+END_WAIT = 2.0
+"""Seconds to wait between SIGTERM and SIGKILL for processes and run scopes."""
 
 
 def _stat(pid: int) -> tuple[int, int] | None:
@@ -83,7 +87,7 @@ def running(process: Process) -> bool:
     return found is not None and found[1] == process[1]
 
 
-def end(processes: Sequence[Process], *, wait: float = 2.0) -> list[int]:
+def end(processes: Sequence[Process], *, wait: float = END_WAIT) -> list[int]:
     """Send SIGTERM to each process still running, then SIGKILL after `wait`.
 
     Args:
