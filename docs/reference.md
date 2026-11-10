@@ -2600,6 +2600,7 @@ The JSON watch report contains:
 |---|---|
 | `event` | `lead_stop`, `end` or `runner_lost` |
 | `flow`, `status`, `reason` | Flow id and current state |
+| `check_output` | Last 20 lines of the latest check's stored log tail if that check failed; null if the tail is empty or whitespace-only, the latest check passed, or no check has run |
 | `exit` | Null at a lead stop, 0, 79 or 82 at the end, 72 when the runner is lost |
 | `branch`, `worktree`, `tip`, `dir` | Flow branch, worktree, tip and source checkout |
 | `tasks` | Task reports in plan order |
@@ -2623,6 +2624,11 @@ work; the task report includes its worktree.
 Text reports print the flow state, one line per task with its reason,
 latest review, finding objects, choices, retained cleanup details and stop events.
 Retained abandoned branches print separately.
+A failed latest check's non-empty log tail prints under `check log output:`,
+with each line indented. At most the last 20 lines of the runner's stored
+4,000-character tail print, without parsing test output. The log path stays
+in the failure reason. An empty or whitespace-only tail, a passing latest
+check or no check prints no log output.
 
 At a lead stop the action says to report every stop and choice to the
 owner, then watch again if a runner is live; otherwise an answer starts
@@ -2652,7 +2658,11 @@ report line after its action line. Flow `next:` lines remain in place
 when workers have pending owner actions; the single-run owner wait does
 not suppress them.
 
-`--status FLOW --json` prints `flow.json` plus `runner_live`. Each task has
+`--status FLOW --json` prints `flow.json` plus `runner_live` and `check_output`.
+`check_output` has the same string-or-null value as the watch report, including
+after a resume: a passing check replaces an earlier failed check's output
+with null. Text status prints the same bounded tail under `check log output:`
+when present, and omits it otherwise. Each task has
 `latest_review` as in watch reports, and its `findings` objects include
 `round` and `run`, with null for missing values. Text status prints the
 latest review's counts separately and each finding with its round and run.
@@ -2661,7 +2671,8 @@ denials, with the run and turn for each entry. Top-level `denied_paths` is their
 union with a `task` id on each entry; flow listings include this union too.
 No denials gives `[]`. Watch task reports include retained `denied_paths`.
 Text status names each denied path, reason, run and turn. Text prints
-every top-level field except `tasks`, then each task's state and reason.
+every top-level field except `tasks` and the separately formatted
+`check_output`, then each task's state and reason.
 `--status` alone lists flows oldest first as
 `<id>  <status>  <n>/<m> merged  <dir>`, or as JSON objects containing `id`,
 `status`, `reason`, `dir`, `branch`, `runner_live`, `merged`, `tasks`

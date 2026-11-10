@@ -1087,6 +1087,25 @@ def _current_events(
     return [event for event in events if event["seq"] > boundary]
 
 
+def _check_output(flow_id: str, env: Mapping[str, str]) -> str | None:
+    """Return at most 20 stored log lines from the latest check if it failed."""
+    latest = next(
+        (
+            event
+            for event in reversed(record.read_events(flow_id, env))
+            if event.get("kind") == "check"
+        ),
+        None,
+    )
+    if latest is None or latest.get("exit") == 0:
+        return None
+    output = latest.get("output", "")
+    if not isinstance(output, str):
+        return None
+    tail = "".join(output.splitlines(keepends=True)[-20:])
+    return tail if tail.strip() else None
+
+
 def _watch_result(
     flow: dict[str, Any],
     env: Mapping[str, str],
@@ -1149,6 +1168,7 @@ def _watch_result(
         event=event,
         flow=flow_id,
         exit=code,
+        check_output=_check_output(flow_id, env),
         tasks=[_task_report(flow_id, task) for task in flow["tasks"]],
         stops=stops,
         abandoned=flow["abandoned"],
@@ -1170,6 +1190,14 @@ def _task_line(task: Mapping[str, Any]) -> str:
     )
 
 
+def _print_check_output(output: str | None, out: TextIO) -> None:
+    """Print a failed check's stored tail with a log output label."""
+    if output is not None:
+        print("check log output:", file=out)
+        for line in output.splitlines():
+            print(f"  {line}", file=out)
+
+
 def _print_watch(result: dict[str, Any], as_json: bool, out: TextIO) -> None:
     """Print one report with findings, choices and retained cleanup details."""
     if as_json:
@@ -1180,6 +1208,7 @@ def _print_watch(result: dict[str, Any], as_json: bool, out: TextIO) -> None:
         + (f": {result['reason']}" if result["reason"] else ""),
         file=out,
     )
+    _print_check_output(result["check_output"], out)
     for task in result["tasks"]:
         print(_task_line(task), file=out)
         print(f"  latest review: {json.dumps(task['latest_review'])}", file=out)
@@ -1247,6 +1276,7 @@ def _status(
     if flow_id:
         flow = _load(flow_id, env)
         flow["runner_live"] = lock.live(flow_id, env)
+        flow["check_output"] = _check_output(flow_id, env)
         _denial_status(flow, env)
         for task in flow["tasks"]:
             task["findings"] = _finding_details(task)
@@ -1257,6 +1287,8 @@ def _status(
             for key, value in flow.items():
                 if key == "review_budget":
                     print(f"review_budget: {verdict.budget_text(value)}", file=out)
+                elif key == "check_output":
+                    _print_check_output(value, out)
                 elif key != "tasks":
                     print(f"{key}: {value}", file=out)
             for task in flow["tasks"]:
