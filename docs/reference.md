@@ -823,6 +823,8 @@ When `systemd-run` and `systemctl` are on `PATH` and
 `systemctl --user show-environment` succeeds, the pane command runs in its
 own transient systemd user scope, `ember-run-<id>.scope`, through
 `systemd-run --user --scope --quiet --collect --unit <unit> --`.
+Each `$` in the command's arguments is passed as `$$`, so `systemd-run`'s
+variable expansion leaves the arguments unchanged.
 The command keeps its environment, working folder and pane process id.
 This also applies to worker runs started by flows and panels.
 If the tools or user manager are unavailable, the run uses process-tree

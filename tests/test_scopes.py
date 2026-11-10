@@ -41,6 +41,34 @@ def test_availability_checks_tools_and_manager(
     assert seen == ([] if missing else [["systemctl", "--user", "show-environment"]])
 
 
+def test_command_doubles_dollar_signs() -> None:
+    assert scopes.command("r1", ["/bin/sh", "/state/$HOME/${X}/launch"]) == (
+        "systemd-run", "--user", "--scope", "--quiet", "--collect",
+        "--unit", "ember-run-r1.scope", "--",
+        "/bin/sh", "/state/$$HOME/$${X}/launch",
+    )  # fmt: skip
+
+
+def test_real_scope_passes_dollar_signs_unchanged(
+    tmp_path: Path,
+    scope_probe: Callable[[Mapping[str, str] | None], bool],
+) -> None:
+    if not scope_probe(os.environ):
+        pytest.skip("no usable systemd user session")
+    argument = "a$b/${HOME}/$$c"
+    result = subprocess.run(
+        scopes.command(
+            f"scope-test-{uuid.uuid4().hex}", ["/usr/bin/printf", "%s", argument]
+        ),
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    assert result.stdout == argument
+
+
 @pytest.mark.parametrize(
     "error", [OSError("unavailable"), subprocess.TimeoutExpired("systemctl", 10)]
 )

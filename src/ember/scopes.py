@@ -54,10 +54,14 @@ def available(env: Mapping[str, str] | None = None) -> bool:
 
 
 def command(run_id: str, argv: Sequence[str]) -> tuple[str, ...]:
-    """Wrap a pane command in a scope, keeping its environment, cwd and pid."""
+    """Wrap a pane command in a scope, keeping its environment, cwd and pid.
+
+    `systemd-run` expands `${VARIABLE}` in command arguments by default, so
+    each `$` is doubled; `$$` is systemd's literal dollar sign.
+    """
     return (
         "systemd-run", "--user", "--scope", "--quiet", "--collect",
-        "--unit", unit(run_id), "--", *argv,
+        "--unit", unit(run_id), "--", *(arg.replace("$", "$$") for arg in argv),
     )  # fmt: skip
 
 
