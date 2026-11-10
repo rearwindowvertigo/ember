@@ -2649,6 +2649,7 @@ including with `--watch --json`:
 | Lead stop, no live runner | `report: lead stop on <task>; no runner is live and the owner's answer starts it; list every printed choice and recommend one` |
 | Lead stop, live runner | `report: lead stop on <task>; the runner is still live for the other tasks; list every printed choice and recommend one` |
 | Lead stop after capacity | `report: capacity on <task>; recommend only the same-worker retry` |
+| Done with latest or retained `lead` or `should` task findings | `report: <lead count> lead and <should count> should findings remain on merged tasks; inspect each before merging` |
 | Exit 82 | `report: tasks unmerged; report every task's status and reason; leave the unmerged work and the flow branch to the owner` |
 | Exit 72 | `report: the runner is gone; work may still be running` |
 
@@ -2656,6 +2657,8 @@ Watch prints one report line per delivered stop event. With no new stop
 events, it prints one per task currently `stopped` or `conflict`. A
 flow-level stop uses the flow id in place of `<task>`. A stop with saved
 `provider_kind: capacity` prints only the capacity line for that stop.
+The done report counts all latest and retained task findings and prints both
+counts. Zero `lead` and zero `should` findings print no done report line.
 Every user-facing flow command that exits 82 or 72 prints the corresponding
 report line after its action line. Flow `next:` lines remain in place
 when workers have pending owner actions; the single-run owner wait does

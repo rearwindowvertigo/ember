@@ -1037,6 +1037,26 @@ def _exit_reports(code: int | None) -> list[str]:
     return []
 
 
+def _done_reports(flow: Mapping[str, Any]) -> list[str]:
+    """Report latest and retained findings when a flow ends done."""
+    if flow["status"] != "done":
+        return []
+    counts = {
+        severity: sum(
+            finding.get("severity") == severity
+            for task in flow["tasks"]
+            for finding in task["findings"]
+        )
+        for severity in ("lead", "should")
+    }
+    if not any(counts.values()):
+        return []
+    return [
+        f"report: {counts['lead']} lead and {counts['should']} should findings "
+        "remain on merged tasks; inspect each before merging"
+    ]
+
+
 def _stop_reports(
     flow: Mapping[str, Any],
     stops: list[dict[str, Any]],
@@ -1178,7 +1198,8 @@ def _watch_result(
             if stops or event == "lead_stop"
             else []
         )
-        + _exit_reports(code),
+        + _exit_reports(code)
+        + (_done_reports(flow) if event == "end" else []),
     )
     return result, max([cursor, *(item["seq"] for item in fresh)])
 
