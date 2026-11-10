@@ -34,7 +34,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any, TextIO
 
-from ember import choices, db, engines, paths, prepare, processes, sandbox, tmux
+from ember import choices, db, engines, paths, prepare, processes, sandbox, scopes, tmux
 from ember.engines import Driver, LaunchSpec, TurnOutcome, models, status
 from ember.engines.opencode2 import DeliveryUncertainError
 from ember.runs import exits, record, steps, worktrees
@@ -1072,6 +1072,7 @@ class Core:
                 effort=worker.effort,
                 read_only=options.read_only,
                 detached=options.read_only,
+                scoped=scopes.available(self.env),
                 repo=top,
                 main=str(main_checkout) if main_checkout is not None else None,
                 common=str(common),
@@ -1116,6 +1117,11 @@ class Core:
                 self.last_run_id = run.id
                 self._say(f"run {run_id}")
                 self._warn(worker.line())
+                if not run.scoped:
+                    self._warn(
+                        "WARNING: no usable systemd user session; "
+                        "detached processes may outlive the run"
+                    )
                 if run.read_only:
                     short_base = (
                         self._git_out(top, "rev-parse", "--short", base) or base[:12]
@@ -1334,12 +1340,19 @@ class Core:
         if spec.first_message is None:
             run = self._turn_sent(run, 1, first_message(run.id, brief))
         launch = run.folder / LAUNCH_NAME
-        record.write_private(launch, f"exec {shlex.join(spec.argv)}\n")
+        ready = run.folder / "scope-ready"
+        script = f"exec {shlex.join(spec.argv)}\n"
+        if run.scoped:
+            script = f": > {shlex.quote(str(ready))}\n" + script
+        record.write_private(launch, script)
+        argv = ("/bin/sh", str(launch))
+        if run.scoped:
+            argv = scopes.command(run.id, argv)
         try:
             tmux.new_session(
                 run.id,
                 cwd=spec.cwd,
-                argv=("/bin/sh", str(launch)),
+                argv=argv,
                 env_vars=spec.env,
                 env=self.env,
             )
@@ -1357,6 +1370,17 @@ class Core:
                 "starting",
                 run=run.id,
             ) from error
+        if run.scoped:
+            deadline = time.monotonic() + scopes.TIMEOUT
+            while not ready.exists():
+                if self._session_state(run.id) != LIVE or time.monotonic() >= deadline:
+                    raise RunError(
+                        exits.ENGINE_FAILED,
+                        f"cannot start the scope {scopes.unit(run.id)}",
+                        "starting",
+                        run=run.id,
+                    )
+                time.sleep(self.poll_seconds)
         window = self._open_window(run, settings) if options.window else None
         if spec.first_message is not None:
             self._wait_ready(run, driver)
@@ -2751,9 +2775,10 @@ class Core:
         return exits.OK
 
     def _end_session(self, run: Run, *, command_locked: bool = False) -> None:
+        """End the driver, pane, scope and recorded descendants, then close."""
         self._end_preparation(run)
-        # Processes a worker's tools start in a session of their own survive
-        # the tmux session, so the pane's descendants are found first.
+        # Record the tree before ending the pane. The scope also holds
+        # descendants whose parent links to the pane have already broken.
         found: list[processes.Process] = []
         with contextlib.suppress(tmux.TmuxError):
             pid = tmux.pane_pid(run.id, env=self.env)
@@ -2767,6 +2792,18 @@ class Core:
             with self._engine_calls(run):
                 tmux.kill(run.id, env=self.env)
         left = processes.end(found)
+        if run.scoped:
+            try:
+                scope_left = scopes.end(run.id, env=self.env)
+                left = sorted(
+                    {pid for pid, start in found if processes.running((pid, start))}
+                    | set(scope_left)
+                )
+            except scopes.ScopeError as error:
+                self._warn(
+                    f"WARNING: cannot end scope {scopes.unit(run.id)}: {error}; "
+                    f"end it with systemctl --user kill {scopes.unit(run.id)}"
+                )
         if left:
             self._warn(
                 f"emb run: {run.id}: processes still running after SIGKILL: "
@@ -3065,7 +3102,7 @@ def _hash(path: Path) -> str | None:
 
 
 def _close_quietly(driver: Driver, run: Run) -> None:
-    """Stop the driver, pane and descendants after a failed start.
+    """Stop the driver, pane, scope and descendants after a failed start.
 
     The start's failure is the one reported, so a clean-up error must not
     replace it.
@@ -3082,3 +3119,6 @@ def _close_quietly(driver: Driver, run: Run) -> None:
             tmux.kill(run.id, env=run.env)
     with contextlib.suppress(Exception):
         processes.end(found)
+    if run.scoped:
+        with contextlib.suppress(Exception):
+            scopes.end(run.id, env=run.env)

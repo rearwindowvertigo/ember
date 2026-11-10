@@ -98,6 +98,7 @@ def test_save_and_load_round_trip(env: dict[str, str]) -> None:
         "opencode_id_format", "owner_wait", "owner_read", "owner_denied", "answered_at",
         "last_variant",
         "last_start_failure",
+        "scoped",
     }  # fmt: skip
     assert [entry.name for entry in folder.iterdir()] == ["run.json"]
 
@@ -124,6 +125,8 @@ def test_missing_run(env: dict[str, str]) -> None:
         ({"sandbox": "codex-bundled"}, "invalid sandbox"),
         ({"network": "on"}, "invalid network"),
         ({"detached": 1}, "invalid detached"),
+        ({"scoped": 1}, "invalid scoped"),
+        ({"scoped": None}, "invalid scoped"),
         ({"read_effective": ["/a", 2]}, "invalid read_effective"),
         ({"id": "codex-20260101-120000-ffffff"}, "names another run"),
     ],
@@ -145,6 +148,20 @@ def test_record_missing_a_field(env: dict[str, str]) -> None:
     (run.folder / "run.json").write_text(json.dumps(document))
     with pytest.raises(record.RecordError, match="has no subject"):
         record.load(run.id, env)
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_scope_mode_round_trip(env: dict[str, str], scoped: bool) -> None:
+    run = replace(_run(env), scoped=scoped)
+    record.save(run)
+    assert record.load(run.id, env).scoped is scoped
+
+
+def test_legacy_record_uses_tree_only(env: dict[str, str]) -> None:
+    run = _run(env)
+    document = run.to_json()
+    document.pop("scoped")
+    assert record.from_json(document, run.folder, env).scoped is False
 
 
 def test_integer_times_are_read_as_floats(env: dict[str, str]) -> None:
