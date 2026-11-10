@@ -1698,6 +1698,180 @@ def test_merge_run_into_flow_uses_flow_worktree(
     assert record.load(run.id, env).status == record.CLOSED
 
 
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize(
+    ("status", "check_pending"),
+    [(status, False) for status in flow_record.FLOW_STATUSES]
+    + [("failed", True), ("running", True)],
+)
+def test_merge_into_flow_prints_its_next_step(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    as_json: bool,
+    status: str,
+    check_pending: bool,
+) -> None:
+    flow = branches.create_flow_branch(repo, FLOW_ID, "HEAD", env)
+    data = _flow_record(env, repo, flow.worktree)
+    data.update(status=status, check_pending=check_pending)
+    flow_record.save(data, env)
+    run = replace(_start(tmp_path, env, flow.worktree, driver), claim="claim-a")
+    record.save(run)
+    assert run.branch is not None
+    streams = Streams()
+    assert (
+        _merge(
+            env, driver, streams, run.branch, repo, target=flow.branch, as_json=as_json
+        )
+        == 0
+    )
+    out, err = streams.take()
+    if status == "done":
+        line = "next: emb choices --finish claim-a"
+    else:
+        action = "resume" if status == "failed" and check_pending else "status"
+        line = f"next: emb flow --{action} {FLOW_ID}"
+        assert "emb choices --finish" not in out + err
+    assert [s for s in err.splitlines() if s.startswith("next:")] == [line]
+    if as_json:
+        document = json.loads(out)
+        assert document["next"] == line
+        assert document["cleanup"][0]["action"] == branches.REMOVED
+    assert (flow.worktree / "work.txt").read_text() == "work\n"
+    assert record.load(run.id, env).status == record.CLOSED
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("owner_actions", [False, True])
+@pytest.mark.parametrize("cleanup", ["removed", "kept", "failed"])
+def test_merge_into_flow_preserves_cleanup_and_owner_lines(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    as_json: bool,
+    owner_actions: bool,
+    cleanup: str,
+) -> None:
+    flow = branches.create_flow_branch(repo, FLOW_ID, "HEAD", env)
+    data = _flow_record(env, repo, flow.worktree)
+    data.update(status="failed", check_pending=True)
+    flow_record.save(data, env)
+    owner_wait = (
+        (
+            "owner: answer whether the worker may read /private/config",
+            "owner: allow the denied path /private/source in sandbox.read",
+        )
+        if owner_actions
+        else ()
+    )
+    run = replace(
+        _start(tmp_path, env, flow.worktree, driver),
+        claim="claim-a",
+        owner_wait=owner_wait,
+    )
+    record.save(run)
+    assert run.branch is not None
+    if cleanup == "kept":
+        (Path(run.worktree) / "uncommitted").write_text("keep")
+    elif cleanup == "failed":
+        lock = repo / ".git" / "refs" / "heads" / f"{run.branch}.lock"
+        lock.write_text("")
+    streams = Streams()
+    assert _merge(
+        env, driver, streams, run.branch, repo, target=flow.branch, as_json=as_json
+    ) == (70 if cleanup == "failed" else 0)
+    out, err = streams.take()
+    line = f"next: emb flow --resume {FLOW_ID}" if cleanup == "removed" else None
+    assert (f"next: emb flow --resume {FLOW_ID}" in err) is (line is not None)
+    assert "emb choices --finish" not in out + err
+    assert [s for s in err.splitlines() if s.startswith("owner:")] == list(owner_wait)
+    if cleanup == "failed":
+        assert "deleting the branch" in err
+        assert err.splitlines()[-1].startswith("next: git -C ")
+    elif cleanup == "kept":
+        assert "next:" not in err
+    if as_json:
+        document = json.loads(out)
+        assert document["next"] == line
+        assert document.get("owner_wait", []) == list(owner_wait)
+        assert document["cleanup"][0]["action"] == (
+            branches.REMOVED if cleanup == "removed" else branches.KEPT
+        )
+    assert record.load(run.id, env).owner_wait == owner_wait
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "session",
+        "missing",
+        "json",
+        "unreadable",
+        "branch",
+        "common",
+        "main",
+        "worktree",
+    ],
+)
+def test_merge_into_unmatched_flow_keeps_run_next_step(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    monkeypatch: pytest.MonkeyPatch,
+    as_json: bool,
+    invalid: str,
+) -> None:
+    flow = branches.create_flow_branch(repo, FLOW_ID, "HEAD", env)
+    data = _flow_record(env, repo, flow.worktree)
+    data.update(status="failed", check_pending=True)
+    target = flow.branch
+    if invalid == "session":
+        git(flow.worktree, "branch", "-m", "session", env=env)
+        target = "session"
+    elif invalid == "branch":
+        data["branch"] = "other"
+    elif invalid == "common":
+        data["common"] = str(tmp_path / "other.git")
+    elif invalid == "main":
+        data["main"] = str(tmp_path / "missing-checkout")
+        data["worktree"] = str(tmp_path / "missing" / FLOW_ID)
+    elif invalid == "worktree":
+        data["worktree"] = str(repo)
+    flow_record.save(data, env)
+    path = flow_record.folder(FLOW_ID, env) / flow_record.FLOW_NAME
+    if invalid == "missing":
+        path.unlink()
+    elif invalid == "json":
+        path.write_text("{")
+    elif invalid == "unreadable":
+
+        def unreadable(
+            flow_id: str, env: Mapping[str, str] | None = None
+        ) -> dict[str, Any]:
+            raise PermissionError("cannot read flow.json")
+
+        monkeypatch.setattr(flow_record, "load", unreadable)
+    run = replace(_start(tmp_path, env, flow.worktree, driver), claim="claim-a")
+    record.save(run)
+    assert run.branch is not None
+    streams = Streams()
+    assert (
+        _merge(env, driver, streams, run.branch, repo, target=target, as_json=as_json)
+        == 0
+    )
+    out, err = streams.take()
+    line = "next: emb choices --finish claim-a"
+    assert [s for s in err.splitlines() if s.startswith("next:")] == [line]
+    assert "next: emb flow" not in out + err
+    if as_json:
+        assert json.loads(out)["next"] == line
+
+
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_cleanup_keeps_live_flow(
     env: dict[str, str], repo: Path, driver: StubDriver, dry_run: bool
