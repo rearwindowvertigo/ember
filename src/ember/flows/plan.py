@@ -416,13 +416,20 @@ def warnings(
                 result.append(
                     f"{task.id}: {file} is a folder; list the files the task changes"
                 )
-        if not any(_test_file(file) for file in task.files):
+        if not any(_test_file(file) for file in task.files) and not all(
+            _documentation_file(file) for file in task.files
+        ):
             result.append(f"{task.id}: no test file in its files")
     files = citations.source_files([*standing, *plan.read])
     result += [
         citations.warning(item) for item in citations.uncovered(cited(plan), files)
     ]
     return result
+
+
+def _documentation_file(file: str) -> bool:
+    """Recognize Markdown paths and paths whose first component is docs."""
+    return file.endswith(".md") or PurePosixPath(file).parts[0] == "docs"
 
 
 def _test_file(file: str) -> bool:
