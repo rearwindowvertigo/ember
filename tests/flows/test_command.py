@@ -713,8 +713,8 @@ def test_watch_outcomes(
     assert report["next"] in err
     expected_reports = {
         82: [
-            "report: tasks unmerged; report every task's status and reason; "
-            "leave the unmerged work and the flow branch to the owner"
+            f"report: the check failed after wave {flow['wave']}; "
+            "fix the flow branch, then resume"
         ],
         72: ["report: the runner is gone; work may still be running"],
     }.get(expected, [])
@@ -726,6 +726,47 @@ def test_watch_outcomes(
     if status in record.ENDED:
         again, output, _ = invoke(env, "--watch", flow["id"], "--json")
         assert again == expected and json.loads(output)["event"] == "end"
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("with_event", [False, True])
+@pytest.mark.parametrize("status", ["failed", "done", "cancelled"])
+@pytest.mark.parametrize("check_pending", [False, True])
+def test_watch_exit_82_report(
+    env: dict[str, str],
+    flow: dict[str, Any],
+    as_json: bool,
+    with_event: bool,
+    status: str,
+    check_pending: bool,
+) -> None:
+    flow.update(status=status, check_pending=check_pending, wave=3)
+    flow["tasks"][0]["status"] = "merged"
+    record.save(flow, env)
+    if with_event:
+        record.append_event(
+            flow["id"], {"kind": "end", "status": status, "exit": 82}, env
+        )
+    expected = (
+        "report: the check failed after wave 3; fix the flow branch, then resume"
+        if status == "failed" and check_pending
+        else "report: tasks unmerged; report every task's status and reason; "
+        "leave the unmerged work and the flow branch to the owner"
+    )
+    for _ in range(2):
+        code, out, err = invoke(
+            env, "--watch", flow["id"], *(["--json"] if as_json else [])
+        )
+        assert code == 82, err
+        assert err.splitlines()[1:] == [expected]
+        if as_json:
+            result = json.loads(out)
+            assert result["exit"] == 82
+            assert result["report"] == [expected]
+            assert [task["status"] for task in result["tasks"]] == ["merged", "pending"]
+        else:
+            assert "a merged" in out and "b pending" in out
+            assert "report:" not in out
 
 
 @pytest.mark.parametrize("as_json", [False, True])
@@ -890,7 +931,10 @@ def test_watch_reports_each_stop(
 
 
 @pytest.mark.parametrize("code", [72, 82])
-@pytest.mark.parametrize("mode", ["start", "watch", "status", "resume"])
+@pytest.mark.parametrize(
+    "mode", ["start", "watch", "status", "resume", "lead", "cancel"]
+)
+@pytest.mark.parametrize("check_pending", [False, True])
 def test_flow_errors_print_exit_report(
     env: dict[str, str],
     flow: dict[str, Any],
@@ -898,8 +942,11 @@ def test_flow_errors_print_exit_report(
     monkeypatch: pytest.MonkeyPatch,
     code: int,
     mode: str,
+    check_pending: bool,
 ) -> None:
     """All command error paths put the exit report after the next action."""
+    flow.update(status="failed", check_pending=check_pending, wave=3)
+    record.save(flow, env)
 
     def fail(*args: object, **kwargs: object) -> None:
         """Raise a flow error from the selected command."""
@@ -909,17 +956,47 @@ def test_flow_errors_print_exit_report(
     options = (
         ["--start", "--plan", str(plan_file)]
         if mode == "start"
+        else ["--lead", flow["id"], "a", "--drop"]
+        if mode == "lead"
         else [f"--{mode}", flow["id"]]
     )
     actual, out, err = invoke(env, *options)
     report = (
         "report: the runner is gone; work may still be running"
         if code == 72
+        else "report: the check failed after wave 3; fix the flow branch, then resume"
+        if check_pending and mode != "start"
         else "report: tasks unmerged; report every task's status and reason; "
         "leave the unmerged work and the flow branch to the owner"
     )
     assert actual == code and not out
     assert err.splitlines() == ["emb flow: stopped", "next: emb flow --status", report]
+
+
+@pytest.mark.parametrize("record_state", ["missing", "invalid"])
+def test_flow_error_exit_report_without_record(
+    env: dict[str, str],
+    flow: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    record_state: str,
+) -> None:
+    def fail(*args: object, **kwargs: object) -> None:
+        raise command.CommandError(82, "stopped", "next: emb flow --status")
+
+    monkeypatch.setattr(command, "_resume", fail)
+    path = record.folder(flow["id"], env) / record.FLOW_NAME
+    if record_state == "missing":
+        path.unlink()
+    else:
+        path.write_text("not JSON")
+    code, out, err = invoke(env, "--resume", flow["id"])
+    assert code == 82 and not out
+    assert err.splitlines() == [
+        "emb flow: stopped",
+        "next: emb flow --status",
+        "report: tasks unmerged; report every task's status and reason; "
+        "leave the unmerged work and the flow branch to the owner",
+    ]
 
 
 def test_starting_grace(
