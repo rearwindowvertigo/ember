@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.23.0](https://github.com/rearwindowvertigo/ember/compare/v0.22.0...v0.23.0) (2026-11-10)
+
+
+### Added
+
+* **app:** draw rows with a remove x on a full-width pill ([466c2a1](https://github.com/rearwindowvertigo/ember/commit/466c2a15cc8b0c35b482463c97b42d02c1f82316))
+* **flows:** skip the no-test-file warning for documentation-only tasks ([e33c0e9](https://github.com/rearwindowvertigo/ember/commit/e33c0e9c77c6f2ba3eb4e4bcd9f2d93d85b9d063))
+
+
+### Fixed
+
+* **app:** put Worktree preparation buttons level with their entry ([9522208](https://github.com/rearwindowvertigo/ember/commit/9522208cfac300019091b3b58a0a18316a15f54f))
+* **cli:** print a flow's next step after merging into an unfinished flow ([923e794](https://github.com/rearwindowvertigo/ember/commit/923e794f1e83ae1b5d8c0559e07a041a114c38bc))
+* **flows:** print a failed-check report line when the check fails ([af3ad81](https://github.com/rearwindowvertigo/ember/commit/af3ad8148c1b338e55f4f500e64b51b201f70898))
+
 ## [0.22.0](https://github.com/rearwindowvertigo/ember/compare/v0.21.2...v0.22.0) (2026-11-10)
 
 
