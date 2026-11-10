@@ -1211,6 +1211,8 @@ def _print_watch(result: dict[str, Any], as_json: bool, out: TextIO) -> None:
     _print_check_output(result["check_output"], out)
     for task in result["tasks"]:
         print(_task_line(task), file=out)
+        for path in task["outside_files"]:
+            print(f"  outside file: {path}", file=out)
         print(f"  latest review: {json.dumps(task['latest_review'])}", file=out)
         for finding in task["finding_details"]:
             print(f"  finding: {json.dumps(finding)}", file=out)
@@ -1293,6 +1295,8 @@ def _status(
                     print(f"{key}: {value}", file=out)
             for task in flow["tasks"]:
                 print(_task_line(task), file=out)
+                for path in task["outside_files"]:
+                    print(f"  outside file: {path}", file=out)
                 print(f"  latest review: {json.dumps(task['latest_review'])}", file=out)
                 for finding in task["findings"]:
                     print(f"  finding: {json.dumps(finding)}", file=out)

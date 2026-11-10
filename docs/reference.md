@@ -2623,6 +2623,9 @@ work; the task report includes its worktree.
 
 Text reports print the flow state, one line per task with its reason,
 latest review, finding objects, choices, retained cleanup details and stop events.
+Each task's non-empty `outside_files` prints directly under its task line,
+one indented `outside file: <path>` line per path. An empty list prints nothing.
+These paths print at the existing watch stops and end reports.
 Retained abandoned branches print separately.
 A failed latest check's non-empty log tail prints under `check log output:`,
 with each line indented. At most the last 20 lines of the runner's stored
@@ -2666,6 +2669,8 @@ when present, and omits it otherwise. Each task has
 `latest_review` as in watch reports, and its `findings` objects include
 `round` and `run`, with null for missing values. Text status prints the
 latest review's counts separately and each finding with its round and run.
+Each task's non-empty `outside_files` prints directly under its task line,
+one indented `outside file: <path>` line per path; an empty list prints nothing.
 Each task's `denied_paths` combines retained and current writer and reviewer
 denials, with the run and turn for each entry. Top-level `denied_paths` is their
 union with a `task` id on each entry; flow listings include this union too.

@@ -892,6 +892,47 @@ def test_concurrent_watch_delivers_stop_once(
 
 @pytest.mark.parametrize("mode", ["--watch", "--status"])
 @pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("ended", [False, True])
+@pytest.mark.parametrize("with_outside_files", [False, True])
+def test_task_outside_files(
+    env: dict[str, str],
+    flow: dict[str, Any],
+    mode: str,
+    as_json: bool,
+    ended: bool,
+    with_outside_files: bool,
+) -> None:
+    paths = [
+        ["docs/extra.md", "tests/path with spaces.py", "src/extra.py"],
+        ["another/path.txt"],
+    ]
+    for task, outside_files in zip(flow["tasks"], paths, strict=True):
+        task["outside_files"] = outside_files if with_outside_files else []
+    if ended:
+        end(flow, env)
+    else:
+        stopped(flow, env)
+    code, out, err = invoke(env, mode, flow["id"], *(["--json"] if as_json else []))
+    assert code == 0, err
+    if as_json:
+        tasks = json.loads(out)["tasks"]
+        assert [task["outside_files"] for task in tasks] == (
+            paths if with_outside_files else [[], []]
+        )
+    else:
+        for task in flow["tasks"]:
+            task_block = f"{task['id']} {task['status']}" + (
+                f": {task['reason']}" if task["reason"] else ""
+            )
+            for path in task["outside_files"]:
+                task_block += f"\n  outside file: {path}"
+            assert f"{task_block}\n  latest review:" in out
+        assert out.count("  outside file:") == (4 if with_outside_files else 0)
+    assert "outside file:" not in err
+
+
+@pytest.mark.parametrize("mode", ["--watch", "--status"])
+@pytest.mark.parametrize("as_json", [False, True])
 def test_failed_check_output(
     env: dict[str, str], flow: dict[str, Any], mode: str, as_json: bool
 ) -> None:
