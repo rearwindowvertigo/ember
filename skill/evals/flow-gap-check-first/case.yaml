@@ -1,6 +1,6 @@
 schema_version: "1.1"
 name: flow-gap-check-first
 expected_outcome: |
-  Claude claims, uses the saved flow row, writes a failure model and dry-runs before a background gap check. It asks the two high gaps sequentially in task order, then the medium gap. It records the three answers by gap id with emb gapcheck --answer, saves gapcheck-<plan stem>-<n>.json, and repeats the dry run and gap check with --previous without asking settled gaps again before starting, verifies the completed branch, gives a verdict and merges it into claude/flow-gap-check-first.
+  Claude claims, uses the saved flow row, writes a failure model and dry-runs before a background gap check. It asks the two high gaps sequentially in task order. For the medium gap g2, it either offers one question accepting zero totals for an unmatched item after both high-gap answers, or, when the plan's failure model already states that answer before the gap check, records g2 itself and names the gap and recorded answer in its message to the owner without asking a medium-gap question. It records the three answers by gap id with emb gapcheck --answer, saves gapcheck-<plan stem>-<n>.json, and repeats the dry run and gap check with --previous without asking settled gaps again before starting, verifies the completed branch, gives a verdict and merges it into claude/flow-gap-check-first.
 context:
   scaffold_script: place-files.sh
