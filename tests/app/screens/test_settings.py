@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 from pytestqt.qtbot import QtBot
 
 from ember import choices
-from ember.app import state, theme
+from ember.app import state, theme, widgets
 from ember.app.context import AppContext
 from ember.app.screens import common
 from ember.app.screens import settings as settings_module
@@ -892,6 +892,65 @@ def test_rows_shrink_stack_and_return(env: dict[str, str], qtbot: QtBot) -> None
 
 
 @pytest.mark.parametrize("mode", theme.MODES)
+def test_preparation_buttons_follow_entry_layout(
+    env: dict[str, str], qtbot: QtBot, qapp: QApplication, mode: str
+) -> None:
+    theme.apply(qapp, mode)
+    commands = {
+        "/srv/repository": "npm ci && npm ci --prefix db",
+        "/srv/no-preparation": "",
+        "/srv/" + "long-repository-" * 10: "npm ci && " + "npm run check " * 20,
+    }
+    choices.set_settings({"worktree.prepare": commands}, env=env)
+    _context, screen = _screen(env, qtbot)
+    screen.show()
+    for width in (1400, 900, 576, 900, 1400):
+        screen.resize(width, 900)
+        stacked = width == 576
+        qtbot.wait(30)
+        qtbot.waitUntil(
+            lambda stacked=stacked: screen.tip_rows["Repositories"].stacked == stacked
+        )
+        for redraw in (False, True):
+            if redraw:
+                screen.shown()
+                qtbot.wait(30)
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
+            for repository, command in commands.items():
+                edit, remove = screen.preparation_rows[repository]
+                row = edit.parentWidget()
+                assert row is not None
+                repository_text, command_text = row.findChildren(QLabel)
+                assert repository_text.text() == repository
+                assert command_text.text() == (command or "No preparation")
+                assert edit.accessibleName() == f"Edit preparation for {repository}"
+                assert remove.accessibleName() == f"Remove preparation for {repository}"
+                assert edit.geometry().right() < remove.geometry().left()
+                assert edit.geometry().center().y() == remove.geometry().center().y()
+                if stacked:
+                    assert edit.geometry().top() > command_text.geometry().bottom()
+                    assert edit.geometry().left() == repository_text.geometry().left()
+                else:
+                    assert (
+                        max(
+                            repository_text.geometry().right(),
+                            command_text.geometry().right(),
+                        )
+                        < edit.geometry().left()
+                    )
+                    text_center = (
+                        repository_text.geometry().top()
+                        + command_text.geometry().bottom()
+                    ) / 2
+                    assert abs(edit.geometry().center().y() - text_center) <= 1
+                    assert remove.mapTo(screen, remove.rect().topRight()).x() == (
+                        screen.add_repository.mapTo(
+                            screen, screen.add_repository.rect().topRight()
+                        ).x()
+                    )
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
 @pytest.mark.parametrize("changed", [False, True])
 def test_list_actions_follow_control_edges_and_stacked_layout(
     env: dict[str, str], qtbot: QtBot, qapp: QApplication, mode: str, changed: bool
@@ -922,8 +981,15 @@ def test_list_actions_follow_control_edges_and_stacked_layout(
         )
         QCoreApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
         edit, remove = screen.preparation_rows[repository]
+        path_remove = screen.path_rows[path]
+        pill = path_remove.parentWidget()
+        assert isinstance(pill, widgets.PillRow)
+        assert pill.mapTo(screen, QPoint()).x() == (
+            screen.paths_box.mapTo(screen, QPoint()).x()
+        )
+        assert right(path_remove) == right(pill) - pill.line.contentsMargins().right()
         if stacked:
-            assert right(screen.path_rows[path]) == right(screen.paths_box)
+            assert right(pill) == right(screen.paths_box)
             assert right(screen.hidden_rows[hidden]) == right(screen.hidden_box)
             assert edit.mapTo(screen, QPoint()).x() == (
                 screen.preparation_box.mapTo(screen, QPoint()).x()
@@ -938,7 +1004,7 @@ def test_list_actions_follow_control_edges_and_stacked_layout(
         else:
             assert {
                 right(screen.add_folder),
-                right(screen.path_rows[path]),
+                right(pill),
                 right(remove),
                 right(screen.hidden_rows[hidden]),
             } == {right(screen.add_folder)}
@@ -953,12 +1019,18 @@ def test_list_actions_follow_control_edges_and_stacked_layout(
     common.align_controls(screen.tip_rows.values())
     qtbot.wait(30)
     QCoreApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
+    pill = screen.path_rows[path].parentWidget()
+    assert isinstance(pill, widgets.PillRow)
     assert {
         right(screen.add_folder),
-        right(screen.path_rows[path]),
+        right(pill),
         right(screen.preparation_rows[repository][1]),
         right(screen.hidden_rows[hidden]),
     } == {right(screen.add_folder)}
+    assert not isinstance(screen.hidden_rows[hidden].parentWidget(), widgets.PillRow)
+    assert not isinstance(
+        screen.preparation_rows[repository][1].parentWidget(), widgets.PillRow
+    )
 
 
 @pytest.mark.parametrize("width", [576, 1400])

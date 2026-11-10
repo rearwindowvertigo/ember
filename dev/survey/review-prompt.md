@@ -11,27 +11,33 @@ The entry to review is the survey issue saved at `{{ENTRY}}`.
 1. `dev/survey/README.md` and `dev/survey/agent.md`, for the scoring
    scale and how entries are filled.
 2. The entry, `{{ENTRY}}`.
-3. Every other file in `{{EARLIER}}` (earlier survey issues, named
+3. `{{POINTS}}`, the lead's numbered list of the entry's points (`P1` to
+   `Pn`), each with its area and a one-line quote or close paraphrase.
+4. Every other file in `{{EARLIER}}` (earlier survey issues, named
    `issue-<number>.md`) and in `dev/survey/entries/` (entries from before
    survey issues), to find points that repeat.
-4. `AGENTS.md`, every file in `docs/design/` and every file in
+5. `AGENTS.md`, every file in `docs/design/` and every file in
    `docs/decisions/`, for what Ember is, what is decided, and what is not
    planned. `docs/design/` is history up to 0.5.0.
-5. `{{DECISIONS}}`, the decisions recorded as "Decision (owner, ...)" and
+6. `{{DECISIONS}}`, the decisions recorded as "Decision (owner, ...)" and
    "Decision (lead, ...)" comments on the repository's GitHub issues, one
    JSON object per issue. Where it and `docs/` disagree, the later decision
    holds.
-6. Any source file, test or skill file an entry point names, to check it.
+7. Any source file, test or skill file an entry point names, to check it.
 
 ## What to do
 
-### 1. List the points
+### 1. Use the lead's points
 
-Take every point the entry makes: each friction point, each thing that
-worked, each suggested change, each bug and each efficiency. Number them
-`P1`, `P2` and so on, in the order the entry gives them. Quote or closely
-paraphrase each one, and name its area (the entry's section number and
-title, or "Summary").
+Use every point in `{{POINTS}}`, keeping its number from `P1` to `Pn`.
+Check the entry for missed points: each friction point, thing that worked,
+suggested change, bug and efficiency. Append any missed points as `Pn+1`
+onwards, marking each as `added` in the Point column. Quote or closely
+paraphrase each added point, and name its area (the entry's section number
+and title, or "Summary"). Do not renumber the lead's points. Added numbers
+are local to your answer; the lead compares them by member and local
+number, then assigns consolidated numbers with a mapping back to each
+member's additions.
 
 ### 2. Check each point
 

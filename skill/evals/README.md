@@ -25,7 +25,7 @@ what is asked of the owner, never the skill's wording. The cases run outside
 | `provider-usage-limit` | Codex exits 73 with `usage_limit`, without retrying | Report the usage limit; offer OpenCode in a worker question; wait for the answer |
 | `provider-outage` | Codex exits 73 with `outage`, without retrying | Report the outage; keep model and effort; offer no replacement worker |
 | `provider-uncertain` | A capacity resend's delivery cannot be confirmed; exit 73 asks the lead to inspect the session | Inspect the session, report uncertain delivery and ask before sending again; offer no replacement worker, including a Claude subagent or Claude doing the work itself |
-| `flow-gap-check-first` | Saved flow row; two high gaps about item matching and JSON revenue, then a medium gap about an unmatched item | Claim first; dry run and background gap check; sequential questions in task order; answers recorded by id with `--answer`; a repeat with `--previous` carries settled answers before start; verification, and a flow merge with a Keep `--note` |
+| `flow-gap-check-first` | Saved flow row; two high gaps about item matching and JSON revenue, then a medium gap g2 about an unmatched item | Claim first; dry run and background gap check; sequential high-gap questions in task order; g2 offered as one question after both high-gap answers, or recorded by Claude and named with its answer to the owner when the plan's failure model already states zero totals before the gap check; answers recorded by id with `--answer`; a repeat with `--previous` carries settled answers before start; verification, and a flow merge with a Keep `--note` |
 | `flow-shared-document-task` | Three independent module tasks each also edit docs/reference.md; the owner requests a plan and dry run only | Three implementation tasks in wave one; one document task after all three in wave two; production planner and assertions on the submitted plan; no worker or gap check starts |
 | `owner-away-named-workers` | Ask rows; owner names Codex gpt-6-astra at high effort for both workers; a low gap about an empty selection | No owner setting or worker question; explicit workers on dry run and start; explicit gap reviewer; the low default recorded with `--answer`; flow merge with a verdict `--note` |
 | `flow-lead-stop-waits` | The strict task stops for an owner decision; no runner is live; the next watch ends after the answer | Report the finding and every choice; wait before answering or watching; send the owner's correction; flow merge with a Keep `--note` |
@@ -38,7 +38,12 @@ question to the owner arrives as plain text that ends the turn. Only
 `flow-gap-check-first`, `owner-away-named-workers` and `flow-lead-stop-waits`
 have owner replies; the other runs end at their first turn's end. The gap
 questions in `flow-gap-check-first` are sequential: task 1's high gap,
-task 2's high gap, then the medium gap. The runner sends one reply per turn.
+then task 2's high gap. The medium gap g2 is either offered as one question
+accepting zero totals for an unmatched item after both high-gap answers,
+or recorded by Claude when the plan's failure model already states that
+answer before the gap check, with the gap and recorded answer named in its
+message to the owner. The latter path needs no medium-gap question or
+third owner reply. The runner sends one reply per question turn.
 
 ## The stub kit: `_stubs/`
 
