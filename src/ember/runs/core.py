@@ -34,7 +34,18 @@ from pathlib import Path
 from types import FrameType
 from typing import Any, TextIO
 
-from ember import choices, db, engines, paths, prepare, processes, sandbox, scopes, tmux
+from ember import (
+    choices,
+    citations,
+    db,
+    engines,
+    paths,
+    prepare,
+    processes,
+    sandbox,
+    scopes,
+    tmux,
+)
 from ember.engines import Driver, LaunchSpec, TurnOutcome, models, status
 from ember.engines.opencode2 import DeliveryUncertainError
 from ember.runs import exits, record, steps, worktrees
@@ -1051,6 +1062,7 @@ class Core:
         read_effective = tuple(
             dict.fromkeys([*answers["sandbox.read"]["value"], *read])
         )
+        brief = citations.append_sources(brief, read_effective)
         self._create_run_tmp(run_id, provider)
         try:
             self._check_kept(engine, provider, worktree, common, read_effective)
