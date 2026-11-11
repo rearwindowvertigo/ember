@@ -49,6 +49,11 @@ def test_brief_contains_steps_schema_and_numbered_plan(
     assert "files shared by tasks" in rendered
     assert "missing order between dependent tasks" in rendered
     assert "missing check" in rendered
+    assert (
+        "For each task, search for and name tests and callers outside the "
+        "declared files that reference what it changes, so the lead can "
+        "include them in the plan."
+    ) in rendered
     assert "Do not redesign the plan" in rendered
     assert (
         "For each gap with harm high, describe the underlying cause and "

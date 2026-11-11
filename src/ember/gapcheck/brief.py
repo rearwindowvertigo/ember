@@ -119,6 +119,9 @@ def text(
             "same time, a missing order between dependent tasks, or a missing check. "
             "A case the failure model settles is not a gap. When the plan has no "
             "failure model, say so in the first gap of step 1 with harm high.",
+            "For each task, search for and name tests and callers outside the "
+            "declared files that reference what it changes, so the lead can "
+            "include them in the plan.",
             "Change, stage, commit or stash nothing.",
             "",
             "For each gap give these four fields:",

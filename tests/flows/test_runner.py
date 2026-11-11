@@ -3,6 +3,7 @@ import fcntl
 import io
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -559,14 +560,18 @@ def test_merged_sibling_unreadable_commit_is_not_reported_absent(h: Harness) -> 
         instance.merged_siblings(a)
 
 
-def test_fix_round_has_previous_head_and_real_plan_briefs(h: Harness) -> None:
+@pytest.mark.parametrize("check", [[], [sys.executable, "-c", "print('plan checked')"]])
+def test_fix_round_has_previous_head_and_real_plan_briefs(
+    h: Harness, check: list[str]
+) -> None:
     h.scripts_update(
         **{
             "Review of task a, round 1,": "@reply " + FIX,
             "Fix round 1 of task a": "@write a fixed",
         }
     )
-    h.create(rounds=1, read=[str(h.scripts)])
+    options: dict[str, Any] = {"check": check} if check else {}
+    h.create(rounds=1, read=[str(h.scripts)], **options)
     flow = h.run()
     item = flow["tasks"][0]
     assert item["status"] == "merged"
@@ -575,6 +580,11 @@ def test_fix_round_has_previous_head_and_real_plan_briefs(h: Harness) -> None:
     folder = record.folder(h.id, h.env) / "briefs"
     fix = next(folder.glob("a-fix-*.md")).read_text()
     assert fix.startswith(briefs.FIX_FIRST.format(round=1, task="a", flow=h.id))
+    if check:
+        assert f"Run the plan's check command `{shlex.join(check)}`" in fix
+        assert "or say why you could not run it" in fix
+    else:
+        assert "Run the tests for the files you change and quick static checks." in fix
     second = sorted(folder.glob("a-review-*.md"))[-1].read_text()
     assert "1. a: wrong value" in second
     assert f"git diff {item['fix_base']} {item['head']}" in second
@@ -959,6 +969,29 @@ def test_answers_resume_stopped_tasks(h: Harness, kind: str) -> None:
         assert item["round"] == 0
 
 
+@pytest.mark.parametrize("check", [[], [sys.executable, "-c", "print('plan checked')"]])
+def test_send_correction_carries_plan_checks(h: Harness, check: list[str]) -> None:
+    h.scripts_update(**{"Review of task a,": "@reply " + FIX})
+    options: dict[str, Any] = {"check": check} if check else {}
+    h.create(rounds=0, **options)
+    assert h.run()["tasks"][0]["status"] == "stopped"
+    correction = h.tmp / "correction.md"
+    correction.write_text("@write a corrected")
+    h.scripts_update(**{"Review of task a,": "@reply " + PASS})
+    h.answer("send", file=str(correction))
+    assert h.run()["status"] == "done"
+    folder = record.folder(h.id, h.env) / "briefs"
+    message = next(folder.glob("a-fix-*.md")).read_text()
+    assert "\n\n@write a corrected\n\n## Checks" in message
+    if check:
+        assert f"Run the plan's check command `{shlex.join(check)}`" in message
+        assert "or say why you could not run it" in message
+    else:
+        assert (
+            "Run the tests for the files you change and quick static checks." in message
+        )
+
+
 @pytest.mark.parametrize("final_answer", ["review", "worker"])
 def test_reviewer_corrections_survive_resume_and_later_answers(
     h: Harness, final_answer: str
@@ -1088,7 +1121,7 @@ def test_hook_refusal_send_uses_the_existing_fix_budget(
     assert flow["rounds"] == rounds
     writer = runs.load(item["writer_run"], h.env)
     assert len(sent) == 1
-    assert sent[0].endswith("@write a corrected\n")
+    assert "\n\n@write a corrected\n\n\n## Checks\n\n" in sent[0]
     assert sent[0].startswith("The commit hook refused") == (not retry_succeeds)
     if not retry_succeeds:
         assert "```\nhook refused\n```\n\n" in sent[0]
