@@ -23,7 +23,7 @@ from typing import Any, TextIO
 
 from ember import branches, choices, citations, db, paths, tmux
 from ember.flows import lock, plan, record, verdict
-from ember.gapcheck import policy
+from ember.gapcheck import policy, previous
 from ember.runs import exits
 from ember.runs import record as run_record
 from ember.runs.core import STALL_MINUTES, Core, WorkerSelection, _preparation_signals
@@ -410,6 +410,18 @@ def _dry_run(
     the owner gets the command with `--confirmed`.
     """
     decision, why = _gapcheck_decision(document, settings)
+    changes = None
+    if args.previous is not None:
+        try:
+            earlier = previous.load(args.previous, allow_incomplete=True)
+        except previous.PreviousError as error:
+            raise CommandError(
+                66 if error.unreadable else 65,
+                str(error),
+                "next: emb flow --dry-run --plan "
+                f"{shlex.quote(str(document.path))} --previous <gap check result>",
+            ) from error
+        changes = previous.comparison(document, earlier)
     gapcheck = [
         "emb",
         "gapcheck",
@@ -419,7 +431,7 @@ def _dry_run(
         str(top),
         "--json",
     ]
-    if args.previous is not None:
+    if args.previous is not None and not (changes and changes["recovery"]):
         gapcheck += ["--previous", args.previous]
     for path in document.read:
         gapcheck += ["--read", path]
@@ -459,6 +471,7 @@ def _dry_run(
                     "gapcheck": command,
                     "gapcheck_status": decision,
                     "gapcheck_reason": why,
+                    "gapcheck_comparison": changes,
                 },
                 indent=2,
             ),
@@ -497,6 +510,13 @@ def _dry_run(
             f"stall {stall:g} min, whole-flow review {'on' if whole else 'off'}",
             file=out,
         )
+        if changes is not None:
+            for reason in changes["reasons"]:
+                print(f"gap check repeat needed: {reason}", file=out)
+            for change in changes["judge"]:
+                print(f"gap check lead judgement: {change}", file=out)
+            if changes["recovery"]:
+                print(f"gap check recovery: {changes['recovery']}", file=out)
         if command is None:
             print(f"gap check: skipped, {why}", file=out)
         elif decision == policy.ASK:

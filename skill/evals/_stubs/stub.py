@@ -99,6 +99,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ember import branches, skill  # noqa: E402
 from ember.flows import plan as flow_plan  # noqa: E402
 from ember.gapcheck import brief as gap_brief  # noqa: E402
+from ember.gapcheck import command as gap_command  # noqa: E402
 from ember.gapcheck import plan as gap_plan  # noqa: E402
 from ember.gapcheck import previous as gap_previous  # noqa: E402
 from ember.gapcheck import reply as gap_reply  # noqa: E402
@@ -2011,6 +2012,8 @@ def gapcheck_repeat(
     made = json.loads(canned_reply(base, variables, True).out)
     made.update(
         fields,
+        schema_version=3,
+        checked_plan=gap_previous.snapshot(document),
         plan=str(document.path),
         plan_steps=document.kind,
         failure_model=document.failure_model,
@@ -2079,6 +2082,8 @@ def flow_dry_run(args: list[str], variables: dict[str, str]) -> Reply:
         return Reply(error.code, err=f"emb flow: {error}\nnext: emb flow --help\n")
     except flow_plan.WorkerError as error:
         return Reply(error.code, err=f"emb flow: {error}\n{error.line}\n")
+    except flows.CommandError as error:
+        return Reply(error.code, err=f"emb flow: {error}\n{error.line}\n")
     # Keep the submitted plan even when the session wrote it in its scratchpad.
     (EVAL / "flow-plan.json").write_text(document.text)
     return Reply(0, output.getvalue(), errors.getvalue())
@@ -2108,9 +2113,42 @@ def dispatch(
         return flow_dry_run(rest, variables)
     if name == "gapcheck-answer":
         return gapcheck_answer(rest)
+    if name == "gapcheck-reply" and option(rest, "--plan") is not None:
+        try:
+            document = gap_plan.load(option(rest, "--plan") or "")
+            gap_command.verify_brief(
+                document,
+                option(rest, "--brief-file"),
+                "emb gapcheck --plan " + shlex.quote(str(document.path)),
+            )
+            if not has(rest, "--previous"):
+                made = gap_command._result(document, None)
+                made.update(
+                    gap_command._read_reply(
+                        Path(option(rest, "--reply") or "").read_text(), document, None
+                    )
+                )
+                gap_command._mark_asks(made, None)
+                output = io.StringIO()
+                gap_command._print_result(made, has(rest, "--json"), output)
+                return Reply(81 if made["parse_error"] else 0, output.getvalue())
+        except gap_command.CommandError as error:
+            return Reply(error.code, err=f"emb gapcheck: {error}\n{error.follow}\n")
+        except (gap_plan.PlanError, OSError) as error:
+            return Reply(66, err=f"emb gapcheck: {error}\nnext: emb gapcheck --help\n")
     if name.startswith("gapcheck") and has(rest, "--previous"):
         # Repeat reviews use the case's base result for reviewer metadata.
         return gapcheck_repeat(rest, reply_base("gapcheck", 1), variables)
+    if (
+        name == "gapcheck-brief"
+        and not canned(base)
+        and option(rest, "--plan") is not None
+    ):
+        try:
+            document = gap_plan.load(option(rest, "--plan") or "")
+        except gap_plan.PlanError as error:
+            return Reply(66, err=f"emb gapcheck: {error}\nnext: emb gapcheck --help\n")
+        return Reply(0, gap_brief.text(document, variables["DIR"]))
     as_json = has(rest, "--json")
     if name == "help":
         return help_reply(args)
@@ -2171,6 +2209,16 @@ def dispatch(
     if name == "panel-start" and part(base, ".summary") is not None:
         return panel_start(state, base, variables, as_json)
     response = canned_reply(base, variables, as_json)
+    if (
+        name == "gapcheck"
+        and response.code == 0
+        and as_json
+        and option(rest, "--plan") is not None
+    ):
+        document = gap_plan.load(option(rest, "--plan") or variables["PLAN"])
+        made = json.loads(response.out)
+        made.update(schema_version=3, checked_plan=gap_previous.snapshot(document))
+        response.out = json.dumps(made, indent=2) + "\n"
     if name == "choices-finish" and response.code == 0:
         # A finished claim reads `gone`, so a status derives no finish line.
         state["claims"][option(rest, "--finish") or ""] = "gone"

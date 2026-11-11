@@ -36,7 +36,10 @@ files to read, and the shape and length of the answer. For a review,
 include the skill's review bar exactly. For a gap check by a panel, use
 the text `emb gapcheck --plan <file> --brief` prints, adding
 `--previous <last result>` on every repeat and using that same result when
-parsing the reply with `emb gapcheck --reply`. Members must not
+parsing the reply with `emb gapcheck --reply <reply-file> --plan <file>
+--brief-file <saved-brief>`. Save the printed brief as the panel question;
+its plan hash is checked when importing the reply. If the plan changes,
+print a new brief and review it again. Members must not
 edit the reviewed source; their answers belong in their final messages.
 Tell them to read the repository in their own working folder, using relative
 paths. A panel pins one source `HEAD` for all members and retries; each

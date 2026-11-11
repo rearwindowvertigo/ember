@@ -264,6 +264,9 @@ def _add_gapcheck(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--brief", action="store_true", help="print the brief only")
     parser.add_argument("--reply", metavar="FILE", help="read an existing reply")
     parser.add_argument(
+        "--brief-file", metavar="FILE", help="with --reply: the reviewer's saved brief"
+    )
+    parser.add_argument(
         "--previous",
         metavar="FILE",
         help="an earlier --json result whose active and settled gaps are reviewed",
@@ -294,7 +297,7 @@ def _add_flow(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--previous",
         metavar="FILE",
-        help="an earlier gap check result for the --dry-run gap check command",
+        help="an earlier gap check result to compare on --dry-run",
     )
     parser.add_argument("--start", action="store_true", help="start the flow runner")
     parser.add_argument("--watch", metavar="FLOW", help="wait for a lead stop or end")

@@ -215,3 +215,15 @@ def test_flow_brief_describes_planner_waves_and_execution(
             in rendered
         )
     assert "Cover all 4 steps." in rendered
+
+
+def test_hash_tracks_exact_plan_text_and_travels_in_the_brief(tmp_path: Path) -> None:
+    path = tmp_path / "plan.md"
+    path.write_text("Workflow\n")
+    document = plan.load(path)
+    rendered = brief.text(document, str(tmp_path))
+    assert brief.PLAN_HASH + brief.plan_hash(document) in rendered.splitlines()
+    assert brief.matches_plan(rendered, document)
+    assert not brief.matches_plan("Old brief\n", document)
+    path.write_text("Workflow \n")
+    assert not brief.matches_plan(rendered, plan.load(path))

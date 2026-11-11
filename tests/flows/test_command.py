@@ -19,6 +19,9 @@ import pytest
 from ember import branches, choices, paths, prepare, tmux
 from ember.cli import build_parser
 from ember.flows import command, lock, plan, record
+from ember.gapcheck import command as gap_command
+from ember.gapcheck import plan as gap_plan
+from ember.gapcheck import previous as gap_previous
 from ember.runs.core import Core
 from runs.stub_engine import (  # pyrefly: ignore[missing-import]
     StubDriver,
@@ -152,6 +155,26 @@ def end(flow: dict[str, Any], env: Mapping[str, str], code: int = 0) -> None:
     )
 
 
+def checked_result(plan_file: Path) -> dict[str, Any]:
+    document = gap_plan.load(plan_file)
+    made = gap_command._result(document, None)
+    made.update(
+        gap_command._read_reply(
+            json.dumps(
+                {
+                    "steps": [
+                        {"step": step.number, "gaps": []} for step in document.steps
+                    ]
+                }
+            ),
+            document,
+            None,
+        )
+    )
+    gap_command._mark_asks(made, None)
+    return gap_previous.validate(made)
+
+
 @pytest.mark.parametrize("as_json", [False, True])
 @pytest.mark.parametrize("with_previous", [False, True])
 def test_dry_run(
@@ -165,6 +188,8 @@ def test_dry_run(
     choices.claim("flow-claim", env=env)
     before = git(repo, "branch", "--list", env=env)
     previous = str(tmp_path / "owner's previous result.json")
+    if with_previous:
+        Path(previous).write_text(json.dumps(checked_result(plan_file)))
     code, out, err = invoke(
         env,
         "--plan",
@@ -2455,3 +2480,112 @@ def test_empty_sandbox_read_is_accepted(
     code, out, err = invoke(env, "--plan", str(plan_file), mode)
     assert code == 0, err
     assert out
+
+
+@pytest.mark.parametrize("when", ["off", "ask", "2", "3", "always"])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_repeat_report_is_independent_of_gap_check_settings(
+    tmp_path: Path, env: dict[str, str], plan_file: Path, when: str, as_json: bool
+) -> None:
+    choices.set_settings({"gapcheck.when": when}, env=env)
+    earlier = tmp_path / "earlier result.json"
+    earlier.write_text(json.dumps(checked_result(plan_file)))
+    document = json.loads(plan_file.read_text())
+    document["tasks"][1]["after"] = []
+    document["tasks"][0]["task"] += " Changed scope."
+    document["context"] = "New context"
+    document["failure_model"] = "New cases"
+    plan_file.write_text(json.dumps(document))
+    code, out, err = invoke(
+        env,
+        "--plan",
+        str(plan_file),
+        "--dry-run",
+        "--previous",
+        str(earlier),
+        *(["--json"] if as_json else []),
+    )
+    assert code == 0, err
+    skipped = when in ("off", "3")
+    if as_json:
+        data = json.loads(out)
+        comparison = data["gapcheck_comparison"]
+        assert comparison["repeat_needed"]
+        assert comparison["reasons"] == ["b: changed after", "changed waves"]
+        assert comparison["judge"] == [
+            "a: changed task text",
+            "changed context for tasks: a, b",
+            "changed failure_model for tasks: a, b",
+        ]
+        assert comparison["recovery"] is None
+        assert (data["gapcheck"] is None) == skipped
+        assert data["gapcheck_status"] == (
+            "skipped" if skipped else "ask" if when == "ask" else "run"
+        )
+        if when == "ask":
+            assert data["gapcheck"].endswith("--confirmed")
+    else:
+        assert "repeat needed: b: changed after" in out
+        assert "repeat needed: changed waves" in out
+        assert "lead judgement: a: changed task text" in out
+        assert "lead judgement: changed context for tasks: a, b" in out
+        assert "lead judgement: changed failure_model for tasks: a, b" in out
+        assert ("gap check: skipped" in out) == skipped
+        assert ("gap check: ask the owner" in out) == (when == "ask")
+    assert "no repeat" not in out.lower()
+    assert not paths.runs_dir(env).exists()
+
+
+@pytest.mark.parametrize(
+    "state", ["old", "parse_error", "uncovered_steps", "unknown_steps"]
+)
+@pytest.mark.parametrize("as_json", [False, True])
+def test_dry_run_reports_repeat_for_old_or_incomplete_results(
+    tmp_path: Path, env: dict[str, str], plan_file: Path, state: str, as_json: bool
+) -> None:
+    made = checked_result(plan_file)
+    if state == "old":
+        del made["checked_plan"], made["schema_version"]
+    else:
+        made[state] = "bad reply" if state == "parse_error" else [1]
+    earlier = tmp_path / "earlier.json"
+    earlier.write_text(json.dumps(made))
+    code, out, err = invoke(
+        env,
+        "--plan",
+        str(plan_file),
+        "--dry-run",
+        "--previous",
+        str(earlier),
+        *(["--json"] if as_json else []),
+    )
+    assert code == 0, err
+    if as_json:
+        data = json.loads(out)
+        report = data["gapcheck_comparison"]
+        assert report["repeat_needed"]
+        check_command = data["gapcheck"]
+        recovery = report["recovery"]
+    else:
+        assert "repeat needed:" in out
+        check_command = out.split("gap check: ")[1].strip()
+        recovery = out
+    if state != "old":
+        assert "--previous" not in shlex.split(check_command)
+        assert "complete the earlier check" in recovery
+        assert "without passing the incomplete result as --previous" in recovery
+    assert "no repeat" not in out.lower()
+
+
+@pytest.mark.parametrize("kind", ["missing", "malformed", "not a result"])
+def test_dry_run_validates_previous_input(
+    tmp_path: Path, env: dict[str, str], plan_file: Path, kind: str
+) -> None:
+    earlier = tmp_path / "earlier.json"
+    if kind != "missing":
+        earlier.write_text("{" if kind == "malformed" else "{}")
+    code, out, err = invoke(
+        env, "--plan", str(plan_file), "--dry-run", "--previous", str(earlier)
+    )
+    assert code == (66 if kind == "missing" else 65)
+    assert not out and "next:" in err

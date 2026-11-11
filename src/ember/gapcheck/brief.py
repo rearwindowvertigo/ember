@@ -1,5 +1,7 @@
 """Build a read-only gap check brief with the entire plan and reply schema."""
 
+import hashlib
+import re
 import shlex
 from collections.abc import Sequence
 from pathlib import Path
@@ -11,6 +13,7 @@ from ember.gapcheck.previous import Previous
 from ember.gapcheck.reply import schema_text
 
 FIRST_LINE = "Gap check of the plan {name}: a read-only review; change no file."
+PLAN_HASH = "Checked plan SHA-256: "
 _LINE_BREAK_ESCAPES = str.maketrans(
     {
         "\n": r"\n",
@@ -30,6 +33,17 @@ _LINE_BREAK_ESCAPES = str.maketrans(
 def _path_text(value: str) -> str:
     """Escape line breaks in a path, preserving every other character."""
     return value.translate(_LINE_BREAK_ESCAPES)
+
+
+def plan_hash(plan: Plan) -> str:
+    """Hash the exact UTF-8 plan text embedded in the brief."""
+    return hashlib.sha256(plan.text.encode("utf-8")).hexdigest()
+
+
+def matches_plan(text: str, plan: Plan) -> bool:
+    """Check that a brief carries exactly one matching plan hash line."""
+    hashes = re.findall(r"^Checked plan SHA-256: ([0-9a-f]{64})$", text, re.M)
+    return hashes == [plan_hash(plan)]
 
 
 def _earlier(previous: Previous | None) -> list[str]:
@@ -146,6 +160,7 @@ def text(
     brief = "\n".join(
         [
             FIRST_LINE.format(name=_path_text(plan.path.name)),
+            PLAN_HASH + plan_hash(plan),
             "",
             "Read the plan below and the repository in your own working folder. "
             "For every step, list the behaviours the plan leaves undefined or "

@@ -1083,6 +1083,7 @@ def test_gapcheck_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
         "--json",
         "--brief",
         "--reply",
+        "--brief-file",
         "--previous",
         "--answer",
         "--id",
