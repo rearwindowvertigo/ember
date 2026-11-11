@@ -137,7 +137,7 @@ def _cleanup(
     streams: Streams,
     directory: Path,
     *,
-    target: str = "main",
+    target: str | None = "main",
     branch: str | None = None,
     claim: str | None = None,
     dry_run: bool = False,
@@ -765,6 +765,241 @@ def test_merge_takes_the_branch_over_a_tag_of_the_same_name(
 # emb cleanup
 
 
+@pytest.mark.parametrize("deleted_flow", [False, True])
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_cleanup_claim_uses_record_bases_and_orders_flow_children(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    deleted_flow: bool,
+    dry_run: bool,
+    as_json: bool,
+) -> None:
+    flow = branches.create_flow_branch(repo, FLOW_ID, "HEAD", env)
+    data = _flow_record(env, repo, flow.worktree)
+    data.update(claim="claim-a", base_branch="main")
+    flow_record.save(data, env)
+    run = _start(tmp_path, env, flow.worktree, driver)
+    correction_branch = f"ember/opencode/{run.id}"
+    git(run.worktree, "branch", "-m", correction_branch, env=env)
+    run = replace(run, engine="opencode", branch=correction_branch, claim="claim-a")
+    record.save(run)
+    assert run.branch is not None and run.base_branch == flow.branch
+    assert flow.branch < run.branch
+    _squash(flow.worktree, run.branch, env)
+    streams = Streams()
+    if deleted_flow:
+        assert _merge(env, driver, streams, flow.branch, repo) == 0
+        streams.take()
+        assert not _branch_exists(repo, flow.branch, env)
+    else:
+        _squash(repo, flow.branch, env)
+    assert (
+        _cleanup(
+            env,
+            driver,
+            streams,
+            repo,
+            target=None,
+            claim="claim-a",
+            dry_run=dry_run,
+            as_json=as_json,
+        )
+        == 0
+    )
+    out, err = streams.take()
+    expected = [run.branch] if deleted_flow else [run.branch, flow.branch]
+    target = "main" if deleted_flow else flow.branch
+    action = branches.WOULD_REMOVE if dry_run else branches.REMOVED
+    if as_json:
+        results = json.loads(out)
+        assert [item["branch"] for item in results] == expected
+        assert all(item["action"] == action for item in results)
+        assert results[0]["reason"].startswith(f"contained in {target};")
+        if not deleted_flow:
+            assert results[1]["reason"].startswith("contained in main;")
+    else:
+        lines = out.splitlines()
+        assert len(lines) == len(expected)
+        assert lines[0].startswith(f"{action} {run.branch}: contained in {target};")
+        if not deleted_flow:
+            assert lines[1].startswith(f"{action} {flow.branch}: contained in main;")
+    assert ("next: emb choices --finish claim-a" in err) == (not dry_run)
+    assert _branch_exists(repo, run.branch, env) == dry_run
+    assert Path(run.worktree).exists() == dry_run
+    assert _branch_exists(repo, flow.branch, env) == (dry_run and not deleted_flow)
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_cleanup_claim_names_each_unmerged_records_target(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    as_json: bool,
+) -> None:
+    first = replace(_start(tmp_path, env, repo, driver), claim="claim-a")
+    lead = tmp_path / "lead"
+    git(repo, "worktree", "add", "-q", "-b", "session", str(lead), env=env)
+    second = replace(_start(tmp_path, env, lead, driver), claim="claim-a")
+    for run in (first, second):
+        record.save(run)
+    streams = Streams()
+    assert (
+        _cleanup(
+            env, driver, streams, repo, target=None, claim="claim-a", as_json=as_json
+        )
+        == 0
+    )
+    out, err = streams.take()
+    assert err == ""
+    for run in (first, second):
+        if as_json:
+            [item] = [item for item in json.loads(out) if item["branch"] == run.branch]
+            assert item["reason"] == f"not contained in {run.base_branch}"
+            line = item["next"]
+        else:
+            [line] = [
+                line
+                for line in out.splitlines()
+                if line.startswith(f"kept {run.branch}:")
+            ]
+            assert f"not contained in {run.base_branch};" in line
+        assert f"next: emb merge {run.branch} --into {run.base_branch}" in line
+
+
+@pytest.mark.parametrize("base", [None, "deleted-branch"])
+@pytest.mark.parametrize("target", [None, "main"])
+def test_cleanup_claim_keeps_missing_base_and_continues(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    base: str | None,
+    target: str | None,
+) -> None:
+    missing = replace(
+        _start(tmp_path, env, repo, driver), claim="claim-a", base_branch=base
+    )
+    merged = replace(_start(tmp_path, env, repo, driver), claim="claim-a")
+    for run in (missing, merged):
+        record.save(run)
+    assert merged.branch is not None
+    _squash(repo, merged.branch, env)
+    streams = Streams()
+    assert (
+        _cleanup(
+            env, driver, streams, repo, target=target, claim="claim-a", as_json=True
+        )
+        == 0
+    )
+    out, err = streams.take()
+    results = {item["run"]: item for item in json.loads(out)}
+    assert results[missing.id]["action"] == (
+        branches.KEPT if target is None else branches.REMOVED
+    )
+    if target is None:
+        assert results[missing.id]["reason"] == (
+            f"no surviving base branch found from {base}"
+            if base
+            else "no base branch is recorded"
+        )
+    assert results[merged.id]["action"] == branches.REMOVED
+    assert Path(missing.worktree).exists() == (target is None)
+    assert not Path(merged.worktree).exists()
+    assert ("choices --finish" in err) == (target is not None)
+
+
+def test_cleanup_claim_rechecks_target_and_names_it_in_retry(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    git(repo, "switch", "-q", "-c", "session", env=env)
+    run = replace(_start(tmp_path, env, repo, driver), claim="claim-a")
+    record.save(run)
+    assert run.branch is not None
+    _squash(repo, run.branch, env)
+    contained = branches.Cleanup._contained
+
+    def move_target(job: branches.Cleanup, tip: str, target_tip: str) -> bool:
+        result = contained(job, tip, target_tip)
+        git(repo, "commit", "--allow-empty", "-qm", "feat: target moved", env=env)
+        return result
+
+    monkeypatch.setattr(branches.Cleanup, "_contained", move_target)
+    streams = Streams()
+    assert (
+        _cleanup(env, driver, streams, repo, target=None, claim="claim-a", as_json=True)
+        == 0
+    )
+    out, err = streams.take()
+    [item] = json.loads(out)
+    assert item["action"] == branches.KEPT
+    assert item["reason"] == "session moved"
+    assert item["next"] == (
+        f"next: emb cleanup --merged-into session --branch {run.branch} "
+        f"--claim claim-a --dir {repo}"
+    )
+    assert Path(run.worktree).exists()
+    assert _branch_exists(repo, run.branch, env)
+    assert "choices --finish" not in err
+
+
+@pytest.mark.parametrize("fallback", [None, "missing", "cycle", "invalid", "absent"])
+def test_cleanup_claim_keeps_a_run_without_a_surviving_flow_base(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    fallback: str | None,
+) -> None:
+    flow = branches.create_flow_branch(repo, FLOW_ID, "HEAD", env)
+    data = _flow_record(env, repo, flow.worktree)
+    run = replace(_start(tmp_path, env, flow.worktree, driver), claim="claim-a")
+    record.save(run)
+    assert run.branch is not None
+    _squash(repo, run.branch, env)
+    streams = Streams()
+    assert _cleanup(env, driver, streams, repo, branch=flow.branch) == 0
+    streams.take()
+    data["base_branch"] = flow.branch if fallback == "cycle" else fallback
+    flow_record.save(data, env)
+    path = flow_record.folder(FLOW_ID, env) / flow_record.FLOW_NAME
+    if fallback == "invalid":
+        path.write_text("{")
+    elif fallback == "absent":
+        path.unlink()
+    assert (
+        _cleanup(env, driver, streams, repo, target=None, claim="claim-a", as_json=True)
+        == 0
+    )
+    out, err = streams.take()
+    [item] = json.loads(out)
+    assert item["branch"] == run.branch
+    assert item["action"] == branches.KEPT
+    assert (
+        "cannot read the flow record"
+        if fallback == "invalid"
+        else f"no surviving base branch found from {flow.branch}"
+    ) in item["reason"]
+    assert Path(run.worktree).exists()
+    assert _branch_exists(repo, run.branch, env)
+    assert "choices --finish" not in err
+
+
+def test_cleanup_requires_target_without_claim(
+    env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    streams = Streams()
+    assert _cleanup(env, driver, streams, repo, target=None) == 64
+    assert "--merged-into is required without --claim" in streams.take()[1]
+
+
 @pytest.mark.parametrize("claim", [None, "claim-a", "claim-b", "claim", "unknown"])
 @pytest.mark.parametrize("single_branch", [False, True])
 def test_cleanup_filters_recorded_claims_and_merge_suggestions(
@@ -889,13 +1124,23 @@ def test_cleanup_claim_filters_flow_branches(
     assert _branch_exists(repo, flow.branch, env) == (claim == "claim-b")
 
 
-@pytest.mark.parametrize("claim", [None, "claim-a", "claim-b"])
+@pytest.mark.parametrize(
+    ("claim", "target"),
+    [
+        (None, "main"),
+        ("claim-a", "main"),
+        ("claim-b", "main"),
+        ("claim-a", None),
+        ("claim-b", None),
+    ],
+)
 def test_cleanup_claim_filters_detached_worktrees(
     tmp_path: Path,
     env: dict[str, str],
     repo: Path,
     driver: StubDriver,
     claim: str | None,
+    target: str | None,
 ) -> None:
     run = _start(tmp_path, env, repo, driver, "Review\n", read_only=True)
     run = replace(run, claim="claim-a")
@@ -905,14 +1150,14 @@ def test_cleanup_claim_filters_detached_worktrees(
     evidence.touch()
     assert _factory(env, driver)(io.StringIO()).close(run.id) == 0
     streams = Streams()
-    assert _cleanup(env, driver, streams, repo, claim=claim) == 0
+    assert _cleanup(env, driver, streams, repo, target=target, claim=claim) == 0
     out, _ = streams.take()
     if claim == "claim-b":
         assert out == ""
     else:
         assert f"kept {run.id}:" in out and "; claim claim-a;" in out
     evidence.unlink()
-    assert _cleanup(env, driver, streams, repo, claim=claim) == 0
+    assert _cleanup(env, driver, streams, repo, target=target, claim=claim) == 0
     assert folder.exists() == (claim == "claim-b")
 
 
@@ -2775,7 +3020,9 @@ def test_merge_with_no_run_has_null_next(
     assert "next:" not in err
 
 
-@pytest.mark.parametrize("claim", [None, "claim-a"])
+@pytest.mark.parametrize(
+    ("claim", "target"), [(None, "main"), ("claim-a", "main"), ("claim-a", None)]
+)
 @pytest.mark.parametrize("dry_run", [False, True])
 @pytest.mark.parametrize("as_json", [False, True])
 def test_cleanup_empty_claim_finishes_only_when_requested(
@@ -2785,11 +3032,19 @@ def test_cleanup_empty_claim_finishes_only_when_requested(
     claim: str | None,
     dry_run: bool,
     as_json: bool,
+    target: str | None,
 ) -> None:
     streams = Streams()
     assert (
         _cleanup(
-            env, driver, streams, repo, claim=claim, dry_run=dry_run, as_json=as_json
+            env,
+            driver,
+            streams,
+            repo,
+            target=target,
+            claim=claim,
+            dry_run=dry_run,
+            as_json=as_json,
         )
         == 0
     )
@@ -2800,7 +3055,10 @@ def test_cleanup_empty_claim_finishes_only_when_requested(
     else:
         assert out == ""
         scope = f" for claim {claim}" if claim is not None else ""
-        message = f"emb cleanup: no Ember run or flow branch left against main{scope}\n"
+        against = target if target is not None else "each record's base branch"
+        message = (
+            f"emb cleanup: no Ember run or flow branch left against {against}{scope}\n"
+        )
     assert err == message + (
         "next: emb choices --finish claim-a\n" if claim and not dry_run else ""
     )

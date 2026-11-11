@@ -452,7 +452,12 @@ A subagent or Workflow branch (`worktree-agent-*`) gets a merge commit.
 the `next: git branch -d <branch>` line.
 
 Before squashing or deleting the session branch, run
-`emb cleanup --merged-into <session branch>` and report the keeps.
+`emb cleanup --claim <id>` and report the keeps. Without `--merged-into`,
+claim cleanup tests each record against its recorded base branch, following
+a deleted flow branch to that flow's base. A record without a surviving
+base is kept with a reason. Records cut from a flow branch are processed
+before that flow branch. An explicit `--merged-into <branch>` tests every
+selected record against that branch; without `--claim`, it is required.
 Without a limiting option, `emb cleanup` covers every Ember run branch of
 the repository, including flow branches and other sessions' runs.
 `emb merge` already cleans up the branch it merged and its worktree when

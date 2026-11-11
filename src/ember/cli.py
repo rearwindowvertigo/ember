@@ -452,9 +452,8 @@ def _add_prune(parser: argparse.ArgumentParser) -> None:
 def _add_cleanup(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--merged-into",
-        required=True,
         metavar="TARGET",
-        help="the branch the worker branches were merged into",
+        help="the merge target; defaults to each record's base branch with --claim",
     )
     parser.add_argument("--branch", metavar="BRANCH", help="only this branch")
     parser.add_argument(
@@ -1139,6 +1138,8 @@ def main(
             args.older_than, dry_run=args.dry_run, as_json=args.json, env=env
         )
     if args.command == "cleanup":
+        if args.merged_into is None and args.claim is None:
+            parser.error("cleanup requires --merged-into unless --claim is given")
         failures = []
         code = branches.cleanup(
             args.merged_into,
