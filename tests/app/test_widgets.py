@@ -1267,6 +1267,171 @@ def test_ember_tip_updates_and_hides_when_control_text_clears(
         widgets.tip_popup().hide_for(control)
 
 
+@pytest.fixture(params=["info", "icon", "nav"])
+def tip_control(
+    request: pytest.FixtureRequest,
+    qapp: QApplication,
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[QPushButton, QPushButton, widgets.TipPopup]:
+    from ember.app.window import NavButton
+
+    widgets.install_tooltips(qapp)
+    popup = widgets.TipPopup()
+    qtbot.addWidget(popup)
+    monkeypatch.setattr(widgets, "_popup", popup)
+    host = QWidget()
+    qtbot.addWidget(host)
+    layout = QVBoxLayout(host)
+    other = QPushButton("Other")
+    control: QPushButton
+    if request.param == "info":
+        control = widgets.InfoTip("Overview", "Overview · 1 live")
+    elif request.param == "icon":
+        control = widgets.IconButton("panel-left", "Show sidebar")
+    else:
+        nav = NavButton("overview", "Overview", "panel-left")
+        nav.set_collapsed(True)
+        nav.set_count(1, "1 live")
+        control = nav
+    layout.addWidget(other)
+    layout.addWidget(control)
+    host.show()
+    qtbot.waitExposed(host)
+    with qtbot.waitActive(host):
+        host.activateWindow()
+    other.setFocus(Qt.FocusReason.MouseFocusReason)
+    popup.hide()
+    return control, other, popup
+
+
+@pytest.mark.parametrize("hover_first", [True, False])
+def test_hover_tip_leaves_a_mouse_focused_control(
+    qtbot: QtBot,
+    tip_control: tuple[QPushButton, QPushButton, widgets.TipPopup],
+    hover_first: bool,
+) -> None:
+    control, _, popup = tip_control
+    enter = QEnterEvent(QPointF(), QPointF(), QPointF())
+    if hover_first:
+        QApplication.sendEvent(control, enter)
+    control.setFocus(Qt.FocusReason.MouseFocusReason)
+    qtbot.mouseClick(control, Qt.MouseButton.LeftButton)
+    if not hover_first:
+        QApplication.sendEvent(control, enter)
+    assert control.hasFocus()
+    assert _popup_shows(control)
+    control.setToolTip("Updated count · 2 live")
+    assert popup.text() == control.toolTip()
+    QApplication.sendEvent(control, QEvent(QEvent.Type.Leave))
+    assert control.hasFocus()
+    assert not popup.isVisible()
+    control.setToolTip("Updated count · 3 live")
+    assert not popup.isVisible()
+
+
+@pytest.mark.parametrize("hover_first", [True, False])
+def test_keyboard_tip_survives_hover_and_text_updates_until_focus_leaves(
+    tip_control: tuple[QPushButton, QPushButton, widgets.TipPopup],
+    hover_first: bool,
+) -> None:
+    control, other, popup = tip_control
+    enter = QEnterEvent(QPointF(), QPointF(), QPointF())
+    if hover_first:
+        QApplication.sendEvent(control, enter)
+    control.setFocus(Qt.FocusReason.TabFocusReason)
+    if not hover_first:
+        QApplication.sendEvent(control, enter)
+    assert control.hasFocus()
+    assert _popup_shows(control)
+    if isinstance(control, widgets.InfoTip):
+        control.set_text("Updated details")
+    else:
+        control.setToolTip("Updated details")
+    assert popup.text() == "Updated details"
+    QApplication.sendEvent(control, QEvent(QEvent.Type.Leave))
+    assert _popup_shows(control)
+    other.setFocus(Qt.FocusReason.TabFocusReason)
+    assert not popup.isVisible()
+
+
+@pytest.mark.parametrize("keyboard", [True, False])
+def test_tip_text_updates_only_its_visible_owner_and_escape_closes_it(
+    qtbot: QtBot,
+    tip_control: tuple[QPushButton, QPushButton, widgets.TipPopup],
+    keyboard: bool,
+) -> None:
+    control, other, popup = tip_control
+    other.setProperty("show-tooltip", True)
+    other.setToolTip("Other details")
+    if keyboard:
+        control.setFocus(Qt.FocusReason.TabFocusReason)
+    else:
+        QApplication.sendEvent(control, QEnterEvent(QPointF(), QPointF(), QPointF()))
+    assert _popup_shows(control)
+    text = popup.text()
+    other.setToolTip("Changed other details")
+    QApplication.sendEvent(other, QEvent(QEvent.Type.Leave))
+    assert _popup_shows(control)
+    assert popup.text() == text
+    qtbot.keyClick(other, Qt.Key.Key_Escape)
+    assert not popup.isVisible()
+    control.setToolTip("Changed after Escape")
+    assert not popup.isVisible()
+    QApplication.sendEvent(other, QEnterEvent(QPointF(), QPointF(), QPointF()))
+    assert _popup_shows(other)
+    control.setToolTip("Changed previous owner")
+    assert _popup_shows(other)
+    assert popup.text() == other.toolTip()
+    QApplication.sendEvent(other, QEvent(QEvent.Type.Leave))
+    assert not popup.isVisible()
+
+
+@pytest.mark.parametrize("keyboard", [True, False])
+def test_info_tip_activation_and_text_update_keep_opening_mode(
+    qapp: QApplication,
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    keyboard: bool,
+) -> None:
+    wrapper = widgets.install_tooltips(qapp)
+    qapp.removeEventFilter(wrapper)
+    popup = widgets.TipPopup()
+    qtbot.addWidget(popup)
+    monkeypatch.setattr(widgets, "_popup", popup)
+    host = QWidget()
+    qtbot.addWidget(host)
+    info = widgets.InfoTip("Command", "Command details")
+    other = QPushButton("Other")
+    layout = QVBoxLayout(host)
+    layout.addWidget(other)
+    layout.addWidget(info)
+    host.show()
+    qtbot.waitExposed(host)
+    with qtbot.waitActive(host):
+        host.activateWindow()
+    other.setFocus(Qt.FocusReason.MouseFocusReason)
+    try:
+        if keyboard:
+            info.setFocus(Qt.FocusReason.TabFocusReason)
+            assert _popup_shows(info)
+            info.hide_tip()
+            qtbot.keyClick(info, Qt.Key.Key_Space)
+        else:
+            info.setFocus(Qt.FocusReason.MouseFocusReason)
+            qtbot.mouseClick(info, Qt.MouseButton.LeftButton)
+        assert info.hasFocus()
+        assert _popup_shows(info)
+        info.set_text("Updated command details")
+        assert popup.text() == "Updated command details"
+        QApplication.sendEvent(info, QEvent(QEvent.Type.Leave))
+        assert popup.isVisible() is keyboard
+        qtbot.keyClick(info, Qt.Key.Key_Escape)
+        assert not popup.isVisible()
+    finally:
+        qapp.installEventFilter(wrapper)
+
+
 @pytest.mark.parametrize("kind", ["picker", "segmented"])
 @pytest.mark.parametrize("mode", theme.MODES)
 def test_changed_outline_yields_to_keyboard_focus(

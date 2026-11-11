@@ -7,6 +7,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,7 @@ import pytest
 
 from ember import choices, paths
 from ember.cli import build_parser
-from ember.gapcheck import command, previous
+from ember.gapcheck import brief, command, plan, previous
 from ember.runs import record
 from ember.runs.core import Core, RunError, StartOptions
 from runs.stub_engine import (  # pyrefly: ignore[missing-import]
@@ -26,6 +27,8 @@ from runs.stub_engine import (  # pyrefly: ignore[missing-import]
 )
 
 RESULT_KEYS = {
+    "schema_version",
+    "checked_plan",
     "status",
     "ask",
     "plan",
@@ -88,6 +91,7 @@ def invoke(
     *options: str,
     driver: StubDriver | None = None,
     factory: Callable[..., Core] | None = None,
+    supply_brief: bool = True,
 ) -> tuple[int, str, str]:
     def make(environment: Mapping[str, str], **kwargs: Any) -> Core:  # noqa: ANN401
         assert driver is not None
@@ -95,6 +99,13 @@ def invoke(
             environment, load_driver=lambda name: driver, poll_seconds=0.05, **kwargs
         )
 
+    if supply_brief and "--reply" in options and "--brief-file" not in options:
+        with suppress(plan.PlanError):
+            saved_brief = plan_file.with_name("checked-brief.md")
+            saved_brief.write_text(
+                brief.text(plan.load(plan_file), str(plan_file.parent))
+            )
+            options += ("--brief-file", str(saved_brief))
     args = build_parser().parse_args(["gapcheck", "--plan", str(plan_file), *options])
     out, err = io.StringIO(), io.StringIO()
     code = command.main(args, env, core_factory=factory or make, out=out, err=err)
@@ -199,6 +210,8 @@ def test_subagent_route(
         ["--brief", "--stall", "10"],
         ["--reply", "answer", "--window"],
         ["--reply", "answer", "--claim", "claim-123"],
+        ["--brief-file", "brief.md"],
+        ["--brief", "--brief-file", "brief.md"],
     ],
 )
 def test_usage_errors(
@@ -286,6 +299,77 @@ def test_brief_starts_nothing(
     assert "repository in your own working folder" in out
     assert str(repo) not in out
     assert not paths.runs_dir(env).exists()
+
+
+@pytest.mark.parametrize("mode", ["run", "brief", "reply"])
+@pytest.mark.parametrize("with_check", [False, True])
+@pytest.mark.parametrize(
+    "kind", ["flow", "incomplete tasks", "markdown", "invalid flow"]
+)
+def test_flow_recognition_on_every_route(
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    reply_file: Path,
+    driver: StubDriver,
+    mode: str,
+    kind: str,
+    with_check: bool,
+) -> None:
+    if kind != "markdown":
+        document: dict[str, Any] = {
+            "failure_model": "A failure stops the work.",
+            "tasks": [
+                {
+                    "id": ident,
+                    "subject": f"feat: {ident}",
+                    "task": f"Build {ident}",
+                    "files": ["shared.py"],
+                }
+                for ident in ("a", "b")
+            ],
+        }
+        if kind != "incomplete tasks":
+            document["dir"] = str(repo)
+        if kind == "invalid flow":
+            del document["tasks"][0]["subject"]
+        if with_check:
+            document["check"] = ["make", "check"]
+        plan_file.write_text(json.dumps(document))
+    options = {
+        "run": ["--dir", str(repo), "--engine", "codex", "--model", "m", "--json"],
+        "brief": ["--brief", "--dir", str(repo)],
+        "reply": ["--reply", str(reply_file), "--json"],
+    }
+    code, out, err = invoke(env, plan_file, *options[mode], driver=driver)
+    assert code == 0, err
+    if kind == "invalid flow":
+        assert "WARNING: invalid flow plan:" in err
+        assert "missing required key 'subject'" in err
+    else:
+        assert "invalid flow plan" not in err
+    if mode == "reply":
+        assert json.loads(out)["parse_error"] is None
+        assert not paths.runs_dir(env).exists()
+        return
+    rendered = (
+        out
+        if mode == "brief"
+        else (
+            record.load(json.loads(out)["run"]["id"], env).folder / "brief.md"
+        ).read_text()
+    )
+    if kind == "flow":
+        assert "## How this flow runs" in rendered
+        assert "- Wave 1: a\n- Wave 2: b\n" in rendered
+        assert (
+            "The plan check runs after each wave: make check"
+            if with_check
+            else "The plan has no check command"
+        ) in rendered
+    else:
+        assert "## How this flow runs" not in rendered
+        assert "missing order between dependent tasks" in rendered
 
 
 def test_reply_only_and_text(
@@ -968,7 +1052,15 @@ def test_previous_without_answers_counts_its_gaps_as_unanswered(
     old_gap = old["steps"][0]["gaps"][0]
     del old_gap["id"], old_gap["answer"], old_gap["earlier"]
     old["ranked"] = [{"step": 1, **old_gap}]
-    for key in ("next_id", "previous_plan", "settled", "closed", "dispositions"):
+    for key in (
+        "next_id",
+        "previous_plan",
+        "settled",
+        "closed",
+        "dispositions",
+        "schema_version",
+        "checked_plan",
+    ):
         del old[key]
     saved.write_text(json.dumps(old))
     text = dispositions(gap_reply(reply_gap("a", earlier="g1")), g1="reopened")
@@ -1684,3 +1776,165 @@ def test_preparation_failure_retries_original_gapcheck(
     assert retry.claim == "gap-prep" and retry.stall == 1.5
     assert retry.window and retry.json and retry.confirmed
     assert not list(paths.runtime_dir(env).glob("gapcheck-*.md"))
+
+
+@pytest.mark.parametrize("mode", ["run", "reply"])
+@pytest.mark.parametrize("kind", ["flow", "workflow"])
+def test_results_save_the_checked_plan_on_each_route(
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    reply_file: Path,
+    driver: StubDriver,
+    mode: str,
+    kind: str,
+) -> None:
+    if kind == "flow":
+        plan_file.write_text(
+            json.dumps(
+                {
+                    "dir": str(repo),
+                    "context": "Context\n",
+                    "failure_model": "Cases\n",
+                    "tasks": [
+                        {
+                            "id": ident,
+                            "subject": f"feat: {ident}",
+                            "task": f"Do {ident}\n",
+                            "files": [f"{ident}.py"],
+                            "after": [] if ident == "a" else ["a"],
+                        }
+                        for ident in ("a", "b")
+                    ],
+                }
+            )
+        )
+    checked = plan.load(plan_file)
+    options = (
+        ["--reply", str(reply_file)]
+        if mode == "reply"
+        else ["--dir", str(repo), "--engine", "codex", "--model", "m"]
+    )
+    code, out, err = invoke(env, plan_file, *options, "--json", driver=driver)
+    assert code == 0, err
+    made = json.loads(out)
+    assert made["schema_version"] == 3
+    assert made["checked_plan"] == previous.snapshot(checked)
+    if kind == "workflow":
+        assert made["checked_plan"] == {
+            "version": 1,
+            "kind": "document",
+            "text": checked.text,
+        }
+    else:
+        assert made["checked_plan"]["context"] == "Context\n"
+        assert made["checked_plan"]["failure_model"] == "Cases\n"
+        assert made["checked_plan"]["tasks"][1] == {
+            "id": "b",
+            "subject": "feat: b",
+            "task": "Do b\n",
+            "review": "",
+            "files": ["b.py"],
+            "after": ["a"],
+        }
+    previous.validate(made)
+
+
+@pytest.mark.parametrize(
+    "problem", ["option", "absent", "hash", "changed", "duplicate"]
+)
+def test_reply_requires_the_brief_for_the_unchanged_plan(
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    reply_file: Path,
+    problem: str,
+) -> None:
+    code, rendered, err = invoke(env, plan_file, "--brief", "--dir", str(repo))
+    assert code == 0, err
+    saved_brief = plan_file.with_name("review brief.md")
+    saved_brief.write_text(rendered)
+    if problem == "absent":
+        saved_brief.unlink()
+    elif problem == "hash":
+        saved_brief.write_text("An older brief without a plan hash\n")
+    elif problem == "changed":
+        plan_file.write_text(plan_file.read_text() + "Scope changed\n")
+    elif problem == "duplicate":
+        saved_brief.write_text(
+            rendered + brief.PLAN_HASH + brief.plan_hash(plan.load(plan_file)) + "\n"
+        )
+    options = [] if problem == "option" else ["--brief-file", str(saved_brief)]
+    code, out, err = invoke(
+        env,
+        plan_file,
+        "--reply",
+        str(reply_file),
+        *options,
+        supply_brief=False,
+    )
+    assert code == 64 and not out
+    assert err.splitlines()[-1].startswith("next: emb gapcheck --plan ")
+    assert "--brief > <brief-file>" in err
+    assert not paths.runs_dir(env).exists()
+
+
+def test_brief_reply_round_trip_keeps_the_reviewed_snapshot(
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    reply_file: Path,
+) -> None:
+    code, rendered, err = invoke(env, plan_file, "--brief", "--dir", str(repo))
+    assert code == 0, err
+    saved_brief = plan_file.with_name("panel question.md")
+    saved_brief.write_text(rendered)
+    code, out, err = invoke(
+        env,
+        plan_file,
+        "--reply",
+        str(reply_file),
+        "--brief-file",
+        str(saved_brief),
+        "--json",
+        supply_brief=False,
+    )
+    assert code == 0, err
+    assert json.loads(out)["checked_plan"]["text"] == plan_file.read_text()
+
+
+def test_run_recovery_names_a_saved_brief_that_verifies(
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    reply_file: Path,
+    driver: StubDriver,
+) -> None:
+    import shlex
+
+    reply_file.write_text("bad reply")
+    code, out, err = invoke(
+        env,
+        plan_file,
+        "--dir",
+        str(repo),
+        "--engine",
+        "codex",
+        "--model",
+        "m",
+        "--json",
+        driver=driver,
+    )
+    assert code == 81
+    data = json.loads(out)
+    run = record.load(data["run"]["id"], env)
+    recovery = build_parser().parse_args(shlex.split(err.splitlines()[-1][6:])[1:])
+    assert recovery.brief_file == str(run.folder / "brief.md")
+    assert brief.matches_plan(
+        Path(recovery.brief_file).read_text(), plan.load(plan_file)
+    )
+    Path(recovery.reply).write_text(VALID)
+    recovery.json = True
+    output, errors = io.StringIO(), io.StringIO()
+    assert command.main(recovery, env, out=output, err=errors) == 0, errors.getvalue()
+    assert json.loads(output.getvalue())["checked_plan"] == data["checked_plan"]

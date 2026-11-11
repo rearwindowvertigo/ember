@@ -49,6 +49,14 @@ def test_brief_contains_steps_schema_and_numbered_plan(
     assert "files shared by tasks" in rendered
     assert "missing order between dependent tasks" in rendered
     assert "missing check" in rendered
+    assert "## How this flow runs" not in rendered
+    assert loaded.flow is None
+    assert not loaded.flow_problems
+    assert (
+        "For each task, search for and name tests and callers outside the "
+        "declared files that reference what it changes, so the lead can "
+        "include them in the plan."
+    ) in rendered
     assert "Do not redesign the plan" in rendered
     assert (
         "For each gap with harm high, describe the underlying cause and "
@@ -155,3 +163,67 @@ def test_closed_history_is_context_without_a_disposition(tmp_path: Path) -> None
     assert "Closed history (no disposition required):" in rendered
     assert r"- g1: Old\nconcern Reason: Removed\nfrom plan" in rendered
     assert "raise a closed concern that matters again as a new gap" in rendered
+
+
+@pytest.mark.parametrize("check", [None, ["python", "-m", "checks with spaces"]])
+def test_flow_brief_describes_planner_waves_and_execution(
+    tmp_path: Path, check: list[str] | None
+) -> None:
+    path = tmp_path / "flow.json"
+    document: dict[str, object] = {
+        "dir": str(tmp_path),
+        "tasks": [
+            {
+                "id": ident,
+                "subject": "feat: build",
+                "task": "Build it",
+                "files": files,
+                "after": after,
+            }
+            for ident, files, after in [
+                ("a", ["src/pkg"], []),
+                ("b", ["src/pkg/module.py"], []),
+                ("c", ["other.py"], []),
+                ("d", ["last.py"], ["b"]),
+            ]
+        ],
+    }
+    if check is not None:
+        document["check"] = check
+    path.write_text(json.dumps(document))
+    loaded = plan.load(path)
+    assert loaded.flow is not None and not loaded.flow_problems
+    rendered = brief.text(loaded, str(tmp_path))
+    assert "## How this flow runs" in rendered
+    assert "- Wave 1: a, c\n- Wave 2: b\n- Wave 3: d\n" in rendered
+    assert "overlapping files, including folder-prefix overlaps" in rendered
+    assert "assuming each wave merges fully; they are not dependencies" in rendered
+    assert "a later task sharing its file can run without its change" in rendered
+    assert "still needs that task in after" in rendered
+    assert "own isolated worktree and merges into the flow branch" in rendered
+    assert (
+        "Report an ordering gap only when a needed direction is missing or wrong."
+        in rendered
+    )
+    assert "shared edits can be separated from the tasks' own checks" in rendered
+    assert "even when their waves serialize them" in rendered
+    if check is None:
+        assert "The plan has no check command; waves merge without a check." in rendered
+    else:
+        assert (
+            "The plan check runs after each wave: python -m 'checks with spaces'"
+            in rendered
+        )
+    assert "Cover all 4 steps." in rendered
+
+
+def test_hash_tracks_exact_plan_text_and_travels_in_the_brief(tmp_path: Path) -> None:
+    path = tmp_path / "plan.md"
+    path.write_text("Workflow\n")
+    document = plan.load(path)
+    rendered = brief.text(document, str(tmp_path))
+    assert brief.PLAN_HASH + brief.plan_hash(document) in rendered.splitlines()
+    assert brief.matches_plan(rendered, document)
+    assert not brief.matches_plan("Old brief\n", document)
+    path.write_text("Workflow \n")
+    assert not brief.matches_plan(rendered, plan.load(path))

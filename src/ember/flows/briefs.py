@@ -1,5 +1,6 @@
 """Build writer briefs, read-only review briefs and correction messages."""
 
+import shlex
 from collections.abc import Sequence
 from textwrap import indent
 from typing import TYPE_CHECKING
@@ -59,6 +60,23 @@ _LIMITS = (
 )
 
 
+def _checks(check: Sequence[str]) -> str:
+    """Describe the plan check and the writer's checks of affected code."""
+    command = (
+        f"Run the plan's check command `{shlex.join(check)}`, or say why you "
+        "could not run it."
+        if check
+        else "Run the tests for the files you change and quick static checks."
+    )
+    return (
+        "## Checks\n\n" + command + "\n\n"
+        "Search for tests and callers of what changed, including outside the "
+        "declared files. Fix a break your change causes in an outside file when "
+        'the Limits allow it; otherwise list it under "Not done". Name failures '
+        "from an unavailable service or environment without trying to fix them."
+    )
+
+
 def _files(files: Sequence[str], wave_files: Sequence[str]) -> str:
     """List this task's files followed by the other tasks' files."""
     other = (
@@ -94,8 +112,7 @@ def writer_brief(
         [
             "## Limits\n\n" + _LIMITS,
             _GIT,
-            "## Checks\n\nRun the tests for the files you change "
-            "and quick static checks.",
+            _checks(plan.check),
             _CLOSING,
         ]
     )
@@ -150,6 +167,10 @@ def review_brief(
         "working folder, on its branch.",
         "## Task\n\n" + indent(task.subject + "\n\n" + task.task, "    "),
         "## Files\n\n" + indent(_files(task.files, wave_files), "    "),
+        "## Writer limits\n\n" + _LIMITS + "\n\n"
+        "Judge each outside edit on whether the task needed it. Use must or "
+        "should for findings about its need. An outside edit allowed by these "
+        "limits is not a lead finding just for being outside the declared files.",
     ]
     if corrections:
         parts.append(
@@ -221,7 +242,12 @@ def review_brief(
 
 
 def fix_message(
-    flow_id: str, task: Task, round: int, findings: Sequence[Finding]
+    flow_id: str,
+    task: Task,
+    round: int,
+    findings: Sequence[Finding],
+    *,
+    check: Sequence[str] = (),
 ) -> str:
     """Send the numbered must findings to the existing writer."""
     return (
@@ -233,6 +259,7 @@ def fix_message(
                 "in your final message.",
                 _must_list(findings),
                 _GIT,
+                _checks(check),
                 _CLOSING,
             ]
         )
@@ -240,6 +267,14 @@ def fix_message(
     )
 
 
-def send_message(flow_id: str, task: Task, text: str) -> str:
+def send_message(
+    flow_id: str, task: Task, text: str, *, check: Sequence[str] = ()
+) -> str:
     """Prefix a lead correction while preserving its text as written."""
-    return f"Correction from the lead for task {task.id} in flow {flow_id}.\n\n{text}"
+    return (
+        f"Correction from the lead for task {task.id} in flow {flow_id}.\n\n"
+        + text
+        + "\n\n"
+        + _checks(check)
+        + "\n"
+    )

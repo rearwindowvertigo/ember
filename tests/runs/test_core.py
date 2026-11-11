@@ -119,6 +119,111 @@ def _events(tmp_path: Path, run_id: str) -> list[dict[str, str]]:
 # Starting an editing run
 
 
+@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize("paste", [False, True])
+@pytest.mark.parametrize("source", ["file", "folder", "standing", "none"])
+def test_start_lists_read_paths_in_saved_brief_and_first_message(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    read_only: bool,
+    paste: bool,
+    source: str,
+) -> None:
+    folder = tmp_path / "sources"
+    nested = folder / "nested" / "notes.md"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("Source")
+    single = tmp_path / "source.md"
+    single.write_text("Source")
+    read: tuple[str, ...] = ()
+    expected: list[Path] = []
+    if source == "standing":
+        choices.set_settings({"sandbox.read": [str(folder)]}, env=env)
+        expected = [folder]
+    elif source != "none":
+        path = single if source == "file" else folder
+        # CLI read paths resolve against the caller's folder, not the worktree.
+        monkeypatch.chdir(tmp_path)
+        read = (path.name,)
+        expected = [path]
+    brief = "Task\n\nRead the supplied sources.\n"
+    driver = _driver(env, paste=paste)
+    core_ = _core(env, driver)
+    assert (
+        _start(core_, repo, _brief(tmp_path, brief), read_only=read_only, read=read)
+        == 0
+    )
+    run = record.load(core_.last_run_id or "", env)
+    saved = (run.folder / record.BRIEF_NAME).read_text()
+    message = core.first_message(run.id, saved)
+    assert driver.commands[0][1] == message
+    assert (run.folder / "turn-1.prompt.md").read_text() == message
+    if paste:
+        assert "".join(item.get("text", "") for item in _events(tmp_path, run.id)) == (
+            message
+        )
+    if expected:
+        assert saved.startswith(brief + "\n## Sources to read\n")
+        assert [line for line in saved.splitlines() if line.startswith("- ")] == [
+            f"- {path}" for path in expected
+        ]
+        assert str(nested) not in saved
+    else:
+        assert saved == brief
+
+
+@pytest.mark.parametrize("route", ["panel", "preparation"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_start_from_saved_brief_lists_sources_once(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    route: str,
+    legacy: bool,
+) -> None:
+    source = tmp_path / "source.md"
+    source.write_text("Source")
+    standing = tmp_path / "standing"
+    standing.mkdir()
+    choices.set_settings({"sandbox.read": [str(standing)]}, env=env)
+    read = (str(source),)
+    brief = "Saved task\n"
+    saved = Path(_brief(tmp_path, brief, "saved-brief.md"))
+    core_ = _core(env)
+    if route == "preparation":
+        choices.set_settings({"worktree.prepare": {str(repo): "exit 1"}}, env=env)
+        assert _start(core_, repo, str(saved), read=read, read_only=True) == 79
+        failed = record.load(core_.last_run_id or "", env)
+        saved = failed.folder / record.BRIEF_NAME
+        assert failed.start_argv[failed.start_argv.index("--task-file") + 1] == str(
+            saved
+        )
+        choices.set_settings({"worktree.prepare": {str(repo): "true"}}, env=env)
+    if legacy:
+        saved.write_text(brief)
+    elif route == "panel":
+        saved.write_text(brief + f"\n## Sources to read\n\n- {source}\n")
+    before = saved.read_bytes()
+    driver = _driver(env)
+    core_ = _core(env, driver)
+    assert _start(
+        core_, repo, str(saved), read=read, read_only=True,
+        parent=record.parent("panel", "panel-saved") if route == "panel" else None,
+    ) == 0  # fmt: skip
+    run = record.load(core_.last_run_id or "", env)
+    rendered = (run.folder / record.BRIEF_NAME).read_text()
+    assert saved.read_bytes() == before
+    assert rendered.count("## Sources to read") == 1
+    assert f"- {source}" in rendered
+    if legacy:
+        assert f"- {standing}" in rendered
+    else:
+        assert rendered.encode() == before
+    assert driver.commands[0][1] == core.first_message(run.id, rendered)
+
+
 @pytest.mark.parametrize("name", [record.BRIEF_NAME, record.RECORD_NAME])
 @pytest.mark.parametrize("read_only", [False, True])
 def test_start_publishes_brief_and_record_together(
@@ -2060,6 +2165,11 @@ def test_claude_run_records_its_sandbox_network_and_read_paths(
     assert run.network is True
     assert run.read == (str(extra),)
     assert run.read_effective == (str(shared), str(extra))
+    saved = (run.folder / record.BRIEF_NAME).read_text()
+    assert [line for line in saved.splitlines() if line.startswith("- ")] == [
+        f"- {shared}",
+        f"- {extra}",
+    ]
 
 
 def test_session_runs_the_command_from_a_launch_script(
@@ -4689,7 +4799,9 @@ def test_preparation_retry_saves_brief_and_options(
     argv = list(run.start_argv)
     assert argv[:2] == ["emb", "run"]
     assert argv[argv.index("--task-file") + 1] == str(run.folder / record.BRIEF_NAME)
-    assert (run.folder / record.BRIEF_NAME).read_text() == "Saved task\n"
+    saved = (run.folder / record.BRIEF_NAME).read_text()
+    assert saved.startswith("Saved task\n\n## Sources to read\n")
+    assert f"- {tmp_path}" in saved.splitlines()
     for flag, value in (
         ("--engine", "claude"),
         ("--dir", str(repo)),

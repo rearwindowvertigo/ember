@@ -80,6 +80,42 @@ def test_sources_section(tmp_path: Path) -> None:
     assert f"- {tmp_path / 'a.md'}" in section
 
 
+def test_append_sources_lists_absolute_paths_without_expanding_folders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    folder = tmp_path / "sources"
+    nested = folder / "nested" / "issue.md"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("source")
+    single = tmp_path / "notes.md"
+    single.write_text("notes")
+    brief = "Task\n\nRead the sources.\n"
+    rendered = citations.append_sources(
+        brief, ["sources", str(single), str(folder), "./notes.md"]
+    )
+    assert rendered.startswith(brief + "\n## Sources to read\n")
+    assert [line for line in rendered.splitlines() if line.startswith("- ")] == [
+        f"- {folder}",
+        f"- {single}",
+    ]
+    assert str(nested) not in rendered
+    assert "Use the ones the brief names, as it directs." in rendered
+    assert "Read them before you start" not in rendered
+    assert citations.append_sources(brief, []) == brief
+
+
+@pytest.mark.parametrize("ending", ["\n", "  \n", "\r\n"])
+def test_append_sources_preserves_an_existing_section(ending: str) -> None:
+    brief = f"Task\n\n## Sources to read{ending}\nExisting instructions.\n"
+    assert citations.append_sources(brief, ["/another/source"]) == brief
+
+
+def test_append_sources_does_not_treat_a_heading_mention_as_a_section() -> None:
+    brief = 'Task\n\nUse a "## Sources to read" section.\n'
+    assert "- /source" in citations.append_sources(brief, ["/source"])
+
+
 @pytest.mark.parametrize(
     ("text", "reference"),
     [

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "ember/gapcheck-result/2",
+  "$id": "ember/gapcheck-result/3",
   "title": "Gap check result",
   "type": "object",
   "additionalProperties": false,
@@ -222,6 +222,20 @@
         "high",
         "medium",
         "all"
+      ]
+    },
+    "schema_version": {
+      "const": 3,
+      "type": "integer"
+    },
+    "checked_plan": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/flowSnapshot"
+        },
+        {
+          "$ref": "#/$defs/documentSnapshot"
+        }
       ]
     }
   },
@@ -519,6 +533,97 @@
         "step": {
           "type": "integer",
           "minimum": 1
+        }
+      }
+    },
+    "snapshotTask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "subject",
+        "task",
+        "review",
+        "files",
+        "after"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "task": {
+          "type": "string"
+        },
+        "review": {
+          "type": "string"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "after": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "flowSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "kind",
+        "context",
+        "failure_model",
+        "tasks"
+      ],
+      "properties": {
+        "version": {
+          "const": 1,
+          "type": "integer"
+        },
+        "kind": {
+          "const": "flow"
+        },
+        "context": {
+          "type": "string"
+        },
+        "failure_model": {
+          "type": "string"
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/snapshotTask"
+          }
+        }
+      }
+    },
+    "documentSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "kind",
+        "text"
+      ],
+      "properties": {
+        "version": {
+          "const": 1,
+          "type": "integer"
+        },
+        "kind": {
+          "const": "document"
+        },
+        "text": {
+          "type": "string"
         }
       }
     }

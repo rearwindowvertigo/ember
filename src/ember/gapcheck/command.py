@@ -67,7 +67,7 @@ def _usage(args: argparse.Namespace) -> None:
     problem = None
     if args.answer is not None:
         extra = [
-            f"--{name}"
+            f"--{name.replace('_', '-')}"
             for name in (
                 "plan",
                 "previous",
@@ -78,6 +78,7 @@ def _usage(args: argparse.Namespace) -> None:
                 "claim",
                 "stall",
                 "reply",
+                "brief_file",
             )
             if getattr(args, name) is not None
         ]
@@ -100,6 +101,8 @@ def _usage(args: argparse.Namespace) -> None:
         problem = "--plan is required"
     elif args.brief and args.reply is not None:
         problem = "--brief and --reply cannot be combined"
+    elif args.brief_file is not None and args.reply is None:
+        problem = "--brief-file needs --reply"
     elif args.brief or args.reply is not None:
         extra = [
             f"--{name}"
@@ -204,7 +207,7 @@ def _engine(args: argparse.Namespace, settings: Mapping[str, Any], command: str)
             f"next: {command} --brief{' --confirmed' if args.confirmed else ''}, "
             "then give the brief to a read-only Claude "
             f"subagent on {row['model']} and read its answer with "
-            f"{command} --reply <file>",
+            f"{command} --reply <file> --brief-file <saved brief>",
         )
     if args.engine is not None and args.engine != row["engine"]:
         return args.engine
@@ -229,6 +232,8 @@ def _read_file(path: Path) -> str:
 def _result(document: plan.Plan, earlier: previous.Previous | None) -> dict[str, Any]:
     """Build an incomplete result before a reply has been collected."""
     return {
+        "schema_version": 3,
+        "checked_plan": previous.snapshot(document),
         "plan": str(document.path),
         "plan_steps": document.kind,
         "failure_model": document.failure_model,
@@ -440,12 +445,39 @@ def _print_result(
         print(f"{name.replace('_', ' ')}: {numbers}", file=out)
 
 
-def _follow(command: str, reply_path: str | None, code: int) -> str:
+def _follow(
+    command: str, reply_path: str | None, code: int, brief_path: str | None = None
+) -> str:
     """Name an existing reply, or a new check when no reply exists."""
     if reply_path is None:
         return f"next: {command} ..."
     prefix = "once the turn ends, " if code not in (0, INVALID_REPLY) else ""
-    return f"next: {prefix}{command} --reply {shlex.quote(reply_path)}"
+    return (
+        f"next: {prefix}{command} --reply {shlex.quote(reply_path)}"
+        f" --brief-file {shlex.quote(brief_path or '<saved brief>')}"
+    )
+
+
+def verify_brief(document: plan.Plan, path: str | None, command: str) -> None:
+    """Require the saved review brief to carry the current plan's hash.
+
+    Raises:
+        CommandError: The brief is absent, unreadable or names different plan text.
+    """
+    follow = f"next: {command} --brief > <brief-file>"
+    if path is None:
+        raise CommandError(64, "--reply requires --brief-file", follow)
+    location = Path(path).expanduser().absolute()
+    try:
+        text = location.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise CommandError(
+            64, f"cannot read the brief {location}: {error}", follow
+        ) from error
+    if not brief.matches_plan(text, document):
+        raise CommandError(
+            64, "the brief has no matching plan hash; run --brief again", follow
+        )
 
 
 def _preparation_retry(args: argparse.Namespace) -> str:
@@ -670,6 +702,8 @@ def main(
                 66, str(error), f"next: ls -l {shlex.quote(args.plan)}"
             ) from error
         command = f"emb gapcheck --plan {shlex.quote(str(document.path))}"
+        for problem in document.flow_problems:
+            print(f"WARNING: invalid flow plan: {problem}", file=err)
         if not document.text.strip():
             raise CommandError(
                 64, f"the plan {document.path} is empty", "next: emb gapcheck --help"
@@ -696,6 +730,8 @@ def main(
                     f"from --plan {document.path}",
                     file=err,
                 )
+        if args.reply is not None:
+            verify_brief(document, args.brief_file, command)
         problem = None
         reply_path = None
         settings = _settings(args, environment) if args.reply is None else None
@@ -783,7 +819,14 @@ def main(
                 if code == exits.PREPARATION_FAILED
                 else problem.follow
                 if problem
-                else _follow(command, reply_path, code),
+                else _follow(
+                    command,
+                    reply_path,
+                    code,
+                    str(record.run_dir(details["id"], environment) / "brief.md")
+                    if details
+                    else args.brief_file,
+                ),
                 file=err,
             )
         return code

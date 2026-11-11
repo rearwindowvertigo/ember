@@ -908,7 +908,9 @@ class _Runner:
             path = self.artifact(
                 task,
                 "fix",
-                briefs.send_message(self.id, self.plan.task(task["id"]), text),
+                briefs.send_message(
+                    self.id, self.plan.task(task["id"]), text, check=self.plan.check
+                ),
             )
             if not self.send(task, path, fresh=not hook_refused):
                 return
@@ -948,6 +950,7 @@ class _Runner:
                     self.plan.task(task["id"]),
                     task["round"] + 1,
                     self.earlier(task),
+                    check=self.plan.check,
                 ),
             )
             if not self.send(task, path, fresh=False):
