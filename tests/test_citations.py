@@ -100,6 +100,8 @@ def test_append_sources_lists_absolute_paths_without_expanding_folders(
         f"- {single}",
     ]
     assert str(nested) not in rendered
+    assert "Use the ones the brief names, as it directs." in rendered
+    assert "Read them before you start" not in rendered
     assert citations.append_sources(brief, []) == brief
 
 

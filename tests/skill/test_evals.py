@@ -1356,6 +1356,25 @@ def test_stub_cleanup_prints_the_claim_finish_line_by_the_reference_rule(
     )
 
 
+def test_stub_claim_cleanup_without_a_target_uses_the_checked_out_branch(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    """Claim cleanup needs no --merged-into; without --claim it is required."""
+    work = case("claim-and-menu-writer", tmp_path, env)
+    claim = "cleanup-def456"
+    started = work.emb(
+        "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief(),
+        "--claim", claim,
+    )  # fmt: skip
+    branch = f"ember/codex/{started.stdout.splitlines()[0].removeprefix('run ')}"
+    assert work.emb("cleanup").returncode == 64
+    work.git("merge", "--no-edit", "-q", branch)
+    done = work.emb("cleanup", "--claim", claim)
+    assert done.returncode == 0
+    assert done.stdout.startswith(f"removed {branch}")
+    assert done.stderr == f"next: emb choices --finish {claim}\n"
+
+
 def test_claim_lost_then_gone(tmp_path: Path, env: dict[str, str]) -> None:
     work = case("claim-lost-then-gone", tmp_path, env)
     first = work.emb("choices", "--claim", "--id", "run-abc123", "--skill", __version__)

@@ -516,8 +516,9 @@ For editing and read-only runs, Ember appends a `## Sources to read`
 section after the supplied brief in the first message. It lists each
 distinct effective read path at its resolved absolute path: the standing
 `sandbox.read` paths followed by the supplied `--read` paths, including
-folders themselves. Read files stay at those paths; they are not copied
-into the worker's folder. With no read paths, or when the brief already
+folders themselves. The section says the paths are readable as given and
+that the worker uses the ones the brief names. Read files stay at those
+paths; they are not copied into the worker's folder. With no read paths, or when the brief already
 has a `## Sources to read` heading, Ember appends nothing. The run saves
 the resulting brief. A new start using a saved brief, including a
 preparation retry or a panel retry through `emb run`, applies the same

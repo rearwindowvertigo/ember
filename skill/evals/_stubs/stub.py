@@ -1635,13 +1635,23 @@ def cleanup(args: list[str], state: dict[str, Any], variables: dict[str, str]) -
         The reply.
     """
     target = option(args, "--merged-into")
-    if target is None:
+    claim_only = target is None and option(args, "--claim") is not None
+    if target is None and not claim_only:
         return Reply(
             64, err="emb cleanup: --merged-into is required\nnext: emb cleanup --help\n"
         )
-    variables["TARGET"] = target
     directory = Path(option(args, "--dir") or ".").expanduser()
     top = top_of(directory)
+    if claim_only and top is not None:
+        # The case repositories cut every run from the checked-out branch,
+        # so it stands in for each record's recorded base branch.
+        target = out(top, "branch", "--show-current").strip() or None
+    if target is None:
+        return Reply(
+            75,
+            err="emb cleanup: no recorded base branch\nnext: emb cleanup --help\n",
+        )
+    variables["TARGET"] = target
     repo = main_checkout(top) if top is not None else None
     if repo is None or not branch_exists(repo, target):
         return Reply(

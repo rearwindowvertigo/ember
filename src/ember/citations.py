@@ -199,5 +199,12 @@ def append_sources(brief: str, read: Iterable[str]) -> str:
     if re.search(r"(?m)^## Sources to read[ \t]*\r?$", brief):
         return brief
     paths = list(dict.fromkeys(Path(item).resolve() for item in read))
-    section = sources_section(paths)
-    return f"{brief.rstrip()}\n\n{section}\n" if section else brief
+    if not paths:
+        return brief
+    listing = "\n".join(f"- {path}" for path in paths)
+    section = (
+        "## Sources to read\n\n"
+        "These paths are outside your working folder and readable as given. "
+        "Use the ones the brief names, as it directs.\n\n" + listing
+    )
+    return f"{brief.rstrip()}\n\n{section}\n"
