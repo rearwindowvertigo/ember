@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.24.0](https://github.com/rearwindowvertigo/ember/compare/v0.23.0...v0.24.0) (2026-11-11)
+
+
+### Added
+
+* **cli:** clean up a claim against each record's own base branch ([0183a93](https://github.com/rearwindowvertigo/ember/commit/0183a936a39bf65eb149df033c98b102c066d40c))
+* **cli:** list read paths in run and panel briefs ([0ef0fe9](https://github.com/rearwindowvertigo/ember/commit/0ef0fe9a21336aad0e2896a39ad04795d42c3a36))
+* **flows:** check flow tasks against the plan check ([c60c6aa](https://github.com/rearwindowvertigo/ember/commit/c60c6aa6ec14441942b2953c7c6abe93122a80b4))
+* **flows:** report plan changes since the last gap check ([955b928](https://github.com/rearwindowvertigo/ember/commit/955b928e35bbf08c662aec336bd87fb2b2cb906e))
+* **flows:** tell the gap reviewer how a flow runs ([deda02c](https://github.com/rearwindowvertigo/ember/commit/deda02cb8445c9fb2382f187ba9c4a0f1446695f))
+
+
+### Fixed
+
+* **app:** hide a hover tip when the mouse leaves a focused control ([1b34e28](https://github.com/rearwindowvertigo/ember/commit/1b34e2821e1fc86c565b2c78538b8fad2ba55a87))
+
 ## [0.23.0](https://github.com/rearwindowvertigo/ember/compare/v0.22.0...v0.23.0) (2026-11-10)
 
 
