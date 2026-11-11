@@ -264,6 +264,9 @@ def _add_gapcheck(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--brief", action="store_true", help="print the brief only")
     parser.add_argument("--reply", metavar="FILE", help="read an existing reply")
     parser.add_argument(
+        "--brief-file", metavar="FILE", help="with --reply: the reviewer's saved brief"
+    )
+    parser.add_argument(
         "--previous",
         metavar="FILE",
         help="an earlier --json result whose active and settled gaps are reviewed",
@@ -294,7 +297,7 @@ def _add_flow(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--previous",
         metavar="FILE",
-        help="an earlier gap check result for the --dry-run gap check command",
+        help="an earlier gap check result to compare on --dry-run",
     )
     parser.add_argument("--start", action="store_true", help="start the flow runner")
     parser.add_argument("--watch", metavar="FLOW", help="wait for a lead stop or end")
@@ -452,9 +455,8 @@ def _add_prune(parser: argparse.ArgumentParser) -> None:
 def _add_cleanup(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--merged-into",
-        required=True,
         metavar="TARGET",
-        help="the branch the worker branches were merged into",
+        help="the merge target; defaults to each record's base branch with --claim",
     )
     parser.add_argument("--branch", metavar="BRANCH", help="only this branch")
     parser.add_argument(
@@ -1139,6 +1141,8 @@ def main(
             args.older_than, dry_run=args.dry_run, as_json=args.json, env=env
         )
     if args.command == "cleanup":
+        if args.merged_into is None and args.claim is None:
+            parser.error("cleanup requires --merged-into unless --claim is given")
         failures = []
         code = branches.cleanup(
             args.merged_into,

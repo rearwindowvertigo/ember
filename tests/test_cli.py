@@ -42,22 +42,31 @@ def test_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 @pytest.mark.parametrize("claim", [None, "claim-a"])
+@pytest.mark.parametrize("target", [None, "main"])
 def test_cleanup_passes_claim_and_branch(
-    monkeypatch: pytest.MonkeyPatch, claim: str | None
+    monkeypatch: pytest.MonkeyPatch, claim: str | None, target: str | None
 ) -> None:
-    calls: list[tuple[str, dict[str, Any]]] = []
+    calls: list[tuple[str | None, dict[str, Any]]] = []
 
-    def cleanup(target: str, **kwargs: Any) -> int:  # noqa: ANN401
+    def cleanup(target: str | None, **kwargs: Any) -> int:  # noqa: ANN401
         calls.append((target, kwargs))
         return 0
 
     monkeypatch.setattr(branches, "cleanup", cleanup)
-    argv = ["cleanup", "--merged-into", "main", "--branch", "ember/claude/run-000001"]
+    argv = ["cleanup", "--branch", "ember/claude/run-000001"]
+    if target is not None:
+        argv.extend(["--merged-into", target])
     if claim is not None:
         argv.extend(["--claim", claim])
+    if target is None and claim is None:
+        with pytest.raises(SystemExit) as exit_info:
+            main(argv, env={})
+        assert exit_info.value.code == 64
+        assert calls == []
+        return
     assert main(argv, env={}) == 0
-    [(target, options)] = calls
-    assert target == "main"
+    [(passed_target, options)] = calls
+    assert passed_target == target
     assert options["claim"] == claim
     assert options["branch"] == "ember/claude/run-000001"
 
@@ -1074,6 +1083,7 @@ def test_gapcheck_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
         "--json",
         "--brief",
         "--reply",
+        "--brief-file",
         "--previous",
         "--answer",
         "--id",

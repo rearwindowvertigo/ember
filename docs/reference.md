@@ -512,6 +512,17 @@ reason in `last_reason` and exits 69 for a sandbox or runtime folder problem,
 70 for a worktree problem, 79 for failed worktree preparation, and 1
 otherwise. The worktree and branch stay.
 
+For editing and read-only runs, Ember appends a `## Sources to read`
+section after the supplied brief in the first message. It lists each
+distinct effective read path at its resolved absolute path: the standing
+`sandbox.read` paths followed by the supplied `--read` paths, including
+folders themselves. Read files stay at those paths; they are not copied
+into the worker's folder. With no read paths, or when the brief already
+has a `## Sources to read` heading, Ember appends nothing. The run saves
+the resulting brief. A new start using a saved brief, including a
+preparation retry or a panel retry through `emb run`, applies the same
+heading check and can append sources to an older brief lacking them.
+
 Model and effort:
 
 - `--model` wins. Otherwise the model comes from the menu row
@@ -1495,6 +1506,7 @@ claim to the run.
 | `--json` | Print the result as JSON |
 | `--brief` | Print the brief and start nothing; accepts `--dir` and `--read` |
 | `--reply FILE` | Read a reply from another worker and start nothing; accepts `--json` |
+| `--brief-file FILE` | Required with `--reply`: the saved brief printed by `--brief`, or the run's saved `brief.md` |
 | `--previous FILE` | Read an earlier complete result; the reviewer gives a disposition for every active and settled gap |
 | `--confirmed` | Run the check although `gapcheck.when` skips the plan or leaves it to the owner |
 | `--answer FILE` | Validate a result and record an answer on its active or settled gap |
@@ -1507,6 +1519,13 @@ claim to the run.
 `--brief` accepts `--read` but no `--json`; `--reply` accepts neither
 `--read` nor `--dir`. `--previous`
 works on the direct run, on `--brief` and on `--reply`.
+
+Every review brief contains a `Checked plan SHA-256:` line hashing the
+plan text. `--reply` requires `--brief-file` and checks its hash against
+the current plan. A missing or unreadable brief, a missing or duplicate
+hash line, or a mismatch exits 64 with a `next:` line to run `--brief`
+again. `--brief-file` without `--reply` is a usage error. Changing the
+plan invalidates its saved brief for `--reply`.
 
 After option validation and the empty-plan check, each `--read` path that
 is a regular file (following symlinks) is read as UTF-8. Empty or
@@ -1571,6 +1590,24 @@ the clean detached worktree. Its temporary brief file is
 `$XDG_RUNTIME_DIR/ember/gapcheck-<pid>-<6 hex>.md`, mode 600, with the usual
 Ember runtime fallback. It is removed after the start returns or fails;
 the run keeps its own copy as `brief.md`.
+
+The brief asks the reviewer to search for and name tests and callers
+outside each task's declared files that reference what it changes.
+
+On every route, Ember also parses the document with the flow plan parser.
+A valid flow plan's brief includes `How this flow runs`, with the planner's
+computed waves, overlap serialization including folder prefixes, isolated
+task worktrees merging into the flow branch, and the plan check command
+after each wave, or a statement that the plan has no check. It states that
+waves assume full merges and are not dependencies: a later task sharing a
+stopped task's file can run without its change, so a needed result still
+requires `after`. It asks for ordering gaps only when a needed direction
+is missing or wrong, and for shared-file overlap gaps when the shared
+edits can be separated from the tasks' own checks, even if waves serialize
+them. Other documents, including Workflow plans, receive no flow execution
+section. A JSON object with both `dir` and `tasks` that fails flow validation
+prints `WARNING: invalid flow plan: <problem>` for each problem and keeps
+the generic review.
 
 The reviewer's worktree runs the repository's `worktree.prepare` command
 before its session, as described under `emb run`. Preparation failure
@@ -1738,7 +1775,17 @@ reports only that error and leaves every step uncovered.
 required fields, rejects unknown fields and checks that ids are unique
 across `steps`, `settled` and `closed`, `ranked` refers to every active gap
 once with its step and harm, `counts` counts active gaps, and `next_id`
-exceeds every stored or referenced id. Incomplete checks cannot be reused.
+exceeds every stored or referenced id. Incomplete checks cannot be reused
+as gap-check history; `emb flow --dry-run --previous` can compare them.
+
+A checked plan's result, including one collected with `--reply` or an
+incomplete check, has `schema_version: 3` and a `checked_plan` snapshot with
+`version: 1`. A `kind: flow` snapshot saves tasks in plan order with their `id`,
+`subject`, `task`, `review`, `files` and `after`, plus the plan's `context`
+and `failure_model`. Other plans save `kind: document` and their original
+`text`; these are not flow structural baselines. Older results without a
+saved plan still load. On the `--reply` route the verified brief hash ties
+the snapshot to the plan text the reviewer saw.
 
 Record owner answers and defaults with:
 
@@ -1807,6 +1854,8 @@ with `--previous`, and reads `  none` when nothing is settled. A nonempty
 
 | Field | Value |
 |---|---|
+| `schema_version` | `3` |
+| `checked_plan` | Versioned snapshot of the checked flow tasks, context and failure model, or the original non-flow plan text |
 | `plan` | Absolute plan path |
 | `plan_steps` | `tasks`, `numbered`, `headings` or `whole` |
 | `failure_model` | Whether the plan has a failure model |
@@ -1840,7 +1889,7 @@ When no failure model is present, the warning is
 `WARNING: the plan has no failure model; every unsettled case is reported as a gap`.
 
 A non-zero run exit keeps the run open. Its follow-up names
-`emb gapcheck --plan <plan> --reply <run folder>/turn-1.md` only when the
+`emb gapcheck --plan <plan> --reply <run folder>/turn-1.md --brief-file <run folder>/brief.md` only when the
 reply file exists; otherwise it names a new gap check. An unreadable
 existing reply exits 66. A successful turn with no reply file exits 81.
 
@@ -1850,13 +1899,13 @@ existing reply exits 66. A successful turn with no reply file exits 81.
 |---|---|---|
 | 0 | The reply covers every step and earlier gap, the brief was printed, an answer was recorded, or settings skip or ask | A failed close prints a warning |
 | 1 | Settings database or run record cannot be read, or checkout discovery times out | `owner: repair or remove the settings database the message names`, `next: emb run --status <run>` or a new check |
-| 64 | Usage error, invalid default-answer batch, empty or whitespace-only plan or `--read` file, invalid claim, reviewer row not `set`, Claude subagent row, or a run start check | `next: emb gapcheck --help` for usage, invalid batches or empty files, the claim's `emb choices` line, `owner: name the reviewer for this gap check, or set Gap check reviewer on the Team screen`, the `--brief`/`--reply` route, or the run's line |
+| 64 | Usage error, invalid default-answer batch, empty or whitespace-only plan or `--read` file, invalid claim, reviewer row not `set`, Claude subagent row, missing or unreadable reply brief, missing or mismatched plan hash, or a run start check | `next: emb gapcheck --help` for usage, invalid batches or empty files, the claim's `emb choices` line, `owner: name the reviewer for this gap check, or set Gap check reviewer on the Team screen`, the `--brief`/`--reply` route, a new `--brief` for brief verification failures, or the run's line |
 | 65 | `--dir` is not in a git checkout, or the `--previous`/`--answer` file is not a valid complete result | `next: emb gapcheck --plan <plan> --dir <a folder in the checkout>`, or `next: correct <file> to the emb gapcheck result format, with answers on their gaps in steps or settled` |
 | 66 | Plan, reply, `--previous` or `--answer` file cannot be read, or `--dir` does not exist or is not a folder | `next: ls -l <path>` |
 | 69 | Git is unavailable, the runtime folder cannot be used, or the run exits 69 | `owner: install git`, the run's runtime-folder instruction, or the run's line |
 | 74 | Interrupted by `SIGINT`, `SIGTERM` or `SIGHUP`, or an answer cannot be written | The run's recovery line when a run exists, then a gap check action; `next: ls -l <result>` for an answer write failure |
 | 79 | Reviewer worktree preparation failed before its session started | Diagnostic names the log; `next:` repeats the original gap check invocation |
-| 81 | Invalid reply, incomplete earlier-gap dispositions or links, missing or unknown steps, or a successful run without a reply file | `next: emb gapcheck --plan <plan> --reply <reply>` after fixing the reply, or a new check |
+| 81 | Invalid reply, incomplete earlier-gap dispositions or links, missing or unknown steps, or a successful run without a reply file | `next: emb gapcheck --plan <plan> --reply <reply> --brief-file <saved brief>` after fixing the reply, or a new check |
 | Other | The run's exit from the `emb run` table | The run's line, then a gap check action |
 
 ## `emb flow`
@@ -1870,7 +1919,7 @@ stops, reviews the flow branch and merges it with `emb merge`.
 ### Options
 
 ```text
-emb flow --plan FILE --dry-run [--writer W] [--reviewer W] [--claim ID] [--json]
+emb flow --plan FILE --dry-run [--previous FILE] [--writer W] [--reviewer W] [--claim ID] [--json]
 emb flow --plan FILE --start [--writer W] [--reviewer W] [--claim ID] [--stall MINUTES]
 emb flow --watch FLOW [--json]
 emb flow --status [FLOW] [--json]
@@ -1883,7 +1932,7 @@ emb flow --cancel FLOW [--reason TEXT] [--json]
 |---|---|
 | `--plan FILE` | Read the JSON plan; required with `--dry-run` or `--start` |
 | `--dry-run` | Validate the plan and workers, then print waves and a gap check command |
-| `--previous FILE` | With `--dry-run` only: pass this earlier result to the printed gap check command |
+| `--previous FILE` | With `--dry-run` only: compare this earlier result's saved plan and pass the result to the printed gap check command when complete |
 | `--start` | Create the flow branch, worktree and records, then start the runner |
 | `--writer W`, `--reviewer W` | Name a worker as `<engine>:<model>[@<effort>]`; override the plan and menu |
 | `--claim ID` | Read choices with this claim; store it on the flow without creating or finishing a claim |
@@ -2214,10 +2263,28 @@ the wave, a `## Sources to read` section listing the read files of the
 and closing report headings. Lead corrections also
 preserve their text as written.
 
+Writer briefs, fix-round messages and lead `--send` corrections name the
+plan's check command as shell words and ask the writer to run it or say
+why it could not. With no plan check, they ask for tests for the changed
+files and quick static checks. They also ask the writer to search for tests
+and callers, including outside the declared files, fix breaks caused by
+the change where the limits allow, and list other needed fixes under
+`Not done`. Failures from unavailable services or the environment are
+named without trying to fix them.
+
+The limits permit needed changes to files outside the task's list when no
+other task in the wave changes them, with a check of their callers and an
+`Outside files` report explaining each change. Files another task in the
+wave changes remain forbidden. The review brief repeats these writer
+limits and asks the reviewer to judge whether each outside edit was needed,
+using `must` or `should` for findings about its need. An allowed outside
+edit is not a `lead` finding merely for being outside the declared files.
+The review bar's severity rules also apply.
+
 The review brief starts with `Review of task <id>, round <n>, in flow
 <flow id>: a read-only review; change no file.` It includes the task and
 subject, declared files and the other tasks' files, the `## Sources to read`
-section when the plan has read files, review focus, context,
+section when the setting or plan has read files, review focus, context,
 failure model, the base and head for `git diff` and `git log`, changed and
 outside files, and up to 20,000 characters of the writer's last report.
 The `Changed outside the declared files` section lists Ember's recorded
@@ -2589,14 +2656,42 @@ owner's `flow.review_rounds` minus one). Warnings print as
 `check`, `rounds`, `rounds_source`, `parallel`, `parallel_source` (`plan`
 or `setting`), `stall_minutes`, `whole_review`, `waves` (arrays of task
 ids), `warnings`, `gapcheck` (the shell command, or null when skipped),
-`gapcheck_status` (`run`, `skipped` or `ask`) and `gapcheck_reason`. The
+`gapcheck_status` (`run`, `skipped` or `ask`), `gapcheck_reason` and
+`gapcheck_comparison` (null without `--previous`). The
 decision follows `gapcheck.when` and the plan's task count. The command
 names the flow's reviewer with `--engine`, `--model` and `--effort` when
 that reviewer came from `--reviewer` or the plan; otherwise it names none
 and `emb gapcheck` uses the `gapcheck.reviewer` row. With `ask` it carries
 `--confirmed`. It always carries `--json`, and carries `--previous FILE`
-when the dry run receives it. Empty lists and zero finding counts remain
-in JSON.
+when the dry run receives a complete result. Empty lists and zero finding
+counts remain in JSON.
+
+With `--previous`, the dry run compares the current plan with the earlier
+result's saved flow snapshot. It prints `gap check repeat needed:` for
+each structural change: added or removed tasks, changed `files` or `after`,
+or changed waves. Files and dependencies compare by membership; waves are
+recomputed with tasks in their saved or current order and compare by task
+membership within each wave. It prints `gap check lead judgement:` for
+tasks whose task text, subject or review focus changed, and for context or
+failure-model changes, naming all affected tasks. Text compares exactly.
+The lead judges these text changes under `skill/references/gap-check.md`;
+a repeat check covers the whole plan. Workflow plans keep the lead's
+judgement.
+
+An incomplete earlier check, a result without a saved plan, or a saved
+non-flow plan also prints `gap check repeat needed:`. Incomplete means a
+parse error, uncovered steps or unknown steps. The dry run still validates
+the result's history. For an incomplete result it prints a recovery action:
+complete that check, or run a whole-plan check without passing it as
+`--previous`. The printed gap check command omits the incomplete result.
+Comparison findings print independently of `gapcheck.when`; skip and ask
+behaviour still applies, and a repeat recommendation grants no permission
+to run a check. No output says that no repeat is needed.
+
+JSON `gapcheck_comparison` has `previous` (the absolute earlier result
+path), `repeat_needed` (true when there are repeat reasons, otherwise
+null), `reasons`, `judge` and `recovery` (the incomplete-check action, or
+null). These carry the same findings as the text lines.
 
 `--start` prints:
 
@@ -2854,6 +2949,11 @@ Rules for this answer:
 A blank line, `The question:`, another blank line and the question follow.
 The brief ends with one newline. Members are not told the other members'
 models.
+
+Each member's `emb run` start appends its effective read paths under
+`## Sources to read` when that heading is absent, as described under
+`emb run`. The shared panel brief is kept separately from those saved run
+briefs.
 
 ### Running
 
@@ -3590,11 +3690,12 @@ not pruned.
 
 ```
 emb cleanup --merged-into TARGET [--branch BRANCH] [--claim ID] [--dir DIR] [--dry-run] [--json]
+emb cleanup --claim ID [--branch BRANCH] [--dir DIR] [--dry-run] [--json]
 ```
 
-Removes the Ember run and flow branches `TARGET` contains, with their worktree
-and session. `DIR` is a folder in the git checkout; the default is the current
-folder.
+Removes the Ember run and flow branches contained in their selected merge
+target, with their worktree and session. `DIR` is a folder in the git checkout;
+the default is the current folder.
 
 A run branch is `ember/<engine>/<run id>`; its worktree is the path its run
 record names: `worktrees/<run id>` in Ember's data folder, or
@@ -3624,11 +3725,24 @@ handles nothing. With both `--branch` and `--claim`, the named branch is
 handled only if its recorded claim matches. Without `--claim`, cleanup
 remains repository-wide unless narrowed by `--branch`.
 
+With `--claim` and no `--merged-into`, each matching run or flow branch is
+tested against its record's own `base_branch`. If that branch no longer
+exists, cleanup follows its flow record to the flow's base, continuing
+until it finds a surviving branch. A record with no recorded base, or no
+surviving base, is kept with that reason while other records continue.
+Branches cut from a flow branch are processed before that flow branch.
+Containment checks, target-tip rechecks and action lines use each record's
+resolved target. Explicit `--merged-into TARGET` uses that one target for
+all selected branches. Without `--claim`, `--merged-into` is required;
+omitting it exits 64 with `next: emb cleanup --help`.
+
 An empty result prints `emb cleanup: no Ember run or flow branch left
 against <target>` on standard error, adding `for claim <id>` when a claim
 filter was given. JSON remains an empty list. A successful `emb merge`
 already performs cleanup of its merged branch, so this can be the result
 of a subsequent cleanup.
+Without an explicit target, the empty message says `against each record's
+base branch for claim <id>`.
 
 A flow branch `ember/flow/<flow id>` is a run branch with no run record;
 its worktree is the path its flow record names, or, with no flow record,

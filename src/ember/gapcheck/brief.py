@@ -1,14 +1,19 @@
 """Build a read-only gap check brief with the entire plan and reply schema."""
 
+import hashlib
+import re
+import shlex
 from collections.abc import Sequence
 from pathlib import Path
 
 from ember import citations
+from ember.flows import plan as flow_plan
 from ember.gapcheck.plan import Plan
 from ember.gapcheck.previous import Previous
 from ember.gapcheck.reply import schema_text
 
 FIRST_LINE = "Gap check of the plan {name}: a read-only review; change no file."
+PLAN_HASH = "Checked plan SHA-256: "
 _LINE_BREAK_ESCAPES = str.maketrans(
     {
         "\n": r"\n",
@@ -28,6 +33,17 @@ _LINE_BREAK_ESCAPES = str.maketrans(
 def _path_text(value: str) -> str:
     """Escape line breaks in a path, preserving every other character."""
     return value.translate(_LINE_BREAK_ESCAPES)
+
+
+def plan_hash(plan: Plan) -> str:
+    """Hash the exact UTF-8 plan text embedded in the brief."""
+    return hashlib.sha256(plan.text.encode("utf-8")).hexdigest()
+
+
+def matches_plan(text: str, plan: Plan) -> bool:
+    """Check that a brief carries exactly one matching plan hash line."""
+    hashes = re.findall(r"^Checked plan SHA-256: ([0-9a-f]{64})$", text, re.M)
+    return hashes == [plan_hash(plan)]
 
 
 def _earlier(previous: Previous | None) -> list[str]:
@@ -80,6 +96,39 @@ def _sources(files: Sequence[Path]) -> list[str]:
     return [section, ""] if section else []
 
 
+def _flow(plan: flow_plan.Plan | None) -> list[str]:
+    """Describe the planner's waves and the flow runner's execution rules."""
+    if plan is None:
+        return []
+    return [
+        "## How this flow runs",
+        "",
+        "The flow planner computed these waves:",
+        *(
+            f"- Wave {number}: {', '.join(task.id for task in wave)}"
+            for number, wave in enumerate(flow_plan.waves(plan), 1)
+        ),
+        "",
+        "Tasks with overlapping files, including folder-prefix overlaps, run "
+        "in separate waves. Waves are the planned order assuming each wave "
+        "merges fully; they are not dependencies. When a task stops, a later "
+        "task sharing its file can run without its change. A task that needs "
+        "another task's result still needs that task in after.",
+        "Each task runs in its own isolated worktree and merges into the flow branch.",
+        (
+            f"The plan check runs after each wave: {_path_text(shlex.join(plan.check))}"
+            if plan.check
+            else "The plan has no check command; waves merge without a check."
+        ),
+        "Report an ordering gap only when a needed direction is missing or "
+        "wrong. Check for tasks whose files overlap only on a shared file, even "
+        "when they edit different sections, and raise that overlap as a gap "
+        "when the shared edits can be separated from the tasks' own checks, "
+        "even when their waves serialize them.",
+        "",
+    ]
+
+
 def text(
     plan: Plan,
     checkout: str,
@@ -111,6 +160,7 @@ def text(
     brief = "\n".join(
         [
             FIRST_LINE.format(name=_path_text(plan.path.name)),
+            PLAN_HASH + plan_hash(plan),
             "",
             "Read the plan below and the repository in your own working folder. "
             "For every step, list the behaviours the plan leaves undefined or "
@@ -119,6 +169,9 @@ def text(
             "same time, a missing order between dependent tasks, or a missing check. "
             "A case the failure model settles is not a gap. When the plan has no "
             "failure model, say so in the first gap of step 1 with harm high.",
+            "For each task, search for and name tests and callers outside the "
+            "declared files that reference what it changes, so the lead can "
+            "include them in the plan.",
             "Change, stage, commit or stash nothing.",
             "",
             "For each gap give these four fields:",
@@ -134,6 +187,7 @@ def text(
             "the other places it affects in why. Use the existing text fields; "
             "do not add fields.",
             "",
+            *_flow(plan.flow),
             *_sources(sources),
             *_earlier(previous),
             "Do not redesign the plan and do not decide missing behaviour; "

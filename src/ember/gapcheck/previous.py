@@ -9,13 +9,15 @@ import re
 import tempfile
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
 from typing import Any
 
 from ember import paths
+from ember.flows import plan as flow_plan
 from ember.gapcheck import reply
+from ember.gapcheck.plan import Plan
 
 SCHEMA_NAME = "gapcheck-result.schema.json"
 
@@ -72,6 +74,102 @@ class Previous:
         return frozenset(gap.id for gap in self.gaps)
 
 
+def snapshot(document: Plan) -> dict[str, Any]:
+    """Save a versioned flow baseline or the original non-flow plan text."""
+    if document.flow is None:
+        return {"version": 1, "kind": "document", "text": document.text}
+    flow = document.flow
+    return {
+        "version": 1,
+        "kind": "flow",
+        "context": flow.context,
+        "failure_model": flow.failure_model,
+        "tasks": [
+            {
+                "id": task.id,
+                "subject": task.subject,
+                "task": task.task,
+                "review": task.review,
+                "files": list(task.files),
+                "after": list(task.after),
+            }
+            for task in flow.tasks
+        ],
+    }
+
+
+def comparison(document: flow_plan.Plan, earlier: Previous) -> dict[str, Any]:
+    """Report structural changes and text changes for the lead to judge."""
+    reasons: list[str] = []
+    judgement: list[str] = []
+    made = earlier.document
+    if incomplete(made):
+        reasons.append("the earlier check is incomplete")
+    saved = made.get("checked_plan")
+    if saved is None:
+        reasons.append("the earlier result has no saved plan")
+    elif saved["kind"] != "flow":
+        reasons.append("the earlier saved plan is not a flow structural baseline")
+    else:
+        before = {task["id"]: task for task in saved["tasks"]}
+        now = {task.id: task for task in document.tasks}
+        reasons += [f"task added: {ident}" for ident in now if ident not in before]
+        reasons += [f"task removed: {ident}" for ident in before if ident not in now]
+        for task in document.tasks:
+            old = before.get(task.id)
+            if old is None:
+                continue
+            for field_name in ("files", "after"):
+                if set(old[field_name]) != set(getattr(task, field_name)):
+                    reasons.append(f"{task.id}: changed {field_name}")
+            if any(
+                old[key] != getattr(task, key) for key in ("task", "subject", "review")
+            ):
+                judgement.append(f"{task.id}: changed task text")
+        for field_name in ("context", "failure_model"):
+            if saved[field_name] != getattr(document, field_name):
+                judgement.append(f"changed {field_name} for tasks: " + ", ".join(now))
+        old_plan = replace(
+            document,
+            tasks=tuple(
+                flow_plan.Task(
+                    task["id"],
+                    task["subject"],
+                    task["task"],
+                    tuple(task["files"]),
+                    tuple(task["after"]),
+                    task["review"],
+                )
+                for task in saved["tasks"]
+            ),
+        )
+        if [set(task.id for task in wave) for wave in flow_plan.waves(old_plan)] != [
+            set(task.id for task in wave) for wave in flow_plan.waves(document)
+        ]:
+            reasons.append("changed waves")
+    return {
+        "previous": str(earlier.path),
+        "repeat_needed": True if reasons else None,
+        "reasons": reasons,
+        "judge": judgement,
+        "recovery": (
+            "complete the earlier check, or run a whole-plan gap check without "
+            "passing the incomplete result as --previous"
+            if incomplete(made)
+            else None
+        ),
+    }
+
+
+def incomplete(document: Mapping[str, Any]) -> bool:
+    """Return whether the result lacks complete parsed step coverage."""
+    return bool(
+        document["parse_error"]
+        or document["uncovered_steps"]
+        or document["unknown_steps"]
+    )
+
+
 def schema_text() -> str:
     """Read the packaged result schema as UTF-8 text."""
     return resources.files("ember").joinpath("data", SCHEMA_NAME).read_text("utf-8")
@@ -81,6 +179,9 @@ def _schema_error(
     value: object, schema: Mapping[str, Any], root: Mapping[str, Any], path: str
 ) -> str | None:
     """Apply the JSON Schema keywords used by the packaged result schema."""
+    if "anyOf" in schema:
+        errors = [_schema_error(value, child, root, path) for child in schema["anyOf"]]
+        return None if None in errors else f"{path}: no matching saved plan schema"
     if "$ref" in schema:
         return _schema_error(
             value, root["$defs"][schema["$ref"].split("/")[-1]], root, path
@@ -100,6 +201,8 @@ def _schema_error(
     }
     if kinds and not any(matches[kind] for kind in kinds):
         return f"{path}: expected {' or '.join(kinds)}"
+    if "const" in schema and value != schema["const"]:
+        return f"{path}: expected {schema['const']!r}"
     if "enum" in schema and value not in schema["enum"]:
         return f"{path}: expected one of {', '.join(schema['enum'])}"
     if isinstance(value, dict):
@@ -142,7 +245,15 @@ def _legacy(document: dict[str, Any]) -> dict[str, Any]:
     steps = document.get("steps")
     if not isinstance(steps, list) or any(
         key in document
-        for key in ("next_id", "previous_plan", "settled", "closed", "dispositions")
+        for key in (
+            "next_id",
+            "previous_plan",
+            "settled",
+            "closed",
+            "dispositions",
+            "schema_version",
+            "checked_plan",
+        )
     ):
         return document
     if any(
@@ -238,6 +349,14 @@ def _legacy(document: dict[str, Any]) -> dict[str, Any]:
 
 def _integrity(document: dict[str, Any]) -> str | None:
     """Check identities and derived result fields across schema-valid entries."""
+    if ("schema_version" in document) != ("checked_plan" in document):
+        return "$: schema_version and checked_plan must occur together"
+    saved = document.get("checked_plan")
+    if saved is not None and saved["kind"] == "flow":
+        try:
+            flow_plan.from_json({"dir": "/", "tasks": saved["tasks"]}, Path("/"))
+        except flow_plan.PlanError as error:
+            return "$.checked_plan: " + "; ".join(error.problems)
     active = [
         {**gap, "step": step["step"]}
         for step in document["steps"]
@@ -316,8 +435,8 @@ def parse(document: object) -> list[EarlierGap]:
     ]
 
 
-def load(path: str) -> Previous:
-    """Read and validate an earlier, complete result file.
+def load(path: str, *, allow_incomplete: bool = False) -> Previous:
+    """Read a validated result, requiring completion except for comparison.
 
     Raises:
         PreviousError: The file cannot be read, or is not a valid result.
@@ -338,7 +457,7 @@ def load(path: str) -> Previous:
         ) from error
     try:
         made = validate(document)
-        if made["parse_error"] or made["uncovered_steps"] or made["unknown_steps"]:
+        if incomplete(made) and not allow_incomplete:
             raise PreviousError(
                 "$: the check is incomplete; finish that check before using its result",
                 unreadable=False,

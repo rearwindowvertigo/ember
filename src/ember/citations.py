@@ -183,3 +183,21 @@ def sources_section(files: Sequence[Path]) -> str | None:
         "Read them before you start; they are outside your working folder "
         "and readable as given.\n\n" + listing
     )
+
+
+def append_sources(brief: str, read: Iterable[str]) -> str:
+    """Append a run's read paths unless its brief already names sources.
+
+    Args:
+        brief: The supplied brief, which may already have a sources section.
+        read: The effective read paths, including standing paths and folders.
+
+    Returns:
+        The brief with each distinct absolute read path listed, or unchanged
+        when there are no paths or a `## Sources to read` heading exists.
+    """
+    if re.search(r"(?m)^## Sources to read[ \t]*\r?$", brief):
+        return brief
+    paths = list(dict.fromkeys(Path(item).resolve() for item in read))
+    section = sources_section(paths)
+    return f"{brief.rstrip()}\n\n{section}\n" if section else brief

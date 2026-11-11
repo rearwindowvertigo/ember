@@ -108,10 +108,16 @@ as a Claude subagent:
    Follow `references/claude-agents.md` for its model and tools.
 3. Save its final message to a scratch file, then parse it with the same
    `--previous`:
-   `emb gapcheck --plan <file> --reply <reply-file> [--previous <result>] --json > <scratch>/gapcheck-<plan stem>-<n>.json`.
+   `emb gapcheck --plan <file> --reply <reply-file> --brief-file <scratch>/gap-brief.md [--previous <result>] --json > <scratch>/gapcheck-<plan stem>-<n>.json`.
 
 These two commands start no run and use no claim. Check the parsed result
 for coverage and errors as above.
+
+Keep the printed brief: it carries the hash of the plan the reviewer saw.
+Every `--reply` needs `--brief-file`, including panel replies. A missing or
+unreadable brief, missing hash or changed plan exits 64 with a `next:` line
+to print a new brief. Review that new brief before importing a new reply.
+For CLI run recovery, use the run's saved brief named by the `next:` line.
 
 ## Owner answers
 
@@ -173,13 +179,30 @@ earlier settled gap). `ranked` refers to active gaps by id, step and harm.
 With the owner away and no answer possible, work waits. Do not take a
 default for a `high` gap with `ask_owner: true` yourself. Write the answers
 into the failure model, context or task text before `--start` or the
-Workflow. If answers materially change task scope, files, dependencies or
-ordering, record every answer of the current result first, update the plan
-once with all of them, then run one repeat flow dry run with
-`--previous <last result>` and its printed gap check command (the gap check
-alone for a Workflow, with the same `--previous`).
-Recording answers without such changes needs no repeat. The reviewer finds gaps;
-it decides nothing.
+Workflow. Record every answer of the current result first and update the
+plan once with all of them. For a flow, run
+`emb flow --plan <file> --dry-run --previous <last result>` and follow its
+comparison lines (or `gapcheck_comparison` in JSON):
+
+- `repeat needed` names each structural change: tasks added or removed,
+  changed `files` or `after`, or changed waves. Run a whole-plan check.
+- `lead judgement` lists changed task text, context or failure model and
+  the affected task ids. Judge whether these change scope or behaviour
+  enough to need a whole-plan check.
+- An incomplete earlier check or a result without a saved flow baseline
+  reports `repeat needed`. For an incomplete check, complete it or run a
+  whole-plan check without passing that result as `--previous`.
+
+The comparison is independent of `gapcheck.when`: a repeat recommendation
+does not grant permission. Keep the `skipped` and `ask` rules above.
+Ember never reports that no repeat is needed. Files and `after` compare
+by membership; task text, context and failure model compare exactly.
+JSON `repeat_needed` is `true` for a recommendation and `null` otherwise;
+`reasons`, `judge` and `recovery` carry the same findings as the text.
+Results save a versioned checked plan; older results still load.
+For a Workflow, judge material changes to scope, files, dependencies or
+ordering yourself and repeat with the same `--previous` when needed.
+The reviewer finds gaps; it decides nothing.
 
 ## Repeat checks
 

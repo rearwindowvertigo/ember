@@ -8,7 +8,7 @@ theme's style sheet through dynamic properties.
 import html
 import math
 from collections.abc import Callable, Sequence
-from typing import cast
+from typing import Literal, cast
 
 import shiboken6
 from PySide6.QtCore import (
@@ -251,12 +251,21 @@ class TipPopup(QWidget):
         self.label.setFont(theme.font("caption"))
         layout.addWidget(self.label)
         self.owner: QWidget | None = None
+        self.mode: Literal["hover", "keyboard"] = "hover"
 
-    def show_for(self, owner: QWidget, text: str) -> None:
+    def show_for(
+        self,
+        owner: QWidget,
+        text: str,
+        *,
+        mode: Literal["hover", "keyboard"] = "hover",
+    ) -> None:
         """Show `text` under `owner`, wrapped at `TIP_WIDTH` when it is wider.
 
         Attach the native popup to the owner's window before showing it.
         """
+        if self.isVisible() and self.owner is owner and self.mode == "keyboard":
+            mode = "keyboard"
         self.winId()
         handle = self.windowHandle()
         parent = owner.window().windowHandle()
@@ -265,6 +274,7 @@ class TipPopup(QWidget):
                 self.hide()
             handle.setTransientParent(parent)
         self.owner = owner
+        self.mode = mode
         shown = tip_text(text)
         wide = shown != text
         self.label.setTextFormat(
@@ -360,15 +370,19 @@ class TipWrapper(QObject):
             and cast(QFocusEvent, event).reason() in KEYBOARD_REASONS
         )
         if show and watched.isEnabled() and watched.toolTip():
-            tip_popup().show_for(watched, watched.toolTip())
+            tip_popup().show_for(
+                watched,
+                watched.toolTip(),
+                mode="keyboard" if kind == QEvent.Type.FocusIn else "hover",
+            )
         elif _popup is not None and shiboken6.isValid(_popup):
             if kind in (QEvent.Type.FocusOut, QEvent.Type.Hide) or (
-                kind == QEvent.Type.Leave and not watched.hasFocus()
+                kind == QEvent.Type.Leave and _popup.mode == "hover"
             ):
                 _popup.hide_for(watched)
             elif kind == QEvent.Type.ToolTipChange and _popup.owner is watched:
                 if watched.toolTip() and _popup.isVisible():
-                    _popup.show_for(watched, watched.toolTip())
+                    _popup.show_for(watched, watched.toolTip(), mode=_popup.mode)
                 else:
                     _popup.hide_for(watched)
         return False
@@ -386,9 +400,8 @@ def install_tooltips(app: QApplication) -> TipWrapper:
 class InfoTip(QPushButton):
     """A small info icon that shows a tooltip on hover, keyboard focus or click.
 
-    The tooltip stays while the pointer is over the icon or the icon has
-    focus, and hides when the pointer leaves an unfocused icon, focus moves
-    on, or Escape is pressed.
+    A hover or mouse-click tip hides when the pointer leaves. A keyboard tip
+    stays while keyboard focus stays. Moving focus or pressing Escape hides it.
     """
 
     def __init__(self, about: str, text: str) -> None:
@@ -406,6 +419,7 @@ class InfoTip(QPushButton):
         self.setAccessibleName(f"About {about}")
         self.setAccessibleDescription(text)
         self.setToolTip(text)
+        self._keyboard_activation = False
         self._paint_icon()
         theme.signals.changed.connect(self._paint_icon)
         self.clicked.connect(self.show_tip)
@@ -418,7 +432,8 @@ class InfoTip(QPushButton):
         self.setToolTip(text)
         self.setAccessibleDescription(text)
         if self._tip_shown():
-            self.show_tip()
+            popup = tip_popup()
+            popup.show_for(self, text, mode=popup.mode)
 
     def _tip_shown(self) -> bool:
         popup = _popup
@@ -431,7 +446,11 @@ class InfoTip(QPushButton):
 
     def show_tip(self) -> None:
         """Show the tooltip under the icon."""
-        tip_popup().show_for(self, self.toolTip())
+        tip_popup().show_for(
+            self,
+            self.toolTip(),
+            mode="keyboard" if self._keyboard_activation else "hover",
+        )
 
     def hide_tip(self) -> None:
         """Hide the tooltip when it is this icon's."""
@@ -440,25 +459,31 @@ class InfoTip(QPushButton):
 
     def event(self, event: QEvent) -> bool:  # noqa: D102
         if event.type() == QEvent.Type.ToolTip:
-            self.show_tip()
+            tip_popup().show_for(self, self.toolTip())
             return True
         return super().event(event)
 
     def leaveEvent(self, event: QEvent) -> None:  # noqa: D102, N802
         super().leaveEvent(event)
-        if not self.hasFocus():
+        if self._tip_shown() and tip_popup().mode == "hover":
             self.hide_tip()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: D102, N802
+        self._keyboard_activation = False
+        super().mousePressEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: D102, N802
         if event.key() == Qt.Key.Key_Escape:
             self.hide_tip()
             return
+        if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._keyboard_activation = True
         super().keyPressEvent(event)
 
     def focusInEvent(self, event: QFocusEvent) -> None:  # noqa: D102, N802
         super().focusInEvent(event)
         if event.reason() in KEYBOARD_REASONS:
-            self.show_tip()
+            tip_popup().show_for(self, self.toolTip(), mode="keyboard")
 
     def focusOutEvent(self, event: QFocusEvent) -> None:  # noqa: D102, N802
         super().focusOutEvent(event)

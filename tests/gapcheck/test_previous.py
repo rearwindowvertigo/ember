@@ -446,3 +446,169 @@ def test_single_answer_can_overwrite_active_and_settled_answers(
     )
     previous.answer(previous.load(saved), identity, "New")
     assert {gap.id: gap.answer for gap in previous.load(saved).gaps}[identity] == "New"
+
+
+def checked_flow(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+    path = tmp_path / "plan.json"
+    document: dict[str, Any] = {
+        "dir": str(tmp_path),
+        "context": "Context\n",
+        "failure_model": "Keep data\n",
+        "tasks": [
+            {
+                "id": ident,
+                "subject": f"feat: {ident}",
+                "task": f"Build {ident}\n",
+                "review": "Check it",
+                "files": [f"{ident}.py", f"tests/test_{ident}.py"],
+                "after": [],
+            }
+            for ident in ("a", "b", "c")
+        ],
+    }
+    path.write_text(json.dumps(document))
+    return path, document
+
+
+@pytest.mark.parametrize(
+    ("change", "reasons", "judge"),
+    [
+        ("add", ["task added: d", "changed waves"], []),
+        ("remove", ["task removed: c", "changed waves"], []),
+        ("files", ["a: changed files", "changed waves"], []),
+        ("after", ["a: changed after", "changed waves"], []),
+        ("task", [], ["a: changed task text"]),
+        ("subject", [], ["a: changed task text"]),
+        ("review", [], ["a: changed task text"]),
+        ("context", [], ["changed context for tasks: a, b, c"]),
+        ("failure_model", [], ["changed failure_model for tasks: a, b, c"]),
+        ("file order", [], []),
+        ("after order", [], []),
+        ("unchanged", [], []),
+    ],
+)
+def test_compare_saved_plan_after_editing_in_place(
+    tmp_path: Path, change: str, reasons: list[str], judge: list[str]
+) -> None:
+    from ember.flows import plan as flow_plan
+    from ember.gapcheck import plan
+
+    path, document = checked_flow(tmp_path)
+    if change == "after order":
+        document["tasks"][0]["after"] = ["b", "c"]
+        path.write_text(json.dumps(document))
+    saved = previous.snapshot(plan.load(path))
+    earlier = previous.load(
+        write(tmp_path, result(schema_version=3, checked_plan=saved))
+    )
+    tasks = document["tasks"]
+    if change == "add":
+        tasks.append({**tasks[-1], "id": "d", "files": ["d.py"]})
+    elif change == "remove":
+        tasks.pop()
+    elif change == "files":
+        tasks[0]["files"].append("b.py")
+    elif change == "after":
+        tasks[0]["after"] = ["b"]
+    elif change in ("task", "subject", "review"):
+        tasks[0][change] += " "
+    elif change in ("context", "failure_model"):
+        document[change] += " "
+    elif change == "file order":
+        tasks[0]["files"].reverse()
+    elif change == "after order":
+        tasks[0]["after"].reverse()
+    path.write_text(json.dumps(document))
+    report = previous.comparison(flow_plan.load(path), earlier)
+    assert report == {
+        "previous": str(earlier.path),
+        "repeat_needed": True if reasons else None,
+        "reasons": reasons,
+        "judge": judge,
+        "recovery": None,
+    }
+    assert earlier.document["checked_plan"] == saved
+
+
+def test_comparison_keeps_task_order_when_recomputing_overlap_waves(
+    tmp_path: Path,
+) -> None:
+    from ember.flows import plan as flow_plan
+    from ember.gapcheck import plan
+
+    path, document = checked_flow(tmp_path)
+    document["tasks"][0]["files"] = ["src"]
+    document["tasks"][1]["files"] = ["src/module.py"]
+    path.write_text(json.dumps(document))
+    earlier = previous.load(
+        write(
+            tmp_path,
+            result(schema_version=3, checked_plan=previous.snapshot(plan.load(path))),
+        )
+    )
+    document["tasks"].reverse()
+    path.write_text(json.dumps(document))
+    report = previous.comparison(flow_plan.load(path), earlier)
+    assert report["reasons"] == ["changed waves"]
+    assert report["repeat_needed"]
+
+
+@pytest.mark.parametrize("field", ["parse_error", "uncovered_steps", "unknown_steps"])
+def test_incomplete_results_are_comparison_only(tmp_path: Path, field: str) -> None:
+    from ember.flows import plan as flow_plan
+    from ember.gapcheck import plan
+
+    path, _ = checked_flow(tmp_path)
+    document = result(schema_version=3, checked_plan=previous.snapshot(plan.load(path)))
+    document[field] = "bad reply" if field == "parse_error" else [1]
+    saved = write(tmp_path, document)
+    with pytest.raises(previous.PreviousError, match="incomplete"):
+        previous.load(saved)
+    earlier = previous.load(saved, allow_incomplete=True)
+    report = previous.comparison(flow_plan.load(path), earlier)
+    assert report["repeat_needed"]
+    assert report["reasons"] == ["the earlier check is incomplete"]
+    assert "without passing the incomplete result as --previous" in report["recovery"]
+    # Comparison mode still applies identity validation.
+    document["ranked"] = [{"id": "g1", "step": 1, "harm": "high"}]
+    with pytest.raises(previous.PreviousError, match="ranked"):
+        previous.load(write(tmp_path, document), allow_incomplete=True)
+
+
+@pytest.mark.parametrize("kind", ["old", "document"])
+def test_older_and_nonflow_results_are_not_structural_baselines(
+    tmp_path: Path, kind: str
+) -> None:
+    from ember.flows import plan as flow_plan
+
+    path, _ = checked_flow(tmp_path)
+    document = result()
+    if kind == "document":
+        document.update(
+            schema_version=3,
+            checked_plan={"version": 1, "kind": "document", "text": "Workflow\n"},
+        )
+    earlier = previous.load(write(tmp_path, document))
+    report = previous.comparison(flow_plan.load(path), earlier)
+    assert report["repeat_needed"] and len(report["reasons"]) == 1
+    assert report["recovery"] is None
+
+
+@pytest.mark.parametrize("change", ["version", "kind", "missing", "cycle", "duplicate"])
+def test_snapshot_schema_and_graph_are_validated(tmp_path: Path, change: str) -> None:
+    from ember.gapcheck import plan
+
+    path, _ = checked_flow(tmp_path)
+    saved = previous.snapshot(plan.load(path))
+    if change == "version":
+        saved["version"] = 2
+    elif change == "kind":
+        saved["kind"] = "unknown"
+    elif change == "missing":
+        del saved["context"]
+    elif change == "cycle":
+        saved["tasks"][0]["after"] = ["a"]
+    else:
+        saved["tasks"][1]["id"] = "a"
+    with pytest.raises(previous.PreviousError):
+        previous.load(write(tmp_path, result(schema_version=3, checked_plan=saved)))

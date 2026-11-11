@@ -730,7 +730,7 @@ class Cleanup:
     def __init__(
         self,
         repo: Repository,
-        target: str,
+        target: str | None,
         *,
         again: str,
         claim: str | None = None,
@@ -743,7 +743,7 @@ class Cleanup:
 
         Args:
             repo: The repository.
-            target: The branch the worker branches were merged into.
+            target: The merge target, or `None` for each record's base branch.
             again: The command that repeats this cleanup.
             claim: Handle only records with this exact claim id.
             dry_run: Report what would be done and change nothing.
@@ -800,10 +800,105 @@ class Cleanup:
                 before it, then the branch it failed on, kept, with the steps
                 done to it and the failed step.
         """
+        if self.target is None:
+            return self._own_targets(branches)
         for branch in branches:
             claim = self._branch_claim(branch)
             if self.claim is None or claim == self.claim:
                 self._report(self._one(branch, claim))
+        return self.results
+
+    def _recorded_base(self, branch: str) -> str | None:
+        """Read the base after checking the record belongs to this branch."""
+        match = WORKER_BRANCH.fullmatch(branch)
+        if match is None:
+            raise _KeepError(NOT_WORKER, f"next: git branch -d {branch}")
+        if FLOW_BRANCH.fullmatch(branch):
+            try:
+                flow = _matching_flow(self.repo, branch)
+            except BranchError as error:
+                raise _KeepError(str(error), error.line) from error
+            return flow.get("base_branch") if flow is not None else None
+        run = self._record(match["run"], match["engine"], branch)
+        return run.base_branch if run is not None else None
+
+    def _base_target(self, base: str | None) -> str:
+        """Follow deleted flow branches until a surviving base is found."""
+        target = base
+        seen: set[str] = set()
+        while target and target not in seen:
+            seen.add(target)
+            if self.repo.branch_exists(target):
+                return target
+            try:
+                flow = _matching_flow(self.repo, target)
+            except BranchError as error:
+                raise _KeepError(str(error), error.line) from error
+            target = flow.get("base_branch") if flow is not None else None
+        reason = (
+            f"no surviving base branch found from {base}"
+            if base
+            else "no base branch is recorded"
+        )
+        raise _KeepError(reason, f"next: {self.again}")
+
+    def _own_targets(self, branches: list[str]) -> list[Result]:
+        """Clean up claimed records before the flow branches they were cut from."""
+        targets: dict[str, str | None] = {}
+        keeps: dict[str, _KeepError] = {}
+        for branch in branches:
+            if self._branch_claim(branch) != self.claim:
+                continue
+            try:
+                targets[branch] = self._base_target(self._recorded_base(branch))
+            except _KeepError as error:
+                targets[branch] = None
+                keeps[branch] = error
+        ordered: list[str] = []
+        seen: set[str] = set()
+
+        def visit(branch: str) -> None:
+            if branch in seen:
+                return
+            seen.add(branch)
+            for child, target in targets.items():
+                if target == branch:
+                    visit(child)
+            ordered.append(branch)
+
+        for branch in targets:
+            visit(branch)
+        for branch in ordered:
+            if branch in keeps:
+                error = keeps[branch]
+                match = WORKER_BRANCH.fullmatch(branch)
+                self._report(
+                    Result(
+                        branch,
+                        match["run"] if match else None,
+                        KEPT,
+                        str(error),
+                        error.line,
+                        self.claim,
+                    )
+                )
+                continue
+            target = targets[branch]
+            assert target is not None
+            job = Cleanup(
+                self.repo,
+                target,
+                again=_again(target, branch, self.repo.top, self.claim),
+                claim=self.claim,
+                dry_run=self.dry_run,
+                core=self.make_core,
+                out=self.out,
+                err=self.err,
+            )
+            try:
+                job.run([branch])
+            finally:
+                self.results.extend(job.results)
         return self.results
 
     def _branch_claim(self, branch: str) -> str | None:
@@ -887,6 +982,7 @@ class Cleanup:
         )
 
     def _tips(self, branch: str) -> tuple[str, str]:
+        assert self.target is not None
         tip = self.repo.tip(branch)
         if tip is None:
             raise _KeepError(f"{branch} no longer exists", f"next: {self.again}")
@@ -984,6 +1080,7 @@ class Cleanup:
         parts: list[str],
     ) -> Result:
         """Remove a branch and its worktree while any run locks are held."""
+        assert self.target is not None
         if (self.repo.tip(branch), self.repo.tip(self.target)) != (tip, target_tip):
             moved = branch if self.repo.tip(branch) != tip else self.target
             raise _KeepError(f"{moved} moved", f"next: {self.again}")
@@ -1201,15 +1298,18 @@ def _print_failure(
     return error.code
 
 
-def _again(target: str, branch: str | None, top: Path, claim: str | None = None) -> str:
+def _again(
+    target: str | None, branch: str | None, top: Path, claim: str | None = None
+) -> str:
     scope = f" --branch {branch}" if branch else ""
     if claim is not None:
         scope += f" --claim {shlex.quote(claim)}"
-    return f"emb cleanup --merged-into {target}{scope} --dir {top}"
+    into = f" --merged-into {target}" if target is not None else ""
+    return f"emb cleanup{into}{scope} --dir {top}"
 
 
 def cleanup(
-    target: str,
+    target: str | None = None,
     *,
     branch: str | None = None,
     claim: str | None = None,
@@ -1225,7 +1325,7 @@ def cleanup(
     """Run `emb cleanup`.
 
     Args:
-        target: The branch the worker branches were merged into.
+        target: The merge target, or `None` for each claimed record's base branch.
         branch: Clean up only this branch.
         claim: Handle only records with this exact claim id; no live claim needed.
         directory: A folder in the git checkout.
@@ -1243,6 +1343,17 @@ def cleanup(
     env = os.environ if env is None else env
     out = out or sys.stdout
     err = err or sys.stderr
+    if target is None and claim is None:
+        return _print_failure(
+            "cleanup",
+            BranchError(
+                exits.USAGE,
+                "--merged-into is required without --claim",
+                "next: emb cleanup --help",
+            ),
+            err,
+            failures,
+        )
     try:
         repo = open_repository(directory, env, "cleanup", from_main=True)
     except BranchError as error:
@@ -1280,8 +1391,9 @@ def cleanup(
         print(json.dumps([item.to_json() for item in job.results], indent=2), file=out)
     elif not job.results and failure is None:
         scope = f" for claim {claim}" if claim is not None else ""
+        against = target if target is not None else "each record's base branch"
         print(
-            f"emb cleanup: no Ember run or flow branch left against {target}{scope}",
+            f"emb cleanup: no Ember run or flow branch left against {against}{scope}",
             file=err,
         )
     if failure is not None:

@@ -2321,7 +2321,7 @@ def test_name_check_matches_whole_tokens(text: str, hits: int) -> None:
 
 NEW_ROUTES = (
     (["gapcheck", "--brief"], "gapcheck-brief"),
-    (["gapcheck", "--reply", "reply.md"], "gapcheck-reply"),
+    (["gapcheck", "--reply", "reply.md", "--brief-file", "brief.md"], "gapcheck-reply"),
     (["gapcheck"], "gapcheck"),
     (["flow", "--dry-run"], "flow-dry-run"),
     (["flow", "--start"], "flow-start"),
@@ -2736,6 +2736,8 @@ def test_flow_case_reports_have_reference_fields(
         work.emb("gapcheck", "--plan", str(flow_plan(work)), "--json").stdout
     )
     assert set(gap) == {
+        "schema_version",
+        "checked_plan",
         "plan",
         "plan_steps",
         "failure_model",
@@ -2994,6 +2996,8 @@ def test_repeat_accepts_legacy_unanswered_results(
             "settled",
             "closed",
             "dispositions",
+            "schema_version",
+            "checked_plan",
         ):
             del made[key]
     saved = tmp_path / "gapcheck-plan-1.json"
@@ -3265,3 +3269,74 @@ def test_flow_repeated_capacity_stop_keeps_report(
         expected = "report: capacity on strict; recommend only the same-worker retry"
         assert json.loads(result.stdout)["report"] == [expected]
         assert result.stderr.splitlines()[-1] == expected
+
+
+@pytest.mark.parametrize("with_previous", [False, True])
+@pytest.mark.parametrize(
+    "problem", [None, "missing option", "missing file", "no hash", "changed"]
+)
+def test_gapcheck_reply_stub_checks_the_saved_brief(
+    tmp_path: Path,
+    env: dict[str, str],
+    with_previous: bool,
+    problem: str | None,
+) -> None:
+    from ember.gapcheck import brief as gap_brief
+    from ember.gapcheck import plan as gap_plan
+
+    work = case("flow-gap-check-first", tmp_path, env)
+    plan = flow_plan(work)
+    earlier = tmp_path / "earlier.json"
+    earlier.write_text(work.emb("gapcheck", "--plan", str(plan), "--json").stdout)
+    result = previous.load(str(earlier)) if with_previous else None
+    saved_brief = tmp_path / "panel brief.md"
+    printed = work.emb(
+        "gapcheck",
+        "--plan",
+        str(plan),
+        "--brief",
+        *(["--previous", str(earlier)] if with_previous else []),
+    )
+    assert printed.returncode == 0, printed.stderr
+    assert gap_brief.matches_plan(printed.stdout, gap_plan.load(plan))
+    saved_brief.write_text(printed.stdout)
+    answer = tmp_path / "review.json"
+    answer.write_text(
+        json.dumps(
+            {
+                "steps": [{"step": 1, "gaps": []}],
+                "dispositions": [
+                    {"id": gap.id, "status": "closed", "reason": "Outside the plan"}
+                    for gap in (() if result is None else result.gaps)
+                ],
+            }
+        )
+    )
+    if problem == "missing file":
+        saved_brief.unlink()
+    elif problem == "no hash":
+        saved_brief.write_text("Old brief\n")
+    elif problem == "changed":
+        document = json.loads(plan.read_text())
+        document["tasks"][0]["task"] += " New scope"
+        plan.write_text(json.dumps(document))
+    checked = work.emb(
+        "gapcheck",
+        "--plan",
+        str(plan),
+        "--reply",
+        str(answer),
+        "--json",
+        *(["--previous", str(earlier)] if with_previous else []),
+        *([] if problem == "missing option" else ["--brief-file", str(saved_brief)]),
+    )
+    if problem:
+        assert checked.returncode == 64
+        assert "--brief > <brief-file>" in checked.stderr
+        assert not checked.stdout
+    else:
+        assert checked.returncode == 0, checked.stderr
+        made = previous.validate(json.loads(checked.stdout))
+        assert made["schema_version"] == 3
+        assert made["checked_plan"] == previous.snapshot(gap_plan.load(plan))
+        assert made["checked_plan"]["kind"] == "flow"

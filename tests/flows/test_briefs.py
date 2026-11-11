@@ -43,6 +43,7 @@ def plan() -> Plan:
             context="Decided here\n@context",
             failure_model="Handle empty\n@failure",
             read=(),
+            check=(),
         ),
     )
 
@@ -91,12 +92,54 @@ def test_writer(plan: Plan, task: Task) -> None:
 def test_writer_omits_blank_optional_sections(task: Task) -> None:
     text = briefs.writer_brief(
         FLOW,
-        cast("Plan", SimpleNamespace(context=" \n", failure_model="", read=())),
+        cast(
+            "Plan", SimpleNamespace(context=" \n", failure_model="", read=(), check=())
+        ),
         task,
         [],
     )
     assert "## Context" not in text and "## Failure model" not in text
     assert "No other task runs in this wave." in text
+
+
+@pytest.mark.parametrize(
+    ("check", "instruction"),
+    [
+        ((), "Run the tests for the files you change and quick static checks."),
+        (("make", "check"), "Run the plan's check command `make check`"),
+        (
+            ("./check script", "--name", "two words"),
+            "Run the plan's check command `'./check script' --name 'two words'`",
+        ),
+    ],
+)
+def test_writer_fix_and_send_checks(
+    task: Task, check: tuple[str, ...], instruction: str
+) -> None:
+    checked_plan = cast(
+        "Plan", SimpleNamespace(context="", failure_model="", read=(), check=check)
+    )
+    messages = [
+        briefs.writer_brief(FLOW, checked_plan, task, ["src/b.py"]),
+        briefs.fix_message(FLOW, task, 1, [_finding()], check=check),
+        briefs.send_message(FLOW, task, "Correct this", check=check),
+    ]
+    sections = [
+        text.split("## Checks\n\n", 1)[1].split("\n\n## ")[0].strip()
+        for text in messages
+    ]
+    assert sections[0] == sections[1] == sections[2]
+    for text in messages:
+        assert instruction in text
+        assert ("or say why you could not run it" in text) == bool(check)
+        assert "Search for tests and callers of what changed" in text
+        assert "including outside the declared files" in text
+        assert "Fix a break your change causes in an outside file" in text
+        assert 'the Limits allow it; otherwise list it under "Not done"' in text
+        assert (
+            "Name failures from an unavailable service or environment without "
+            "trying to fix them."
+        ) in text
 
 
 @pytest.mark.parametrize("round", [1, 2])
@@ -127,6 +170,13 @@ def test_review(plan: Plan, task: Task, round: int) -> None:
     assert report[: briefs.REPORT_LIMIT].replace("\n", "\n    ") in text
     assert verdict.schema_text() in text
     assert briefs.REVIEW_BAR in text
+    assert "## Writer limits\n\n" + briefs._LIMITS in text
+    assert "Judge each outside edit on whether the task needed it" in text
+    assert "Use must or should for findings about its need" in text
+    assert (
+        "An outside edit allowed by these limits is not a lead finding "
+        "just for being outside the declared files."
+    ) in text
     assert (
         "For each must, describe the underlying cause and the other places "
         "it affects in problem. Use the existing text fields; do not add fields."
@@ -237,9 +287,11 @@ def test_fix_filters_and_numbers_must_findings(task: Task) -> None:
 
 def test_send_preserves_intentional_commands(task: Task) -> None:
     text = "Correct this\n@write a.py fixed\n"
-    assert briefs.send_message(FLOW, task, text) == (
+    rendered = briefs.send_message(FLOW, task, text)
+    assert rendered.startswith(
         f"Correction from the lead for task parser in flow {FLOW}.\n\n" + text
     )
+    assert rendered.count(text) == 1
 
 
 @pytest.mark.parametrize("separator", ["\n", "\r", "\r\n"])
@@ -297,7 +349,9 @@ def test_briefs_with_parsed_plan(tmp_path: Path) -> None:
     )
     assert "    Read input" in review and "    Check empty input" in review
     assert briefs.fix_message(FLOW, task, 1, [_finding()]).startswith("Fix round 1")
-    assert briefs.send_message(FLOW, task, "Correction").endswith("\n\nCorrection")
+    assert "\n\nCorrection\n\n## Checks" in briefs.send_message(
+        FLOW, task, "Correction"
+    )
 
 
 def test_writer_and_reviewer_list_the_read_files(tmp_path: Path, task: Task) -> None:
@@ -312,6 +366,7 @@ def test_writer_and_reviewer_list_the_read_files(tmp_path: Path, task: Task) -> 
             context="",
             failure_model="",
             read=(str(issue), str(folder), str(tmp_path / "missing")),
+            check=(),
         ),
     )
     writer = briefs.writer_brief(FLOW, with_sources, task, [])
@@ -333,7 +388,7 @@ def test_writer_and_reviewer_list_the_read_files(tmp_path: Path, task: Task) -> 
         assert str(tmp_path / "missing") not in text
     plain = briefs.writer_brief(
         FLOW,
-        cast("Plan", SimpleNamespace(context="", failure_model="", read=())),
+        cast("Plan", SimpleNamespace(context="", failure_model="", read=(), check=())),
         task,
         [],
     )
