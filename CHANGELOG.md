@@ -15,7 +15,6 @@
 ### Fixed
 
 * **app:** hide a hover tip when the mouse leaves a focused control ([1b34e28](https://github.com/rearwindowvertigo/ember/commit/1b34e2821e1fc86c565b2c78538b8fad2ba55a87))
-* **cli:** word the run sources section as readable paths, and let the eval stub clean up by claim ([1c6329d](https://github.com/rearwindowvertigo/ember/commit/1c6329d781235f846f408ba796c8cb2567d7a81f))
 
 ## [0.23.0](https://github.com/rearwindowvertigo/ember/compare/v0.22.0...v0.23.0) (2026-11-10)
 
