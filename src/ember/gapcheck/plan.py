@@ -6,6 +6,8 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from ember.flows import plan as flow_plan
+
 KINDS = ("tasks", "numbered", "headings", "whole")
 _NUMBERED = re.compile(r"\d+[.)]\s+\S")
 _HEADING = re.compile(r"(#{1,6})\s+\S")
@@ -24,13 +26,15 @@ class Step:
 
 @dataclass(frozen=True)
 class Plan:
-    """A plan's absolute path, source text, steps and failure model presence."""
+    """A plan's source, review steps, failure model presence and flow validation."""
 
     path: Path
     text: str
     kind: str
     steps: tuple[Step, ...]
     failure_model: bool
+    flow: flow_plan.Plan | None = None
+    flow_problems: tuple[str, ...] = ()
 
 
 class PlanError(Exception):
@@ -148,7 +152,10 @@ def has_failure_model(text: str, kind: str) -> bool:
 
 
 def load(path: str | Path) -> Plan:
-    """Read a UTF-8 plan and identify its steps and failure model.
+    """Read a UTF-8 plan, identify its steps and validate it as a flow.
+
+    Documents with both dir and tasks report flow validation problems;
+    other documents that fail flow validation keep generic review.
 
     Raises:
         PlanError: The file cannot be read or is not UTF-8.
@@ -159,4 +166,19 @@ def load(path: str | Path) -> Plan:
     except (OSError, UnicodeDecodeError) as error:
         raise PlanError(f"cannot read the plan {absolute}: {error}") from error
     kind, steps = split(text)
-    return Plan(absolute, text, kind, steps, has_failure_model(text, kind))
+    flow = None
+    flow_problems: tuple[str, ...] = ()
+    try:
+        flow = flow_plan.parse(text, absolute)
+    except flow_plan.PlanError as error:
+        # A document with both required top-level flow keys is flow-shaped.
+        # Other documents, including partial task lists, keep generic review.
+        try:
+            document = json.loads(text)
+        except ValueError:
+            document = None
+        if isinstance(document, dict) and {"dir", "tasks"} <= document.keys():
+            flow_problems = error.problems
+    return Plan(
+        absolute, text, kind, steps, has_failure_model(text, kind), flow, flow_problems
+    )

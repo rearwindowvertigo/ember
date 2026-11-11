@@ -288,6 +288,77 @@ def test_brief_starts_nothing(
     assert not paths.runs_dir(env).exists()
 
 
+@pytest.mark.parametrize("mode", ["run", "brief", "reply"])
+@pytest.mark.parametrize("with_check", [False, True])
+@pytest.mark.parametrize(
+    "kind", ["flow", "incomplete tasks", "markdown", "invalid flow"]
+)
+def test_flow_recognition_on_every_route(
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    reply_file: Path,
+    driver: StubDriver,
+    mode: str,
+    kind: str,
+    with_check: bool,
+) -> None:
+    if kind != "markdown":
+        document: dict[str, Any] = {
+            "failure_model": "A failure stops the work.",
+            "tasks": [
+                {
+                    "id": ident,
+                    "subject": f"feat: {ident}",
+                    "task": f"Build {ident}",
+                    "files": ["shared.py"],
+                }
+                for ident in ("a", "b")
+            ],
+        }
+        if kind != "incomplete tasks":
+            document["dir"] = str(repo)
+        if kind == "invalid flow":
+            del document["tasks"][0]["subject"]
+        if with_check:
+            document["check"] = ["make", "check"]
+        plan_file.write_text(json.dumps(document))
+    options = {
+        "run": ["--dir", str(repo), "--engine", "codex", "--model", "m", "--json"],
+        "brief": ["--brief", "--dir", str(repo)],
+        "reply": ["--reply", str(reply_file), "--json"],
+    }
+    code, out, err = invoke(env, plan_file, *options[mode], driver=driver)
+    assert code == 0, err
+    if kind == "invalid flow":
+        assert "WARNING: invalid flow plan:" in err
+        assert "missing required key 'subject'" in err
+    else:
+        assert "invalid flow plan" not in err
+    if mode == "reply":
+        assert json.loads(out)["parse_error"] is None
+        assert not paths.runs_dir(env).exists()
+        return
+    rendered = (
+        out
+        if mode == "brief"
+        else (
+            record.load(json.loads(out)["run"]["id"], env).folder / "brief.md"
+        ).read_text()
+    )
+    if kind == "flow":
+        assert "## How this flow runs" in rendered
+        assert "- Wave 1: a\n- Wave 2: b\n" in rendered
+        assert (
+            "The plan check runs after each wave: make check"
+            if with_check
+            else "The plan has no check command"
+        ) in rendered
+    else:
+        assert "## How this flow runs" not in rendered
+        assert "missing order between dependent tasks" in rendered
+
+
 def test_reply_only_and_text(
     env: dict[str, str],
     plan_file: Path,

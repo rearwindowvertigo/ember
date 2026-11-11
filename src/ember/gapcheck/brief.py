@@ -1,9 +1,11 @@
 """Build a read-only gap check brief with the entire plan and reply schema."""
 
+import shlex
 from collections.abc import Sequence
 from pathlib import Path
 
 from ember import citations
+from ember.flows import plan as flow_plan
 from ember.gapcheck.plan import Plan
 from ember.gapcheck.previous import Previous
 from ember.gapcheck.reply import schema_text
@@ -80,6 +82,39 @@ def _sources(files: Sequence[Path]) -> list[str]:
     return [section, ""] if section else []
 
 
+def _flow(plan: flow_plan.Plan | None) -> list[str]:
+    """Describe the planner's waves and the flow runner's execution rules."""
+    if plan is None:
+        return []
+    return [
+        "## How this flow runs",
+        "",
+        "The flow planner computed these waves:",
+        *(
+            f"- Wave {number}: {', '.join(task.id for task in wave)}"
+            for number, wave in enumerate(flow_plan.waves(plan), 1)
+        ),
+        "",
+        "Tasks with overlapping files, including folder-prefix overlaps, run "
+        "in separate waves. Waves are the planned order assuming each wave "
+        "merges fully; they are not dependencies. When a task stops, a later "
+        "task sharing its file can run without its change. A task that needs "
+        "another task's result still needs that task in after.",
+        "Each task runs in its own isolated worktree and merges into the flow branch.",
+        (
+            f"The plan check runs after each wave: {_path_text(shlex.join(plan.check))}"
+            if plan.check
+            else "The plan has no check command; waves merge without a check."
+        ),
+        "Report an ordering gap only when a needed direction is missing or "
+        "wrong. Check for tasks whose files overlap only on a shared file, even "
+        "when they edit different sections, and raise that overlap as a gap "
+        "when the shared edits can be separated from the tasks' own checks, "
+        "even when their waves serialize them.",
+        "",
+    ]
+
+
 def text(
     plan: Plan,
     checkout: str,
@@ -137,6 +172,7 @@ def text(
             "the other places it affects in why. Use the existing text fields; "
             "do not add fields.",
             "",
+            *_flow(plan.flow),
             *_sources(sources),
             *_earlier(previous),
             "Do not redesign the plan and do not decide missing behaviour; "

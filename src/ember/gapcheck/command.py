@@ -670,6 +670,8 @@ def main(
                 66, str(error), f"next: ls -l {shlex.quote(args.plan)}"
             ) from error
         command = f"emb gapcheck --plan {shlex.quote(str(document.path))}"
+        for problem in document.flow_problems:
+            print(f"WARNING: invalid flow plan: {problem}", file=err)
         if not document.text.strip():
             raise CommandError(
                 64, f"the plan {document.path} is empty", "next: emb gapcheck --help"
