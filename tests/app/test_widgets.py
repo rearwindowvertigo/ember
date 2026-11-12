@@ -609,24 +609,21 @@ def test_run_command_dialog_copies_original(qtbot: QtBot) -> None:
 
 
 @pytest.mark.parametrize("selection", ("mouse", "keyboard"))
-@pytest.mark.parametrize("backend", ("native", "double"))
 def test_run_command_dialog_primary_selection(
-    qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, selection: str, backend: str
+    qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, selection: str
 ) -> None:
-    clipboard = QGuiApplication.clipboard()
-    if backend == "double":
-        contents: dict[QClipboard.Mode, str] = {}
-        clipboard = Mock(spec=QClipboard)
-        clipboard.supportsSelection.return_value = True
-        clipboard.setText.side_effect = lambda text, mode=QClipboard.Mode.Clipboard: (
-            contents.__setitem__(mode, text)
-        )
-        clipboard.text.side_effect = lambda mode=QClipboard.Mode.Clipboard: (
-            contents.get(mode, "")
-        )
-        monkeypatch.setattr(QGuiApplication, "clipboard", lambda: clipboard)
-    if not clipboard.supportsSelection():
-        pytest.skip("The platform does not support the primary selection")
+    # Qt's offscreen platform has no primary selection, so use a clipboard
+    # double that has one.
+    contents: dict[QClipboard.Mode, str] = {}
+    clipboard = Mock(spec=QClipboard)
+    clipboard.supportsSelection.return_value = True
+    clipboard.setText.side_effect = lambda text, mode=QClipboard.Mode.Clipboard: (
+        contents.__setitem__(mode, text)
+    )
+    clipboard.text.side_effect = lambda mode=QClipboard.Mode.Clipboard: contents.get(
+        mode, ""
+    )
+    monkeypatch.setattr(QGuiApplication, "clipboard", lambda: clipboard)
     command = "sudo npm install -g --prefix /usr/local @openai/codex@latest"
     dialog = _dialog(qtbot, command)
     label = dialog.command
