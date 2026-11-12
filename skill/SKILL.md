@@ -72,9 +72,11 @@ Do this for every run, whether or not you expect to use any answer,
 including read-only work and choosing no worker.
 Only a claim reply authorizes a one-time answer. `--brief` keeps the claim,
 the skill fields, the `single.writer`, `single.reviewer`, `multi.runs_as`
-and `panel.members` menu rows and the `engine.<name>` and
-`shortlist.<name>` answers; read without it when a step needs another
-setting.
+and `panel.members` menu rows, the picker answers with their `layer`, and
+the `engine.<name>` and `shortlist.<name>` answers; read without it when a
+step needs another setting. A picker answer's `layer` says whether its
+value is a request, a one-time choice, a setting or the default: name it
+that way to the owner.
 
 Read `skill` separately from `claim.status`. On `current`, continue. On
 `stale`, reload the ember skill before the next step, then follow the
@@ -245,7 +247,10 @@ own folder and use relative paths.
 Keep the brief to the request: a fix you noticed elsewhere goes in your
 report, because the owner did not ask for it. Do not set message wording,
 docstrings or tests the request does not ask for. Do not fan out beyond what
-you can review.
+you can review. Mark each acceptance line with its source: the owner's
+request, a repository rule (name the file), a recorded decision, or your
+suggestion. A suggestion is optional for the worker and is not an
+acceptance requirement.
 
 Before a flow or a Claude Workflow of two or more tasks starts, follow the
 gap check in `references/gap-check.md`.
@@ -311,8 +316,8 @@ notices) needs no answer: report it and carry on. Count turn results from each r
 successful ones, and report unknown fields as unknown; `references/runs.md`
 (Turn results) describes unfinished and older results.
 
-When your check of a worker fails, correct it first with `--send` or
-SendMessage, unless an `owner:` line still waits for the owner's answer; offer another worker after a correction fails. When the
+When your check of a worker finds a `must` (step 7), correct it first with
+`--send` or SendMessage, unless an `owner:` line still waits for the owner's answer; offer another worker after a correction fails. When the
 owner named the workers or said they will not answer worker questions,
 do not offer one: give the verdict and say what is missing. Do not discard
 stalled partial edits without the owner's approval.
@@ -368,6 +373,13 @@ decision answers it, and name that source; bring every other `lead` finding to t
 owner. Never send one to the writer. Later review rounds check earlier
 blockers and the fix diff only; a new blocker must be caused by the fix.
 
+Judge your own checks by the same bar. A finding blocks Keep only as a
+`must` with its scenario, whatever its source. A gap only against a detail
+you added to the brief, with no such scenario, blocks nothing and starts no
+correction: give `Keep` and name the detail in your report. After a
+correction turn that changes nothing, judge the finding again by the bar;
+the unchanged turn is not itself a blocker.
+
 ### 8. Report and park
 
 For each `emb run`, copy its summary line exactly
@@ -382,9 +394,10 @@ Report each check, yours or the worker's, as run, with its command and
 result, or as not run, with the reason. Report a build or test as passing
 only from its output.
 
-`Keep, with <fix>` names who makes the fix: you on the session branch
-after the merge, or the worker through `--send` before it. Either way the
-fix is checked before the branch counts as done.
+`Keep, with <fix>` is only for a fix the request or a recorded decision
+authorizes. It names who makes the fix: you on the session branch after
+the merge, or the worker through `--send` before it. Either way the fix is
+checked before the branch counts as done.
 
 Report a subagent or Claude Workflow in one or two plain sentences, naming
 its branch when it has one. Every worker with a branch gets one of the

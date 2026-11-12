@@ -1701,3 +1701,15 @@ def test_brief_keeps_a_null_menu_and_the_error_fields() -> None:
         **reply,
         "answers": {"engine.codex": {"value": "on", "layer": "default"}},
     }
+
+
+def test_brief_keeps_the_layer_of_a_claimed_one_time_writer(
+    env: dict[str, str],
+) -> None:
+    choices.set_once({"single.writer": "ask"}, env=env)
+    reply = choices.brief(choices.claim("run-000001", env=env))
+    assert reply["claim"]["status"] == "claimed"
+    assert reply["answers"]["single.writer"] == {"value": "ask", "layer": "one-time"}
+    assert reply["answers"]["single.reviewer"]["layer"] == "default"
+    assert set(reply["answers"]) >= set(choices.BRIEF_ANSWER_KEYS)
+    assert "worker.network" not in reply["answers"]

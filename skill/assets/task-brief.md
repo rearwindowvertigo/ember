@@ -4,7 +4,10 @@ line for worker-turn subjects; the lead writes the landed subject at merge.>
 ## Objective
 
 <Requested result and the decisions already settled. Do not hand off an
-open design decision. Split unrelated objectives into separate runs.>
+open design decision. Split unrelated objectives into separate runs.
+Mark each acceptance line with its source: (request), (rule: <file>),
+(decision: <where recorded>) or (suggestion, optional). A suggestion is
+not an acceptance requirement.>
 
 ## Inputs and reading budget
 

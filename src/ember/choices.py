@@ -956,7 +956,16 @@ def _read_state(
 
 
 BRIEF_ANSWER_PREFIXES = ("engine.", "shortlist.")
-"""The answer keys a brief reply keeps: the engine switches and shortlists."""
+"""The answer key prefixes a brief reply keeps: engine switches and shortlists."""
+BRIEF_ANSWER_KEYS = (
+    "single.writer",
+    "single.reviewer",
+    "single.writer_as",
+    "single.reviewer_as",
+    "multi.runs_as",
+    "panel.members",
+)
+"""The picker answers a brief reply keeps, so each value's layer is known."""
 BRIEF_MENU_KEYS = ("single.writer", "single.reviewer", "multi.runs_as", "panel.members")
 """The menu rows a brief reply keeps: the rows the skill reads at a claim."""
 
@@ -969,8 +978,9 @@ def brief(reply: Mapping[str, Any]) -> dict[str, Any]:
 
     Returns:
         The reply with `answers` holding only the `engine.<name>` and
-        `shortlist.<name>` keys, `menu` holding only the `BRIEF_MENU_KEYS`
-        rows or still `None`, and every other key unchanged.
+        `shortlist.<name>` keys and the `BRIEF_ANSWER_KEYS` picker answers,
+        `menu` holding only the `BRIEF_MENU_KEYS` rows or still `None`, and
+        every other key unchanged.
     """
     answers = reply.get("answers") or {}
     menu = reply.get("menu")
@@ -979,7 +989,7 @@ def brief(reply: Mapping[str, Any]) -> dict[str, Any]:
         "answers": {
             key: value
             for key, value in answers.items()
-            if key.startswith(BRIEF_ANSWER_PREFIXES)
+            if key.startswith(BRIEF_ANSWER_PREFIXES) or key in BRIEF_ANSWER_KEYS
         },
         "menu": None
         if menu is None
