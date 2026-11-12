@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.1](https://github.com/rearwindowvertigo/ember/compare/v0.25.0...v0.25.1) (2026-11-12)
+
+
+### Fixed
+
+* **cli:** keep the picker answers in emb choices --brief ([636770f](https://github.com/rearwindowvertigo/ember/commit/636770fc0ead72a28c7b5f247e8c5398a55935c9))
+
 ## [0.25.0](https://github.com/rearwindowvertigo/ember/compare/v0.24.0...v0.25.0) (2026-11-12)
 
 
