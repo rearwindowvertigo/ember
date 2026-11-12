@@ -30,10 +30,11 @@ Settle whether the plan gets a check before choosing a reviewer or asking
 any worker question:
 
 - Flow: read `gapcheck_status` in the `emb flow --dry-run` JSON.
-- Claude Workflow: read `gapcheck.when` in the choices reply you already
-  hold for the run's claim, and count the plan's steps (its tasks or
-  numbered steps). `off`, or a number above the step count, is `skipped`;
-  `ask` is `ask`; anything else is `run`. Run no command to find out.
+- Claude Workflow: read `gapcheck.when` with `emb choices --json --id <id>`
+  for the run's claim, without `--brief` (a brief reply leaves it out),
+  and count the plan's steps (its tasks or numbered steps). `off`, or a
+  number above the step count, is `skipped`; `ask` is `ask`; anything else
+  is `run`.
 
 Then:
 
@@ -87,7 +88,7 @@ earlier gap disposition also leaves it incomplete. Empty gap lists and
 zero counts are valid only with coverage of every expected step. Exit 81: follow `next:`
 to obtain a complete reply. On a `WARNING:` about a missing failure model,
 add it and check again. Follow printed lines as SKILL.md step 6 says. For a CLI reviewer's
-denied paths, inspect its run status and report them as `references/runs.md`
+denied paths, inspect its run status and report them as `references/sandbox-and-exits.md`
 (Denied paths) says.
 
 Check for tasks whose `files` overlap only on a shared file, even when

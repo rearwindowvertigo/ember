@@ -66,11 +66,15 @@ when Ember runs the command and how a failed preparation is retried.
 
 Before the first picker, mint a unique id matching
 `[a-z0-9][a-z0-9-]{5,63}`, keep it in the run's notes, then call
-`emb choices --claim --id <id> --skill <version>`, using the `Skill version:`
-from this loaded text on every claim, including retries. Do this for every
-run, whether or not you expect to use any answer, including read-only work
-and choosing no worker.
-Only a claim reply authorizes a one-time answer.
+`emb choices --claim --id <id> --skill <version> --brief`, using the
+`Skill version:` from this loaded text on every claim, including retries.
+Do this for every run, whether or not you expect to use any answer,
+including read-only work and choosing no worker.
+Only a claim reply authorizes a one-time answer. `--brief` keeps the claim,
+the skill fields, the `single.writer`, `single.reviewer`, `multi.runs_as`
+and `panel.members` menu rows and the `engine.<name>` and
+`shortlist.<name>` answers; read without it when a step needs another
+setting.
 
 Read `skill` separately from `claim.status`. On `current`, continue. On
 `stale`, reload the ember skill before the next step, then follow the
@@ -83,7 +87,7 @@ Workflow, flow or panel is one run for all its workers. Separately started
 tasks each claim; only the first consumes the pending one-time choice. A correction or
 `--recover` of an open run keeps its claim. A new worker starts a new run.
 
-Before a later picker, read `emb choices --json --id <id>`. Read the reply
+Before a later picker, read `emb choices --json --id <id> --brief`. Read the reply
 directly; do not write code to parse it. Read `references/claims.md` for a
 reply other than a clean `claimed` or `none`, a lost reply, or an owner
 question about one-time choices.
@@ -168,12 +172,7 @@ text before the picker is hidden. Without the picker tool (print mode),
 ask the same question in plain text, as one direct question ending in a
 question mark, and stop until the owner answers.
 
-Open every owner question with what the owner would see and what each
-answer makes happen. Before asking an owner question that offers a fix,
-find the problem's cause. After the opening, state the cause, the other
-cases it affects and the fix that covers all of them. Say when a design or
-decision change would serve better than a patch.
-Use Ember's terms last, each with a plain explanation.
+Word the worker question as "Owner questions" below says.
 
 Resolve two or more separately started tasks one at a time, numbered
 `Task N of M`. A same-worker correction, recovery or retry needs no new
@@ -237,7 +236,8 @@ besides the brief:
 | Claude subagent | `CLAUDE.md` and a git status snapshot. |
 
 Under Ember's sandbox a worker sees the machine read-only and the home
-folder hidden except the paths `references/runs.md` lists. Give a worker
+folder hidden except the paths `references/sandbox-and-exits.md` lists.
+Give a worker
 everything outside its worktree it needs through `--read <path>` or the
 brief, never as an absolute path it cannot reach. Tell it to stay in its
 own folder and use relative paths.
@@ -252,9 +252,9 @@ gap check in `references/gap-check.md`.
 
 ### 6. Start and follow the run
 
-Read `references/runs.md` before the session's first `emb run`, and again
-on every non-zero exit. Read `references/claude-agents.md` before a
-subagent or Workflow spawn.
+Read `references/runs.md` before the session's first `emb run`, and
+again with `references/sandbox-and-exits.md` on every non-zero exit. Read
+`references/claude-agents.md` before a subagent or Workflow spawn.
 
 Run every `emb run` start, `--send` and `--recover`, and every
 `emb flow --start` and `--watch`, `emb gapcheck` and `emb panel`, as a
@@ -300,7 +300,7 @@ changes nothing.
 
 For every denied path, name its run and turn and its reason. For each
 denial with an `owner:` line, give the Settings, Sandbox read paths owner
-action from `references/runs.md` (Denied paths), and say that Don't show
+action from `references/sandbox-and-exits.md` (Denied paths), and say that Don't show
 again in Overview records "no change" for that folder for later runs.
 Never add paths to `sandbox.read` or `sandbox.hidden_notices` yourself.
 Until the owner answers a denial's `owner:` line, send the run nothing, not
@@ -344,6 +344,10 @@ or type checking is not enough.
 Read the worker's "Not covered" list and put real omissions in the
 verdict. Say when a stopped run has none.
 
+Read the last paragraph of every worker reply for a question or a request
+to you. A reply that ends in one is not a finished turn: answer it with
+`emb run --send`, or bring it to the owner, before giving a verdict.
+
 Use this bar for every review, including your final review. Copy its exact
 text into every review brief you write.
 
@@ -373,6 +377,10 @@ or `Discard, because <reason>`. While a correction you sent is still to be
 checked, say the branch is under correction instead. When the owner typed
 into a worker's session, name it in the verdict. For a read-only run,
 branch, commit and numstat are "not applicable".
+
+Report each check, yours or the worker's, as run, with its command and
+result, or as not run, with the reason. Report a build or test as passing
+only from its output.
 
 `Keep, with <fix>` names who makes the fix: you on the session branch
 after the merge, or the worker through `--send` before it. Either way the
@@ -472,6 +480,15 @@ when a reachable commit records its tip in `Ember-Task-Tip`, or when merging
 it into the target gives no conflict and the target's own tree. The trailer
 recognizes a squashed branch even after later target edits.
 
+When the host squash-merged and deleted the session branch, claim cleanup
+keeps its records with `no surviving base branch found`. Run
+`emb cleanup --claim <id> --merged-into <target>` against the branch the
+host merged into: its remote-tracking ref (`origin/main`) after a fetch, or
+the local branch once it holds the merge. A kept line that says the target
+is behind its upstream needs that update first. Report every branch still
+kept and show its changes to the owner; remove nothing with `--force`
+without the owner's word.
+
 Do not remove a worktree or delete a branch that is not merged unless the
 owner says drop it: a finished claim is not approval to delete. Show its
 changes first. On an approved drop, report the tip, then use
@@ -485,6 +502,18 @@ those, run `emb choices --finish <id>` after merge or discard for editing
 work (once the owner's decision on the kept branch is reported), after review
 for read-only work, at once for no worker. Failed or cancelled runs still get
 review and a decision on their partial work before the finish. `references/claims.md` says what its reply means.
+
+## Owner questions
+
+These rules cover every question to the owner in a run: worker choice,
+design, gap check, correction, review finding, merge and cleanup.
+
+Open every owner question with what the owner would see and what each
+answer makes happen. Before asking an owner question that offers a fix,
+find the problem's cause. After the opening, state the cause, the other
+cases it affects and the fix that covers all of them. Say when a design or
+decision change would serve better than a patch.
+Use Ember's terms last, each with a plain explanation.
 
 ## Owner gates
 
@@ -522,6 +551,7 @@ finding gets at most one closing sentence, or is left out.
 |---|---|
 | `references/claims.md` | A claim or read reply other than a clean `claimed` or `none`, a lost reply, an `emb choices` exit, or an owner question about one-time choices. |
 | `references/runs.md` | Before the session's first `emb run`; on every non-zero `emb run` exit; before closing a run; when handing the owner a test build from any worker branch, including a flow branch. |
+| `references/sandbox-and-exits.md` | On every non-zero `emb run` exit; on a denied path or an `owner:` line about a path; before giving a worker anything outside its worktree. |
 | `references/claude-agents.md` | Before a Claude subagent or Claude Workflow spawn. |
 | `references/gap-check.md` | Before a flow or a multi-task Claude Workflow starts. |
 | `references/flows.md` | Before `emb flow`; at every flow report. |

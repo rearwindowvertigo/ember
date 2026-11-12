@@ -249,8 +249,8 @@ with a `task` id on each entry. The runner adds new denials to its
 `denied_paths` events with the task and worker role. Empty lists mean no
 recorded denials. Report each path with its task, run, turn and reason,
 even when the task succeeds. Startup-file denials and older records are
-handled as `references/runs.md` (Denied paths) says. Report printed owner
-actions and hidden-path restrictions as `references/runs.md` (Denied paths)
+handled as `references/sandbox-and-exits.md` (Denied paths) says. Report printed owner
+actions and hidden-path restrictions as `references/sandbox-and-exits.md` (Denied paths)
 describes.
 
 ## Verify, merge and report

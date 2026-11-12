@@ -22,6 +22,7 @@ standard error as `emb choices: <message>`; skill-version warnings use
 | `--id ID` | With a read or `--claim`: use the claim for `ID` | Read reply for `ID` |
 | `--claim --id ID` | Claim the pending one-time choice for `ID` | Read reply |
 | `--skill X.Y.Z` | With `--claim`: compare the loaded skill version with the installed skill | Adds `skill`, `loaded_skill_version` and `installed_skill_version` |
+| `--brief` | With a read or `--claim`: keep only the `engine.<name>` and `shortlist.<name>` keys in `answers` and the `single.writer`, `single.reviewer`, `multi.runs_as` and `panel.members` rows in `menu` (`null` stays `null`); every other field is unchanged | Shortened reply |
 | `--finish ID` | Release the claim for `ID` | `{"claim": {"id", "status": "gone", "was"}, "generation", "errors"}` |
 | `--request KEY=VALUE` | With a read or `--claim`: a request-layer value; repeatable | |
 | `--set KEY=VALUE` | Save a standing setting; repeatable | `{"settings": {...}, "generation", "errors"}` |
@@ -3737,6 +3738,15 @@ resolved target. Explicit `--merged-into TARGET` uses that one target for
 all selected branches. Without `--claim`, `--merged-into` is required;
 omitting it exits 64 with `next: emb cleanup --help`.
 
+`TARGET` is a local branch or, when no local branch has that name, a
+remote-tracking ref named without `refs/remotes/`, such as `origin/main`.
+A remote-tracking target is only tested for containment and rechecked
+before each removal; it is never merged into, and cleanup does not fetch
+it, so it is as current as the last fetch. A `TARGET` that is neither
+exits 65 with `emb cleanup: no local branch or remote-tracking ref TARGET`
+and `next: git -C <top> fetch, then name a local branch or a
+remote-tracking ref such as origin/main`.
+
 An empty result prints `emb cleanup: no Ember run or flow branch left
 against <target>` on standard error, adding `for claim <id>` when a claim
 filter was given. JSON remains an empty list. A successful `emb merge`
@@ -3761,6 +3771,11 @@ it into `TARGET` gives no conflict and `TARGET`'s own tree. The trailer
 recognizes an Ember squash even after later target edits. The check changes
 no index, worktree or ref; with `--dry-run`
 the objects of the trial merge go to a temporary folder.
+
+When a local `TARGET` does not contain a branch and has a configured
+upstream with commits `TARGET` lacks, the kept reason adds `TARGET is
+behind <upstream>`. Only refs already in the repository are compared;
+cleanup fetches nothing and moves no branch.
 
 For each contained run branch, in order:
 
@@ -3795,7 +3810,8 @@ Everything else is kept, with a reason and an action when available:
 |---|---|---|
 | `TARGET` itself | `the merge target` | `next: emb cleanup --merged-into <the branch it was merged into>` |
 | A branch that is not a run branch (with `--branch`) | `not an Ember run branch` | `next: git branch -d BRANCH` |
-| A branch not contained | `not contained in TARGET` | With `--claim` matching its recorded claim: `next: emb merge BRANCH --into TARGET --verdict keep --note '<verdict line>' --subject '<commit subject>' (after a Keep verdict)`; without `--claim`, no merge suggestion |
+| A branch not contained, `TARGET` a local branch behind its upstream | `not contained in TARGET; TARGET is behind <upstream>` | `next: git -C <top> fetch, fast-forward TARGET to <upstream>, then <the cleanup>` |
+| A branch not contained | `not contained in TARGET` | With `--claim` matching its recorded claim and a local `TARGET`: `next: emb merge BRANCH --into TARGET --verdict keep --note '<verdict line>' --subject '<commit subject>' (after a Keep verdict)`; without `--claim` or with a remote-tracking `TARGET`, no merge suggestion |
 | A flow branch whose runner is live | `the flow <id> is running` | `next: emb flow --status <id>` |
 | A flow branch whose runner lock cannot be checked | The lock error | `next: emb flow --status <id>` |
 | A run record that is not this branch's | `the run record <run> is not this branch's: ...` | `next: emb run --status <run>` |
