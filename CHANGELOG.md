@@ -6,12 +6,6 @@
 ### Added
 
 * **cli:** add emb choices --brief and remote-tracking cleanup targets ([2dd1b53](https://github.com/rearwindowvertigo/ember/commit/2dd1b53dfdad61df93c32d73980416b332e5fc6e))
-* survey [#261](https://github.com/rearwindowvertigo/ember/issues/261) changes: emb choices --brief, remote-tracking cleanup targets and skill rules ([84cfb8c](https://github.com/rearwindowvertigo/ember/commit/84cfb8c73e90ea21216a80fa19774d6ceb20f70e))
-
-
-### Fixed
-
-* trim the brief menu, read gapcheck.when in full, and apply --brief in the eval stub ([b2ce329](https://github.com/rearwindowvertigo/ember/commit/b2ce3294ea198e24a5c14300d9b566496b5b1c16))
 
 ## [0.24.0](https://github.com/rearwindowvertigo/ember/compare/v0.23.0...v0.24.0) (2026-11-11)
 
