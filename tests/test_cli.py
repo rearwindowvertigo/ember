@@ -324,9 +324,15 @@ def test_brief_claim_keeps_claim_skill_menu_and_engine_answers(
         "installed_skill_version",
     }
     assert set(data["answers"]) == {
-        key for key in full["answers"] if key.startswith(("engine.", "shortlist."))
+        *(key for key in full["answers"] if key.startswith(("engine.", "shortlist."))),
+        *choices.BRIEF_ANSWER_KEYS,
     }
     assert data["answers"]["engine.codex"] == full["answers"]["engine.codex"]
+    assert data["answers"]["single.writer_as"] == {
+        "value": "subagent",
+        "layer": "one-time",
+    }
+    assert data["answers"]["single.writer"] == {"value": "ask", "layer": "default"}
 
 
 def test_brief_read_and_refusals(
@@ -337,6 +343,7 @@ def test_brief_read_and_refusals(
     assert set(data["answers"]) == {
         *(f"engine.{name}" for name in choices.ENGINES),
         *(f"shortlist.{name}" for name in choices.ENGINES),
+        *choices.BRIEF_ANSWER_KEYS,
     }
     code, _, err = _run(["--finish", "run-000001", "--brief"], env, capsys)
     assert code == 64

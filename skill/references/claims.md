@@ -4,7 +4,12 @@
 
 Each key in `answers` is `{"value", "layer"}`, with `layer` one of
 `request`, `one-time`, `setting` or `default`: the first layer that holds
-the key wins, and an `ask` in a higher layer wins too.
+the key wins, and an `ask` in a higher layer wins too. A `--brief` reply
+keeps the picker answers (`single.writer`, `single.reviewer`,
+`single.writer_as`, `single.reviewer_as`, `multi.runs_as` and
+`panel.members`) and the `engine.<name>` and `shortlist.<name>` answers.
+A menu row has no layer: read the layer of a row's value from its answer,
+and of its `run_as` from the `_as` answer.
 
 The menu has four rows. `single.writer` and `single.reviewer` each hold
 `value`, `state`, `engine`, `model`, `effort`, `run_as` and `reason`:

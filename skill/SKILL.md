@@ -72,9 +72,11 @@ Do this for every run, whether or not you expect to use any answer,
 including read-only work and choosing no worker.
 Only a claim reply authorizes a one-time answer. `--brief` keeps the claim,
 the skill fields, the `single.writer`, `single.reviewer`, `multi.runs_as`
-and `panel.members` menu rows and the `engine.<name>` and
-`shortlist.<name>` answers; read without it when a step needs another
-setting.
+and `panel.members` menu rows, the picker answers with their `layer`, and
+the `engine.<name>` and `shortlist.<name>` answers; read without it when a
+step needs another setting. A picker answer's `layer` says whether its
+value is a request, a one-time choice, a setting or the default: name it
+that way to the owner.
 
 Read `skill` separately from `claim.status`. On `current`, continue. On
 `stale`, reload the ember skill before the next step, then follow the
