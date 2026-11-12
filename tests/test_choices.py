@@ -1683,3 +1683,21 @@ def test_worktree_prepare_cli_json(
         == 0
     )
     assert _answer(choices.read(env=env), "worktree.prepare") == (value, "setting")
+
+
+def test_brief_keeps_a_null_menu_and_the_error_fields() -> None:
+    reply = {
+        "answers": {
+            "engine.codex": {"value": "on", "layer": "default"},
+            "worker.network": {"value": "off", "layer": "default"},
+        },
+        "claim": {"id": "run-000001", "status": "unknown"},
+        "generation": 3,
+        "errors": ["single.writer: bad"],
+        "source_error": True,
+        "menu": None,
+    }
+    assert choices.brief(reply) == {
+        **reply,
+        "answers": {"engine.codex": {"value": "on", "layer": "default"}},
+    }

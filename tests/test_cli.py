@@ -316,7 +316,7 @@ def test_brief_claim_keeps_claim_skill_menu_and_engine_answers(
     assert data["skill"] == "stale"
     assert data["loaded_skill_version"] == "0.12.0"
     assert data["installed_skill_version"] == "0.13.0"
-    assert data["menu"] == full["menu"]
+    assert data["menu"] == {key: full["menu"][key] for key in choices.BRIEF_MENU_KEYS}
     assert set(data) == {
         *full,
         "skill",

@@ -50,7 +50,9 @@ standard error unless a kept result holds that claim or `--dry-run` is set.
 The `verify_branch.py` path comes from `ember.skill.link_path(os.environ)`.
 A run records `base_branch`, the branch checked out in its `--dir` checkout
 at start (null when detached). An exit-0 `choices --finish` records its
-claim as `gone` in `state.json`'s `claims`. A closed run with no merge pending
+claim as `gone` in `state.json`'s `claims`. An exit-0 choices read or claim
+with `--brief` is shortened by `ember.choices.brief`, as the real command
+shortens it. A closed run with no merge pending
 whose claim is `gone` derives `done` with no next line.
 Stored `step` and `next` keys in a state document are
 ignored. Canned starts with a status JSON retain that record with the call's
@@ -96,7 +98,7 @@ from typing import Any
 
 # The installer copies these production modules beside the isolated stub.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ember import branches, skill  # noqa: E402
+from ember import branches, choices, skill  # noqa: E402
 from ember.flows import plan as flow_plan  # noqa: E402
 from ember.gapcheck import brief as gap_brief  # noqa: E402
 from ember.gapcheck import command as gap_command  # noqa: E402
@@ -2238,6 +2240,14 @@ def dispatch(
             document.pop(key, None)
         response.out = json.dumps(document, indent=2) + "\n"
         response.err = ""
+    if (
+        name in ("choices-claim", "choices-read", "choices-read-id")
+        and response.code == 0
+        and has(rest, "--brief")
+    ):
+        # Shorten the canned reply with the production formatter.
+        document = choices.brief(json.loads(response.out))
+        response.out = json.dumps(document, indent=2) + "\n"
     if name == "flow-dry-run" and has(rest, "--previous"):
         extra = " --previous " + shlex.quote(option(rest, "--previous") or "")
         if as_json:

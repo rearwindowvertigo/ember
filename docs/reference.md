@@ -22,7 +22,7 @@ standard error as `emb choices: <message>`; skill-version warnings use
 | `--id ID` | With a read or `--claim`: use the claim for `ID` | Read reply for `ID` |
 | `--claim --id ID` | Claim the pending one-time choice for `ID` | Read reply |
 | `--skill X.Y.Z` | With `--claim`: compare the loaded skill version with the installed skill | Adds `skill`, `loaded_skill_version` and `installed_skill_version` |
-| `--brief` | With a read or `--claim`: keep only the `engine.<name>` and `shortlist.<name>` keys in `answers`; every other field, `menu` included, is unchanged | Shortened reply |
+| `--brief` | With a read or `--claim`: keep only the `engine.<name>` and `shortlist.<name>` keys in `answers` and the `single.writer`, `single.reviewer`, `multi.runs_as` and `panel.members` rows in `menu` (`null` stays `null`); every other field is unchanged | Shortened reply |
 | `--finish ID` | Release the claim for `ID` | `{"claim": {"id", "status": "gone", "was"}, "generation", "errors"}` |
 | `--request KEY=VALUE` | With a read or `--claim`: a request-layer value; repeatable | |
 | `--set KEY=VALUE` | Save a standing setting; repeatable | `{"settings": {...}, "generation", "errors"}` |

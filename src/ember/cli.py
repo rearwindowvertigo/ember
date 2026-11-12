@@ -71,7 +71,8 @@ def _add_choices(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--brief",
         action="store_true",
-        help="with a read or --claim, keep only the engine and shortlist answers",
+        help="with a read or --claim, keep only the engine and shortlist answers "
+        "and the single, multi-task and panel menu rows",
     )
     parser.add_argument("--finish", metavar="ID", help="release the claim for ID")
     parser.add_argument(

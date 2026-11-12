@@ -1177,9 +1177,8 @@ def test_cleanup_removes_a_squash_merged_branch(
     assert record.load(run.id, env).status == record.CLOSED
 
 
-def _publish_then_drop(repo: Path, env: dict[str, str]) -> None:
-    """Copy `main` to `origin/main` as its upstream, then drop the last commit."""
-    git(repo, "update-ref", "refs/remotes/origin/main", "main", env=env)
+def _track_origin(repo: Path, env: dict[str, str]) -> None:
+    """Make `origin` a remote of `repo` and `origin/main` the upstream of `main`."""
     git(repo, "config", "remote.origin.url", str(repo), env=env)
     git(
         repo,
@@ -1190,7 +1189,19 @@ def _publish_then_drop(repo: Path, env: dict[str, str]) -> None:
     )
     git(repo, "config", "branch.main.remote", "origin", env=env)
     git(repo, "config", "branch.main.merge", "refs/heads/main", env=env)
+
+
+def _publish_then_drop(repo: Path, env: dict[str, str]) -> None:
+    """Copy `main` to `origin/main` as its upstream, then drop the last commit."""
+    git(repo, "update-ref", "refs/remotes/origin/main", "main", env=env)
+    _track_origin(repo, env)
     git(repo, "reset", "-q", "--hard", "HEAD~1", env=env)
+
+
+def _commit_on_main(repo: Path, env: dict[str, str], name: str) -> None:
+    (repo / name).write_text(f"{name}\n")
+    git(repo, "add", name, env=env)
+    git(repo, "commit", "-q", "-m", name, env=env)
 
 
 def test_cleanup_removes_a_branch_contained_in_a_remote_tracking_ref(
@@ -1236,36 +1247,58 @@ def test_cleanup_keeps_a_branch_a_remote_tracking_ref_lacks_without_a_merge_line
     assert run.branch is not None and _branch_exists(repo, run.branch, env)
 
 
-def test_cleanup_prefers_a_local_branch_and_notes_no_current_upstream(
+def test_cleanup_prefers_a_local_branch_named_like_a_remote_tracking_ref(
     tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
 ) -> None:
     run = _start(tmp_path, env, repo, driver)
     assert run.branch is not None
-    git(repo, "update-ref", "refs/remotes/origin/main", "main", env=env)
-    git(repo, "config", "remote.origin.url", str(repo), env=env)
-    git(
-        repo,
-        "config",
-        "remote.origin.fetch",
-        "+refs/heads/*:refs/remotes/origin/*",
-        env=env,
-    )
-    git(repo, "config", "branch.main.remote", "origin", env=env)
-    git(repo, "config", "branch.main.merge", "refs/heads/main", env=env)
     git(repo, "branch", "-q", "origin/main", "main", env=env)
     _squash(repo, run.branch, env)
+    git(repo, "update-ref", "refs/remotes/origin/main", "main", env=env)
     streams = Streams()
     assert _cleanup(env, driver, streams, repo, target="origin/main") == 0
     out, _ = streams.take()
-    assert (
-        out
-        == f"kept {run.branch}: not contained in origin/main; no claim is recorded\n"
+    assert out == (
+        f"kept {run.branch}: not contained in origin/main; no claim is recorded\n"
     )
-    git(repo, "branch", "-q", "-D", "origin/main", env=env)
-    git(repo, "update-ref", "refs/remotes/origin/main", "main", env=env)
+    assert _branch_exists(repo, run.branch, env)
+
+
+@pytest.mark.parametrize(
+    ("upstream", "noted"),
+    [
+        ("none", False),
+        ("gone", False),
+        ("equal", False),
+        ("behind", False),
+        ("ahead", True),
+    ],
+)
+def test_cleanup_notes_only_an_upstream_ahead_of_the_target(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    upstream: str,
+    noted: bool,
+) -> None:
+    run = _start(tmp_path, env, repo, driver)
+    assert run.branch is not None
+    if upstream != "none":
+        _track_origin(repo, env)
+    if upstream == "ahead":
+        _commit_on_main(repo, env, "upstream.txt")
+        _publish_then_drop(repo, env)
+    elif upstream in ("equal", "behind"):
+        git(repo, "update-ref", "refs/remotes/origin/main", "main", env=env)
+        if upstream == "behind":
+            _commit_on_main(repo, env, "local.txt")
+    streams = Streams()
     assert _cleanup(env, driver, streams, repo) == 0
     out, _ = streams.take()
-    assert out.startswith(f"removed {run.branch}: contained in main")
+    note = "; main is behind origin/main" if noted else ""
+    assert out.startswith(f"kept {run.branch}: not contained in main{note}; ")
+    assert _branch_exists(repo, run.branch, env)
 
 
 def test_cleanup_from_inside_the_run_worktree_removes_it(

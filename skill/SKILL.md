@@ -71,8 +71,10 @@ Before the first picker, mint a unique id matching
 Do this for every run, whether or not you expect to use any answer,
 including read-only work and choosing no worker.
 Only a claim reply authorizes a one-time answer. `--brief` keeps the claim,
-the skill fields, the menu and the `engine.<name>` and `shortlist.<name>`
-answers; read without it when a step needs another setting.
+the skill fields, the `single.writer`, `single.reviewer`, `multi.runs_as`
+and `panel.members` menu rows and the `engine.<name>` and
+`shortlist.<name>` answers; read without it when a step needs another
+setting.
 
 Read `skill` separately from `claim.status`. On `current`, continue. On
 `stale`, reload the ember skill before the next step, then follow the

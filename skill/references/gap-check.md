@@ -30,10 +30,11 @@ Settle whether the plan gets a check before choosing a reviewer or asking
 any worker question:
 
 - Flow: read `gapcheck_status` in the `emb flow --dry-run` JSON.
-- Claude Workflow: read `gapcheck.when` in the choices reply you already
-  hold for the run's claim, and count the plan's steps (its tasks or
-  numbered steps). `off`, or a number above the step count, is `skipped`;
-  `ask` is `ask`; anything else is `run`. Run no command to find out.
+- Claude Workflow: read `gapcheck.when` with `emb choices --json --id <id>`
+  for the run's claim, without `--brief` (a brief reply leaves it out),
+  and count the plan's steps (its tasks or numbered steps). `off`, or a
+  number above the step count, is `skipped`; `ask` is `ask`; anything else
+  is `run`.
 
 Then:
 

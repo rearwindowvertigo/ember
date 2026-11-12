@@ -455,6 +455,29 @@ def test_route_logs_and_replies(
         assert "dirty: no" in result.stdout or '"value": false' in result.stdout
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["choices", "--claim", "--id", "run-abc123", "--skill", __version__],
+        ["choices", "--json", "--id", "run-abc123"],
+        ["choices", "--json"],
+    ],
+)
+def test_stub_brief_matches_the_production_formatter(
+    tmp_path: Path, env: dict[str, str], args: list[str]
+) -> None:
+    full = json.loads(
+        case("claim-and-menu-writer", tmp_path / "full", env).emb(*args).stdout
+    )
+    work = case("claim-and-menu-writer", tmp_path / "brief", env)
+    result = work.emb(*args, "--brief")
+    assert result.returncode == 0, result.stderr
+    brief = json.loads(result.stdout)
+    assert brief == choices.brief(full)
+    assert set(brief["menu"]) == set(choices.BRIEF_MENU_KEYS)
+    assert "gapcheck.when" not in brief["answers"]
+
+
 def test_run_start_commits_on_its_branch(tmp_path: Path, env: dict[str, str]) -> None:
     work = case("claim-and-menu-writer", tmp_path, env)
     trailer = "Co-Authored-By: Claude <noreply@anthropic.com>"
