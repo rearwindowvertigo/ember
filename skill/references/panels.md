@@ -93,8 +93,8 @@ also gives their union with the `member` number. Empty lists mean no
 recorded denials. Panels have no denial event stream. Report every denied
 path with its member, run, turn and reason, including for answered members.
 Startup-file denials and older records are handled as
-`references/runs.md` (Denied paths) says. Report printed owner actions and hidden-path
-restrictions as `references/runs.md` (Denied paths) describes.
+`references/sandbox-and-exits.md` (Denied paths) says. Report printed owner actions and hidden-path
+restrictions as `references/sandbox-and-exits.md` (Denied paths) describes.
 
 ## Read and compare
 

@@ -71,6 +71,11 @@ Run <checks for this task>.
 Run the repository's full test suite, or name why not.
 <Name checks the worker cannot run in its sandbox, why, who runs them, and
 the constraints, grants and fixture prerequisites those checks exercise.>
+For a test someone else runs against a database: before writing it, read
+each check constraint, trigger and grant on every table its fixture
+writes; create every row the test needs; confirm each table it names
+exists in the current schema. Name in your closing report anything of
+these you could not read.
 Search for other tests that reference what this task changes.
 Report failures in files outside the allowed set without editing them.
 Stop when <observable completion condition>.

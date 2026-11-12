@@ -87,7 +87,7 @@ earlier gap disposition also leaves it incomplete. Empty gap lists and
 zero counts are valid only with coverage of every expected step. Exit 81: follow `next:`
 to obtain a complete reply. On a `WARNING:` about a missing failure model,
 add it and check again. Follow printed lines as SKILL.md step 6 says. For a CLI reviewer's
-denied paths, inspect its run status and report them as `references/runs.md`
+denied paths, inspect its run status and report them as `references/sandbox-and-exits.md`
 (Denied paths) says.
 
 Check for tasks whose `files` overlap only on a shared file, even when
