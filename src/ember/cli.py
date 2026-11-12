@@ -68,6 +68,11 @@ def _add_choices(parser: argparse.ArgumentParser) -> None:
         metavar="X.Y.Z",
         help="compare the loaded skill version with the installed skill, with --claim",
     )
+    parser.add_argument(
+        "--brief",
+        action="store_true",
+        help="with a read or --claim, keep only the engine and shortlist answers",
+    )
     parser.add_argument("--finish", metavar="ID", help="release the claim for ID")
     parser.add_argument(
         "--request",
@@ -456,7 +461,8 @@ def _add_cleanup(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--merged-into",
         metavar="TARGET",
-        help="the merge target; defaults to each record's base branch with --claim",
+        help="the merge target, a local branch or a remote-tracking ref such as "
+        "origin/main; defaults to each record's base branch with --claim",
     )
     parser.add_argument("--branch", metavar="BRANCH", help="only this branch")
     parser.add_argument(
@@ -719,6 +725,8 @@ def _choices_action(args: argparse.Namespace) -> str:
         raise UsageError("--skill needs --claim")
     if args.request and action not in ("read", "--claim"):
         raise UsageError(f"--request cannot be used with {action}")
+    if args.brief and action not in ("read", "--claim"):
+        raise UsageError(f"--brief cannot be used with {action}")
     owner = ("--set", "--clear", "--once", "--clear-once")
     if args.expect_generation is not None and action not in owner:
         raise UsageError(
@@ -786,6 +794,8 @@ def _run_choices(args: argparse.Namespace, env: Mapping[str, str] | None) -> int
             "starting a worker",
             file=sys.stderr,
         )
+    if args.brief:
+        reply = choices.brief(reply)
     print(json.dumps(reply, indent=2))
     return EX_OK
 

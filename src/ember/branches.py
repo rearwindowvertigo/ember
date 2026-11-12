@@ -443,6 +443,49 @@ class Repository:
         valid = self.git("check-ref-format", f"refs/heads/{branch}").returncode == 0
         return valid and self.tip(branch) is not None
 
+    def remote_tip(self, ref: str) -> str | None:
+        """Return a remote-tracking ref's commit.
+
+        Args:
+            ref: The ref name without `refs/remotes/`, such as `origin/main`.
+
+        Returns:
+            The commit, or `None` when there is no such valid ref.
+        """
+        full = f"refs/remotes/{ref}"
+        if self.git("check-ref-format", full).returncode:
+            return None
+        result = self.git(
+            "rev-parse", "--verify", "--quiet", "--end-of-options", f"{full}^{{commit}}"
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    def behind_upstream(self, branch: str) -> str | None:
+        """Name a local branch's upstream when it has commits the branch lacks.
+
+        Only refs already in the repository are read; nothing is fetched.
+
+        Args:
+            branch: The local branch name.
+
+        Returns:
+            The upstream's short name, such as `origin/main`, or `None` when
+            the branch has no upstream, the upstream is gone or the branch
+            holds every upstream commit.
+        """
+        result = self.git(
+            "for-each-ref",
+            "--format=%(upstream)%00%(upstream:short)",
+            f"refs/heads/{branch}",
+        )
+        full, _, short = result.stdout.strip().partition("\0")
+        if result.returncode or not full or not short:
+            return None
+        count = self.git("rev-list", "--count", f"refs/heads/{branch}..{full}", "--")
+        if count.returncode or count.stdout.strip() in ("", "0"):
+            return None
+        return short
+
     def worktrees(self) -> list[Worktree]:
         """List the repository's worktrees.
 
@@ -744,6 +787,8 @@ class Cleanup:
         Args:
             repo: The repository.
             target: The merge target, or `None` for each record's base branch.
+                A name that is no local branch but a remote-tracking ref, such
+                as `origin/main`, is only tested for containment.
             again: The command that repeats this cleanup.
             claim: Handle only records with this exact claim id.
             dry_run: Report what would be done and change nothing.
@@ -754,6 +799,11 @@ class Cleanup:
         """
         self.repo = repo
         self.target = target
+        self.remote = (
+            target is not None
+            and not repo.branch_exists(target)
+            and repo.remote_tip(target) is not None
+        )
         self.again = again
         self.claim = claim
         self.dry_run = dry_run
@@ -981,23 +1031,44 @@ class Cleanup:
             self.repo.top, tip, target_tip, self.repo.env, scratch=self.dry_run
         )
 
+    def _target_tip(self) -> str | None:
+        assert self.target is not None
+        if self.remote:
+            return self.repo.remote_tip(self.target)
+        return self.repo.tip(self.target)
+
+    def _not_contained(self, branch: str) -> _KeepError:
+        """Explain a branch the target does not contain."""
+        assert self.target is not None
+        reason = f"not contained in {self.target}"
+        if self.remote:
+            return _KeepError(reason, None)
+        upstream = self.repo.behind_upstream(self.target)
+        if upstream is not None:
+            return _KeepError(
+                f"{reason}; {self.target} is behind {upstream}",
+                f"next: git -C {self.repo.top} fetch, fast-forward {self.target} "
+                f"to {upstream}, then {self.again}",
+            )
+        return _KeepError(
+            reason,
+            f"next: emb merge {branch} --into {self.target} --verdict keep "
+            "--note '<verdict line>' --subject '<commit subject>' "
+            "(after a Keep verdict)"
+            if self.claim is not None
+            else None,
+        )
+
     def _tips(self, branch: str) -> tuple[str, str]:
         assert self.target is not None
         tip = self.repo.tip(branch)
         if tip is None:
             raise _KeepError(f"{branch} no longer exists", f"next: {self.again}")
-        target_tip = self.repo.tip(self.target)
+        target_tip = self._target_tip()
         if target_tip is None:
             raise _KeepError(f"{self.target} no longer exists", f"next: {self.again}")
         if not self._contained(tip, target_tip):
-            raise _KeepError(
-                f"not contained in {self.target}",
-                f"next: emb merge {branch} --into {self.target} --verdict keep "
-                "--note '<verdict line>' --subject '<commit subject>' "
-                "(after a Keep verdict)"
-                if self.claim is not None
-                else None,
-            )
+            raise self._not_contained(branch)
         return tip, target_tip
 
     def _clean(
@@ -1081,7 +1152,7 @@ class Cleanup:
     ) -> Result:
         """Remove a branch and its worktree while any run locks are held."""
         assert self.target is not None
-        if (self.repo.tip(branch), self.repo.tip(self.target)) != (tip, target_tip):
+        if (self.repo.tip(branch), self._target_tip()) != (tip, target_tip):
             moved = branch if self.repo.tip(branch) != tip else self.target
             raise _KeepError(f"{moved} moved", f"next: {self.again}")
         tip, _ = self._tips(branch)
@@ -1325,7 +1396,8 @@ def cleanup(
     """Run `emb cleanup`.
 
     Args:
-        target: The merge target, or `None` for each claimed record's base branch.
+        target: The merge target, a local branch or a remote-tracking ref, or
+            `None` for each claimed record's base branch.
         branch: Clean up only this branch.
         claim: Handle only records with this exact claim id; no live claim needed.
         directory: A folder in the git checkout.
@@ -1359,17 +1431,31 @@ def cleanup(
     except BranchError as error:
         return _print_failure("cleanup", error, err, failures)
     again = _again(target, branch, repo.top, claim)
-    for name in (target, branch):
-        if name is not None and not repo.branch_exists(name):
-            return _print_failure(
-                "cleanup",
-                BranchError(
-                    exits.NOT_A_CHECKOUT,
-                    f"no local branch {name}",
-                    f"next: git -C {repo.top} branch --list",
-                ),
-                err,
-            )
+    if (
+        target is not None
+        and not repo.branch_exists(target)
+        and repo.remote_tip(target) is None
+    ):
+        return _print_failure(
+            "cleanup",
+            BranchError(
+                exits.NOT_A_CHECKOUT,
+                f"no local branch or remote-tracking ref {target}",
+                f"next: git -C {repo.top} fetch, then name a local branch or a "
+                "remote-tracking ref such as origin/main",
+            ),
+            err,
+        )
+    if branch is not None and not repo.branch_exists(branch):
+        return _print_failure(
+            "cleanup",
+            BranchError(
+                exits.NOT_A_CHECKOUT,
+                f"no local branch {branch}",
+                f"next: git -C {repo.top} branch --list",
+            ),
+            err,
+        )
     job = Cleanup(
         repo,
         target,

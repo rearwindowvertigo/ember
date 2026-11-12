@@ -1177,6 +1177,97 @@ def test_cleanup_removes_a_squash_merged_branch(
     assert record.load(run.id, env).status == record.CLOSED
 
 
+def _publish_then_drop(repo: Path, env: dict[str, str]) -> None:
+    """Copy `main` to `origin/main` as its upstream, then drop the last commit."""
+    git(repo, "update-ref", "refs/remotes/origin/main", "main", env=env)
+    git(repo, "config", "remote.origin.url", str(repo), env=env)
+    git(
+        repo,
+        "config",
+        "remote.origin.fetch",
+        "+refs/heads/*:refs/remotes/origin/*",
+        env=env,
+    )
+    git(repo, "config", "branch.main.remote", "origin", env=env)
+    git(repo, "config", "branch.main.merge", "refs/heads/main", env=env)
+    git(repo, "reset", "-q", "--hard", "HEAD~1", env=env)
+
+
+def test_cleanup_removes_a_branch_contained_in_a_remote_tracking_ref(
+    tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    run = _start(tmp_path, env, repo, driver)
+    claimed = replace(run, claim="claim-r")
+    record.save(claimed)
+    assert run.branch is not None
+    _squash(repo, run.branch, env)
+    _publish_then_drop(repo, env)
+    streams = Streams()
+    assert _cleanup(env, driver, streams, repo, claim="claim-r") == 0
+    out, _ = streams.take()
+    assert out == (
+        f"kept {run.branch}: not contained in main; main is behind origin/main; "
+        f"claim claim-r; next: git -C {repo} fetch, fast-forward main to "
+        f"origin/main, then emb cleanup --merged-into main --claim claim-r "
+        f"--dir {repo}\n"
+    )
+    assert (
+        _cleanup(env, driver, streams, repo, target="origin/main", claim="claim-r") == 0
+    )
+    out, err = streams.take()
+    assert out.startswith(f"removed {run.branch}: contained in origin/main"), err
+    assert "next: emb choices --finish claim-r" in err
+    assert not _branch_exists(repo, run.branch, env)
+    assert not Path(run.worktree).exists()
+
+
+def test_cleanup_keeps_a_branch_a_remote_tracking_ref_lacks_without_a_merge_line(
+    tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    run = replace(_start(tmp_path, env, repo, driver), claim="claim-r")
+    record.save(run)
+    git(repo, "update-ref", "refs/remotes/origin/main", "main", env=env)
+    streams = Streams()
+    assert (
+        _cleanup(env, driver, streams, repo, target="origin/main", claim="claim-r") == 0
+    )
+    out, _ = streams.take()
+    assert out == (f"kept {run.branch}: not contained in origin/main; claim claim-r\n")
+    assert run.branch is not None and _branch_exists(repo, run.branch, env)
+
+
+def test_cleanup_prefers_a_local_branch_and_notes_no_current_upstream(
+    tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    run = _start(tmp_path, env, repo, driver)
+    assert run.branch is not None
+    git(repo, "update-ref", "refs/remotes/origin/main", "main", env=env)
+    git(repo, "config", "remote.origin.url", str(repo), env=env)
+    git(
+        repo,
+        "config",
+        "remote.origin.fetch",
+        "+refs/heads/*:refs/remotes/origin/*",
+        env=env,
+    )
+    git(repo, "config", "branch.main.remote", "origin", env=env)
+    git(repo, "config", "branch.main.merge", "refs/heads/main", env=env)
+    git(repo, "branch", "-q", "origin/main", "main", env=env)
+    _squash(repo, run.branch, env)
+    streams = Streams()
+    assert _cleanup(env, driver, streams, repo, target="origin/main") == 0
+    out, _ = streams.take()
+    assert (
+        out
+        == f"kept {run.branch}: not contained in origin/main; no claim is recorded\n"
+    )
+    git(repo, "branch", "-q", "-D", "origin/main", env=env)
+    git(repo, "update-ref", "refs/remotes/origin/main", "main", env=env)
+    assert _cleanup(env, driver, streams, repo) == 0
+    out, _ = streams.take()
+    assert out.startswith(f"removed {run.branch}: contained in main")
+
+
 def test_cleanup_from_inside_the_run_worktree_removes_it(
     tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
 ) -> None:
@@ -1710,7 +1801,12 @@ def test_cleanup_usage_and_missing_names_are_65(
 ) -> None:
     streams = Streams()
     assert _cleanup(env, driver, streams, repo, target="nope") == 65
-    assert "no local branch nope" in streams.take()[1]
+    _, err = streams.take()
+    assert "no local branch or remote-tracking ref nope" in err
+    assert err.splitlines()[-1] == (
+        f"next: git -C {repo} fetch, then name a local branch or a "
+        "remote-tracking ref such as origin/main"
+    )
     assert _cleanup(env, driver, streams, repo, branch="ember/claude/none-at-all") == 65
     outside = tmp_path / "outside"
     outside.mkdir()

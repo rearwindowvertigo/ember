@@ -291,6 +291,58 @@ def test_claim_skill_version_reply_and_warning(
     )
 
 
+def test_brief_claim_keeps_claim_skill_menu_and_engine_answers(
+    env: dict[str, str], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    installed = tmp_path / "installed-skill"
+    installed.mkdir()
+    (installed / "SKILL.md").write_text(
+        "---\nname: ember\n---\n"
+        "Skill version: 0.13.0 <!-- x-release-please-version -->\n"
+    )
+    link = skill.link_path(env)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(installed)
+    choices.set_once({"single.writer_as": "subagent"}, env=env)
+
+    code, data, err = _run(
+        ["--claim", "--id", "run-000001", "--skill", "0.12.0", "--brief"], env, capsys
+    )
+
+    assert code == 0
+    assert "WARNING: the loaded ember skill is 0.12.0" in err
+    full = choices.read("run-000001", env=env)
+    assert data["claim"] == {"id": "run-000001", "status": "claimed"}
+    assert data["skill"] == "stale"
+    assert data["loaded_skill_version"] == "0.12.0"
+    assert data["installed_skill_version"] == "0.13.0"
+    assert data["menu"] == full["menu"]
+    assert set(data) == {
+        *full,
+        "skill",
+        "loaded_skill_version",
+        "installed_skill_version",
+    }
+    assert set(data["answers"]) == {
+        key for key in full["answers"] if key.startswith(("engine.", "shortlist."))
+    }
+    assert data["answers"]["engine.codex"] == full["answers"]["engine.codex"]
+
+
+def test_brief_read_and_refusals(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, data, _ = _run(["--brief"], env, capsys)
+    assert code == 0
+    assert set(data["answers"]) == {
+        *(f"engine.{name}" for name in choices.ENGINES),
+        *(f"shortlist.{name}" for name in choices.ENGINES),
+    }
+    code, _, err = _run(["--finish", "run-000001", "--brief"], env, capsys)
+    assert code == 64
+    assert err == "emb choices: --brief cannot be used with --finish\n"
+
+
 @pytest.mark.parametrize("version_line", [None, "", "Skill version: invalid\n"])
 def test_claim_unknown_skill_warns_and_keeps_claim(
     env: dict[str, str],

@@ -955,6 +955,31 @@ def _read_state(
             return _load(conn, generation, run_id, now, include_once=run_id is None)
 
 
+BRIEF_ANSWER_PREFIXES = ("engine.", "shortlist.")
+"""The answer keys a brief reply keeps: the engine switches and shortlists."""
+
+
+def brief(reply: Mapping[str, Any]) -> dict[str, Any]:
+    """Shorten a read or claim reply to what a lead reads to pick a worker.
+
+    Args:
+        reply: A reply from `read` or `claim`.
+
+    Returns:
+        The reply with every key but `answers` unchanged, and `answers`
+        holding only the `engine.<name>` and `shortlist.<name>` keys.
+    """
+    answers = reply.get("answers") or {}
+    return {
+        **reply,
+        "answers": {
+            key: value
+            for key, value in answers.items()
+            if key.startswith(BRIEF_ANSWER_PREFIXES)
+        },
+    }
+
+
 def read(
     id: str | None = None,
     request: Mapping[str, object] | None = None,
