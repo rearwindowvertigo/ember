@@ -1298,6 +1298,7 @@ def test_cleanup_notes_only_an_upstream_ahead_of_the_target(
     out, _ = streams.take()
     note = "; main is behind origin/main" if noted else ""
     assert out.startswith(f"kept {run.branch}: not contained in main{note}; ")
+    assert ("is behind" in out) == noted
     assert _branch_exists(repo, run.branch, env)
 
 
