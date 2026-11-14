@@ -2920,7 +2920,9 @@ class Core:
         self.status_next = None
         self.status_owner = []
         if run_id is not None:
-            document = self._document(self._load(run_id))
+            document, errors = self._document(self._load(run_id))
+            for error in errors:
+                self._warn(f"WARNING: {error}")
             self.status_next = document["next"]
             self._warn_parent([document])
             if document["step"] == "owner":
@@ -2939,7 +2941,19 @@ class Core:
         runs, errors = record.list_runs(self.env)
         for error in errors:
             self._warn(f"emb run: skipped {error}")
-        documents = [self._document(run) for run in runs]
+        documents = []
+        broken_runs = 0
+        for run in runs:
+            document, turn_errors = self._document(run)
+            documents.append(document)
+            if turn_errors:
+                broken_runs += 1
+        if broken_runs:
+            counted = "1 run has" if broken_runs == 1 else f"{broken_runs} runs have"
+            self._warn(
+                f"WARNING: {counted} a turn result that cannot be read; "
+                "emb run --status <run> names the file"
+            )
         self._warn_parent(documents)
         for document in documents:
             if document["step"] == "owner":
@@ -2955,12 +2969,10 @@ class Core:
                 )
         return exits.OK
 
-    def _document(self, run: Run) -> dict[str, Any]:
+    def _document(self, run: Run) -> tuple[dict[str, Any], list[record.RecordError]]:
         run = self._owner_state(run)
         parent = record.parent_state(run)
         turns, errors = record.turn_results(run)
-        for error in errors:
-            self._warn(f"WARNING: {error}")
         session_state = self._session_state(run.id)
         step, next_line = self.step(run, session_state)
         return {
@@ -2979,7 +2991,7 @@ class Core:
             "turns": turns,
             "step": step,
             "next": next_line,
-        }
+        }, errors
 
     def step(
         self, run: Run, session_state: str | None = None
