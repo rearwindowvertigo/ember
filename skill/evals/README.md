@@ -2,9 +2,11 @@
 
 Twenty-two cases check the `ember` skill's rules in a real Claude session against
 a stub `emb` command. Each case has `prompt.md`, `case.yaml`, `graders/`
-and `place-files.sh`; some also have `files/` or `owner-replies.md`. Every grader is
-`type: llm`, `focus: trace`, and names commands, their order and flags, and
-what is asked of the owner, never the skill's wording. The cases run outside
+and `place-files.sh`; some also have `files/` or `owner-replies.md`. Every grader has
+`focus: trace` and names commands, their order and flags, and what is asked
+of the owner, never the skill's wording. A `type: llm` grader is judged by
+graders that read the run; a `type: script` grader is decided from the
+order of the run's Bash calls (Grading). The cases run outside
 `make check`; `tests/skill/test_evals.py` checks the kit itself.
 
 | Case | Situation the stubs set up | Graders |
@@ -408,24 +410,56 @@ bash skill/evals/_runner/run_case.sh skill/evals/<case> skill "${XDG_CACHE_HOME:
 
 ## Grading
 
-For each run, a grader subagent reads the case's `graders/*.md` (one
-expectation each), the run's `trace.jsonl` and `calls.log`, and writes
-`grading.json` in the run's out dir with `expectations`, a list of
-`{"text", "passed", "evidence"}`. `calls.log` gives the exact argv, order
-and exit of every stubbed call; `trace.jsonl` gives the messages, the
-questions to the owner, the owner's replies and whether a Bash call ran in
-the background.
-`grading.json` lists the expectations in the order of the case's
-`graders/*.md` file names.
+Each file in a case's `graders/` holds one expectation. Runs are graded by
+expectation, not by run: every run of the case is judged against one
+expectation by the same graders, who are not told which skill text a run
+used.
+
+```
+python3 skill/evals/_runner/grade.py batch <case dir> <out dir> [--seed <n>]
+python3 skill/evals/_runner/grade.py apply <case dir> <out dir> [--graders <n>]
+```
+
+`batch` writes `<out dir>/grading/<grader>/` for every grader file.
+
+- A `type: script` grader has `check: order` with the patterns `first` and
+  `then` in its front matter. It passes for a run when a Bash call matching
+  `first` comes before the first Bash call matching `then` in the run's
+  `trace.jsonl`. `batch` decides it for every run and saves `script.json`.
+- A `type: llm` grader gets `expectation.md`, `task.md` and one folder per
+  run under `runs/`, named `r01`, `r02` and so on in a shuffled order. Each
+  holds the run's `calls.log` (the exact argv, order and exit of every
+  stubbed call), `owner.log` and `trace.txt`, an ordered view of
+  `trace.jsonl` with the messages, the questions to the owner, the owner's
+  replies, every tool call and whether a Bash call ran in the background.
+  The run's path is replaced in those files. The key from `r<nn>` to
+  `<side>/<run>` is in `<out dir>/grading/keys/<grader>.json`; no grader is
+  given it.
+
+Two grader subagents grade each `type: llm` grader folder, each on its own.
+Each follows `task.md`: it writes the one reading of the expectation it
+applies to every run, lists the places where the words can be read two
+ways, grades every run, and writes `verdict-<name>.json` in the folder.
+
+`apply` needs `--graders` verdict files (default 2) for every `type: llm`
+grader, each with a true or false `passed` for every run. When the graders
+agree on every run, it writes each run's `grading.json` with `expectations`,
+a list of `{"text", "passed", "evidence"}` in the order of the case's
+`graders/*.md` file names. When two graders disagree on a run, it names the
+run, writes nothing and exits 65: the expectation's text is corrected, and
+the runs are batched and graded again. It exits 64 on a usage error and 66
+when the case has no graders or the out dir has no runs.
 
 ## Repeated runs: `_runner/run_repeat.sh` and `_runner/tally.py`
 
 Before a change that moves, removes or rewrites rules in `skill/SKILL.md`
 or `skill/references/` merges into `main`, its author lists the cases whose
-graders exercise those rules. The author compares each listed case with
-`bash skill/evals/_runner/run_repeat.sh --base origin/main <case dir> <out dir>`,
-grades every run on both sides as in Grading, and records `tally.py`'s
-`all graders` pass counts for both `skill` and `base` on the change's issue.
+graders exercise those rules. The author runs each listed case five times
+with `bash skill/evals/_runner/run_repeat.sh --runs 5 <case dir> <out dir>`,
+grades the runs as in Grading, and records `tally.py`'s counts on the
+change's issue. The change merges when every listed case shows `5/5` on
+`all graders`. `--base origin/main` adds the same number of runs with the
+skill text on `main`, for a comparison; the bar applies to `skill` only.
 
 ```
 bash skill/evals/_runner/run_repeat.sh [--runs <n>] [--jobs <n>] [--base <git ref>] <case dir> <out dir>
@@ -446,7 +480,7 @@ on standard error, and `run_repeat.sh` then exits with that code once every
 run has finished. It exits 64 on a usage error or an unknown ref, and 66
 when the case has no `prompt.md` or the ref has no `skill/SKILL.md`.
 
-After each run is graded as in Grading, `tally.py` counts the passes:
+After the runs are graded as in Grading, `tally.py` counts the passes:
 
 ```
 python3 skill/evals/_runner/tally.py <case dir> <out dir> [--json]

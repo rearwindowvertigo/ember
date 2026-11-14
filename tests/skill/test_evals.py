@@ -187,7 +187,25 @@ def test_case_files_parse(case: str) -> None:
     assert graders
     for grader in graders:
         meta, text = front_matter(grader)
-        assert meta == {"type": "llm", "focus": "trace", "weight": "1"}, grader
+        if meta.get("type") == "script":
+            # Decided by _runner/grade.py from the order of the run's Bash calls.
+            assert set(meta) == {
+                "type",
+                "focus",
+                "weight",
+                "check",
+                "first",
+                "then",
+            }, grader
+            assert (meta["focus"], meta["weight"], meta["check"]) == (
+                "trace",
+                "1",
+                "order",
+            ), grader
+            for pattern in (meta["first"], meta["then"]):
+                assert re.compile(pattern.strip("'\"")).pattern, grader
+        else:
+            assert meta == {"type": "llm", "focus": "trace", "weight": "1"}, grader
         assert text.strip()
     replies = folder / "owner-replies.md"
     if replies.exists():
