@@ -779,7 +779,10 @@ def test_watch_outcomes(
     expected_reports = {
         82: [
             f"report: the check failed after wave {flow['wave']}; "
-            "fix the flow branch, then resume"
+            "fix the flow branch, then resume; "
+            "when the check command is wrong, replace it with "
+            f"emb flow --resume {flow['id']} --check '<JSON argv list>' "
+            "--reason '<text>'"
         ],
         72: ["report: the runner is gone; work may still be running"],
     }.get(expected, [])
@@ -813,7 +816,9 @@ def test_watch_exit_82_report(
             flow["id"], {"kind": "end", "status": status, "exit": 82}, env
         )
     expected = (
-        "report: the check failed after wave 3; fix the flow branch, then resume"
+        "report: the check failed after wave 3; fix the flow branch, then resume; "
+        "when the check command is wrong, replace it with "
+        f"emb flow --resume {flow['id']} --check '<JSON argv list>' --reason '<text>'"
         if status == "failed" and check_pending
         else "report: tasks unmerged; report every task's status and reason; "
         "leave the unmerged work and the flow branch to the owner"
@@ -1029,7 +1034,9 @@ def test_flow_errors_print_exit_report(
     report = (
         "report: the runner is gone; work may still be running"
         if code == 72
-        else "report: the check failed after wave 3; fix the flow branch, then resume"
+        else "report: the check failed after wave 3; fix the flow branch, then resume; "
+        "when the check command is wrong, replace it with "
+        f"emb flow --resume {flow['id']} --check '<JSON argv list>' --reason '<text>'"
         if check_pending and mode != "start"
         else "report: tasks unmerged; report every task's status and reason; "
         "leave the unmerged work and the flow branch to the owner"
@@ -2708,3 +2715,212 @@ def test_dry_run_does_not_execute_check(env: dict[str, str], plan_file: Path) ->
     assert code == 0, err
     assert not marker.exists()
     assert not paths.runs_dir(env).exists()
+
+
+def flow_files(flow_id: str, env: Mapping[str, str]) -> dict[str, bytes]:
+    """Read the record, saved plan and event log for refusal comparisons."""
+    folder = record.folder(flow_id, env)
+    return {
+        name: (folder / name).read_bytes()
+        for name in (record.FLOW_NAME, record.PLAN_NAME, record.EVENTS_NAME)
+    }
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--check", "[]", "--reason", "correct argv"],
+        ["--check", '[" \\t"]', "--reason", "correct argv"],
+        ["--check", '["true\\u0000"]', "--reason", "correct argv"],
+        ["--check", '["true", "\\u0000"]', "--reason", "correct argv"],
+        ["--check", '"true"', "--reason", "correct argv"],
+        ["--check", "{}", "--reason", "correct argv"],
+        ["--check", "null", "--reason", "correct argv"],
+        ["--check", '["true", 1]', "--reason", "correct argv"],
+        ["--check", "{", "--reason", "correct argv"],
+        ["--check", '["true"]'],
+        ["--check", '["true"]', "--reason", " \t\n"],
+        ["--reason", "correct argv"],
+    ],
+)
+def test_check_replacement_usage_preserves_files(
+    env: dict[str, str], flow: dict[str, Any], options: list[str]
+) -> None:
+    flow.update(status="failed", check_pending=True, check=["false"])
+    record.save(flow, env)
+    before = flow_files(flow["id"], env)
+    code, out, err = invoke(env, "--resume", flow["id"], *options)
+    assert code == 64 and not out, err
+    assert "next: emb flow --help" in err
+    assert flow_files(flow["id"], env) == before
+
+
+@pytest.mark.parametrize("mode", ["--status", "--watch", "--cancel"])
+def test_check_requires_resume(
+    env: dict[str, str], flow: dict[str, Any], mode: str
+) -> None:
+    before = flow_files(flow["id"], env)
+    code, _, err = invoke(
+        env, mode, flow["id"], "--check", '["true"]', "--reason", "correct argv"
+    )
+    assert code == 64 and "--check needs --resume" in err
+    assert flow_files(flow["id"], env) == before
+
+
+@pytest.mark.parametrize("status", record.FLOW_STATUSES)
+@pytest.mark.parametrize("pending", [True, False])
+def test_check_replacement_state_refused(
+    env: dict[str, str], flow: dict[str, Any], status: str, pending: bool
+) -> None:
+    if status == "failed" and pending:
+        return
+    flow.update(status=status, check_pending=pending)
+    record.save(flow, env)
+    before = flow_files(flow["id"], env)
+    code, _, err = invoke(
+        env, "--resume", flow["id"], "--check", '["true"]', "--reason", "correct argv"
+    )
+    assert code == 75 and f"is {status}" in err
+    assert f"next: emb flow --status {flow['id']}" in err
+    assert flow_files(flow["id"], env) == before
+
+
+@pytest.mark.parametrize("blocker", ["cancel", "live", "startup", "session"])
+def test_check_replacement_busy_preserves_files(
+    env: dict[str, str],
+    flow: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    blocker: str,
+) -> None:
+    flow.update(status="failed", check_pending=True, check=["false"])
+    record.save(flow, env)
+    folder = record.folder(flow["id"], env)
+    with ExitStack() as stack:
+        if blocker == "cancel":
+            (folder / record.CANCEL_NAME).write_text(
+                json.dumps({"at": time.time(), "reason": "stop"})
+            )
+        elif blocker == "live":
+            stack.enter_context(lock.hold(flow["id"], env))
+        elif blocker == "startup":
+            (folder / "startup.json").write_text(json.dumps({"at": time.time()}))
+        else:
+            monkeypatch.setattr(command, "SESSION_EXIT_SECONDS", 0)
+            monkeypatch.setattr(tmux, "exists", lambda *a, **kw: True)
+            monkeypatch.setattr(tmux, "pane_dead", lambda *a, **kw: False)
+        before = flow_files(flow["id"], env)
+        code, _, err = invoke(
+            env,
+            "--resume",
+            flow["id"],
+            "--check",
+            '["true"]',
+            "--reason",
+            "correct argv",
+        )
+        assert code == 75, err
+        assert flow_files(flow["id"], env) == before
+
+
+@pytest.mark.parametrize("wave", [0, 1, 3])
+def test_check_replacement_record_event_status(
+    env: dict[str, str],
+    flow: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    wave: int,
+) -> None:
+    flow.update(status="failed", check_pending=True, check=["false"], wave=wave)
+    record.save(flow, env)
+    before = flow_files(flow["id"], env)
+    saves = []
+    save = record.save
+
+    def capture(value: dict[str, Any], environment: Mapping[str, str]) -> None:
+        saves.append(json.loads(json.dumps(value)))
+        save(value, environment)
+
+    monkeypatch.setattr(record, "save", capture)
+    code, _, err = invoke(
+        env,
+        "--resume",
+        flow["id"],
+        "--check",
+        '["true", ""]',
+        "--reason",
+        "empty argument is intentional",
+    )
+    assert code == 0, err
+    assert len(saves) == 1
+    saved = record.load(flow["id"], env)
+    assert saved["check"] == ["true", ""] and saved["check_pending"]
+    (change,) = saved["check_changes"]
+    assert change == {
+        "at": change["at"],
+        "old": ["false"],
+        "new": ["true", ""],
+        "reason": "empty argument is intentional",
+    }
+    assert isinstance(change["at"], float)
+    assert saves[0]["check_changes"] == [change]
+    events = record.read_events(flow["id"], env)
+    assert events[-1] == {"kind": "check_replaced", "seq": 2, **change}
+    assert flow_files(flow["id"], env)[record.PLAN_NAME] == before[record.PLAN_NAME]
+    for as_json in (False, True):
+        code, out, err = invoke(
+            env, "--status", flow["id"], *(["--json"] if as_json else [])
+        )
+        assert code == 0, err
+        if as_json:
+            assert json.loads(out)["check_changes"] == [change]
+        else:
+            assert f"latest check replacement: {json.dumps(change)}" in out
+
+
+@pytest.mark.parametrize("failure", ["missing tool", "launch"])
+def test_check_replacement_survives_launch_failure(
+    env: dict[str, str],
+    flow: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    flow.update(status="failed", check_pending=True, check=["false"])
+    record.save(flow, env)
+    before = flow_files(flow["id"], env)
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise tmux.TmuxError("launch failed")
+
+    with monkeypatch.context() as patch:
+        if failure == "missing tool":
+            patch.setattr(command.shutil, "which", lambda *a, **kw: None)
+        else:
+            patch.setattr(tmux, "new_session", fail)
+        code, _, err = invoke(
+            env,
+            "--resume",
+            flow["id"],
+            "--check",
+            '["true"]',
+            "--reason",
+            "correct argv",
+        )
+    assert code == (69 if failure == "missing tool" else 71), err
+    assert f"emb flow --resume {flow['id']} uses the new check" in err
+    assert err.splitlines().count(f"next: emb flow --resume {flow['id']}") == 1
+    saved = record.load(flow["id"], env)
+    assert saved["check"] == ["true"] and saved["check_pending"]
+    assert len(saved["check_changes"]) == 1
+    assert flow_files(flow["id"], env)[record.PLAN_NAME] == before[record.PLAN_NAME]
+    assert (
+        len(
+            [
+                e
+                for e in record.read_events(flow["id"], env)
+                if e["kind"] == "check_replaced"
+            ]
+        )
+        == 1
+    )
+    code, _, err = invoke(env, "--resume", flow["id"])
+    assert code == 0, err
+    assert record.load(flow["id"], env)["check_changes"] == saved["check_changes"]

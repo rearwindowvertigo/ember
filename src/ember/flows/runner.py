@@ -12,6 +12,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -887,7 +888,7 @@ class _Runner:
                 return
             text = briefs.writer_brief(
                 self.id,
-                self.plan,
+                replace(self.plan, check=tuple(self.flow["check"])),
                 self.plan.task(task["id"]),
                 self.other_files(task),
                 standing=self.standing_read(),
@@ -909,7 +910,7 @@ class _Runner:
                 task,
                 "fix",
                 briefs.send_message(
-                    self.id, self.plan.task(task["id"]), text, check=self.plan.check
+                    self.id, self.plan.task(task["id"]), text, check=self.flow["check"]
                 ),
             )
             if not self.send(task, path, fresh=not hook_refused):
@@ -950,7 +951,7 @@ class _Runner:
                     self.plan.task(task["id"]),
                     task["round"] + 1,
                     self.earlier(task),
-                    check=self.plan.check,
+                    check=self.flow["check"],
                 ),
             )
             if not self.send(task, path, fresh=False):

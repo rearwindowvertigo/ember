@@ -763,3 +763,35 @@ def test_record_without_check_base(
     assert loaded["check_pending"] is False
     record.save(loaded, env)
     assert record.load(flow["id"], env) == loaded
+
+
+def test_record_without_check_changes(
+    flow: dict[str, Any], created: Path, env: dict[str, str]
+) -> None:
+    path = created / record.FLOW_NAME
+    old = json.loads(path.read_text())
+    del old["check_changes"]
+    path.write_text(json.dumps(old))
+    before = path.read_bytes()
+    assert record.load(flow["id"], env)["check_changes"] == []
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        None,
+        {},
+        [None],
+        [{"at": 1}],
+        [
+            {"at": 1, "old": [], "new": ["true"], "reason": None},
+        ],
+    ],
+)
+def test_invalid_check_changes(
+    flow: dict[str, Any], created: Path, env: dict[str, str], bad: object
+) -> None:
+    flow["check_changes"] = bad
+    with pytest.raises(record.FlowError, match="check"):
+        record.save(flow, env)

@@ -972,11 +972,16 @@ def test_answers_resume_stopped_tasks(h: Harness, kind: str) -> None:
 
 
 @pytest.mark.parametrize("check", [[], [sys.executable, "-c", "print('plan checked')"]])
-def test_send_correction_carries_plan_checks(h: Harness, check: list[str]) -> None:
+def test_send_correction_carries_record_check(h: Harness, check: list[str]) -> None:
     h.scripts_update(**{"Review of task a,": "@reply " + FIX})
     options: dict[str, Any] = {"check": check} if check else {}
     h.create(rounds=0, **options)
     assert h.run()["tasks"][0]["status"] == "stopped"
+    if check:
+        check = [*check, ""]
+        flow = h.flow()
+        flow["check"] = check
+        record.save(flow, h.env)
     correction = h.tmp / "correction.md"
     correction.write_text("@write a corrected")
     h.scripts_update(**{"Review of task a,": "@reply " + PASS})
@@ -2497,7 +2502,9 @@ def test_failed_base_check_watch_reports(h: Harness, timeout: bool) -> None:
     assert flow["reason"] == reason
     report = (
         "report: the check failed on the base; "
-        "correct the check or the flow branch, then resume"
+        "correct the check or the flow branch, then resume; "
+        "when the check command is wrong, replace it with "
+        f"emb flow --resume {h.id} --check '<JSON argv list>' --reason '<text>'"
     )
     next_line = (
         f"next: correct the check {shlex.join(flow['check'])} or "
@@ -2670,3 +2677,80 @@ def test_old_record_runs_without_base_check(h: Harness) -> None:
     flow = h.run()
     assert flow["status"] == "done"
     assert [(c["wave"], c["exit"]) for c in flow["checks"]] == [(1, 0)]
+
+
+@pytest.mark.parametrize("wave", [0, 1])
+@pytest.mark.parametrize("passes", [False, True])
+def test_replace_failed_check_before_pending_wave(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, wave: int, passes: bool
+) -> None:
+    old_check = [sys.executable, "-c", 'print("old check"); raise SystemExit(1)']
+    h.create(
+        [task("a"), task("b", after=["a"])],
+        check=old_check,
+        check_base=wave == 0,
+        rounds=1,
+    )
+    failed = h.run()
+    assert failed["status"] == "failed" and failed["wave"] == wave
+    assert failed["check_pending"]
+    folder = record.folder(h.id, h.env)
+    saved_plan = (folder / record.PLAN_NAME).read_bytes()
+    new_check = [
+        sys.executable,
+        "-c",
+        f'print("new check"); raise SystemExit({0 if passes else 2})',
+    ]
+    h.scripts_update(
+        **{
+            "Review of task b, round 1,": "@reply " + FIX,
+            "Fix round 1 of task b": "@write b fixed",
+        }
+    )
+    pipeline = runner._Runner._pipeline
+    started = []
+
+    def verify_check(instance: runner._Runner, item: dict[str, Any]) -> None:
+        current = h.flow()
+        assert current["checks"][-1]["exit"] == 0
+        assert not current["check_pending"]
+        assert current["check"] == new_check
+        started.append(item["id"])
+        pipeline(instance, item)
+
+    monkeypatch.setattr(runner._Runner, "_pipeline", verify_check)
+    args = build_parser().parse_args(
+        [
+            "flow",
+            "--resume",
+            h.id,
+            "--check",
+            json.dumps(new_check),
+            "--reason",
+            "correct the command",
+        ]
+    )
+    err = io.StringIO()
+    assert (
+        command.main(
+            args, h.env, runner_argv=lambda _: ["true"], out=io.StringIO(), err=err
+        )
+        == 0
+    ), err.getvalue()
+    final = h.run()
+    assert final["status"] == ("done" if passes else "failed")
+    assert final["check_pending"] is not passes
+    assert final["checks"][1]["wave"] == wave
+    assert final["checks"][1]["exit"] == (0 if passes else 2)
+    assert (folder / record.PLAN_NAME).read_bytes() == saved_plan
+    if passes:
+        assert started == (["a", "b"] if wave == 0 else ["b"])
+        assert all(t["status"] == "merged" for t in final["tasks"])
+        for kind in ("write", "fix"):
+            brief = next((folder / "briefs").glob(f"b-{kind}-*.md")).read_text()
+            assert f"Run the plan's check command `{shlex.join(new_check)}`" in brief
+            assert shlex.join(old_check) not in brief
+    else:
+        assert started == []
+        assert final["tasks"] == failed["tasks"]
+        assert final["checks"][-1]["exit"] == 2

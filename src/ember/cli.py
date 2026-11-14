@@ -319,8 +319,13 @@ def _add_flow(parser: argparse.ArgumentParser) -> None:
         "--lead", nargs=2, metavar=("FLOW", "TASK"), help="answer a task's lead stop"
     )
     parser.add_argument("--resume", metavar="FLOW", help="restart a flow's runner")
+    parser.add_argument(
+        "--check", metavar="JSON", help="with --resume, replace a failed check argv"
+    )
     parser.add_argument("--cancel", metavar="FLOW", help="cancel a flow's runner")
-    parser.add_argument("--reason", metavar="TEXT", help="the cancellation reason")
+    parser.add_argument(
+        "--reason", metavar="TEXT", help="the cancellation or check replacement reason"
+    )
     parser.add_argument("--writer", metavar="W", help="writer engine:model[@effort]")
     parser.add_argument(
         "--reviewer", metavar="W", help="reviewer engine:model[@effort]"

@@ -97,8 +97,16 @@ def _usage(args: argparse.Namespace) -> str:
             problem = "--writer and --claim need --dry-run or --start"
         elif args.stall is not None and mode != "start":
             problem = "--stall needs --start"
-        elif args.reason is not None and mode != "cancel":
-            problem = "--reason needs --cancel"
+        elif args.check is not None and mode != "resume":
+            problem = "--check needs --resume"
+        elif args.check is not None and (
+            args.reason is None or not args.reason.strip()
+        ):
+            problem = "--check needs --reason with non-blank text"
+        elif args.reason is not None and not (
+            mode == "cancel" or (mode == "resume" and args.check is not None)
+        ):
+            problem = "--reason needs --cancel or --resume with --check"
         elif args.json and mode not in ("dry_run", "watch", "status", "cancel"):
             problem = "--json needs --dry-run, --watch, --status or --cancel"
     if problem:
@@ -254,17 +262,21 @@ def _session(
     argv: Callable[[str], list[str]],
     *,
     fresh: bool = False,
+    checked: bool = False,
 ) -> None:
     """Reserve startup and launch one session while lifecycle.lock is held."""
     flow_id = flow["id"]
     follow = f"next: emb flow --watch {flow_id} --json"
-    if lock.live(flow_id, env) or (not fresh and _starting(flow, env)):
+    if not checked and (
+        lock.live(flow_id, env) or (not fresh and _starting(flow, env))
+    ):
         raise CommandError(
             75, f"the runner for {flow_id} is running or starting", follow
         )
     _require_tool("tmux", env)
     try:
-        _wait_session_exit(flow_id, env, follow)
+        if not checked:
+            _wait_session_exit(flow_id, env, follow)
         (record.folder(flow_id, env) / record.CANCEL_NAME).unlink(missing_ok=True)
         events = record.read_events(flow_id, env)
         reservation = {"at": time.time(), "after": events[-1]["seq"] if events else 0}
@@ -690,12 +702,32 @@ def _not_done(flow: Mapping[str, Any]) -> None:
 
 
 def _resume(
-    flow_id: str, env: Mapping[str, str], argv: Callable[[str], list[str]], out: TextIO
+    flow_id: str,
+    env: Mapping[str, str],
+    argv: Callable[[str], list[str]],
+    out: TextIO,
+    *,
+    check: str | None = None,
+    reason: str | None = None,
 ) -> None:
     """Start an idle flow under the startup reservation lock."""
+    replacement = plan.parse_check(check) if check is not None else None
+    if replacement is not None and (reason is None or not reason.strip()):
+        raise CommandError(
+            64, "--check needs --reason with non-blank text", "next: emb flow --help"
+        )
     _load(flow_id, env)
     with lifecycle(flow_id, env):
         flow = _load(flow_id, env)
+        if replacement is not None and not (
+            flow["status"] == "failed" and flow["check_pending"]
+        ):
+            raise CommandError(
+                75,
+                f"the flow {flow_id} is {flow['status']}; "
+                "replacing a check requires failed with a pending check",
+                f"next: emb flow --status {flow_id}",
+            )
         _not_done(flow)
         if flow["status"] != "cancelled" and record.cancel_request(flow_id, env):
             raise CommandError(
@@ -703,7 +735,14 @@ def _resume(
                 f"cancellation of {flow_id} is pending",
                 f"next: emb flow --status {flow_id}",
             )
-        if not lock.live(flow_id, env) and not _starting(flow, env):
+        busy = lock.live(flow_id, env) or _starting(flow, env)
+        if replacement is not None and busy:
+            raise CommandError(
+                75,
+                f"the runner for {flow_id} is running or starting",
+                f"next: emb flow --status {flow_id}",
+            )
+        if not busy:
             from ember.flows.runner import RunnerError, preparation_known
 
             try:
@@ -712,7 +751,52 @@ def _resume(
                 raise CommandError(
                     exits.REFUSED, str(error), f"next: emb flow --status {flow_id}"
                 ) from error
-        _session(flow, env, argv)
+        if replacement is None:
+            _session(flow, env, argv)
+        else:
+            launch_error = None
+            try:
+                _require_tool("tmux", env)
+                _wait_session_exit(flow_id, env, f"next: emb flow --status {flow_id}")
+            except CommandError as error:
+                if error.code == 75:
+                    raise
+                launch_error = error
+            except (tmux.TmuxError, paths.RuntimeDirError) as error:
+                launch_error = error
+            change = {
+                "at": time.time(),
+                "old": flow["check"],
+                "new": replacement,
+                "reason": reason,
+            }
+            flow["check"] = replacement
+            flow["check_changes"].append(change)
+            record.save(flow, env)
+            try:
+                record.append_event(flow_id, {"kind": "check_replaced", **change}, env)
+                if launch_error is not None:
+                    raise launch_error
+                _session(flow, env, argv, checked=True)
+            except Exception as error:
+                code = (
+                    error.code
+                    if isinstance(error, CommandError)
+                    else 69
+                    if isinstance(error, paths.RuntimeDirError)
+                    else 71
+                    if isinstance(error, tmux.TmuxError)
+                    else 1
+                )
+                follow = f"next: emb flow --resume {flow_id}"
+                if isinstance(error, CommandError) and error.line != follow:
+                    follow = error.line + "\n" + follow
+                raise CommandError(
+                    code,
+                    f"{error}; the check replacement is saved; "
+                    f"emb flow --resume {flow_id} uses the new check",
+                    follow,
+                ) from error
     print(f"flow {flow_id}", file=out)
 
 
@@ -1083,14 +1167,19 @@ def _exit_reports(code: int | None, flow: Mapping[str, Any] | None = None) -> li
     """Return the settled report lines for a user-facing flow exit."""
     if code == NOT_MERGED:
         if flow is not None and flow["status"] == "failed" and flow["check_pending"]:
+            replacement = (
+                "; when the check command is wrong, replace it with "
+                f"emb flow --resume {flow['id']} --check '<JSON argv list>' "
+                "--reason '<text>'"
+            )
             if flow["wave"] == 0:
                 return [
                     "report: the check failed on the base; "
-                    "correct the check or the flow branch, then resume"
+                    "correct the check or the flow branch, then resume" + replacement
                 ]
             return [
                 f"report: the check failed after wave {flow['wave']}; "
-                "fix the flow branch, then resume"
+                "fix the flow branch, then resume" + replacement
             ]
         return [
             "report: tasks unmerged; report every task's status and reason; "
@@ -1376,6 +1465,12 @@ def _status(
                     print(f"review_budget: {verdict.budget_text(value)}", file=out)
                 elif key == "check_output":
                     _print_check_output(value, out)
+                elif key == "check_changes":
+                    if value:
+                        print(
+                            f"latest check replacement: {json.dumps(value[-1])}",
+                            file=out,
+                        )
                 elif key != "tasks":
                     print(f"{key}: {value}", file=out)
             for task in flow["tasks"]:
@@ -1461,7 +1556,9 @@ def main(
             flow_id = args.lead[0]
         elif mode == "resume":
             flow_id = args.resume
-            _resume(flow_id, environment, argv, out)
+            _resume(
+                flow_id, environment, argv, out, check=args.check, reason=args.reason
+            )
         elif mode == "watch":
             return _watch(args.watch, args.json, environment, out, err)
         elif mode == "cancel":

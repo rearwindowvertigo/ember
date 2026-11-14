@@ -68,6 +68,7 @@ _FLOW_FIELDS = {
     "parallel": "int",
     "check_timeout": "int",
     "check": "[str]",
+    "check_changes": "[dict]",
     "trailers": "[str]",
     "read": "[str]",
     "stall_minutes": "number",
@@ -218,6 +219,7 @@ def new_flow(
         "parallel": plan.parallel,
         "check_timeout": plan.check_timeout,
         "check": list(plan.check),
+        "check_changes": [],
         "trailers": list(plan.trailers),
         "read": list(plan.read),
         "stall_minutes": stall_minutes,
@@ -330,6 +332,13 @@ def _validate(flow_id: str, flow: object) -> None:
             {"wave": "int", "exit": "int", "log": "str", "at": "number"},
             "check",
         )
+    for change in flow["check_changes"]:
+        _fields(
+            flow_id,
+            change,
+            {"at": "number", "old": "[str]", "new": "[str]", "reason": "str"},
+            "check change",
+        )
     seen: set[str] = set()
     for task in flow["tasks"]:
         _fields(flow_id, task, _TASK_FIELDS, "task")
@@ -398,6 +407,7 @@ def load(flow_id: str, env: Mapping[str, str] | None = None) -> dict[str, Any]:
         value.setdefault("base_branch", None)
         value.setdefault("common", None)
         value.setdefault("check_base", False)
+        value.setdefault("check_changes", [])
         if "review_budget" not in value:
             value["review_budget"] = _saved_budget(path.parent, value.get("rounds"))
         if isinstance(value.get("tasks"), list):
@@ -546,6 +556,8 @@ def _append(
             )
         number = max([len(lines), *numbers], default=0) + 1
         item = {**value, field: number, "at": time.time()}
+        if name == EVENTS_NAME and "at" in value:
+            item["at"] = value["at"]
         if name == ANSWERS_NAME:
             item = {
                 "task": None,
@@ -590,7 +602,7 @@ def append_event(
     event: Mapping[str, Any],
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Append an event with a consecutive seq and the current time."""
+    """Append an event with a consecutive seq and a supplied or current time."""
     return _append(flow_id, EVENTS_NAME, "seq", event, env)
 
 
