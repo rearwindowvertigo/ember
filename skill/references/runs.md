@@ -201,8 +201,11 @@ It has one entry per recorded turn number, oldest first: `turn`, `exit`,
 and `denied_paths`.
 New outcomes also expose `provider_kind`, the ordered `attempts` and retry
 timestamps. `provider_kind` is `capacity`, `usage_limit`, `outage` or null;
-older outcomes can omit it and `attempts`. Count turns separately from
-attempts: a successful turn can include failed capacity attempts.
+older outcomes can omit it and `attempts`. For a turn whose entry lacks
+`provider_kind` or `attempts`, name both as unknown for that turn and call
+any attempt total a minimum: a missing key is not null and not zero
+attempts. Count turns separately from attempts: a successful turn can
+include failed capacity attempts.
 No recorded turns gives `turns: []`; no runs gives `[]`.
 `last_exit` and `last_reason` describe only the latest turn or failure;
 each summary line describes one turn. A turn with `exit: 73` and

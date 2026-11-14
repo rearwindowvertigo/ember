@@ -313,7 +313,7 @@ even a correction that avoids the denied paths. A denial with no `owner:`
 line (a startup file, a protected path, or a folder in Settings, Hidden
 notices) needs no answer: report it and carry on. Count turn results from each run's `turns` in
 `emb run --status [<run>] --json`, including failed turns followed by
-successful ones, and report unknown fields as unknown; `references/runs.md`
+successful ones, and report null and missing fields as unknown; `references/runs.md`
 (Turn results) describes unfinished and older results.
 
 When your check of a worker finds a `must` (step 7), correct it first with
@@ -425,9 +425,11 @@ Repeat the same verdict in the step 8 report. Run `emb merge` as its own
 Bash call, with no other command chained before or after it; do the same
 after a correction. Merge only Keep or Keep-with-fix work into the session
 branch. For an `emb run` branch, run the `emb merge` line in the `next:`
-line printed after the turn, writing `--note` and `--subject` yourself. Write
-`--subject` in the repository's commit convention, read from `AGENTS.md`,
-`CONTRIBUTING` or `git log`. Describe the reviewed result across all turns.
+line printed after the turn, writing `--note` and `--subject` yourself.
+Before writing `--subject`, find the repository's commit convention: use
+the one `AGENTS.md` or `CONTRIBUTING` states; when neither states one, run
+`git log --oneline -10 <session branch>` and follow the form of its
+subjects. Describe the reviewed result across all turns.
 Mark a breaking Conventional Commit with `!`. For a branch with no run
 record (a flow or `worktree-agent-*` branch), run:
 

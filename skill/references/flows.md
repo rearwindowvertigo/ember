@@ -83,9 +83,11 @@ Stall after (`flow.stall`) unless you pass `--stall`.
 | `after` | List of other task ids as strings; default `[]`; every id exists, no self dependency or cycle | `["schema"]` |
 | `review` | String giving the reviewer's focus; default `""` | `"Check empty orders and rounding."` |
 
-Write `subject` in the repository's commit convention, read from
-`AGENTS.md`, `CONTRIBUTING` or `git log`, with `!` for a breaking
-Conventional Commit. It is the task's squash subject and the writer
+Write `subject` in the repository's commit convention, with `!` for a
+breaking Conventional Commit. Find the convention before writing the plan:
+use the one `AGENTS.md` or `CONTRIBUTING` states; when neither states one,
+run `git log --oneline -10` in the checkout and follow the form of its
+subjects. It is the task's squash subject and the writer
 brief's first line. Recorded flows keep their resolved subjects.
 
 `files` refuses a leading slash, an empty path component, `.` or `..`
@@ -185,8 +187,7 @@ choices, not an assumed list:
 | Answer after `emb flow --lead <id> <task>` | Does |
 |---|---|
 | `--send <file>` | Send a correction to the existing writer, then review it. |
-| `--accept` | Accept the task branch's current tip without another review. |
-| `--accept --commit <commit>` | Accept the specified reviewed commit. |
+| `--accept [--commit <commit>]` | Accept the task branch's current tip without another review. With `--commit`, accept that reviewed commit instead of the tip. |
 | `--review [--reviewer W]` | Collect a running turn, then start fresh reviews and a fix budget. |
 | `--worker W` | Keep the old branch and start a new writer from the flow tip. |
 | `--drop` | Keep the branch and drop the task; its dependants stay blocked. Also accepted for a pending or blocked task. |
@@ -200,6 +201,11 @@ already in the flow branch needs no `--drop`.
 Do not settle a flow stop yourself, edit to choose its answer, or merge a
 task branch into the session branch. Call `emb flow --lead` only after the
 owner's answer. A `--send` file carries that decision, not your own choice.
+A choice you wrote into the plan or its failure model without the owner's
+word is yours, not a settled decision. At a stop, say what the plan says
+and that you chose it, then ask. Call a finding settled only when the
+owner's request, an owner answer or a sent correction settles it, and
+quote that source.
 
 Every sent correction appears in that task's later reviewer briefs, in
 order, as a settled decision; files it allows are in scope for the review.
