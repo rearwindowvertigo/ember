@@ -93,6 +93,39 @@ def test_creation(flow: dict[str, Any], created: Path, env: dict[str, str]) -> N
         record.task_entry(flow, "unknown")
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_review_outside_files_round_trip(
+    flow: dict[str, Any], created: Path, env: dict[str, str], legacy: bool
+) -> None:
+    review: dict[str, Any] = {"verdict": "pass"}
+    if not legacy:
+        review["outside_files"] = [
+            {"file": "z.py", "needed": True, "reason": "Caller changed"},
+            {"file": "a.py", "needed": False, "reason": "Unrelated wording"},
+        ]
+    flow["tasks"][0]["reviews"] = [review]
+    record.save(flow, env)
+    assert record.load(flow["id"], env)["tasks"][0]["reviews"] == [review]
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        {},
+        [None],
+        [{"file": "a"}],
+        [{"file": "a", "needed": 1, "reason": "Needed"}],
+        [{"file": "a", "needed": True, "reason": " \n"}],
+    ],
+)
+def test_invalid_review_outside_files(
+    flow: dict[str, Any], created: Path, env: dict[str, str], entries: object
+) -> None:
+    flow["tasks"][0]["reviews"] = [{"outside_files": entries}]
+    with pytest.raises(record.FlowError, match="review"):
+        record.save(flow, env)
+
+
 def test_preparation_round_trip(
     flow: dict[str, Any], created: Path, env: dict[str, str]
 ) -> None:

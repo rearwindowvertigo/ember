@@ -902,6 +902,57 @@ def test_watch_done_reports_findings(
 
 
 @pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_done_outside_reports_in_watch_and_status(
+    env: dict[str, str], flow: dict[str, Any], as_json: bool, count: int
+) -> None:
+    flow["tasks"][0]["findings"] = [{"severity": "should", "problem": "Check wording"}]
+    for index, task in enumerate(flow["tasks"][:count]):
+        task["outside_files"] = [f"extra-{n}.py" for n in range(index + 1)]
+    end(flow, env)
+    reports = [
+        "report: 0 lead and 1 should findings remain on merged tasks; "
+        "inspect each before merging"
+    ]
+    if count:
+        names = "a (1)" if count == 1 else "a (1), b (2)"
+        reports.append(
+            f"report: {count} merged task{'' if count == 1 else 's'} changed files "
+            f"outside their declared files: {names}; inspect each before merging"
+        )
+    options = ["--json"] if as_json else []
+    for _ in range(2):
+        code, out, err = invoke(env, "--watch", flow["id"], *options)
+        assert code == 0
+        assert err.splitlines()[1:] == reports
+        if as_json:
+            assert json.loads(out)["report"] == reports
+    code, out, err = invoke(env, "--status", flow["id"], *options)
+    assert code == 0 and err == ""
+    if as_json:
+        assert json.loads(out)["reports"] == reports
+    else:
+        assert [
+            line for line in out.splitlines() if line.startswith("report:")
+        ] == reports
+
+
+def test_done_outside_report_without_findings_counts_only_merged_tasks(
+    env: dict[str, str], flow: dict[str, Any]
+) -> None:
+    end(flow, env)
+    for task in flow["tasks"]:
+        task["outside_files"] = ["extra.py"]
+    flow["tasks"][1]["status"] = "dropped"
+    assert command._done_reports(flow) == [
+        "report: 1 merged task changed files outside their declared files: a (1); "
+        "inspect each before merging"
+    ]
+    flow["tasks"][0]["outside_files"] = []
+    assert command._done_reports(flow) == []
+
+
+@pytest.mark.parametrize("as_json", [False, True])
 @pytest.mark.parametrize("status", ["failed", "cancelled", "stopped", "running"])
 def test_watch_other_states_omit_done_findings_report(
     env: dict[str, str], flow: dict[str, Any], as_json: bool, status: str
@@ -910,6 +961,7 @@ def test_watch_other_states_omit_done_findings_report(
         {"severity": "lead", "problem": "lead finding"},
         {"severity": "should", "problem": "should finding"},
     ]
+    flow["tasks"][0].update(status="merged", outside_files=["extra.py"])
     flow["status"] = status
     record.save(flow, env)
     code, out, err = invoke(
@@ -917,11 +969,15 @@ def test_watch_other_states_omit_done_findings_report(
     )
     assert code == {"failed": 82, "cancelled": 82, "stopped": 0, "running": 72}[status]
     assert "findings remain on merged tasks" not in err
+    assert "changed files outside their declared files" not in err
     if as_json:
         assert all(
             "findings remain on merged tasks" not in line
             for line in json.loads(out)["report"]
         )
+    code, out, err = invoke(env, "--status", flow["id"], "--json")
+    assert code == 0 and err == ""
+    assert json.loads(out)["reports"] == []
 
 
 def test_done_unmerged(env: dict[str, str], flow: dict[str, Any]) -> None:

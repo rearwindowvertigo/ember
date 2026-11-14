@@ -171,6 +171,8 @@ def review_brief(
         "Judge each outside edit on whether the task needed it. Use must or "
         "should for findings about its need. An outside edit allowed by these "
         "limits is not a lead finding just for being outside the declared files.",
+        "Check, in any file, changes to behaviour or user-facing wording that "
+        "the task text does not ask for. Raise each as a finding under the review bar.",
     ]
     if corrections:
         parts.append(
@@ -210,6 +212,14 @@ def review_brief(
         + "\n\nChanged outside the declared files:\n"
         + indent("\n".join(outside) or "none", "    ")
     )
+    if outside:
+        parts.append(
+            "In outside_files, give exactly one entry per file listed above as "
+            "changed outside the declared files. Copy the exact path into file, "
+            "set needed to whether the task needed the edit, and explain why in "
+            "a one-line reason. Raise an edit the task did not need as a must "
+            "or should finding under the review bar."
+        )
     parts.append(
         "## The writer's report\n\n"
         + (

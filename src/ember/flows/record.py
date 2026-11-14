@@ -342,6 +342,20 @@ def _validate(flow_id: str, flow: object) -> None:
     seen: set[str] = set()
     for task in flow["tasks"]:
         _fields(flow_id, task, _TASK_FIELDS, "task")
+        for review in task["reviews"]:
+            if "outside_files" in review:
+                _fields(flow_id, review, {"outside_files": "[dict]"}, "review")
+                for entry in review["outside_files"]:
+                    _fields(
+                        flow_id,
+                        entry,
+                        {"file": "str", "needed": "bool", "reason": "str"},
+                        "review outside file",
+                    )
+                    if not entry["reason"].strip():
+                        raise FlowError(
+                            flow_id, "review outside file has a blank reason"
+                        )
         if (
             task["id"] in seen
             or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", task["id"]) is None

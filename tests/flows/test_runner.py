@@ -41,6 +41,14 @@ MUST = {
 FIX = json.dumps({"verdict": "fix", "findings": [MUST]})
 
 
+def outside_reply(reply: str) -> str:
+    value = json.loads(reply)
+    value["outside_files"] = [
+        {"file": "README.md", "needed": True, "reason": "The task needs this edit"}
+    ]
+    return json.dumps(value)
+
+
 class Harness:
     def __init__(self, tmp_path: Path) -> None:
         self.tmp = tmp_path
@@ -759,6 +767,7 @@ def test_same_wave_declaration_violation_stops_before_review(h: Harness) -> None
 
 
 def test_outside_file_and_same_wave_merge_conflict(h: Harness) -> None:
+    h.scripts_update(**{"a read-only review;": "@reply " + outside_reply(PASS)})
     h.create(
         [
             task("a", text="@write README.md first"),
@@ -776,6 +785,41 @@ def test_outside_file_and_same_wave_merge_conflict(h: Harness) -> None:
         .returncode
         != 0
     )
+
+
+@pytest.mark.parametrize("accounted", [False, True])
+def test_outside_file_review_is_required_and_saved(h: Harness, accounted: bool) -> None:
+    entries = [
+        {"file": "README.md", "needed": True, "reason": "Update the interface"},
+        {"file": "helper.py", "needed": False, "reason": "Unrelated change"},
+    ]
+    if accounted:
+        reply = json.dumps(
+            {
+                "verdict": "pass",
+                "findings": [],
+                "outside_files": entries[::-1],
+            }
+        )
+        h.scripts_update(**{"a read-only review;": "@reply " + reply})
+    h.create([task("a", text="@write README.md updated\n@write helper.py value")])
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["outside_files"] == ["README.md", "helper.py"]
+    review = item["reviews"][-1]
+    if accounted:
+        assert flow["status"] == "done" and item["status"] == "merged"
+        assert review["outside_files"] == entries
+        out, err = io.StringIO(), io.StringIO()
+        args = build_parser().parse_args(["flow", "--status", h.id, "--json"])
+        assert command.main(args, h.env, out=out, err=err) == 0
+        assert json.loads(out.getvalue())["tasks"][0]["reviews"][-1] == review
+    else:
+        assert item["status"] == "stopped" and review["verdict"] == "unreadable"
+        assert "the review is unreadable" in item["reason"]
+        assert "README.md (missing)" in item["reason"]
+        assert "helper.py (missing)" in item["reason"]
+        assert review["outside_files"] == []
 
 
 @pytest.mark.parametrize("failure", ["@fail broken", "@provider rate limit"])
@@ -1004,7 +1048,7 @@ def test_reviewer_corrections_survive_resume_and_later_answers(
     h: Harness, final_answer: str
 ) -> None:
     """Applied corrections reach only this task's later reviews in answer order."""
-    h.scripts_update(**{"Review of task a,": "@reply " + FIX})
+    h.scripts_update(**{"Review of task a,": "@reply " + outside_reply(FIX)})
     h.create(
         [task("a", text="@write a value\n@write README.md expanded"), task("b")],
         rounds=0,
@@ -1034,7 +1078,7 @@ def test_reviewer_corrections_survive_resume_and_later_answers(
         if number == 1:
             h.answer("review")
             assert h.run()["tasks"][0]["corrections"] == expected
-    h.scripts_update(**{"Review of task a,": "@reply " + PASS})
+    h.scripts_update(**{"Review of task a,": "@reply " + outside_reply(PASS)})
     h.answer(final_answer)
     flow = h.run()
     assert flow["status"] == "done"
@@ -1669,6 +1713,7 @@ def test_artifact_numbers_survive_replacement(h: Harness) -> None:
 
 
 def test_changed_files_include_both_rename_sides(h: Harness) -> None:
+    h.scripts_update(**{"a read-only review;": "@reply " + outside_reply(PASS)})
     h.create([task("a", text="@git mv README.md renamed.md", files=["renamed.md"])])
     item = h.run()["tasks"][0]
     assert item["status"] == "merged"
@@ -2320,6 +2365,7 @@ def test_denied_paths_are_saved_and_emitted_after_successful_turn(
 
 
 def _conflicted(h: Harness) -> dict[str, Any]:
+    h.scripts_update(**{"a read-only review;": "@reply " + outside_reply(PASS)})
     h.create(
         [
             task("a", text="@write README.md first"),

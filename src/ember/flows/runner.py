@@ -812,7 +812,11 @@ class _Runner:
                 else ""
             )
             result = verdict.read(
-                text, len(earlier), round=task["round"] + 1, run=review_run.id
+                text,
+                len(earlier),
+                outside=task["outside_files"],
+                round=task["round"] + 1,
+                run=review_run.id,
             )
         except (OSError, UnicodeError) as error:
             result = verdict.Review(None, (), f"cannot read the reply: {error}")
@@ -831,6 +835,7 @@ class _Runner:
                     "review_round": task["round"] + 1,
                     "run": review_run.id,
                     "verdict": result.verdict or "unreadable",
+                    "outside_files": [item.to_json() for item in result.outside_files],
                     **result.counts(),
                     "at": time.time(),
                 }

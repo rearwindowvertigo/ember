@@ -1191,7 +1191,7 @@ def _exit_reports(code: int | None, flow: Mapping[str, Any] | None = None) -> li
 
 
 def _done_reports(flow: Mapping[str, Any]) -> list[str]:
-    """Report latest and retained findings when a flow ends done."""
+    """Report retained findings and merged tasks' outside files for a done flow."""
     if flow["status"] != "done":
         return []
     counts = {
@@ -1202,12 +1202,27 @@ def _done_reports(flow: Mapping[str, Any]) -> list[str]:
         )
         for severity in ("lead", "should")
     }
-    if not any(counts.values()):
-        return []
-    return [
-        f"report: {counts['lead']} lead and {counts['should']} should findings "
-        "remain on merged tasks; inspect each before merging"
+    reports = []
+    if any(counts.values()):
+        reports.append(
+            f"report: {counts['lead']} lead and {counts['should']} should findings "
+            "remain on merged tasks; inspect each before merging"
+        )
+    outside = [
+        task
+        for task in flow["tasks"]
+        if task["status"] == "merged" and task["outside_files"]
     ]
+    if outside:
+        tasks = ", ".join(
+            f"{task['id']} ({len(task['outside_files'])})" for task in outside
+        )
+        reports.append(
+            f"report: {len(outside)} merged task{'' if len(outside) == 1 else 's'} "
+            f"changed files outside their declared files: {tasks}; "
+            "inspect each before merging"
+        )
+    return reports
 
 
 def _stop_reports(
@@ -1453,6 +1468,7 @@ def _status(
         flow = _load(flow_id, env)
         flow["runner_live"] = lock.live(flow_id, env)
         flow["check_output"] = _check_output(flow_id, env)
+        flow["reports"] = _done_reports(flow)
         _denial_status(flow, env)
         for task in flow["tasks"]:
             task["findings"] = _finding_details(task)
@@ -1465,6 +1481,9 @@ def _status(
                     print(f"review_budget: {verdict.budget_text(value)}", file=out)
                 elif key == "check_output":
                     _print_check_output(value, out)
+                elif key == "reports":
+                    for line in value:
+                        print(line, file=out)
                 elif key == "check_changes":
                     if value:
                         print(

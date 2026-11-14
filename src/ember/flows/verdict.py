@@ -1,7 +1,7 @@
 """Read flow review replies and decide whether a task needs another turn."""
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from importlib import resources
 from typing import Any
@@ -60,12 +60,26 @@ class Finding:
 
 
 @dataclass(frozen=True)
+class OutsideFile:
+    """The reviewer's account of one file outside the task's declared files."""
+
+    file: str
+    needed: bool
+    reason: str
+
+    def to_json(self) -> dict[str, Any]:
+        """Return the outside-file entry as a JSON-ready object."""
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class Review:
     """A review's verdict and findings, or the reason it cannot be read."""
 
     verdict: str | None
     findings: tuple[Finding, ...]
     problem: str | None
+    outside_files: tuple[OutsideFile, ...] = ()
 
     def counts(self) -> dict[str, int]:
         """Count each severity, including those with no findings."""
@@ -129,10 +143,43 @@ def _finding(value: object, earlier_count: int) -> Finding:
     )
 
 
+def _outside_files(value: object, outside: Sequence[str]) -> tuple[OutsideFile, ...]:
+    """Validate listed paths and ignore entries for every other path."""
+    entries: dict[str, list[dict[str, Any]]] = {path: [] for path in outside}
+    if isinstance(value, list):
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            path = item.get("file")
+            if isinstance(path, str) and path in entries:
+                entries[path].append(item)
+    result = []
+    problems = []
+    for path, items in entries.items():
+        if not items:
+            problems.append(f"{path} (missing)")
+        elif len(items) != 1:
+            problems.append(f"{path} (repeated)")
+        else:
+            needed, reason = items[0].get("needed"), items[0].get("reason")
+            if (
+                type(needed) is not bool
+                or not isinstance(reason, str)
+                or not reason.strip()
+            ):
+                problems.append(f"{path} (invalid needed or reason)")
+            else:
+                result.append(OutsideFile(path, needed, reason))
+    if problems:
+        raise ValueError("the reply's outside_files: " + ", ".join(problems))
+    return tuple(result)
+
+
 def read(
     text: str,
     earlier_count: int = 0,
     *,
+    outside: Sequence[str] = (),
     round: int | None = None,
     run: str | None = None,
 ) -> Review:
@@ -146,6 +193,10 @@ def read(
     findings = document.get("findings")
     if not isinstance(findings, list):
         return Review(None, (), "the reply's findings is not a list")
+    try:
+        outside_files = _outside_files(document.get("outside_files"), outside)
+    except ValueError as error:
+        return Review(None, (), str(error))
     return Review(
         verdict,
         tuple(
@@ -153,4 +204,5 @@ def read(
             for item in findings
         ),
         None,
+        outside_files,
     )
