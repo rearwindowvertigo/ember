@@ -433,8 +433,6 @@ def _dry_run(
     ]
     if args.previous is not None and not (changes and changes["recovery"]):
         gapcheck += ["--previous", args.previous]
-    for path in document.read:
-        gapcheck += ["--read", path]
     if reviewer.source != "menu":
         # A reviewer named for this flow, by option or in the plan, also
         # checks its plan; the Gap check reviewer row covers the rest.

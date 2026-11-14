@@ -3,6 +3,7 @@
 import json
 import re
 from collections.abc import Iterator, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +36,28 @@ class Plan:
     failure_model: bool
     flow: flow_plan.Plan | None = None
     flow_problems: tuple[str, ...] = ()
+    read: tuple[str, ...] = ()
+
+    def read_paths(self, extra: Sequence[str] = ()) -> tuple[str, ...]:
+        """Deduplicate plan paths, then option paths, by fully resolved identity.
+
+        Keep the first path's absolute spelling with its existing parents resolved
+        and its source filename retained. A final dot or parent component instead
+        uses the fully resolved path. Missing or unresolvable paths retain their
+        existing spelling and input checks.
+        """
+        read: dict[Path, str] = {}
+        for item in (*self.read, *extra):
+            path = Path(item).expanduser().absolute()
+            with suppress(OSError):
+                path = path.parent.resolve(strict=True) / path.name
+            key = path
+            with suppress(OSError):
+                key = path.resolve(strict=True)
+                if item.rstrip("/").rsplit("/", 1)[-1] in (".", ".."):
+                    path = key
+            read.setdefault(key, str(path))
+        return tuple(read.values())
 
 
 class PlanError(Exception):
@@ -156,6 +179,7 @@ def load(path: str | Path) -> Plan:
 
     Documents with both dir and tasks report flow validation problems;
     other documents that fail flow validation keep generic review.
+    A valid read list is retained when other flow fields are invalid.
 
     Raises:
         PlanError: The file cannot be read or is not UTF-8.
@@ -168,6 +192,7 @@ def load(path: str | Path) -> Plan:
     kind, steps = split(text)
     flow = None
     flow_problems: tuple[str, ...] = ()
+    read: tuple[str, ...] = ()
     try:
         flow = flow_plan.parse(text, absolute)
     except flow_plan.PlanError as error:
@@ -179,6 +204,21 @@ def load(path: str | Path) -> Plan:
             document = None
         if isinstance(document, dict) and {"dir", "tasks"} <= document.keys():
             flow_problems = error.problems
+            schema = json.loads(flow_plan.schema_text())
+            value = document.get("read", [])
+            if not flow_plan._validate(
+                value, schema["properties"]["read"], schema, "plan.read"
+            ):
+                read = tuple(value)
+    else:
+        read = flow.read
     return Plan(
-        absolute, text, kind, steps, has_failure_model(text, kind), flow, flow_problems
+        absolute,
+        text,
+        kind,
+        steps,
+        has_failure_model(text, kind),
+        flow,
+        flow_problems,
+        read,
     )

@@ -2340,7 +2340,7 @@ def test_accept_on_a_conflict_refuses_another_commit(
     assert not record.read_answers(flow["id"], env)
 
 
-def test_dry_run_passes_read_files_to_the_gap_check_and_counts_sandbox_read(
+def test_dry_run_omits_plan_read_options_and_counts_sandbox_read(
     env: dict[str, str], plan_file: Path, tmp_path: Path
 ) -> None:
     issue = tmp_path / "issue 93.md"
@@ -2355,7 +2355,12 @@ def test_dry_run_passes_read_files_to_the_gap_check_and_counts_sandbox_read(
     assert code == 0, err
     result = json.loads(out)
     words = shlex.split(result["gapcheck"])
-    assert words[words.index("--read") + 1] == str(issue)
+    assert "--read" not in words
+    assert words[words.index("--plan") + 1] == str(plan_file)
+    code, text, err = invoke(env, "--plan", str(plan_file), "--dry-run")
+    assert code == 0, err
+    line = next(line for line in text.splitlines() if line.startswith("gap check:"))
+    assert shlex.split(line.removeprefix("gap check: ")) == words
     cites = [w for w in result["warnings"] if " cites " in w]
     assert cites == [
         "task a cites https://example.com/spec, which no read path supplies"

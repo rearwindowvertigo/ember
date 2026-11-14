@@ -1665,18 +1665,27 @@ def test_empty_reads_report_in_order_before_other_checks(
     code, out, err = invoke(env, plan_file, *options, "--previous", "missing.json")
     assert code == 64 and not out
     assert err.splitlines() == [
-        "emb gapcheck: the read file ~/second.md is empty",
-        "emb gapcheck: the read file first.md is empty",
+        f"emb gapcheck: the read file {tmp_path / 'second.md'} is empty",
+        f"emb gapcheck: the read file {tmp_path / 'first.md'} is empty",
         "next: emb gapcheck --help",
     ]
     assert not paths.runs_dir(env).exists()
 
 
+@pytest.mark.parametrize("flow_shaped", [False, True])
 def test_reply_rejects_read_before_checking_empty_file(
-    tmp_path: Path, env: dict[str, str], plan_file: Path, reply_file: Path
+    tmp_path: Path,
+    env: dict[str, str],
+    plan_file: Path,
+    reply_file: Path,
+    flow_shaped: bool,
 ) -> None:
     source = tmp_path / "empty.md"
     source.touch()
+    if flow_shaped:
+        plan_file.write_text(
+            json.dumps({"dir": str(tmp_path), "tasks": [], "read": [str(source)]})
+        )
     code, out, err = invoke(
         env, plan_file, "--reply", str(reply_file), "--read", str(source)
     )
@@ -1696,6 +1705,206 @@ def test_empty_sandbox_read_is_accepted(
     code, out, err = invoke(env, plan_file, "--brief", "--dir", str(repo))
     assert code == 0, err
     assert str(source) in out
+
+
+@pytest.fixture
+def flow_file(tmp_path: Path, repo: Path) -> Path:
+    path = tmp_path / "flow.json"
+    path.write_text(
+        json.dumps(
+            {
+                "dir": str(repo),
+                "failure_model": "A failure stops the work.",
+                "tasks": [
+                    {
+                        "id": ident,
+                        "subject": "feat: build",
+                        "task": "Build #7 and #8",
+                        "files": [f"{ident}.py"],
+                    }
+                    for ident in ("a", "b")
+                ],
+            }
+        )
+    )
+    return path
+
+
+@pytest.mark.parametrize("mode", ["run", "brief", "reply"])
+@pytest.mark.parametrize("valid", [False, True])
+@pytest.mark.parametrize("symlink", [False, True])
+def test_flow_sources_cover_citations_and_grant_reads(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    flow_file: Path,
+    reply_file: Path,
+    driver: StubDriver,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    valid: bool,
+    symlink: bool,
+) -> None:
+    source = tmp_path / "issue-7.md"
+    if symlink:
+        target = tmp_path / "source.md"
+        target.write_text("Source text")
+        source.symlink_to(target)
+    else:
+        source.write_text("Source text")
+    extra = tmp_path / "extra.md"
+    extra.write_text("Additional context")
+    raw = json.loads(flow_file.read_text())
+    raw["read"] = [str(source)]
+    if not valid:
+        raw["tasks"][0]["after"] = ["unknown"]
+    flow_file.write_text(json.dumps(raw))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    choices.set_settings({"single.reviewer": "codex:gpt-5"}, env=env)
+    if mode == "reply":
+        options = ["--reply", str(reply_file), "--json"]
+    else:
+        options = [
+            "--dir",
+            str(repo),
+            "--read",
+            "~/issue-7.md",
+            "--read",
+            "./issue-7.md",
+            "--read",
+            str(extra),
+        ]
+        options += ["--brief"] if mode == "brief" else ["--json"]
+    code, out, err = invoke(env, flow_file, *options, driver=driver)
+    assert code == 0, err
+    assert ("WARNING: invalid flow plan:" in err) is not valid
+    assert [line for line in err.splitlines() if " cites " in line] == [
+        "WARNING: the plan cites #8, which no read path supplies"
+    ]
+    if mode == "reply":
+        assert json.loads(out)["run"] is None
+        assert not paths.runs_dir(env).exists()
+        return
+    if mode == "run":
+        run = record.load(json.loads(out)["run"]["id"], env)
+        assert run.read == (str(source.resolve()), str(extra))
+        assert set(run.read) <= set(run.read_effective)
+        out = (run.folder / "brief.md").read_text()
+    assert out.splitlines().count(f"- {source}") == 1
+    assert out.splitlines().count(f"- {extra}") == 1
+
+
+@pytest.mark.parametrize("mode", ["run", "brief", "reply"])
+@pytest.mark.parametrize("valid", [False, True])
+def test_flow_empty_sources_are_checked_once_before_review(
+    tmp_path: Path,
+    env: dict[str, str],
+    flow_file: Path,
+    reply_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    valid: bool,
+) -> None:
+    source = tmp_path / "empty.md"
+    source.write_text(" \n")
+    raw = json.loads(flow_file.read_text())
+    raw["read"] = [str(source)]
+    if not valid:
+        raw["tasks"][0]["after"] = ["unknown"]
+    flow_file.write_text(json.dumps(raw))
+    monkeypatch.chdir(tmp_path)
+    options = (
+        ["--reply", str(reply_file)] if mode == "reply" else ["--read", "./empty.md"]
+    )
+    if mode == "brief":
+        options.append("--brief")
+    code, out, err = invoke(env, flow_file, *options)
+    assert code == 64 and not out
+    assert ("WARNING: invalid flow plan:" in err) is not valid
+    assert [line for line in err.splitlines() if "the read file" in line] == [
+        f"emb gapcheck: the read file {source} is empty"
+    ]
+    assert err.endswith("next: emb gapcheck --help\n")
+    assert not paths.runs_dir(env).exists()
+
+
+@pytest.mark.parametrize(
+    ("origin", "mode"),
+    [
+        ("flow", "run"),
+        ("flow", "brief"),
+        ("flow", "reply"),
+        ("option", "run"),
+        ("option", "brief"),
+    ],
+)
+@pytest.mark.parametrize("empty", [False, True])
+def test_source_parent_after_directory_symlink(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    flow_file: Path,
+    plan_file: Path,
+    reply_file: Path,
+    driver: StubDriver,
+    monkeypatch: pytest.MonkeyPatch,
+    origin: str,
+    mode: str,
+    empty: bool,
+) -> None:
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    archive = tmp_path / "archive"
+    (archive / "release").mkdir(parents=True)
+    (sources / "current").symlink_to(archive / "release", target_is_directory=True)
+    target = archive / "source.md"
+    target.write_text(" \n" if empty else "Source for #8")
+    source = archive / "issue-7.md"
+    source.symlink_to(target)
+    wrong = sources / source.name
+    wrong.write_text("Wrong source for #8" if empty else "")
+    given = sources / "current" / ".." / source.name
+    monkeypatch.chdir(tmp_path)
+    options = []
+    if origin == "flow":
+        plan_file = flow_file
+        raw = json.loads(plan_file.read_text())
+        raw["read"] = [str(given)]
+        plan_file.write_text(json.dumps(raw))
+    else:
+        plan_file.write_text(
+            "1. Read #7 and #8\n2. Build\n## Failure model\nStop on failure.\n"
+        )
+        options += ["--read", "sources/current/../issue-7.md"]
+    if mode == "reply":
+        options += ["--reply", str(reply_file), "--json"]
+    else:
+        options += ["--dir", str(repo), "--read", str(source)]
+        options += ["--brief"] if mode == "brief" else ["--json"]
+    choices.set_settings({"single.reviewer": "codex:gpt-5"}, env=env)
+    code, out, err = invoke(env, plan_file, *options, driver=driver)
+    if empty:
+        assert code == 64 and not out
+        assert err == (
+            f"emb gapcheck: the read file {source} is empty\n"
+            "next: emb gapcheck --help\n"
+        )
+        assert not paths.runs_dir(env).exists()
+        return
+    assert code == 0, err
+    assert " cites " not in err
+    if mode == "reply":
+        assert json.loads(out)["run"] is None
+        return
+    if mode == "run":
+        run = record.load(json.loads(out)["run"]["id"], env)
+        assert run.read == (str(target),)
+        assert str(target) in run.read_effective
+        assert str(wrong) not in run.read_effective
+        out = (run.folder / "brief.md").read_text()
+    assert out.splitlines().count(f"- {source}") == 1
+    assert f"- {wrong}" not in out.splitlines()
 
 
 def test_preparation_failure_retries_original_gapcheck(
