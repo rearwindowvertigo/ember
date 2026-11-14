@@ -46,7 +46,8 @@ record `step` and `next` and prints no next line. `merge` prints the newest
 matching run's line on standard error and gives it as `next` in its JSON;
 a kept branch, a branch with no run record and a flow branch give none.
 `cleanup --claim <id>` prints `next: emb choices --finish <id>` once on
-standard error unless a kept result holds that claim or `--dry-run` is set.
+standard error unless a kept result holds that claim, `--dry-run` is set,
+or the claim is recorded as `gone` in the stub's state.
 The `verify_branch.py` path comes from `ember.skill.link_path(os.environ)`.
 A run records `base_branch`, the branch checked out in its `--dir` checkout
 at start (null when detached). An exit-0 `choices --finish` records its
@@ -63,9 +64,11 @@ pending owner line; the recorded turn exit stays unchanged. Merge prints
 pending owner lines on standard error and in JSON's `owner_wait` array when
 nonempty. Status repeats the pending owner lines. `run-answered` clears the wait;
 a later turn or all suggested sandbox read paths also end it.
-Run, merge, cleanup and flow replies append the production `report:` lines
-after next or owner lines, including canned replies. Flow watch JSON also
-carries the report list. No `.reply` file holds a next line.
+Run, merge and cleanup replies, and flow watch and failure replies, append
+the production `report:` lines after next or owner lines, including canned
+replies. Flow watch JSON also carries the report list.
+No `.reply` file holds a next line.
+Done flow status reports appear on standard output, or in JSON's `reports`.
 With `EMBER_EVAL_SETUP` set, a call is neither logged
 nor counted, so a case can start a run while it is set up.
 `run-dry-run` checks the brief and repository and resolves the worker
@@ -92,7 +95,7 @@ import shutil
 import socket
 import subprocess
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -1296,10 +1299,48 @@ def run_other(
 # emb flow and emb panel ----------------------------------------------------
 
 
+def flow_worker(
+    worker: flow_plan.Worker,
+    role: str,
+    settings: dict[str, Any],
+    variables: dict[str, str],
+) -> flow_plan.Worker:
+    """Resolve effort from the Team row and canned models without engine probes."""
+    effort, source = worker.effort, worker.effort_source
+    row = (settings.get("menu") or {}).get(flow_plan.ROW[role])
+    if (
+        effort is None
+        and row
+        and row["state"] == "set"
+        and row["engine"] == worker.engine
+        and row["model"] == worker.model
+    ):
+        effort = row["effort"]
+        if effort is not None:
+            source = f"single.{role}" if row.get("same") else flow_plan.ROW[role]
+    # Codex reads its model catalogue's default; Claude and OpenCode leave
+    # an omitted effort to the engine. The eval catalogue is a canned reply.
+    if effort is None and worker.engine == "codex":
+        models = json.loads(
+            read_part(reply_base("engines-models", 1), ".json", variables) or "{}"
+        )
+        effort = next(
+            (
+                model.get("default_effort")
+                for model in models.get("models", [])
+                if model["id"] == worker.model
+            ),
+            None,
+        )
+    return replace(worker, effort=effort, effort_source=source)
+
+
 def flow_start(
     args: list[str], state: dict[str, Any], base: Path | None, variables: dict[str, str]
 ) -> Reply:
     """Build a flow branch and commit the reply tree with the plan's subject."""
+    from ember.flows import command as flows
+
     plan_path = variables["PLAN"]
     try:
         plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
@@ -1311,8 +1352,22 @@ def flow_start(
         )
     try:
         document = flow_plan.from_json(plan, Path(plan_path))
+        settings = json.loads(
+            canned_reply(reply_base("choices-read-id", 1), variables, True).out
+        )
+        writer, reviewer = (
+            flow_worker(
+                flow_plan.resolve(role, option(args, f"--{role}"), document, settings),
+                role,
+                settings,
+                variables,
+            )
+            for role in flow_plan.ROLES
+        )
     except flow_plan.PlanError as error:
         return Reply(error.code, err=f"emb flow: {error}\nnext: emb flow --help\n")
+    except flow_plan.WorkerError as error:
+        return Reply(error.code, err=f"emb flow: {error}\n{error.line}\n")
     directory = Path(plan.get("dir") or variables["DIR"]).resolve()
     repo = main_checkout(directory)
     flow_id = new_run_id("flow")
@@ -1335,10 +1390,12 @@ def flow_start(
         "branch": branch,
         "worktree": str(worktree),
     }
+    errors = io.StringIO()
+    flows._worker_lines(writer, reviewer, errors)
     return Reply(
         0,
         f"flow {flow_id}\nbranch {branch}\nworktree {worktree}\n",
-        f"next: emb flow --watch {flow_id} --json\n",
+        errors.getvalue() + f"next: emb flow --watch {flow_id} --json\n",
     )
 
 
@@ -1714,8 +1771,13 @@ def cleanup(args: list[str], state: dict[str, Any], variables: dict[str, str]) -
                 lines.append(f"{action} {run['id']}: {verb} worktree {run['worktree']}")
     err = "" if lines else f"emb cleanup: no Ember run branch against {target}\n"
     # The claim-finish line: after exit 0 with --claim, unless a kept result
-    # holds that claim; never with --dry-run.
-    if claim is not None and not has(args, "--dry-run") and claim not in kept_claims:
+    # holds that claim or it is gone; never with --dry-run.
+    if (
+        claim is not None
+        and not has(args, "--dry-run")
+        and claim not in kept_claims
+        and state["claims"].get(claim) != "gone"
+    ):
         err += f"next: emb choices --finish {shlex.quote(claim)}\n"
     return Reply(0, "".join(line + "\n" for line in lines), err)
 
@@ -2069,7 +2131,12 @@ def flow_dry_run(args: list[str], variables: dict[str, str]) -> Reply:
         document = flow_plan.load(option(args, "--plan") or "")
         document = flows._parallel(flows._review_rounds(document, settings), settings)
         writer, reviewer = (
-            flow_plan.resolve(role, option(args, f"--{role}"), document, settings)
+            flow_worker(
+                flow_plan.resolve(role, option(args, f"--{role}"), document, settings),
+                role,
+                settings,
+                variables,
+            )
             for role in flow_plan.ROLES
         )
         output, errors = io.StringIO(), io.StringIO()
@@ -2273,8 +2340,47 @@ def command_reports(
         from ember.flows import command as flows
 
         reports = flows._exit_reports(reply.code)
-        if name == "flow-watch" and part(base, ".json"):
+        if name in ("flow-watch", "flow-status", "flow-start", "flow-resume") and part(
+            base, ".json"
+        ):
             document = json.loads(read_part(base, ".json", variables))
+            if isinstance(document, dict) and "status" in document:
+                flow = {
+                    "check_pending": False,
+                    **document,
+                    "id": document.get("flow", document.get("id")),
+                    "tasks": [
+                        {
+                            **task,
+                            "findings": task.get("finding_details", [])
+                            if isinstance(task.get("findings"), dict)
+                            else task.get("findings", []),
+                            "outside_files": task.get("outside_files", []),
+                        }
+                        for task in document.get("tasks", [])
+                    ],
+                }
+                reports = flows._exit_reports(reply.code, flow)
+                if (
+                    name == "flow-watch"
+                    and document["status"] == "failed"
+                    and "check_pending" not in document
+                    and "report" in document
+                ):
+                    # Watch snapshots carry reports, not the record's pending
+                    # check and wave fields needed to reconstruct them.
+                    reports = list(document["report"])
+                if name == "flow-status":
+                    document["reports"] = flows._done_reports(flow)
+                    if has(args, "--json"):
+                        reply.out = json.dumps(document, indent=2) + "\n"
+                    else:
+                        for line in document["reports"]:
+                            if line not in reply.out.splitlines():
+                                reply.out += line + "\n"
+                elif document.get("event") == "end":
+                    reports += flows._done_reports(flow)
+        if name == "flow-watch" and part(base, ".json"):
             stops = document.get("stops", [])
             saved = state.setdefault("flow_stops", {}).setdefault(
                 document.get("flow", ""), {}
