@@ -41,6 +41,14 @@ MUST = {
 FIX = json.dumps({"verdict": "fix", "findings": [MUST]})
 
 
+def outside_reply(reply: str) -> str:
+    value = json.loads(reply)
+    value["outside_files"] = [
+        {"file": "README.md", "needed": True, "reason": "The task needs this edit"}
+    ]
+    return json.dumps(value)
+
+
 class Harness:
     def __init__(self, tmp_path: Path) -> None:
         self.tmp = tmp_path
@@ -58,6 +66,7 @@ class Harness:
         )
 
     def create(self, tasks: list[dict[str, Any]] | None = None, **options: Any) -> None:  # noqa: ANN401
+        check_base = options.pop("check_base", False)
         data = {
             "dir": str(self.repo),
             "tasks": tasks if tasks is not None else [task("a")],
@@ -77,6 +86,7 @@ class Harness:
             reviewer=worker,
             stall_minutes=0.03,
             claim=None,
+            check_base=check_base,
         )
         record.create(flow, parsed.text, self.env)
 
@@ -757,6 +767,7 @@ def test_same_wave_declaration_violation_stops_before_review(h: Harness) -> None
 
 
 def test_outside_file_and_same_wave_merge_conflict(h: Harness) -> None:
+    h.scripts_update(**{"a read-only review;": "@reply " + outside_reply(PASS)})
     h.create(
         [
             task("a", text="@write README.md first"),
@@ -774,6 +785,41 @@ def test_outside_file_and_same_wave_merge_conflict(h: Harness) -> None:
         .returncode
         != 0
     )
+
+
+@pytest.mark.parametrize("accounted", [False, True])
+def test_outside_file_review_is_required_and_saved(h: Harness, accounted: bool) -> None:
+    entries = [
+        {"file": "README.md", "needed": True, "reason": "Update the interface"},
+        {"file": "helper.py", "needed": False, "reason": "Unrelated change"},
+    ]
+    if accounted:
+        reply = json.dumps(
+            {
+                "verdict": "pass",
+                "findings": [],
+                "outside_files": entries[::-1],
+            }
+        )
+        h.scripts_update(**{"a read-only review;": "@reply " + reply})
+    h.create([task("a", text="@write README.md updated\n@write helper.py value")])
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["outside_files"] == ["README.md", "helper.py"]
+    review = item["reviews"][-1]
+    if accounted:
+        assert flow["status"] == "done" and item["status"] == "merged"
+        assert review["outside_files"] == entries
+        out, err = io.StringIO(), io.StringIO()
+        args = build_parser().parse_args(["flow", "--status", h.id, "--json"])
+        assert command.main(args, h.env, out=out, err=err) == 0
+        assert json.loads(out.getvalue())["tasks"][0]["reviews"][-1] == review
+    else:
+        assert item["status"] == "stopped" and review["verdict"] == "unreadable"
+        assert "the review is unreadable" in item["reason"]
+        assert "README.md (missing)" in item["reason"]
+        assert "helper.py (missing)" in item["reason"]
+        assert review["outside_files"] == []
 
 
 @pytest.mark.parametrize("failure", ["@fail broken", "@provider rate limit"])
@@ -970,11 +1016,16 @@ def test_answers_resume_stopped_tasks(h: Harness, kind: str) -> None:
 
 
 @pytest.mark.parametrize("check", [[], [sys.executable, "-c", "print('plan checked')"]])
-def test_send_correction_carries_plan_checks(h: Harness, check: list[str]) -> None:
+def test_send_correction_carries_record_check(h: Harness, check: list[str]) -> None:
     h.scripts_update(**{"Review of task a,": "@reply " + FIX})
     options: dict[str, Any] = {"check": check} if check else {}
     h.create(rounds=0, **options)
     assert h.run()["tasks"][0]["status"] == "stopped"
+    if check:
+        check = [*check, ""]
+        flow = h.flow()
+        flow["check"] = check
+        record.save(flow, h.env)
     correction = h.tmp / "correction.md"
     correction.write_text("@write a corrected")
     h.scripts_update(**{"Review of task a,": "@reply " + PASS})
@@ -997,7 +1048,7 @@ def test_reviewer_corrections_survive_resume_and_later_answers(
     h: Harness, final_answer: str
 ) -> None:
     """Applied corrections reach only this task's later reviews in answer order."""
-    h.scripts_update(**{"Review of task a,": "@reply " + FIX})
+    h.scripts_update(**{"Review of task a,": "@reply " + outside_reply(FIX)})
     h.create(
         [task("a", text="@write a value\n@write README.md expanded"), task("b")],
         rounds=0,
@@ -1027,7 +1078,7 @@ def test_reviewer_corrections_survive_resume_and_later_answers(
         if number == 1:
             h.answer("review")
             assert h.run()["tasks"][0]["corrections"] == expected
-    h.scripts_update(**{"Review of task a,": "@reply " + PASS})
+    h.scripts_update(**{"Review of task a,": "@reply " + outside_reply(PASS)})
     h.answer(final_answer)
     flow = h.run()
     assert flow["status"] == "done"
@@ -1662,6 +1713,7 @@ def test_artifact_numbers_survive_replacement(h: Harness) -> None:
 
 
 def test_changed_files_include_both_rename_sides(h: Harness) -> None:
+    h.scripts_update(**{"a read-only review;": "@reply " + outside_reply(PASS)})
     h.create([task("a", text="@git mv README.md renamed.md", files=["renamed.md"])])
     item = h.run()["tasks"][0]
     assert item["status"] == "merged"
@@ -2313,6 +2365,7 @@ def test_denied_paths_are_saved_and_emitted_after_successful_turn(
 
 
 def _conflicted(h: Harness) -> dict[str, Any]:
+    h.scripts_update(**{"a read-only review;": "@reply " + outside_reply(PASS)})
     h.create(
         [
             task("a", text="@write README.md first"),
@@ -2470,3 +2523,280 @@ def test_recovered_flow_routes_legacy_opencode_workers(h: Harness) -> None:
     saved, errors = runs.list_runs(h.env)
     assert not errors and len(saved) >= 2
     assert all(worker.model == "openrouter/anthropic/claude-x" for worker in saved)
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_failed_base_check_watch_reports(h: Harness, timeout: bool) -> None:
+    h.create(
+        check_base=True,
+        check=[
+            sys.executable,
+            "-c",
+            "import time; print('base failed', flush=True); "
+            + ("time.sleep(60)" if timeout else "raise SystemExit(3)"),
+        ],
+        check_timeout=1,
+    )
+    flow = h.run()
+    assert flow["status"] == "failed" and flow["check_pending"]
+    assert flow["wave"] == 0
+    assert all(t["writer_run"] is None for t in flow["tasks"])
+    assert runs.list_runs(h.env) == ([], [])
+    (check,) = flow["checks"]
+    assert check["wave"] == 0 and check["exit"] == (124 if timeout else 3)
+    reason = f"the check failed on the base: exit {check['exit']}, see {check['log']}"
+    assert flow["reason"] == reason
+    report = (
+        "report: the check failed on the base; "
+        "correct the check or the flow branch, then resume; "
+        "when the check command is wrong, replace it with "
+        f"emb flow --resume {h.id} --check '<JSON argv list>' --reason '<text>'"
+    )
+    next_line = (
+        f"next: correct the check {shlex.join(flow['check'])} or "
+        f"commit a correction to the flow branch {flow['branch']} "
+        f"(an emb run on {shlex.quote(flow['worktree'])}, "
+        f"then emb merge <its branch> --into {flow['branch']} --verdict keep "
+        f"--note '<verdict line>'), then emb flow --resume {h.id}"
+    )
+    for as_json in (False, True):
+        out, err = io.StringIO(), io.StringIO()
+        args = build_parser().parse_args(
+            ["flow", "--watch", h.id, *(["--json"] if as_json else [])]
+        )
+        assert command.main(args, h.env, out=out, err=err) == 82
+        assert err.getvalue().splitlines() == [next_line, report]
+        if as_json:
+            result = json.loads(out.getvalue())
+            assert result["reason"] == reason
+            assert result["report"] == [report]
+            assert result["next"] == next_line
+            assert result["check_output"] == "base failed\n"
+        else:
+            assert reason in out.getvalue()
+            assert "check log output:\n  base failed" in out.getvalue()
+
+
+@pytest.mark.parametrize("metadata", [False, True, None])
+def test_passing_base_check_precedes_wave_one(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, metadata: bool | None
+) -> None:
+    h.create(check_base=True, check=[sys.executable, "-c", "print('checked')"])
+    path = record.folder(h.id, h.env) / record.FLOW_NAME
+    saved = json.loads(path.read_text())
+    if metadata is None:
+        del saved["check_base"]
+    else:
+        saved["check_base"] = metadata
+    path.write_text(json.dumps(saved))
+    pipeline = runner._Runner.pipeline
+    started = []
+
+    def after_base(instance: runner._Runner, item: dict[str, Any]) -> None:
+        flow = h.flow()
+        assert [(c["wave"], c["exit"]) for c in flow["checks"]] == [(0, 0)]
+        assert not flow["check_pending"] and flow["wave"] == 1
+        assert item["writer_run"] is None
+        started.append(item["id"])
+        pipeline(instance, item)
+
+    monkeypatch.setattr(runner._Runner, "pipeline", after_base)
+    flow = h.run()
+    assert started == ["a"]
+    assert flow["status"] == "done"
+    assert [(c["wave"], c["exit"]) for c in flow["checks"]] == [(0, 0), (1, 0)]
+    assert flow["tasks"][0]["wave"] == 1
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_base_check_interruption_resumes_before_any_task(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, cancel: bool
+) -> None:
+    entered = h.tmp / "check-entered"
+    h.create(
+        check_base=True,
+        check=[
+            sys.executable,
+            "-c",
+            "import pathlib,time; "
+            f"p = pathlib.Path({str(entered)!r}); "
+            "first = not p.exists(); p.touch(); "
+            "time.sleep(60) if first else None",
+        ],
+    )
+    shutdown = threading.Event()
+    monkeypatch.setattr(command, "POLL_SECONDS", 0.01)
+
+    def signal_runner(fd: int, sig: int) -> None:
+        assert sig == signal.SIGTERM
+        shutdown.set()
+
+    monkeypatch.setattr(command.signal, "pidfd_send_signal", signal_runner)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(runner._run, h.id, h.env, h.factory, 0.01, shutdown)
+        try:
+            deadline = time.monotonic() + 10
+            while not entered.exists() or not h.flow().get("active_check"):
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+            assert runs.list_runs(h.env) == ([], [])
+            if cancel:
+                command._cancel(
+                    h.id, "stop base check", True, h.env, io.StringIO(), io.StringIO()
+                )
+            else:
+                shutdown.set()
+            assert future.result(timeout=10) == 0
+        finally:
+            shutdown.set()
+    flow = h.flow()
+    assert flow["status"] == ("cancelled" if cancel else "failed")
+    assert flow["check_pending"] and flow["wave"] == 0
+    assert flow["checks"][0]["exit"] == 124
+    assert runs.list_runs(h.env) == ([], [])
+    pipeline = runner._Runner.pipeline
+
+    def after_retry(instance: runner._Runner, item: dict[str, Any]) -> None:
+        saved = h.flow()
+        assert [(c["wave"], c["exit"]) for c in saved["checks"]] == [(0, 124), (0, 0)]
+        assert not saved["check_pending"] and saved["wave"] == 1
+        pipeline(instance, item)
+
+    monkeypatch.setattr(runner._Runner, "pipeline", after_retry)
+    command._resume(h.id, h.env, lambda _: ["true"], io.StringIO())
+    assert record.cancel_request(h.id, h.env) is None
+    final = h.run()
+    assert final["status"] == "done"
+    assert [(c["wave"], c["exit"]) for c in final["checks"]] == [
+        (0, 124),
+        (0, 0),
+        (1, 0),
+    ]
+
+
+def test_passed_base_check_is_not_rerun_on_resume(h: Harness) -> None:
+    h.create(
+        [task("a", text="Do nothing")],
+        check_base=True,
+        check=[sys.executable, "-c", "print('checked')"],
+    )
+    flow = h.run()
+    assert flow["status"] == "stopped" and not flow["check_pending"]
+    assert [(c["wave"], c["exit"]) for c in flow["checks"]] == [(0, 0)]
+    command._resume(h.id, h.env, lambda _: ["true"], io.StringIO())
+    resumed = h.run()
+    assert resumed["status"] == "stopped"
+    assert resumed["checks"] == flow["checks"]
+
+
+def test_base_check_resume_preserves_flow_branch_correction(h: Harness) -> None:
+    h.create(
+        check_base=True,
+        check=[
+            sys.executable,
+            "-c",
+            "from pathlib import Path; assert Path('fix').exists()",
+        ],
+    )
+    flow = h.run()
+    assert flow["status"] == "failed"
+    worktree = Path(flow["worktree"])
+    (worktree / "fix").write_text("correction")
+    git(worktree, "add", "fix", env=h.env)
+    git(worktree, "commit", "-m", "fix: correct base", env=h.env)
+    correction = git(worktree, "rev-parse", "HEAD", env=h.env)
+    command._resume(h.id, h.env, lambda _: ["true"], io.StringIO())
+    final = h.run()
+    assert final["status"] == "done"
+    assert final["base"] == flow["base"]
+    assert final["branch"] == flow["branch"]
+    assert final["tasks"][0]["task_base"] == correction
+    assert [(c["wave"], c["exit"]) for c in final["checks"]] == [(0, 1), (0, 0), (1, 0)]
+
+
+def test_old_record_runs_without_base_check(h: Harness) -> None:
+    h.create(check=[sys.executable, "-c", "print('checked')"])
+    path = record.folder(h.id, h.env) / record.FLOW_NAME
+    old = json.loads(path.read_text())
+    del old["check_base"]
+    path.write_text(json.dumps(old))
+    flow = h.run()
+    assert flow["status"] == "done"
+    assert [(c["wave"], c["exit"]) for c in flow["checks"]] == [(1, 0)]
+
+
+@pytest.mark.parametrize("wave", [0, 1])
+@pytest.mark.parametrize("passes", [False, True])
+def test_replace_failed_check_before_pending_wave(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, wave: int, passes: bool
+) -> None:
+    old_check = [sys.executable, "-c", 'print("old check"); raise SystemExit(1)']
+    h.create(
+        [task("a"), task("b", after=["a"])],
+        check=old_check,
+        check_base=wave == 0,
+        rounds=1,
+    )
+    failed = h.run()
+    assert failed["status"] == "failed" and failed["wave"] == wave
+    assert failed["check_pending"]
+    folder = record.folder(h.id, h.env)
+    saved_plan = (folder / record.PLAN_NAME).read_bytes()
+    new_check = [
+        sys.executable,
+        "-c",
+        f'print("new check"); raise SystemExit({0 if passes else 2})',
+    ]
+    h.scripts_update(
+        **{
+            "Review of task b, round 1,": "@reply " + FIX,
+            "Fix round 1 of task b": "@write b fixed",
+        }
+    )
+    pipeline = runner._Runner._pipeline
+    started = []
+
+    def verify_check(instance: runner._Runner, item: dict[str, Any]) -> None:
+        current = h.flow()
+        assert current["checks"][-1]["exit"] == 0
+        assert not current["check_pending"]
+        assert current["check"] == new_check
+        started.append(item["id"])
+        pipeline(instance, item)
+
+    monkeypatch.setattr(runner._Runner, "_pipeline", verify_check)
+    args = build_parser().parse_args(
+        [
+            "flow",
+            "--resume",
+            h.id,
+            "--check",
+            json.dumps(new_check),
+            "--reason",
+            "correct the command",
+        ]
+    )
+    err = io.StringIO()
+    assert (
+        command.main(
+            args, h.env, runner_argv=lambda _: ["true"], out=io.StringIO(), err=err
+        )
+        == 0
+    ), err.getvalue()
+    final = h.run()
+    assert final["status"] == ("done" if passes else "failed")
+    assert final["check_pending"] is not passes
+    assert final["checks"][1]["wave"] == wave
+    assert final["checks"][1]["exit"] == (0 if passes else 2)
+    assert (folder / record.PLAN_NAME).read_bytes() == saved_plan
+    if passes:
+        assert started == (["a", "b"] if wave == 0 else ["b"])
+        assert all(t["status"] == "merged" for t in final["tasks"])
+        for kind in ("write", "fix"):
+            brief = next((folder / "briefs").glob(f"b-{kind}-*.md")).read_text()
+            assert f"Run the plan's check command `{shlex.join(new_check)}`" in brief
+            assert shlex.join(old_check) not in brief
+    else:
+        assert started == []
+        assert final["tasks"] == failed["tasks"]
+        assert final["checks"][-1]["exit"] == 2

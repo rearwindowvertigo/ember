@@ -12,6 +12,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -811,7 +812,11 @@ class _Runner:
                 else ""
             )
             result = verdict.read(
-                text, len(earlier), round=task["round"] + 1, run=review_run.id
+                text,
+                len(earlier),
+                outside=task["outside_files"],
+                round=task["round"] + 1,
+                run=review_run.id,
             )
         except (OSError, UnicodeError) as error:
             result = verdict.Review(None, (), f"cannot read the reply: {error}")
@@ -830,6 +835,7 @@ class _Runner:
                     "review_round": task["round"] + 1,
                     "run": review_run.id,
                     "verdict": result.verdict or "unreadable",
+                    "outside_files": [item.to_json() for item in result.outside_files],
                     **result.counts(),
                     "at": time.time(),
                 }
@@ -887,7 +893,7 @@ class _Runner:
                 return
             text = briefs.writer_brief(
                 self.id,
-                self.plan,
+                replace(self.plan, check=tuple(self.flow["check"])),
                 self.plan.task(task["id"]),
                 self.other_files(task),
                 standing=self.standing_read(),
@@ -909,7 +915,7 @@ class _Runner:
                 task,
                 "fix",
                 briefs.send_message(
-                    self.id, self.plan.task(task["id"]), text, check=self.plan.check
+                    self.id, self.plan.task(task["id"]), text, check=self.flow["check"]
                 ),
             )
             if not self.send(task, path, fresh=not hook_refused):
@@ -950,7 +956,7 @@ class _Runner:
                     self.plan.task(task["id"]),
                     task["round"] + 1,
                     self.earlier(task),
-                    check=self.plan.check,
+                    check=self.flow["check"],
                 ),
             )
             if not self.send(task, path, fresh=False):
@@ -1363,9 +1369,13 @@ class _Runner:
         if self.shutdown.is_set():
             return False
         if code or reason:
+            where = (
+                "on the base"
+                if self.flow["wave"] == 0
+                else f"after wave {self.flow['wave']}"
+            )
             self.failure = reason or (
-                f"the check failed after wave {self.flow['wave']}: "
-                f"exit {code}, see {log}"
+                f"the check failed {where}: exit {code}, see {log}"
             )
             return False
         return True

@@ -191,6 +191,19 @@ def _validate(
     return problems
 
 
+def parse_check(text: str) -> list[str]:
+    """Parse check argv using the plan schema's check validation."""
+    try:
+        value = json.loads(text)
+    except ValueError as error:
+        raise PlanError(64, [f"check is not valid JSON: {error}"]) from error
+    schema = json.loads(schema_text())
+    problems = _validate(value, schema["properties"]["check"], schema, "check")
+    if problems:
+        raise PlanError(64, problems)
+    return value
+
+
 def _dependencies(tasks: list[Any]) -> list[str]:
     """Report duplicate ids, invalid dependency references and named cycles."""
     graph: dict[str, list[str]] = {}

@@ -539,6 +539,7 @@ def _run(
     env: Mapping[str, str],
     core_factory: Callable[..., Core],
     err: TextIO,
+    read: Sequence[str],
     sources: Sequence[Path] = (),
 ) -> tuple[dict[str, Any] | None, int, CommandError | None]:
     """Start, collect and close one run, forwarding every run diagnostic.
@@ -576,7 +577,7 @@ def _run(
             model=args.model,
             effort=args.effort,
             read_only=True,
-            read=tuple(args.read),
+            read=tuple(read),
             trailers=(),
             claim=args.claim,
             window=args.window,
@@ -708,9 +709,10 @@ def main(
             raise CommandError(
                 64, f"the plan {document.path} is empty", "next: emb gapcheck --help"
             )
+        read = document.read_paths(args.read)
         empty_reads = []
-        for item in args.read:
-            path = Path(item).expanduser().absolute()
+        for item in read:
+            path = Path(item)
             try:
                 if path.is_file() and not path.read_text(encoding="utf-8").strip():
                     empty_reads.append(item)
@@ -735,12 +737,7 @@ def main(
         problem = None
         reply_path = None
         settings = _settings(args, environment) if args.reply is None else None
-        sources = citations.source_files(
-            [
-                *citations.standing(settings),
-                *(str(Path(item).expanduser().absolute()) for item in args.read),
-            ]
-        )
+        sources = citations.source_files([*citations.standing(settings), *read])
         for item in citations.uncovered(
             citations.find("the plan", document.text), sources
         ):
@@ -782,6 +779,7 @@ def main(
                 environment,
                 core_factory,
                 err,
+                read,
                 sources,
             )
             if result is None:

@@ -216,13 +216,16 @@ def test_dry_run(
             "effort": "low",
             "source": "plan",
         }
+        assert result["same_model"] is True
         assert result["check"] == []
         gapcheck = result["gapcheck"]
     else:
-        assert out.splitlines()[:2] == [
+        assert out.splitlines()[:3] == [
             "plan, writer: codex gpt-5 · high (plan)",
             "plan, reviewer: codex gpt-5 · low (plan)",
+            "same model: writer and reviewer both resolve to codex gpt-5",
         ]
+        assert out.count("same model:") == 1
         assert "plan, writer:" not in err
         assert "plan, reviewer:" not in err
         assert "wave 1:\n  a: a.py\nwave 2:\n  b: b.py" in out
@@ -245,6 +248,7 @@ def test_dry_run(
         "--claim",
         "flow-claim",
     ]
+    assert "same model:" not in err
     assert "WARNING: no failure_model" in err and "WARNING: no check" in err
     assert not paths.runs_dir(env).exists()
     assert not tmux_log(tmp_path)
@@ -429,7 +433,42 @@ def test_start(
     launch = next(call for call in calls if "new-session" in call)
     assert launch[launch.index("-s") + 1] == flow_id
     assert f"EMBER_FLOW_RUNNER={flow_id}" in launch and launch[-1] == "true"
-    assert err == f"next: emb flow --watch {flow_id} --json\n"
+    assert err.splitlines() == [
+        "plan, writer: codex gpt-5 · high (plan)",
+        "plan, reviewer: codex gpt-5 · low (plan)",
+        "same model: writer and reviewer both resolve to codex gpt-5",
+        f"next: emb flow --watch {flow_id} --json",
+    ]
+
+
+@pytest.mark.parametrize("reviewer", ["codex:other@low", "claude:gpt-5@low"])
+@pytest.mark.parametrize("mode", ["dry-run", "json", "start"])
+def test_different_workers(
+    env: dict[str, str], plan_file: Path, reviewer: str, mode: str
+) -> None:
+    options = ["--dry-run", "--json"] if mode == "json" else [f"--{mode}"]
+    code, out, err = invoke(
+        env, "--plan", str(plan_file), "--reviewer", reviewer, *options
+    )
+    assert code == 0, err
+    assert "same model:" not in out + err
+    if mode == "json":
+        assert json.loads(out)["same_model"] is False
+    else:
+        engine, model = reviewer.removesuffix("@low").split(":")
+        lines = [
+            "plan, writer: codex gpt-5 · high (plan)",
+            f"option, reviewer: {engine} {model} · low (option)",
+        ]
+        if mode == "start":
+            flow_id = out.splitlines()[0].split()[1]
+            assert err.splitlines() == [
+                *lines,
+                f"next: emb flow --watch {flow_id} --json",
+            ]
+            assert len(out.splitlines()) == 3
+        else:
+            assert out.splitlines()[:2] == lines
 
 
 @pytest.mark.parametrize("setting", [None, ""])
@@ -720,6 +759,7 @@ def test_watch_outcomes(
     env: dict[str, str], flow: dict[str, Any], status: str, expected: int
 ) -> None:
     if status in record.ENDED:
+        flow["wave"] = 1
         flow["check_pending"] = status == "failed"
         end(flow, env, 82 if status == "failed" else 0)
     else:
@@ -739,7 +779,10 @@ def test_watch_outcomes(
     expected_reports = {
         82: [
             f"report: the check failed after wave {flow['wave']}; "
-            "fix the flow branch, then resume"
+            "fix the flow branch, then resume; "
+            "when the check command is wrong, replace it with "
+            f"emb flow --resume {flow['id']} --check '<JSON argv list>' "
+            "--reason '<text>'"
         ],
         72: ["report: the runner is gone; work may still be running"],
     }.get(expected, [])
@@ -773,7 +816,9 @@ def test_watch_exit_82_report(
             flow["id"], {"kind": "end", "status": status, "exit": 82}, env
         )
     expected = (
-        "report: the check failed after wave 3; fix the flow branch, then resume"
+        "report: the check failed after wave 3; fix the flow branch, then resume; "
+        "when the check command is wrong, replace it with "
+        f"emb flow --resume {flow['id']} --check '<JSON argv list>' --reason '<text>'"
         if status == "failed" and check_pending
         else "report: tasks unmerged; report every task's status and reason; "
         "leave the unmerged work and the flow branch to the owner"
@@ -857,6 +902,57 @@ def test_watch_done_reports_findings(
 
 
 @pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_done_outside_reports_in_watch_and_status(
+    env: dict[str, str], flow: dict[str, Any], as_json: bool, count: int
+) -> None:
+    flow["tasks"][0]["findings"] = [{"severity": "should", "problem": "Check wording"}]
+    for index, task in enumerate(flow["tasks"][:count]):
+        task["outside_files"] = [f"extra-{n}.py" for n in range(index + 1)]
+    end(flow, env)
+    reports = [
+        "report: 0 lead and 1 should findings remain on merged tasks; "
+        "inspect each before merging"
+    ]
+    if count:
+        names = "a (1)" if count == 1 else "a (1), b (2)"
+        reports.append(
+            f"report: {count} merged task{'' if count == 1 else 's'} changed files "
+            f"outside their declared files: {names}; inspect each before merging"
+        )
+    options = ["--json"] if as_json else []
+    for _ in range(2):
+        code, out, err = invoke(env, "--watch", flow["id"], *options)
+        assert code == 0
+        assert err.splitlines()[1:] == reports
+        if as_json:
+            assert json.loads(out)["report"] == reports
+    code, out, err = invoke(env, "--status", flow["id"], *options)
+    assert code == 0 and err == ""
+    if as_json:
+        assert json.loads(out)["reports"] == reports
+    else:
+        assert [
+            line for line in out.splitlines() if line.startswith("report:")
+        ] == reports
+
+
+def test_done_outside_report_without_findings_counts_only_merged_tasks(
+    env: dict[str, str], flow: dict[str, Any]
+) -> None:
+    end(flow, env)
+    for task in flow["tasks"]:
+        task["outside_files"] = ["extra.py"]
+    flow["tasks"][1]["status"] = "dropped"
+    assert command._done_reports(flow) == [
+        "report: 1 merged task changed files outside their declared files: a (1); "
+        "inspect each before merging"
+    ]
+    flow["tasks"][0]["outside_files"] = []
+    assert command._done_reports(flow) == []
+
+
+@pytest.mark.parametrize("as_json", [False, True])
 @pytest.mark.parametrize("status", ["failed", "cancelled", "stopped", "running"])
 def test_watch_other_states_omit_done_findings_report(
     env: dict[str, str], flow: dict[str, Any], as_json: bool, status: str
@@ -865,6 +961,7 @@ def test_watch_other_states_omit_done_findings_report(
         {"severity": "lead", "problem": "lead finding"},
         {"severity": "should", "problem": "should finding"},
     ]
+    flow["tasks"][0].update(status="merged", outside_files=["extra.py"])
     flow["status"] = status
     record.save(flow, env)
     code, out, err = invoke(
@@ -872,11 +969,15 @@ def test_watch_other_states_omit_done_findings_report(
     )
     assert code == {"failed": 82, "cancelled": 82, "stopped": 0, "running": 72}[status]
     assert "findings remain on merged tasks" not in err
+    assert "changed files outside their declared files" not in err
     if as_json:
         assert all(
             "findings remain on merged tasks" not in line
             for line in json.loads(out)["report"]
         )
+    code, out, err = invoke(env, "--status", flow["id"], "--json")
+    assert code == 0 and err == ""
+    assert json.loads(out)["reports"] == []
 
 
 def test_done_unmerged(env: dict[str, str], flow: dict[str, Any]) -> None:
@@ -989,7 +1090,9 @@ def test_flow_errors_print_exit_report(
     report = (
         "report: the runner is gone; work may still be running"
         if code == 72
-        else "report: the check failed after wave 3; fix the flow branch, then resume"
+        else "report: the check failed after wave 3; fix the flow branch, then resume; "
+        "when the check command is wrong, replace it with "
+        f"emb flow --resume {flow['id']} --check '<JSON argv list>' --reason '<text>'"
         if check_pending and mode != "start"
         else "report: tasks unmerged; report every task's status and reason; "
         "leave the unmerged work and the flow branch to the owner"
@@ -2340,7 +2443,7 @@ def test_accept_on_a_conflict_refuses_another_commit(
     assert not record.read_answers(flow["id"], env)
 
 
-def test_dry_run_passes_read_files_to_the_gap_check_and_counts_sandbox_read(
+def test_dry_run_omits_plan_read_options_and_counts_sandbox_read(
     env: dict[str, str], plan_file: Path, tmp_path: Path
 ) -> None:
     issue = tmp_path / "issue 93.md"
@@ -2355,7 +2458,12 @@ def test_dry_run_passes_read_files_to_the_gap_check_and_counts_sandbox_read(
     assert code == 0, err
     result = json.loads(out)
     words = shlex.split(result["gapcheck"])
-    assert words[words.index("--read") + 1] == str(issue)
+    assert "--read" not in words
+    assert words[words.index("--plan") + 1] == str(plan_file)
+    code, text, err = invoke(env, "--plan", str(plan_file), "--dry-run")
+    assert code == 0, err
+    line = next(line for line in text.splitlines() if line.startswith("gap check:"))
+    assert shlex.split(line.removeprefix("gap check: ")) == words
     cites = [w for w in result["warnings"] if " cites " in w]
     assert cites == [
         "task a cites https://example.com/spec, which no read path supplies"
@@ -2589,3 +2697,286 @@ def test_dry_run_validates_previous_input(
     )
     assert code == (66 if kind == "missing" else 65)
     assert not out and "next:" in err
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        [],
+        ["--dry-run", "--plan", "missing.json"],
+        ["--status"],
+        ["--watch", "missing"],
+        ["--resume", "missing"],
+        ["--cancel", "missing"],
+        ["--lead", "missing", "task", "--drop"],
+    ],
+)
+def test_check_base_requires_start(env: dict[str, str], options: list[str]) -> None:
+    code, out, err = invoke(env, *options, "--check-base")
+    assert code == 64 and not out
+    assert "--check-base needs --start" in err
+    assert not paths.runs_dir(env).exists()
+
+
+def test_check_base_requires_check(env: dict[str, str], plan_file: Path) -> None:
+    code, out, err = invoke(env, "--plan", str(plan_file), "--start", "--check-base")
+    assert code == 64 and not out
+    assert "--check-base needs a plan with a check" in err
+    assert not paths.runs_dir(env).exists()
+
+
+@pytest.mark.parametrize("check_base", [False, True])
+def test_start_records_pending_base_check_before_launch(
+    env: dict[str, str], plan_file: Path, check_base: bool
+) -> None:
+    data = json.loads(plan_file.read_text())
+    choices.set_settings({"worktree.prepare": {data["dir"]: "true"}}, env=env)
+    data["check"] = [sys.executable, "-c", "raise SystemExit(3)"]
+    plan_file.write_text(json.dumps(data))
+    launched = []
+
+    def launch(flow_id: str) -> list[str]:
+        flow = record.load(flow_id, env)
+        assert flow["wave"] == 0
+        assert flow["check_pending"] is check_base
+        assert flow["check_base"] is check_base
+        assert flow["checks"] == []
+        assert flow["preparation"]["state"] == "ok"
+        assert all(task["writer_run"] is None for task in flow["tasks"])
+        launched.append(flow_id)
+        return ["true"]
+
+    code, _, err = invoke(
+        env,
+        "--plan",
+        str(plan_file),
+        "--start",
+        *(["--check-base"] if check_base else []),
+        argv=launch,
+    )
+    assert code == 0, err
+    assert len(launched) == 1
+
+
+def test_dry_run_does_not_execute_check(env: dict[str, str], plan_file: Path) -> None:
+    marker = plan_file.parent / "check-ran"
+    data = json.loads(plan_file.read_text())
+    data["check"] = [
+        sys.executable,
+        "-c",
+        f"from pathlib import Path; Path({str(marker)!r}).touch()",
+    ]
+    plan_file.write_text(json.dumps(data))
+    code, _, err = invoke(env, "--plan", str(plan_file), "--dry-run")
+    assert code == 0, err
+    assert not marker.exists()
+    assert not paths.runs_dir(env).exists()
+
+
+def flow_files(flow_id: str, env: Mapping[str, str]) -> dict[str, bytes]:
+    """Read the record, saved plan and event log for refusal comparisons."""
+    folder = record.folder(flow_id, env)
+    return {
+        name: (folder / name).read_bytes()
+        for name in (record.FLOW_NAME, record.PLAN_NAME, record.EVENTS_NAME)
+    }
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--check", "[]", "--reason", "correct argv"],
+        ["--check", '[" \\t"]', "--reason", "correct argv"],
+        ["--check", '["true\\u0000"]', "--reason", "correct argv"],
+        ["--check", '["true", "\\u0000"]', "--reason", "correct argv"],
+        ["--check", '"true"', "--reason", "correct argv"],
+        ["--check", "{}", "--reason", "correct argv"],
+        ["--check", "null", "--reason", "correct argv"],
+        ["--check", '["true", 1]', "--reason", "correct argv"],
+        ["--check", "{", "--reason", "correct argv"],
+        ["--check", '["true"]'],
+        ["--check", '["true"]', "--reason", " \t\n"],
+        ["--reason", "correct argv"],
+    ],
+)
+def test_check_replacement_usage_preserves_files(
+    env: dict[str, str], flow: dict[str, Any], options: list[str]
+) -> None:
+    flow.update(status="failed", check_pending=True, check=["false"])
+    record.save(flow, env)
+    before = flow_files(flow["id"], env)
+    code, out, err = invoke(env, "--resume", flow["id"], *options)
+    assert code == 64 and not out, err
+    assert "next: emb flow --help" in err
+    assert flow_files(flow["id"], env) == before
+
+
+@pytest.mark.parametrize("mode", ["--status", "--watch", "--cancel"])
+def test_check_requires_resume(
+    env: dict[str, str], flow: dict[str, Any], mode: str
+) -> None:
+    before = flow_files(flow["id"], env)
+    code, _, err = invoke(
+        env, mode, flow["id"], "--check", '["true"]', "--reason", "correct argv"
+    )
+    assert code == 64 and "--check needs --resume" in err
+    assert flow_files(flow["id"], env) == before
+
+
+@pytest.mark.parametrize("status", record.FLOW_STATUSES)
+@pytest.mark.parametrize("pending", [True, False])
+def test_check_replacement_state_refused(
+    env: dict[str, str], flow: dict[str, Any], status: str, pending: bool
+) -> None:
+    if status == "failed" and pending:
+        return
+    flow.update(status=status, check_pending=pending)
+    record.save(flow, env)
+    before = flow_files(flow["id"], env)
+    code, _, err = invoke(
+        env, "--resume", flow["id"], "--check", '["true"]', "--reason", "correct argv"
+    )
+    assert code == 75 and f"is {status}" in err
+    assert f"next: emb flow --status {flow['id']}" in err
+    assert flow_files(flow["id"], env) == before
+
+
+@pytest.mark.parametrize("blocker", ["cancel", "live", "startup", "session"])
+def test_check_replacement_busy_preserves_files(
+    env: dict[str, str],
+    flow: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    blocker: str,
+) -> None:
+    flow.update(status="failed", check_pending=True, check=["false"])
+    record.save(flow, env)
+    folder = record.folder(flow["id"], env)
+    with ExitStack() as stack:
+        if blocker == "cancel":
+            (folder / record.CANCEL_NAME).write_text(
+                json.dumps({"at": time.time(), "reason": "stop"})
+            )
+        elif blocker == "live":
+            stack.enter_context(lock.hold(flow["id"], env))
+        elif blocker == "startup":
+            (folder / "startup.json").write_text(json.dumps({"at": time.time()}))
+        else:
+            monkeypatch.setattr(command, "SESSION_EXIT_SECONDS", 0)
+            monkeypatch.setattr(tmux, "exists", lambda *a, **kw: True)
+            monkeypatch.setattr(tmux, "pane_dead", lambda *a, **kw: False)
+        before = flow_files(flow["id"], env)
+        code, _, err = invoke(
+            env,
+            "--resume",
+            flow["id"],
+            "--check",
+            '["true"]',
+            "--reason",
+            "correct argv",
+        )
+        assert code == 75, err
+        assert flow_files(flow["id"], env) == before
+
+
+@pytest.mark.parametrize("wave", [0, 1, 3])
+def test_check_replacement_record_event_status(
+    env: dict[str, str],
+    flow: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    wave: int,
+) -> None:
+    flow.update(status="failed", check_pending=True, check=["false"], wave=wave)
+    record.save(flow, env)
+    before = flow_files(flow["id"], env)
+    saves = []
+    save = record.save
+
+    def capture(value: dict[str, Any], environment: Mapping[str, str]) -> None:
+        saves.append(json.loads(json.dumps(value)))
+        save(value, environment)
+
+    monkeypatch.setattr(record, "save", capture)
+    code, _, err = invoke(
+        env,
+        "--resume",
+        flow["id"],
+        "--check",
+        '["true", ""]',
+        "--reason",
+        "empty argument is intentional",
+    )
+    assert code == 0, err
+    assert len(saves) == 1
+    saved = record.load(flow["id"], env)
+    assert saved["check"] == ["true", ""] and saved["check_pending"]
+    (change,) = saved["check_changes"]
+    assert change == {
+        "at": change["at"],
+        "old": ["false"],
+        "new": ["true", ""],
+        "reason": "empty argument is intentional",
+    }
+    assert isinstance(change["at"], float)
+    assert saves[0]["check_changes"] == [change]
+    events = record.read_events(flow["id"], env)
+    assert events[-1] == {"kind": "check_replaced", "seq": 2, **change}
+    assert flow_files(flow["id"], env)[record.PLAN_NAME] == before[record.PLAN_NAME]
+    for as_json in (False, True):
+        code, out, err = invoke(
+            env, "--status", flow["id"], *(["--json"] if as_json else [])
+        )
+        assert code == 0, err
+        if as_json:
+            assert json.loads(out)["check_changes"] == [change]
+        else:
+            assert f"latest check replacement: {json.dumps(change)}" in out
+
+
+@pytest.mark.parametrize("failure", ["missing tool", "launch"])
+def test_check_replacement_survives_launch_failure(
+    env: dict[str, str],
+    flow: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    flow.update(status="failed", check_pending=True, check=["false"])
+    record.save(flow, env)
+    before = flow_files(flow["id"], env)
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise tmux.TmuxError("launch failed")
+
+    with monkeypatch.context() as patch:
+        if failure == "missing tool":
+            patch.setattr(command.shutil, "which", lambda *a, **kw: None)
+        else:
+            patch.setattr(tmux, "new_session", fail)
+        code, _, err = invoke(
+            env,
+            "--resume",
+            flow["id"],
+            "--check",
+            '["true"]',
+            "--reason",
+            "correct argv",
+        )
+    assert code == (69 if failure == "missing tool" else 71), err
+    assert f"emb flow --resume {flow['id']} uses the new check" in err
+    assert err.splitlines().count(f"next: emb flow --resume {flow['id']}") == 1
+    saved = record.load(flow["id"], env)
+    assert saved["check"] == ["true"] and saved["check_pending"]
+    assert len(saved["check_changes"]) == 1
+    assert flow_files(flow["id"], env)[record.PLAN_NAME] == before[record.PLAN_NAME]
+    assert (
+        len(
+            [
+                e
+                for e in record.read_events(flow["id"], env)
+                if e["kind"] == "check_replaced"
+            ]
+        )
+        == 1
+    )
+    code, _, err = invoke(env, "--resume", flow["id"])
+    assert code == 0, err
+    assert record.load(flow["id"], env)["check_changes"] == saved["check_changes"]

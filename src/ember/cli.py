@@ -306,6 +306,11 @@ def _add_flow(parser: argparse.ArgumentParser) -> None:
         help="an earlier gap check result to compare on --dry-run",
     )
     parser.add_argument("--start", action="store_true", help="start the flow runner")
+    parser.add_argument(
+        "--check-base",
+        action="store_true",
+        help="with --start, run the plan check on the base before wave 1",
+    )
     parser.add_argument("--watch", metavar="FLOW", help="wait for a lead stop or end")
     parser.add_argument(
         "--status", nargs="?", const="", metavar="FLOW", help="show one or all flows"
@@ -314,8 +319,13 @@ def _add_flow(parser: argparse.ArgumentParser) -> None:
         "--lead", nargs=2, metavar=("FLOW", "TASK"), help="answer a task's lead stop"
     )
     parser.add_argument("--resume", metavar="FLOW", help="restart a flow's runner")
+    parser.add_argument(
+        "--check", metavar="JSON", help="with --resume, replace a failed check argv"
+    )
     parser.add_argument("--cancel", metavar="FLOW", help="cancel a flow's runner")
-    parser.add_argument("--reason", metavar="TEXT", help="the cancellation reason")
+    parser.add_argument(
+        "--reason", metavar="TEXT", help="the cancellation or check replacement reason"
+    )
     parser.add_argument("--writer", metavar="W", help="writer engine:model[@effort]")
     parser.add_argument(
         "--reviewer", metavar="W", help="reviewer engine:model[@effort]"
@@ -446,8 +456,10 @@ def _whole_days(text: str) -> int:
 
 def _add_prune(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
+        "--claim", metavar="ID", help="only records with this exact claim id"
+    )
+    parser.add_argument(
         "--older-than",
-        required=True,
         type=_whole_days,
         metavar="DAYS",
         help="remove records ended at least DAYS days ago (0 includes all ended)",
@@ -1148,8 +1160,14 @@ def main(
     if args.command == "prune":
         from ember import prune
 
+        if args.older_than is None and args.claim is None:
+            parser.error("prune requires --older-than unless --claim is given")
         return prune.main(
-            args.older_than, dry_run=args.dry_run, as_json=args.json, env=env
+            args.older_than or 0,
+            claim=args.claim,
+            dry_run=args.dry_run,
+            as_json=args.json,
+            env=env,
         )
     if args.command == "cleanup":
         if args.merged_into is None and args.claim is None:

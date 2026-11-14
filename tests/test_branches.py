@@ -3,6 +3,7 @@ import io
 import json
 import os
 import shlex
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Iterator, Mapping
@@ -12,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from ember import branches, engines, paths
+from ember import branches, choices, db, engines, paths
 from ember.cli import main
 from ember.flows import lock as flow_lock
 from ember.flows import plan
@@ -1072,6 +1073,61 @@ def test_cleanup_claim_removes_only_matching_merged_runs(
     assert _branch_exists(repo, second.branch, env)
     assert Path(second.worktree).exists()
     assert _session_live(tmp_path, second.id)
+
+
+@pytest.mark.parametrize("state", ["gone", "claimed", "none", "missing-row"])
+@pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_cleanup_finish_line_checks_claim_status(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    state: str,
+    empty: bool,
+    as_json: bool,
+) -> None:
+    if not empty:
+        run = replace(_start(tmp_path, env, repo, driver), claim="claim-a")
+        record.save(run)
+        assert run.branch is not None
+        _squash(repo, run.branch, env)
+    if state == "gone":
+        choices.finish("claim-a", env=env)
+    elif state in ("claimed", "none"):
+        if state == "claimed":
+            choices.set_once({"single.writer": "ask"}, env=env)
+        assert choices.claim("claim-a", env=env)["claim"]["status"] == state
+    else:
+        choices.finish("other-claim", env=env)
+    streams = Streams()
+    assert _cleanup(env, driver, streams, repo, claim="claim-a", as_json=as_json) == 0
+    out, err = streams.take()
+    assert ("next: emb choices --finish claim-a\n" in err) == (state != "gone")
+    if as_json:
+        results = json.loads(out)
+        assert len(results) == (0 if empty else 1)
+        if not empty:
+            assert results[0]["action"] == "removed"
+    elif not empty:
+        assert out.startswith("removed ")
+
+
+@pytest.mark.parametrize("error", [OSError, sqlite3.OperationalError])
+def test_cleanup_unreadable_claim_prints_finish_line(
+    env: dict[str, str],
+    repo: Path,
+    driver: StubDriver,
+    monkeypatch: pytest.MonkeyPatch,
+    error: type[Exception],
+) -> None:
+    def unreadable(*args: object, **kwargs: object) -> None:
+        raise error("cannot read claims")
+
+    monkeypatch.setattr(db, "open_read", unreadable)
+    streams = Streams()
+    assert _cleanup(env, driver, streams, repo, claim="claim-a") == 0
+    assert "next: emb choices --finish claim-a\n" in streams.take()[1]
 
 
 @pytest.mark.parametrize("kind", ["empty", "no-record", "no-claim"])

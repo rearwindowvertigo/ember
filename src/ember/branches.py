@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -33,7 +34,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TextIO
 
-from ember import paths
+from ember import db, paths
 from ember.flows import lock as flow_lock
 from ember.flows import record as flow_record
 from ember.runs import exits, record, worktrees
@@ -1379,6 +1380,21 @@ def _again(
     return f"emb cleanup{into}{scope} --dir {top}"
 
 
+def _claim_open(claim: str, env: Mapping[str, str]) -> bool:
+    """Return whether the claim is open, including when it cannot be read."""
+    try:
+        with db.open_read(env) as conn:
+            if conn is not None:
+                row = conn.execute(
+                    "SELECT status FROM claims WHERE id = ?", (claim,)
+                ).fetchone()
+                if row is not None and row[0] == "gone":
+                    return False
+    except OSError, sqlite3.Error:
+        pass
+    return True
+
+
 def cleanup(
     target: str | None = None,
     *,
@@ -1488,6 +1504,7 @@ def cleanup(
         claim is not None
         and not dry_run
         and not any(item.action == KEPT and item.claim == claim for item in job.results)
+        and _claim_open(claim, env)
     ):
         print(f"next: emb choices --finish {shlex.quote(claim)}", file=err)
     return exits.OK

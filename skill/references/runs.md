@@ -214,9 +214,17 @@ starts and completed after commit handling with the final exit code.
 Recovery updates the same result; its seconds accumulate across recovery.
 An unfinished result has `exit: null`. Older outcomes without exit code or
 seconds show null for those fields. A missing, unreadable or malformed
-outcome leaves its numbered entry with all other fields null and prints a
-`WARNING:` naming the file; other turns are unaffected. Report the warning
-and unknown results. Null is not success or evidence of no provider error.
+outcome leaves its numbered entry with all other fields null; other turns
+are unaffected. `emb run --status <run>` prints a per-file `WARNING:`
+naming the file, in text and JSON modes, on standard error.
+Without a run id, text and JSON status print one warning on standard error:
+`WARNING: <n> runs have a turn result that cannot be read; emb run --status <run> names the file`.
+For one run it says `1 run has` instead of `<n> runs have`. Each run counts
+once even with several broken turns. Zero broken runs prints no turn-result
+warning; valid outcomes with absent or null optional fields do not count.
+Both JSON forms keep the numbered entries and null fields. Report the
+warning and unknown results. Null is not success or evidence of no provider
+error.
 
 ## Provider errors
 

@@ -93,6 +93,39 @@ def test_creation(flow: dict[str, Any], created: Path, env: dict[str, str]) -> N
         record.task_entry(flow, "unknown")
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+def test_review_outside_files_round_trip(
+    flow: dict[str, Any], created: Path, env: dict[str, str], legacy: bool
+) -> None:
+    review: dict[str, Any] = {"verdict": "pass"}
+    if not legacy:
+        review["outside_files"] = [
+            {"file": "z.py", "needed": True, "reason": "Caller changed"},
+            {"file": "a.py", "needed": False, "reason": "Unrelated wording"},
+        ]
+    flow["tasks"][0]["reviews"] = [review]
+    record.save(flow, env)
+    assert record.load(flow["id"], env)["tasks"][0]["reviews"] == [review]
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        {},
+        [None],
+        [{"file": "a"}],
+        [{"file": "a", "needed": 1, "reason": "Needed"}],
+        [{"file": "a", "needed": True, "reason": " \n"}],
+    ],
+)
+def test_invalid_review_outside_files(
+    flow: dict[str, Any], created: Path, env: dict[str, str], entries: object
+) -> None:
+    flow["tasks"][0]["reviews"] = [{"outside_files": entries}]
+    with pytest.raises(record.FlowError, match="review"):
+        record.save(flow, env)
+
+
 def test_preparation_round_trip(
     flow: dict[str, Any], created: Path, env: dict[str, str]
 ) -> None:
@@ -749,3 +782,49 @@ def test_pending_worker_answers_migrate_without_rewriting_log(
     )
     assert current["opencode_id_format"] == 1
     assert record.read_answers(flow["id"], env)[1] == current
+
+
+def test_record_without_check_base(
+    flow: dict[str, Any], created: Path, env: dict[str, str]
+) -> None:
+    path = created / record.FLOW_NAME
+    old = json.loads(path.read_text())
+    del old["check_base"]
+    path.write_text(json.dumps(old))
+    loaded = record.load(flow["id"], env)
+    assert loaded["check_base"] is False
+    assert loaded["check_pending"] is False
+    record.save(loaded, env)
+    assert record.load(flow["id"], env) == loaded
+
+
+def test_record_without_check_changes(
+    flow: dict[str, Any], created: Path, env: dict[str, str]
+) -> None:
+    path = created / record.FLOW_NAME
+    old = json.loads(path.read_text())
+    del old["check_changes"]
+    path.write_text(json.dumps(old))
+    before = path.read_bytes()
+    assert record.load(flow["id"], env)["check_changes"] == []
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        None,
+        {},
+        [None],
+        [{"at": 1}],
+        [
+            {"at": 1, "old": [], "new": ["true"], "reason": None},
+        ],
+    ],
+)
+def test_invalid_check_changes(
+    flow: dict[str, Any], created: Path, env: dict[str, str], bad: object
+) -> None:
+    flow["check_changes"] = bad
+    with pytest.raises(record.FlowError, match="check"):
+        record.save(flow, env)

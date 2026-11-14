@@ -46,6 +46,24 @@ Stall after (`flow.stall`) unless you pass `--stall`.
   variables the check needs in that shell each time. Its timeout is
   `check_timeout`, an integer number of seconds, at least 1, default `1800`.
   Tests that need a local service, such as a database, can go in this check.
+  For a flow not meant to repair a failing base, run the plan's exact check
+  argv on the base, on this machine, before `--start`. Start only when it
+  exits 0. To have Ember do this before starting tasks, use
+  `emb flow --plan <file> --start --check-base`. It runs the check in the
+  prepared flow worktree at wave 0, before creating any task run. A non-zero
+  exit or timeout ends the flow `failed`, with a reason starting
+  `the check failed on the base` and the check log tail. The `report:` and
+  `next:` lines say to correct the check or the flow branch, then resume.
+  An interrupted or cancelled base check stays pending and runs on resume;
+  a passed base check does not run again on later resumes. `--check-base`
+  without `--start` or a plan check exits 64. A flow meant to repair a
+  failing base starts without `--check-base`.
+  Leave out a test this machine cannot run through a wrapper script named
+  as the check argv. The wrapper lists each excluded file and fails on any
+  other failure. Name the exclusions to the owner and in the report.
+  The check runs once after every wave's merges. Each writer is told to
+  run it too. A chain of one-task waves runs the wave check once per task;
+  wave count multiplies check time.
 - `failure_model`: the cases that must work and those accepted.
 - `context`: only settled decisions and the rules tasks need.
 - `read`: the files that hold each source the plan cites, such as an
@@ -119,6 +137,13 @@ Start with the same worker options used for the dry run. Keep the flow id,
 branch and worktree from the start output before watching. Do not poll
 `--status` while a watch runs. Follow the printed `next:` and `owner:` lines
 as SKILL.md step 6 says.
+
+Start prints the resolved writer and reviewer announce lines on standard
+error, as the text dry run does in its output. Both print
+`same model: writer and reviewer both resolve to <engine> <model>` when
+both roles resolve to one engine and model, even with different efforts.
+The JSON dry run carries this fact as `same_model`. Report it to the owner
+in one sentence and change nothing.
 
 Ember creates the flow worktree at `worktrees/<id>` in its data folder,
 `$XDG_DATA_HOME/ember` (default `~/.local/share/ember`), outside every
@@ -230,6 +255,29 @@ Exit 75 from `--cancel` means the flow had already ended or the 60-second
 deadline from writing `cancel.json` passed with the request still pending;
 follow `next: emb flow --status <id>`.
 
+A plain `emb flow --resume <flow>` reruns the saved check after a failed
+check. The `next:` line after a wave check failure assumes the branch is
+at fault. When the command is wrong, replace it with:
+
+```bash
+emb flow --resume <flow> --check '<JSON argv list>' --reason <text>
+```
+
+Replacement requires a `failed` flow with `check_pending`, at any wave
+including wave 0, and no running or starting runner. Other states or a
+pending cancellation are refused with exit 75. An indeterminate worktree
+preparation state also refuses continuation. The argv uses the plan's
+`check` validation: a non-empty JSON list of strings, a nonblank command
+and no NUL characters. Later arguments may be empty. Invalid argv or a
+missing or blank reason exits 64. A refused call changes nothing.
+Ember saves the replacement and its history entry atomically in the flow
+record, with the time, old argv, new argv and reason. The saved plan stays
+unchanged. The runner, `emb merge`, writer briefs and fix briefs use the
+flow record's check. If runner launch fails after the save, the replacement
+stays and a plain resume uses it. The new check runs before any pending
+wave and must pass. No option accepts a wave without a passing check.
+A flow merged while `failed` keeps that status in its record.
+
 ## Provider errors
 
 Each task's run retries `capacity` as `references/runs.md` (Provider errors)
@@ -254,6 +302,23 @@ actions and hidden-path restrictions as `references/sandbox-and-exits.md` (Denie
 describes.
 
 ## Verify, merge and report
+
+At a `done` flow's end, a `report:` line names each merged task with outside
+files and its count. For example:
+
+```text
+report: 2 merged tasks changed files outside their declared files: a (1), b (2); inspect each before merging
+```
+
+Watch and `emb flow --status <id>` show the line; single-flow status JSON
+holds it in `reports`. Inspect each named task's outside files before
+merging. Each review's `outside_files` has one entry per outside file:
+`file`, `needed` and a one-line `reason`. A missing, repeated or invalid
+entry for a listed file makes the review unreadable. Reviewers judge
+whether each edit was needed and raise an unneeded edit as `must` or
+`should` under the review bar. An allowed outside edit is not a `lead`
+finding just for being outside the list. Reviewers also check changes to
+behaviour or user-facing wording the task did not ask for, in any file.
 
 `emb merge` checks a completed flow branch against the local `--into`
 target. With a matching flow record whose status is `done`, the flow tip

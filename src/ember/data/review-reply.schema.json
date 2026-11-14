@@ -8,9 +8,20 @@
   "required": ["verdict", "findings"],
   "properties": {
     "verdict": {"type": "string", "enum": ["pass", "fix"]},
-    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}}
+    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}},
+    "outside_files": {"type": "array", "items": {"$ref": "#/$defs/outside_file"}}
   },
   "$defs": {
+    "outside_file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "needed", "reason"],
+      "properties": {
+        "file": {"type": "string"},
+        "needed": {"type": "boolean"},
+        "reason": {"type": "string", "pattern": "\\S"}
+      }
+    },
     "finding": {
       "type": "object",
       "additionalProperties": false,

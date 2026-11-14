@@ -1344,6 +1344,7 @@ def test_flow_help_and_order(capsys: pytest.CaptureFixture[str]) -> None:
     assert "--lead FLOW TASK" in output and "--resume FLOW" in output
     assert "--cancel FLOW" in output and "--reason TEXT" in output
     assert "--previous FILE" in output
+    assert "--check-base" in output and "--check JSON" in output
     with pytest.raises(SystemExit) as result:
         main(["--help"])
     assert result.value.code == 0
@@ -1501,7 +1502,10 @@ def test_prune_help(capsys: pytest.CaptureFixture[str]) -> None:
         main(["prune", "--help"])
     assert raised.value.code == 0
     output = capsys.readouterr().out
-    assert all(option in output for option in ("--older-than", "--dry-run", "--json"))
+    assert all(
+        option in output
+        for option in ("--claim", "--older-than", "--dry-run", "--json")
+    )
 
 
 def test_prune_empty_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -2057,3 +2061,23 @@ def test_failed_launch_keeps_no_worker_report_in_status(
     captured = capsys.readouterr()
     assert json.loads(captured.out)["step"] == "owner"
     assert captured.err.splitlines()[-1] == exits.report(69)
+
+
+@pytest.mark.parametrize("age", [[], ["--older-than", "1"]])
+@pytest.mark.parametrize("dry_run", [[], ["--dry-run"]])
+def test_prune_empty_claim_json(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    age: list[str],
+    dry_run: list[str],
+) -> None:
+    env = {
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+    }
+    assert main(["prune", "--claim", "missing", *age, *dry_run, "--json"], env=env) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == dict(
+        removed=[], skipped=[], branches=[], worktrees=[]
+    )
+    assert captured.err == ""
