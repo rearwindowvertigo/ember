@@ -446,8 +446,10 @@ def _whole_days(text: str) -> int:
 
 def _add_prune(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
+        "--claim", metavar="ID", help="only records with this exact claim id"
+    )
+    parser.add_argument(
         "--older-than",
-        required=True,
         type=_whole_days,
         metavar="DAYS",
         help="remove records ended at least DAYS days ago (0 includes all ended)",
@@ -1148,8 +1150,14 @@ def main(
     if args.command == "prune":
         from ember import prune
 
+        if args.older_than is None and args.claim is None:
+            parser.error("prune requires --older-than unless --claim is given")
         return prune.main(
-            args.older_than, dry_run=args.dry_run, as_json=args.json, env=env
+            args.older_than or 0,
+            claim=args.claim,
+            dry_run=args.dry_run,
+            as_json=args.json,
+            env=env,
         )
     if args.command == "cleanup":
         if args.merged_into is None and args.claim is None:
