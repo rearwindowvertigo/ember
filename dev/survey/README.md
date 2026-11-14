@@ -30,9 +30,22 @@ other file of this repository except `survey.md`.
 `ember-survey/SKILL.md` is a Claude Code skill that only fetches
 `agent.md` from `main` and follows it. It runs when the owner types
 `/ember-survey`, never on its own (`disable-model-invocation: true`). It
-holds no survey text, so it does not change when the survey does. To
-install it on a machine, with `gh` signed in to an account that can read
-this repository (the file is written only when the download succeeds):
+holds no survey text, so it does not change when the survey does.
+
+On a machine with a checkout of this repository, install it as a link into
+the checkout, here at `~/Repos/ember`:
+
+```bash
+ln -sfn ~/Repos/ember/dev/survey/ember-survey ~/.claude/skills/ember-survey
+```
+
+Where `~/.claude/skills/ember-survey` already exists as a folder, from the
+download below, remove that folder first: the command puts the link inside
+an existing folder.
+
+On a machine with no checkout, download the file, with `gh` signed in to an
+account that can read this repository (the file is written only when the
+download succeeds):
 
 ```bash
 mkdir -p ~/.claude/skills/ember-survey && gh api repos/rearwindowvertigo/ember/contents/dev/survey/ember-survey/SKILL.md -H "Accept: application/vnd.github.raw+json" > /tmp/ember-survey-SKILL.md && mv /tmp/ember-survey-SKILL.md ~/.claude/skills/ember-survey/SKILL.md
