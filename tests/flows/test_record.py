@@ -749,3 +749,17 @@ def test_pending_worker_answers_migrate_without_rewriting_log(
     )
     assert current["opencode_id_format"] == 1
     assert record.read_answers(flow["id"], env)[1] == current
+
+
+def test_record_without_check_base(
+    flow: dict[str, Any], created: Path, env: dict[str, str]
+) -> None:
+    path = created / record.FLOW_NAME
+    old = json.loads(path.read_text())
+    del old["check_base"]
+    path.write_text(json.dumps(old))
+    loaded = record.load(flow["id"], env)
+    assert loaded["check_base"] is False
+    assert loaded["check_pending"] is False
+    record.save(loaded, env)
+    assert record.load(flow["id"], env) == loaded

@@ -306,6 +306,11 @@ def _add_flow(parser: argparse.ArgumentParser) -> None:
         help="an earlier gap check result to compare on --dry-run",
     )
     parser.add_argument("--start", action="store_true", help="start the flow runner")
+    parser.add_argument(
+        "--check-base",
+        action="store_true",
+        help="with --start, run the plan check on the base before wave 1",
+    )
     parser.add_argument("--watch", metavar="FLOW", help="wait for a lead stop or end")
     parser.add_argument(
         "--status", nargs="?", const="", metavar="FLOW", help="show one or all flows"

@@ -76,6 +76,7 @@ _FLOW_FIELDS = {
     "reason": "str?",
     "wave": "int",  # The flow's runner pass count.
     "check_pending": "bool",
+    "check_base": "bool",
     "checks": "[dict]",
     "answers_seen": "int",
     "halted": "str?",
@@ -176,6 +177,7 @@ def new_flow(
     now: float | None = None,
     base_branch: str | None = None,
     whole_review: bool = True,
+    check_base: bool = False,
     common: str | None = None,
 ) -> dict[str, Any]:
     """Build the initial flow record without creating any files.
@@ -224,7 +226,8 @@ def new_flow(
         "status": "starting",
         "reason": None,
         "wave": 0,
-        "check_pending": False,
+        "check_pending": check_base,
+        "check_base": check_base,
         "checks": [],
         "answers_seen": 0,
         "halted": None,
@@ -394,6 +397,7 @@ def load(flow_id: str, env: Mapping[str, str] | None = None) -> dict[str, Any]:
         value.setdefault("plan_waves", [])
         value.setdefault("base_branch", None)
         value.setdefault("common", None)
+        value.setdefault("check_base", False)
         if "review_budget" not in value:
             value["review_budget"] = _saved_budget(path.parent, value.get("rounds"))
         if isinstance(value.get("tasks"), list):

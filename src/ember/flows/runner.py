@@ -1363,9 +1363,13 @@ class _Runner:
         if self.shutdown.is_set():
             return False
         if code or reason:
+            where = (
+                "on the base"
+                if self.flow["wave"] == 0
+                else f"after wave {self.flow['wave']}"
+            )
             self.failure = reason or (
-                f"the check failed after wave {self.flow['wave']}: "
-                f"exit {code}, see {log}"
+                f"the check failed {where}: exit {code}, see {log}"
             )
             return False
         return True

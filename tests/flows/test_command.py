@@ -759,6 +759,7 @@ def test_watch_outcomes(
     env: dict[str, str], flow: dict[str, Any], status: str, expected: int
 ) -> None:
     if status in record.ENDED:
+        flow["wave"] = 1
         flow["check_pending"] = status == "failed"
         end(flow, env, 82 if status == "failed" else 0)
     else:
@@ -2633,3 +2634,77 @@ def test_dry_run_validates_previous_input(
     )
     assert code == (66 if kind == "missing" else 65)
     assert not out and "next:" in err
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        [],
+        ["--dry-run", "--plan", "missing.json"],
+        ["--status"],
+        ["--watch", "missing"],
+        ["--resume", "missing"],
+        ["--cancel", "missing"],
+        ["--lead", "missing", "task", "--drop"],
+    ],
+)
+def test_check_base_requires_start(env: dict[str, str], options: list[str]) -> None:
+    code, out, err = invoke(env, *options, "--check-base")
+    assert code == 64 and not out
+    assert "--check-base needs --start" in err
+    assert not paths.runs_dir(env).exists()
+
+
+def test_check_base_requires_check(env: dict[str, str], plan_file: Path) -> None:
+    code, out, err = invoke(env, "--plan", str(plan_file), "--start", "--check-base")
+    assert code == 64 and not out
+    assert "--check-base needs a plan with a check" in err
+    assert not paths.runs_dir(env).exists()
+
+
+@pytest.mark.parametrize("check_base", [False, True])
+def test_start_records_pending_base_check_before_launch(
+    env: dict[str, str], plan_file: Path, check_base: bool
+) -> None:
+    data = json.loads(plan_file.read_text())
+    choices.set_settings({"worktree.prepare": {data["dir"]: "true"}}, env=env)
+    data["check"] = [sys.executable, "-c", "raise SystemExit(3)"]
+    plan_file.write_text(json.dumps(data))
+    launched = []
+
+    def launch(flow_id: str) -> list[str]:
+        flow = record.load(flow_id, env)
+        assert flow["wave"] == 0
+        assert flow["check_pending"] is check_base
+        assert flow["check_base"] is check_base
+        assert flow["checks"] == []
+        assert flow["preparation"]["state"] == "ok"
+        assert all(task["writer_run"] is None for task in flow["tasks"])
+        launched.append(flow_id)
+        return ["true"]
+
+    code, _, err = invoke(
+        env,
+        "--plan",
+        str(plan_file),
+        "--start",
+        *(["--check-base"] if check_base else []),
+        argv=launch,
+    )
+    assert code == 0, err
+    assert len(launched) == 1
+
+
+def test_dry_run_does_not_execute_check(env: dict[str, str], plan_file: Path) -> None:
+    marker = plan_file.parent / "check-ran"
+    data = json.loads(plan_file.read_text())
+    data["check"] = [
+        sys.executable,
+        "-c",
+        f"from pathlib import Path; Path({str(marker)!r}).touch()",
+    ]
+    plan_file.write_text(json.dumps(data))
+    code, _, err = invoke(env, "--plan", str(plan_file), "--dry-run")
+    assert code == 0, err
+    assert not marker.exists()
+    assert not paths.runs_dir(env).exists()

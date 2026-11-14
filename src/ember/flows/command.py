@@ -67,7 +67,9 @@ def _usage(args: argparse.Namespace) -> str:
         )
     ]
     problem = None
-    if len(modes) != 1:
+    if args.check_base and modes != ["start"]:
+        problem = "--check-base needs --start"
+    elif len(modes) != 1:
         problem = (
             "give exactly one of --dry-run, --start, --watch, "
             "--status, --lead, --resume or --cancel"
@@ -297,6 +299,12 @@ def _prepare(
 ) -> tuple[plan.Plan, Path, Path, str, plan.Worker, plan.Worker, dict[str, Any]]:
     """Validate a plan, checkout, claim and both workers before creating state."""
     document = plan.load(args.plan)
+    if args.check_base and not document.check:
+        raise CommandError(
+            exits.USAGE,
+            "--check-base needs a plan with a check",
+            "next: emb flow --help",
+        )
     problems = []
     for item in document.read:
         path = Path(item).expanduser().absolute()
@@ -592,6 +600,7 @@ def _start(
         stall_minutes=_stall_minutes(args, settings),
         claim=args.claim,
         whole_review=_whole_review(settings),
+        check_base=args.check_base,
     )
     # None denotes a frozen engine default, not permission to read a later menu.
     for role in plan.ROLES:
@@ -1046,6 +1055,15 @@ def _next(flow: Mapping[str, Any], event: str, code: int | None, live: bool) -> 
         )
     if flow["status"] == "failed":
         if flow["check_pending"]:
+            if flow["wave"] == 0:
+                return (
+                    f"next: correct the check {shlex.join(flow['check'])} or "
+                    f"commit a correction to the flow branch {branch} "
+                    f"(an emb run on {shlex.quote(flow['worktree'])}, "
+                    f"then emb merge <its branch> --into {branch} --verdict keep "
+                    "--note '<verdict line>'), "
+                    f"then emb flow --resume {flow_id}"
+                )
             return (
                 "next: fix the flow branch "
                 f"(an emb run on {shlex.quote(flow['worktree'])}, "
@@ -1065,6 +1083,11 @@ def _exit_reports(code: int | None, flow: Mapping[str, Any] | None = None) -> li
     """Return the settled report lines for a user-facing flow exit."""
     if code == NOT_MERGED:
         if flow is not None and flow["status"] == "failed" and flow["check_pending"]:
+            if flow["wave"] == 0:
+                return [
+                    "report: the check failed on the base; "
+                    "correct the check or the flow branch, then resume"
+                ]
             return [
                 f"report: the check failed after wave {flow['wave']}; "
                 "fix the flow branch, then resume"
