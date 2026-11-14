@@ -216,13 +216,16 @@ def test_dry_run(
             "effort": "low",
             "source": "plan",
         }
+        assert result["same_model"] is True
         assert result["check"] == []
         gapcheck = result["gapcheck"]
     else:
-        assert out.splitlines()[:2] == [
+        assert out.splitlines()[:3] == [
             "plan, writer: codex gpt-5 · high (plan)",
             "plan, reviewer: codex gpt-5 · low (plan)",
+            "same model: writer and reviewer both resolve to codex gpt-5",
         ]
+        assert out.count("same model:") == 1
         assert "plan, writer:" not in err
         assert "plan, reviewer:" not in err
         assert "wave 1:\n  a: a.py\nwave 2:\n  b: b.py" in out
@@ -245,6 +248,7 @@ def test_dry_run(
         "--claim",
         "flow-claim",
     ]
+    assert "same model:" not in err
     assert "WARNING: no failure_model" in err and "WARNING: no check" in err
     assert not paths.runs_dir(env).exists()
     assert not tmux_log(tmp_path)
@@ -429,7 +433,42 @@ def test_start(
     launch = next(call for call in calls if "new-session" in call)
     assert launch[launch.index("-s") + 1] == flow_id
     assert f"EMBER_FLOW_RUNNER={flow_id}" in launch and launch[-1] == "true"
-    assert err == f"next: emb flow --watch {flow_id} --json\n"
+    assert err.splitlines() == [
+        "plan, writer: codex gpt-5 · high (plan)",
+        "plan, reviewer: codex gpt-5 · low (plan)",
+        "same model: writer and reviewer both resolve to codex gpt-5",
+        f"next: emb flow --watch {flow_id} --json",
+    ]
+
+
+@pytest.mark.parametrize("reviewer", ["codex:other@low", "claude:gpt-5@low"])
+@pytest.mark.parametrize("mode", ["dry-run", "json", "start"])
+def test_different_workers(
+    env: dict[str, str], plan_file: Path, reviewer: str, mode: str
+) -> None:
+    options = ["--dry-run", "--json"] if mode == "json" else [f"--{mode}"]
+    code, out, err = invoke(
+        env, "--plan", str(plan_file), "--reviewer", reviewer, *options
+    )
+    assert code == 0, err
+    assert "same model:" not in out + err
+    if mode == "json":
+        assert json.loads(out)["same_model"] is False
+    else:
+        engine, model = reviewer.removesuffix("@low").split(":")
+        lines = [
+            "plan, writer: codex gpt-5 · high (plan)",
+            f"option, reviewer: {engine} {model} · low (option)",
+        ]
+        if mode == "start":
+            flow_id = out.splitlines()[0].split()[1]
+            assert err.splitlines() == [
+                *lines,
+                f"next: emb flow --watch {flow_id} --json",
+            ]
+            assert len(out.splitlines()) == 3
+        else:
+            assert out.splitlines()[:2] == lines
 
 
 @pytest.mark.parametrize("setting", [None, ""])

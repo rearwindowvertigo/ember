@@ -389,6 +389,34 @@ def _gapcheck_decision(
     return policy.decide(answers, len(document.tasks))
 
 
+def _same_model(writer: plan.Worker, reviewer: plan.Worker) -> bool:
+    """Return whether both workers use the same engine and model."""
+    return (writer.engine, writer.model) == (reviewer.engine, reviewer.model)
+
+
+def _worker_lines(writer: plan.Worker, reviewer: plan.Worker, out: TextIO) -> None:
+    """Print the resolved workers and whether their engine and model match."""
+    for worker in (writer, reviewer):
+        print(
+            WorkerSelection(
+                engine=worker.engine,
+                model=worker.model,
+                effort=worker.effort,
+                model_source=worker.model_source,
+                effort_source=worker.effort_source,
+                screen=worker.screen,
+                row=worker.row,
+            ).line(),
+            file=out,
+        )
+    if _same_model(writer, reviewer):
+        print(
+            "same model: writer and reviewer both resolve to "
+            f"{writer.engine} {writer.model}",
+            file=out,
+        )
+
+
 def _dry_run(
     args: argparse.Namespace,
     document: plan.Plan,
@@ -457,6 +485,7 @@ def _dry_run(
                     "base": base,
                     "writer": writer.to_json(),
                     "reviewer": reviewer.to_json(),
+                    "same_model": _same_model(writer, reviewer),
                     "check": list(document.check),
                     "rounds": document.rounds,
                     "rounds_source": document.rounds_source,
@@ -476,19 +505,7 @@ def _dry_run(
             file=out,
         )
     else:
-        for worker in (writer, reviewer):
-            print(
-                WorkerSelection(
-                    engine=worker.engine,
-                    model=worker.model,
-                    effort=worker.effort,
-                    model_source=worker.model_source,
-                    effort_source=worker.effort_source,
-                    screen=worker.screen,
-                    row=worker.row,
-                ).line(),
-                file=out,
-            )
+        _worker_lines(writer, reviewer, out)
         print(f"base {base}", file=out)
         print(
             f"rounds {document.rounds} fix rounds, at most {document.rounds + 1} "
@@ -634,6 +651,7 @@ def _start(
         f"flow {flow_id}\nbranch {flow['branch']}\nworktree {flow['worktree']}",
         file=out,
     )
+    _worker_lines(writer, reviewer, err)
     print(f"next: emb flow --watch {flow_id} --json", file=err)
     return 0
 
