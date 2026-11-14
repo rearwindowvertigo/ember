@@ -516,6 +516,11 @@ work (once the owner's decision on the kept branch is reported), after review
 for read-only work, at once for no worker. Failed or cancelled runs still get
 review and a decision on their partial work before the finish. `references/claims.md` says what its reply means.
 
+Run, flow and panel records stay in Ember's state folder after cleanup
+and finish. On the owner's word, remove them with `emb prune`, including
+`emb prune --claim <id>`, or Overview's Clear. Never delete record folders
+by hand.
+
 ## Owner questions
 
 These rules cover every question to the owner in a run: worker choice,
