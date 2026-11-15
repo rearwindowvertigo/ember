@@ -70,8 +70,7 @@ run read:
 - `trace.txt`: the session in order: every assistant text, every tool call
   with its full input (including `run_in_background`), each tool result cut
   to {limit} characters and each turn's final text. `=== OWNER REPLY n`
-  marks where the owner's reply n was sent: after the turn result that
-  asked.
+  marks where the owner's reply n was sent.
 - `files/` and `command.txt`, where the expectation names them: files
   copied from the run's work folder, and the output and exit code of a
   command run there.
@@ -170,20 +169,25 @@ def compact(
 
     Every text is passed through `clean` before a tool result is cut to the
     limit, so a path that names the side cannot survive as a cut fragment.
-    Each owner reply follows the turn result it answered: the runner sends
-    the next reply after a result that contains a question mark.
+    Each owner reply is shown where run_case.sh marked it in the trace. In
+    a trace without marks it follows the next result with a question mark.
     """
     lines = []
     number = 0
+    found = events(run / "trace.jsonl")
+    marked = any(item.get("type") == "owner_reply" for item in found)
     sent = replies(run / "owner.log")
     turn = 0
-    for item in events(run / "trace.jsonl"):
+    for item in found:
         kind = item.get("type")
+        if kind == "owner_reply":
+            text = clean(str(item.get("text")))
+            lines.append(f"=== OWNER REPLY {item.get('n')}:\n{text}\n")
         if kind == "result":
             final = clean(str(item.get("result")))
             lines.append(f"=== TURN RESULT (final text of this turn):\n{final}\n")
-            # run_case.sh sends the next reply after a result with a question mark.
-            if "?" in final and turn < len(sent):
+            # A trace without markers: the runner replies after a question mark.
+            if not marked and "?" in final and turn < len(sent):
                 lines.append(f"=== OWNER REPLY {turn + 1}:\n{clean(sent[turn])}\n")
                 turn += 1
         if kind not in ("assistant", "user"):
@@ -213,9 +217,20 @@ def compact(
     return "\n".join(lines)
 
 
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n(?:.*\n)*?[ \t]*\2[ \t]*(?:\n|$)")
+
+
+def shell_lines(command: str) -> str:
+    """Return a Bash command without heredoc bodies and with continued lines joined."""
+    command = HEREDOC.sub(
+        lambda found: found.group(0).split("\n", 1)[0] + "\n", command
+    )
+    return re.sub(r"\\\n\s*", " ", command)
+
+
 def order(first: str, then: str, called: list[str]) -> tuple[bool, str]:
     """Return whether a `first` call precedes the first `then` call, with evidence."""
-    joined = [re.sub(r"\\\n\s*", " ", text) for text in called]
+    joined = [shell_lines(text) for text in called]
     before = next((i for i, text in enumerate(joined, 1) if re.search(first, text)), 0)
     after = next((i for i, text in enumerate(joined, 1) if re.search(then, text)), 0)
     if not after:
@@ -313,6 +328,7 @@ def batch(case: Path, out: Path, seed: int) -> int:
             shutil.rmtree(folder)
         folder.mkdir(parents=True)
         (folder / "expectation.md").write_text(body + "\n", encoding="utf-8")
+        shutil.copyfile(grader, folder / "grader.md")
         if meta.get("type") == "script":
             if meta.get("check") != "order" or not (
                 meta.get("first") and meta.get("then")
@@ -414,16 +430,11 @@ def apply(case: Path, out: Path, need: int) -> int:
         problems: list[str] = []
         agreed: dict[str, dict[str, Any]] = {}
         try:
-            batched = (folder / "expectation.md").read_text("utf-8").strip()
-            if batched != body:
-                problems.append("its text changed after batch")
+            batched = (folder / "grader.md").read_text("utf-8")
+            if batched != grader.read_text(encoding="utf-8"):
+                problems.append("the grader file changed after batch")
             elif meta.get("type") == "script":
                 decided = json.loads((folder / "script.json").read_text("utf-8"))
-                if (decided["first"], decided["then"]) != (
-                    meta.get("first"),
-                    meta.get("then"),
-                ):
-                    problems.append("its patterns changed after batch")
                 agreed = decided["runs"]
             else:
                 key = json.loads(

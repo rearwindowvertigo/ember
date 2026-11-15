@@ -204,7 +204,8 @@ timestamps. `provider_kind` is `capacity`, `usage_limit`, `outage` or null;
 older outcomes can omit it and `attempts`. When a turn's entry lacks
 `provider_kind` or `attempts`, name each missing one as unknown for that
 turn and leave a recorded one as it is. Call any attempt total that covers
-such a turn a minimum: a missing key is not null and not zero attempts.
+a turn without recorded `attempts` a minimum: a missing key is not null
+and not zero attempts.
 Count turns separately from attempts: a successful turn can include
 failed capacity attempts.
 No recorded turns gives `turns: []`; no runs gives `[]`.

@@ -283,14 +283,21 @@ def test_apply_refuses_a_grader_changed_after_batch(tmp_path: Path) -> None:
     )
     result = run_grade("apply", case, out)
     assert result.returncode == 65
-    assert "01-reports: its text changed after batch" in result.stderr
+    assert "01-reports: the grader file changed after batch" in result.stderr
     (case / "graders" / "01-reports.md").write_text(LLM, encoding="utf-8")
     (case / "graders" / "01b-reads-first.md").write_text(
         SCRIPT.replace("'git log'", "'git show'"), encoding="utf-8"
     )
     result = run_grade("apply", case, out)
     assert result.returncode == 65
-    assert "01b-reads-first: its patterns changed after batch" in result.stderr
+    assert "01b-reads-first: the grader file changed after batch" in result.stderr
+    (case / "graders" / "01b-reads-first.md").write_text(SCRIPT, encoding="utf-8")
+    (case / "graders" / "01-reports.md").write_text(
+        LLM.replace("weight: 1\n", "weight: 1\ncommand: true\n"), encoding="utf-8"
+    )
+    result = run_grade("apply", case, out)
+    assert result.returncode == 65
+    assert "01-reports: the grader file changed after batch" in result.stderr
     assert not list(out.rglob("grading.json"))
 
 
@@ -425,20 +432,64 @@ def test_the_convention_checks_follow_the_command_not_its_spelling(
         "git --no-pager log -5",
         "cd /repo && git log --oneline",
         "ls data; git log --oneline",
+        "cd /repo\n  git log --oneline -10",
+        "if true; then\n\tgit log -3\nfi",
+        "GIT_PAGER=cat git log --oneline -10",
     ):
         assert grade.order(first, then, [read, target])[0], read
     assert grade.order(first, then, ["git log", f"/usr/bin/{target}"])[0]
+    assert grade.order(first, then, ["git log", f"cd /repo\n  {target}"])[0]
+    assert grade.order(first, then, ["git log", f"EMB_X=1 {target}"])[0]
     for not_a_read in (
         "cat > brief.md <<'B'\nRun no git command such as `git log` here.\nB",
+        "cat > brief.md <<'B'\ngit log --oneline -10 claude/report-since\nB",
+        "cat > brief.md <<-B\n\t(git log shows plain subjects)\n\tB\necho done",
         "printf '%s\\n' 'read git log first'",
         "git status --short",
         "git show --stat HEAD",
     ):
         assert not grade.order(first, then, [not_a_read, target])[0], not_a_read
     assert not grade.order(first, then, [target, "git log --oneline"])[0]
-    helped = target.split(" \\\n")[0] + " --help"
-    passed, evidence = grade.order(first, then, [helped, "git log", target])
-    assert passed, evidence
+    one_line = target.replace(" \\\n ", "")
+    if "flow" in grader:
+        # A help call is not the first dry run.
+        helped = f"{one_line} --help"
+        assert not grade.order(first, then, ["git log", helped])[0]
+        assert grade.order(first, then, [helped, "git log", target])[0]
+    else:
+        # `--help` in a note or subject does not hide the merge.
+        noted = f"{one_line} --subject 'List --since in --help'"
+        assert grade.order(first, then, ["git log", noted])[0]
+        assert not grade.order(first, then, ["git log", "emb merge --help"])[0]
+
+
+def test_shell_lines_drops_heredoc_bodies_and_joins_continued_lines() -> None:
+    """Only the commands of a Bash call are matched."""
+    grade = load_grade()
+    text = "cat > f <<'EOF'\ngit log\nEOF\ngit status \\\n  --short"
+    assert grade.shell_lines(text) == "cat > f <<'EOF'\ngit status  --short"
+
+
+def test_an_owner_reply_is_shown_where_the_runner_marked_it(tmp_path: Path) -> None:
+    """A marked trace places the reply at its mark, not after a question mark."""
+    case, out = make(tmp_path)
+    run = out / "skill" / "run-1"
+    lines = [
+        json.dumps({"type": "result", "result": "started; shall I watch? yes"}),
+        json.dumps({"type": "result", "result": "the flow stopped. Which choice?"}),
+        json.dumps({"type": "owner_reply", "n": 1, "text": "send it"}),
+        json.dumps({"type": "result", "result": "sent"}),
+    ]
+    (run / "trace.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert run_grade("batch", case, out).returncode == 0
+    key = json.loads((out / "grading" / "keys" / "01-reports.json").read_text("utf-8"))
+    ident = next(name for name, real in key.items() if real == "skill/run-1")
+    trace = (out / "grading" / "01-reports" / "runs" / ident / "trace.txt").read_text(
+        "utf-8"
+    )
+    assert trace.count("=== OWNER REPLY") == 1
+    assert trace.index("Which choice?") < trace.index("=== OWNER REPLY 1:\nsend it")
+    assert trace.index("=== OWNER REPLY 1") < trace.index("sent\n")
 
 
 def test_the_fixture_gives_the_convention_only_in_its_history() -> None:

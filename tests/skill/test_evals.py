@@ -2070,8 +2070,15 @@ def test_runner_reply_loop(tmp_path: Path, env: dict[str, str]) -> None:
     assert [json.loads(line)["type"] for line in trace] == [
         "assistant",
         "result",
+        "owner_reply",
         "result",
     ]
+    # The runner marks each reply in the trace, before the turn it starts.
+    assert json.loads(trace[2]) == {
+        "type": "owner_reply",
+        "n": 1,
+        "text": "Leave it as it is.",
+    }
     assert (out / "prompt.txt").read_text().startswith("Add a `--since")
     assert json.loads((out / "run.json").read_text())["exit"] == 0
     assert len((out / "calls.log").read_text().splitlines()) == 2

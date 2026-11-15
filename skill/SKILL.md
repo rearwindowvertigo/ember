@@ -315,8 +315,9 @@ line (a startup file, a protected path, or a folder in Settings, Hidden
 notices) needs no answer: report it and carry on. Count turn results from each run's `turns` in
 `emb run --status [<run>] --json`, including failed turns followed by
 successful ones, and report a null `exit`, `seconds`, `state` or
-`provider_error`, and an older outcome's missing `provider_kind` and
-`attempts`, as unknown; `references/runs.md`
+`provider_error`, every field of a turn whose outcome could not be read,
+and an older outcome's missing `provider_kind` and `attempts`, as unknown;
+`references/runs.md`
 (Turn results) describes unfinished and older results.
 
 When your check of a worker finds a `must` (step 7), correct it first with

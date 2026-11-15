@@ -214,7 +214,8 @@ contacted. Waves, dependencies and warnings come from the submitted plan,
 with no canned dry-run reply. The route saves that plan as
 `.ember-eval/flow-plan.json`. The case's `.ember-eval/check-plan.py` loads
 the saved plan through the same planner and asserts file ownership,
-dependencies and membership of both waves. Its grader runs that checker;
+dependencies and membership of both waves. `grade.py batch` runs that
+checker for each run and the grader reads its result;
 the kit tests exercise the split plan, the original overlapping plan and
 a document task missing one dependency.
 
@@ -441,9 +442,9 @@ python3 skill/evals/_runner/grade.py apply <case dir> <out dir> [--graders <n>]
   the work folder, saving its output and exit code as `command.txt`.
   The run's path is replaced in every copied text, before a tool result is
   cut, also in the dashed form Claude Code gives a session's scratch
-  folder. `trace.txt` marks each owner reply after the turn result that
-  asked. Clock times, run ids and any skill text a session printed are
-  kept.
+  folder. `run_case.sh` writes an `owner_reply` line into `trace.jsonl`
+  before each reply it sends, and `trace.txt` shows the reply there.
+  Clock times, run ids and any skill text a session printed are kept.
   The key from `r<nn>` to `<side>/<run>` is in
   `<out dir>/grading/keys/<grader>.json`; no grader is given it, and
   `task.md` tells a grader to open nothing outside its folder.

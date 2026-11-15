@@ -192,10 +192,11 @@ choices, not an assumed list:
 | `--worker W` | Keep the old branch and start a new writer from the flow tip. |
 | `--drop` | Keep the branch and drop the task; its dependants stay blocked. Also accepted for a pending or blocked task. |
 
-In the stop message, say in words what each printed choice does. For
+In the stop message, say in words what each choice you offer does. For
 `--accept [--commit <sha>]` say both: plain `--accept` takes the current
 tip with no further review, and `--commit <sha>` takes that reviewed
-commit instead of the tip.
+commit instead of the tip. A `conflict` stop and a provider error limit
+what you offer, as their paragraphs below say.
 
 A merge conflict stops the task as `conflict`. Its `next:` line names the
 hand merge of the approved tip into the flow branch. After that merge, the
@@ -209,7 +210,7 @@ owner's answer. A `--send` file carries that decision, not your own choice.
 At a stop, a choice you wrote into the plan or its failure model without
 the owner's word is yours, not the owner's decision. Say what the plan
 says and that you chose it, then ask. Do not call the finding settled,
-decided or covered by your plan.
+decided or covered, by your plan or by anything else you chose.
 
 Every sent correction appears in that task's later reviewer briefs, in
 order, as a settled decision; files it allows are in scope for the review.
