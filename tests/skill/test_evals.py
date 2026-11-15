@@ -205,6 +205,9 @@ def test_case_files_parse(case: str) -> None:
             for pattern in (meta["first"], meta["then"]):
                 assert re.compile(pattern.strip("'\"")).pattern, grader
         else:
+            # An llm grader may name files and a command for grade.py to copy.
+            extra = {key: meta.pop(key) for key in ("files", "command") if key in meta}
+            assert all(value.strip() for value in extra.values()), grader
             assert meta == {"type": "llm", "focus": "trace", "weight": "1"}, grader
         assert text.strip()
     replies = folder / "owner-replies.md"

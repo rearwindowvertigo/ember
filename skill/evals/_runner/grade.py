@@ -4,39 +4,48 @@ Usage:
     grade.py batch <case dir> <out dir> [--seed <n>]
     grade.py apply <case dir> <out dir> [--graders <n>]
 
-The out dir is one that run_repeat.sh filled. `batch` writes
-`<out dir>/grading/<grader>/` for every file in the case's `graders/`:
+The out dir is one that run_repeat.sh filled. `batch` removes each run's
+earlier `grading.json` and writes `<out dir>/grading/<grader>/` for every
+file in the case's `graders/`:
 
 - A `type: script` grader is decided at once from each run's `trace.jsonl`
   and saved as `script.json`. Its `check: order` passes when a Bash call
   matching the `first` pattern runs before the first Bash call matching the
-  `then` pattern.
+  `then` pattern. A backslash at a line's end joins the next line first.
 - A `type: llm` grader gets `task.md`, `expectation.md` and one folder per
   run under `runs/`, named `r01`, `r02` and so on in a shuffled order, with
-  the run's `calls.log`, `owner.log` and a compact `trace.txt`. The run's
-  path is replaced in those files, so neither the folder names nor the
-  files say which side a run is on. The key is in
-  `<out dir>/grading/keys/<grader>.json`, which no grader is given.
+  the run's `calls.log`, `owner.log` and a compact `trace.txt`. A grader
+  file may name `files`, paths under the run's work folder that are copied
+  to the run's `files/`, and a `command`, which is run in the work folder
+  with its output and exit code saved as `command.txt`. The run's path is
+  replaced in every copied text, so the folder names and paths do not say
+  which side a run is on. Clock times, run ids and any skill text a session
+  printed are kept. The key is in `<out dir>/grading/keys/<grader>.json`,
+  which no grader is given.
 
 Each grader of a `type: llm` file reads one `<grader>` folder and writes
 `verdict-<name>.json` there. `apply` needs `--graders` such files (default
-2) for every `type: llm` grader, each covering every run. When they agree
-on every run, it writes each run's `grading.json` in grader file order, as
-tally.py reads it. When they disagree on any run, it lists the runs and
-writes nothing: the expectation's text is read two ways and is corrected
-before the runs are graded again.
+2) for every `type: llm` grader, each with a written reading, a list of
+ambiguities and a true or false `passed` for every run. When they agree on
+every run, it writes each run's `grading.json` in grader file order, as
+tally.py reads it, and prints each reading. When they disagree on any run,
+or a grader file changed after `batch`, it says so and writes nothing: the
+expectation's text is corrected and the runs are batched and graded again.
 
 Exit 0 on success, 64 on a usage error, 65 when verdicts are missing,
-unreadable or in disagreement, 66 when the case has no graders or the out
-dir has no runs.
+unreadable, out of date or in disagreement, 66 when the case has no
+graders or the out dir has no runs.
 """
 
 import argparse
 import json
 import random
 import re
+import shlex
 import shutil
+import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -44,20 +53,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tally import runs, sides  # noqa: E402
 
 RESULT_LIMIT = 1500
+COMMAND_TIMEOUT = 120
 
 TASK = """# Grade one expectation across every run
 
 Read `expectation.md` in this folder. It holds one expectation.
 
 Each folder under `runs/` is one run of the same eval case. The names are
-shuffled; nothing says which skill text a run used. For each run read:
+shuffled; no folder name or path says which skill text a run used. Open
+nothing outside this folder, and no other `verdict-*.json` file. For each
+run read:
 
 - `calls.log`: the exact argv, order and exit code of every stubbed `emb`
   call.
 - `owner.log`: the owner's replies that were sent.
 - `trace.txt`: the session in order: every assistant text, every tool call
   with its full input (including `run_in_background`), each tool result cut
-  to {limit} characters, the owner's replies and each turn's final text.
+  to {limit} characters, each turn's final text, and after it the owner's
+  reply that started the next turn.
+- `files/` and `command.txt`, where the expectation names them: files
+  copied from the run's work folder, and the output and exit code of a
+  command run there.
 
 Method:
 
@@ -86,18 +102,20 @@ def front(path: Path) -> tuple[dict[str, str], str]:
     """Return a grader file's front matter and its body."""
     text = path.read_text(encoding="utf-8")
     meta: dict[str, str] = {}
-    parts = text.split("---\n", 2)
-    if text.startswith("---\n") and len(parts) == 3:
-        for line in parts[1].splitlines():
+    pieces = text.split("---\n", 2)
+    if text.startswith("---\n") and len(pieces) == 3:
+        for line in pieces[1].splitlines():
             key, found, value = line.partition(":")
             if found:
                 meta[key.strip()] = value.strip().strip("'\"")
-        text = parts[2]
+        text = pieces[2]
     return meta, text.strip()
 
 
 def events(trace: Path) -> list[dict[str, Any]]:
-    """Return the JSON objects of a stream-json trace, skipping other lines."""
+    """Return the JSON objects of a stream-json trace; a missing trace has none."""
+    if not trace.is_file():
+        return []
     found = []
     for line in trace.read_text(encoding="utf-8").splitlines():
         try:
@@ -137,25 +155,44 @@ def commands(trace: Path) -> list[str]:
     return found
 
 
-def compact(trace: Path, limit: int = RESULT_LIMIT) -> str:
-    """Return an ordered text view of a trace with tool results cut to the limit."""
+def replies(owner_log: Path) -> list[str]:
+    """Return the owner's replies of a run, in the order they were sent."""
+    if not owner_log.is_file():
+        return []
+    return [line for line in owner_log.read_text(encoding="utf-8").splitlines() if line]
+
+
+def compact(
+    run: Path, clean: Callable[[str], str] = str, limit: int = RESULT_LIMIT
+) -> str:
+    """Return an ordered text view of a run's trace.
+
+    Every text is passed through `clean` before a tool result is cut to the
+    limit, so a path that names the side cannot survive as a cut fragment.
+    Each owner reply follows the final text of the turn it answered.
+    """
     lines = []
     number = 0
-    for item in events(trace):
+    sent = replies(run / "owner.log")
+    turn = 0
+    for item in events(run / "trace.jsonl"):
         kind = item.get("type")
         if kind == "result":
-            lines.append(
-                f"=== TURN RESULT (final text of this turn):\n{item.get('result')}\n"
-            )
+            final = clean(str(item.get("result")))
+            lines.append(f"=== TURN RESULT (final text of this turn):\n{final}\n")
+            if turn < len(sent):
+                lines.append(f"=== OWNER REPLY {turn + 1}:\n{clean(sent[turn])}\n")
+            turn += 1
         if kind not in ("assistant", "user"):
             continue
         for part in parts(item):
             number += 1
             what = part.get("type")
             if what == "text":
-                lines.append(f"[{number}] {kind.upper()} TEXT:\n{part.get('text')}\n")
+                text = clean(str(part.get("text")))
+                lines.append(f"[{number}] {kind.upper()} TEXT:\n{text}\n")
             elif what == "tool_use":
-                shown = json.dumps(part.get("input"), ensure_ascii=False)
+                shown = clean(json.dumps(part.get("input"), ensure_ascii=False))
                 lines.append(f"[{number}] TOOL CALL {part.get('name')}: {shown}\n")
             elif what == "tool_result":
                 body = part.get("content")
@@ -166,7 +203,7 @@ def compact(trace: Path, limit: int = RESULT_LIMIT) -> str:
                         else str(piece)
                         for piece in body
                     )
-                body = str(body)
+                body = clean(str(body))
                 if len(body) > limit:
                     body = body[:limit] + f"\n...[cut, {len(body)} chars]"
                 lines.append(f"[{number}] TOOL RESULT:\n{body}\n")
@@ -175,8 +212,9 @@ def compact(trace: Path, limit: int = RESULT_LIMIT) -> str:
 
 def order(first: str, then: str, called: list[str]) -> tuple[bool, str]:
     """Return whether a `first` call precedes the first `then` call, with evidence."""
-    before = next((i for i, text in enumerate(called, 1) if re.search(first, text)), 0)
-    after = next((i for i, text in enumerate(called, 1) if re.search(then, text)), 0)
+    joined = [re.sub(r"\\\n\s*", " ", text) for text in called]
+    before = next((i for i, text in enumerate(joined, 1) if re.search(first, text)), 0)
+    after = next((i for i, text in enumerate(joined, 1) if re.search(then, text)), 0)
     if not after:
         return False, f"no Bash call matches {then!r}"
     if not before:
@@ -197,24 +235,77 @@ def all_runs(out: Path) -> list[tuple[str, Path]]:
     ]
 
 
-def scrub(text: str, run: Path, out: Path) -> str:
-    """Replace the run's and the out dir's paths, which name the side."""
+def scrubber(run: Path, out: Path) -> Callable[[str], str]:
+    """Return a function that replaces the run's and the out dir's paths.
+
+    Only absolute spellings are replaced, longest first, so a relative out
+    dir such as `out` never replaces part of a word.
+    """
+    marks = {}
     for path, mark in ((run, "<RUN>"), (out, "<OUT>")):
-        for spelling in {str(path), str(path.resolve())}:
+        for spelling in (str(path.absolute()), str(path.resolve())):
+            marks.setdefault(spelling, mark)
+    ordered = sorted(marks.items(), key=lambda item: len(item[0]), reverse=True)
+
+    def clean(text: str) -> str:
+        for spelling, mark in ordered:
             text = text.replace(spelling, mark)
-    return text
+        return text
+
+    return clean
+
+
+def lay_out(target: Path, run: Path, clean: Callable[[str], str], meta: dict) -> None:
+    """Write one run's blind copy for an llm grader."""
+    target.mkdir(parents=True)
+    for log in ("calls.log", "owner.log"):
+        source = run / log
+        text = source.read_text(encoding="utf-8") if source.is_file() else ""
+        (target / log).write_text(clean(text), encoding="utf-8")
+    (target / "trace.txt").write_text(compact(run, clean), encoding="utf-8")
+    work = run / "work"
+    for name in filter(
+        None, (item.strip() for item in meta.get("files", "").split(","))
+    ):
+        (target / "files").mkdir(exist_ok=True)
+        source = work / name
+        text = (
+            source.read_text(encoding="utf-8")
+            if source.is_file()
+            else f"(the run has no {name})\n"
+        )
+        (target / "files" / Path(name).name).write_text(clean(text), encoding="utf-8")
+    if meta.get("command"):
+        try:
+            done = subprocess.run(
+                shlex.split(meta["command"]),
+                cwd=work,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=COMMAND_TIMEOUT,
+            )
+            result = f"exit {done.returncode}\n{done.stdout}{done.stderr}"
+        except (OSError, subprocess.TimeoutExpired) as error:
+            result = f"not run: {error}\n"
+        (target / "command.txt").write_text(
+            clean(f"$ {meta['command']}\n{result}"), encoding="utf-8"
+        )
 
 
 def batch(case: Path, out: Path, seed: int) -> int:
     """Decide script graders and lay out blind run folders for the others."""
     root = out / "grading"
     found = all_runs(out)
+    for _, run in found:
+        (run / "grading.json").unlink(missing_ok=True)
     for grader in graders(case):
         meta, body = front(grader)
         folder = root / grader.stem
         if folder.exists():
             shutil.rmtree(folder)
         folder.mkdir(parents=True)
+        (folder / "expectation.md").write_text(body + "\n", encoding="utf-8")
         if meta.get("type") == "script":
             if meta.get("check") != "order" or not (
                 meta.get("first") and meta.get("then")
@@ -230,8 +321,9 @@ def batch(case: Path, out: Path, seed: int) -> int:
                     meta["first"], meta["then"], commands(run / "trace.jsonl")
                 )
                 verdicts[name] = {"passed": passed, "evidence": evidence}
+            decided = {"first": meta["first"], "then": meta["then"], "runs": verdicts}
             (folder / "script.json").write_text(
-                json.dumps(verdicts, indent=2) + "\n", encoding="utf-8"
+                json.dumps(decided, indent=2) + "\n", encoding="utf-8"
             )
             print(f"{grader.stem}: script, {len(verdicts)} runs decided")
             continue
@@ -241,16 +333,7 @@ def batch(case: Path, out: Path, seed: int) -> int:
         for number, (name, run) in enumerate(shuffled, 1):
             ident = f"r{number:02d}"
             key[ident] = name
-            target = folder / "runs" / ident
-            target.mkdir(parents=True)
-            for log in ("calls.log", "owner.log"):
-                source = run / log
-                text = source.read_text(encoding="utf-8") if source.is_file() else ""
-                (target / log).write_text(scrub(text, run, out), encoding="utf-8")
-            (target / "trace.txt").write_text(
-                scrub(compact(run / "trace.jsonl"), run, out), encoding="utf-8"
-            )
-        (folder / "expectation.md").write_text(body + "\n", encoding="utf-8")
+            lay_out(folder / "runs" / ident, run, scrubber(run, out), meta)
         (folder / "task.md").write_text(
             TASK.format(limit=RESULT_LIMIT), encoding="utf-8"
         )
@@ -265,23 +348,32 @@ def batch(case: Path, out: Path, seed: int) -> int:
 
 def verdicts_of(
     folder: Path, key: dict[str, str], need: int
-) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    """Return the agreed verdict per run of one llm grader, and the problems."""
+) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
+    """Return one llm grader's agreed verdicts, its problems and its readings."""
     files = sorted(folder.glob("verdict-*.json"))
     problems = []
     if len(files) < need:
         problems.append(f"has {len(files)} of {need} verdict files")
     loaded = []
+    readings = []
     for path in files:
+        who = path.stem.removeprefix("verdict-")
         try:
-            graded = json.loads(path.read_text(encoding="utf-8"))["runs"]
+            document = json.loads(path.read_text(encoding="utf-8"))
+            reading = document["reading"]
+            if not isinstance(reading, str) or not reading.strip():
+                raise TypeError("no written reading")
+            if not isinstance(document["ambiguities"], list):
+                raise TypeError("ambiguities is not a list")
+            graded = document["runs"]
             for ident in key:
                 if not isinstance(graded[ident]["passed"], bool):
                     raise TypeError(f"{ident} has no true or false passed")
         except (ValueError, KeyError, TypeError) as error:
             problems.append(f"{path.name} unreadable or incomplete: {error!r}")
             continue
-        loaded.append((path.stem.removeprefix("verdict-"), graded))
+        loaded.append((who, graded))
+        readings.append(f"{who}: {' '.join(reading.split())}")
     agreed: dict[str, dict[str, Any]] = {}
     for ident, name in key.items():
         given = {who: graded[ident]["passed"] for who, graded in loaded}
@@ -299,7 +391,7 @@ def verdicts_of(
                     for who, graded in loaded
                 ),
             }
-    return agreed, problems
+    return agreed, problems, readings
 
 
 def apply(case: Path, out: Path, need: int) -> int:
@@ -307,6 +399,7 @@ def apply(case: Path, out: Path, need: int) -> int:
     root = out / "grading"
     found = all_runs(out)
     table: list[tuple[str, dict[str, dict[str, Any]]]] = []
+    notes: list[str] = []
     failed = False
     for grader in graders(case):
         meta, body = front(grader)
@@ -314,20 +407,29 @@ def apply(case: Path, out: Path, need: int) -> int:
         problems: list[str] = []
         agreed: dict[str, dict[str, Any]] = {}
         try:
-            if meta.get("type") == "script":
-                agreed = json.loads((folder / "script.json").read_text("utf-8"))
+            batched = (folder / "expectation.md").read_text("utf-8").strip()
+            if batched != body:
+                problems.append("its text changed after batch")
+            elif meta.get("type") == "script":
+                decided = json.loads((folder / "script.json").read_text("utf-8"))
+                if (decided["first"], decided["then"]) != (
+                    meta.get("first"),
+                    meta.get("then"),
+                ):
+                    problems.append("its patterns changed after batch")
+                agreed = decided["runs"]
             else:
                 key = json.loads(
                     (root / "keys" / f"{grader.stem}.json").read_text("utf-8")
                 )
-                agreed, problems = verdicts_of(folder, key, need)
-        except (OSError, ValueError) as error:
-            problems = [f"not batched: {error}"]
-        problems += [
-            f"no verdict for {name}"
-            for name, _ in found
-            if name not in agreed and not problems
-        ]
+                agreed, problems, readings = verdicts_of(folder, key, need)
+                notes += [f"{grader.stem} reading, {line}" for line in readings]
+        except (OSError, ValueError, KeyError) as error:
+            problems = [f"not batched: {error!r}"]
+        if not problems:
+            problems = [
+                f"no verdict for {name}" for name, _ in found if name not in agreed
+            ]
         for problem in problems:
             print(f"{grader.stem}: {problem}", file=sys.stderr)
         failed = failed or bool(problems)
@@ -341,6 +443,8 @@ def apply(case: Path, out: Path, need: int) -> int:
             json.dumps({"expectations": expectations}, indent=2) + "\n",
             encoding="utf-8",
         )
+    for note in notes:
+        print(note)
     print(f"wrote grading.json for {len(found)} runs")
     return 0
 
@@ -357,19 +461,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--graders", type=int, default=2, help="verdict files apply needs per grader"
     )
-    args = parser.parse_args(argv)
-    if not graders(args.case):
-        print(f"grade.py: {args.case} has no graders/*.md", file=sys.stderr)
-        return 66
-    if not args.out.is_dir() or not sides(args.out):
-        print(f"grade.py: {args.out} has no run-<i> folders", file=sys.stderr)
-        return 66
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as stop:
+        return 64 if stop.code else 0
     if args.graders < 1:
         print("grade.py: --graders is at least 1", file=sys.stderr)
         return 64
+    case, out = args.case.resolve(), args.out.resolve()
+    if not graders(case):
+        print(f"grade.py: {args.case} has no graders/*.md", file=sys.stderr)
+        return 66
+    if not out.is_dir() or not sides(out):
+        print(f"grade.py: {args.out} has no run-<i> folders", file=sys.stderr)
+        return 66
     if args.mode == "batch":
-        return batch(args.case, args.out, args.seed)
-    return apply(args.case, args.out, args.graders)
+        return batch(case, out, args.seed)
+    return apply(case, out, args.graders)
 
 
 if __name__ == "__main__":

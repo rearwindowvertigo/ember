@@ -420,21 +420,30 @@ python3 skill/evals/_runner/grade.py batch <case dir> <out dir> [--seed <n>]
 python3 skill/evals/_runner/grade.py apply <case dir> <out dir> [--graders <n>]
 ```
 
-`batch` writes `<out dir>/grading/<grader>/` for every grader file.
+`batch` removes each run's earlier `grading.json` and writes
+`<out dir>/grading/<grader>/` for every grader file.
 
 - A `type: script` grader has `check: order` with the patterns `first` and
   `then` in its front matter. It passes for a run when a Bash call matching
   `first` comes before the first Bash call matching `then` in the run's
-  `trace.jsonl`. `batch` decides it for every run and saves `script.json`.
+  `trace.jsonl`. A backslash at a line's end joins the next line before
+  matching. The three read-first graders match `git log` as a command, with
+  or without options before `log`, and not as words in a file a call
+  writes. `batch` decides the grader for every run and saves `script.json`.
 - A `type: llm` grader gets `expectation.md`, `task.md` and one folder per
   run under `runs/`, named `r01`, `r02` and so on in a shuffled order. Each
   holds the run's `calls.log` (the exact argv, order and exit of every
   stubbed call), `owner.log` and `trace.txt`, an ordered view of
   `trace.jsonl` with the messages, the questions to the owner, the owner's
   replies, every tool call and whether a Bash call ran in the background.
-  The run's path is replaced in those files. The key from `r<nn>` to
-  `<side>/<run>` is in `<out dir>/grading/keys/<grader>.json`; no grader is
-  given it.
+  A grader file may name `files`, paths under the run's work folder that
+  are copied to the run's `files/`, and a `command`, which `batch` runs in
+  the work folder, saving its output and exit code as `command.txt`.
+  The run's path is replaced in every copied text, before a tool result is
+  cut. Clock times, run ids and any skill text a session printed are kept.
+  The key from `r<nn>` to `<side>/<run>` is in
+  `<out dir>/grading/keys/<grader>.json`; no grader is given it, and
+  `task.md` tells a grader to open nothing outside its folder.
 
 Two grader subagents grade each `type: llm` grader folder, each on its own.
 Each follows `task.md`: it writes the one reading of the expectation it
@@ -442,11 +451,15 @@ applies to every run, lists the places where the words can be read two
 ways, grades every run, and writes `verdict-<name>.json` in the folder.
 
 `apply` needs `--graders` verdict files (default 2) for every `type: llm`
-grader, each with a true or false `passed` for every run. When the graders
-agree on every run, it writes each run's `grading.json` with `expectations`,
-a list of `{"text", "passed", "evidence"}` in the order of the case's
-`graders/*.md` file names. When two graders disagree on a run, it names the
-run, writes nothing and exits 65: the expectation's text is corrected, and
+grader, each with a written `reading`, a list of `ambiguities` and a true
+or false `passed` for every run. When the graders agree on every run, it
+writes each run's `grading.json` with `expectations`, a list of
+`{"text", "passed", "evidence"}` in the order of the case's
+`graders/*.md` file names, and prints each grader's reading. The author
+compares the readings: two graders who agree on every run through
+different readings mean the text is still read two ways. When two graders
+disagree on a run, or a grader file changed after `batch`, `apply` says
+so, writes nothing and exits 65: the expectation's text is corrected, and
 the runs are batched and graded again. It exits 64 on a usage error and 66
 when the case has no graders or the out dir has no runs.
 
@@ -457,9 +470,10 @@ or `skill/references/` merges into `main`, its author lists the cases whose
 graders exercise those rules. The author runs each listed case five times
 with `bash skill/evals/_runner/run_repeat.sh --runs 5 <case dir> <out dir>`,
 grades the runs as in Grading, and records `tally.py`'s counts on the
-change's issue. The change merges when every listed case shows `5/5` on
-`all graders`. `--base origin/main` adds the same number of runs with the
-skill text on `main`, for a comparison; the bar applies to `skill` only.
+change's issue. The change merges when every listed case shows `5/5` in
+the `skill` column of `all graders`. `--base origin/main` adds the same
+number of runs with the skill text on `main`, for a comparison; the bar
+applies to `skill` only.
 
 ```
 bash skill/evals/_runner/run_repeat.sh [--runs <n>] [--jobs <n>] [--base <git ref>] <case dir> <out dir>
