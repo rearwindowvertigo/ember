@@ -97,7 +97,10 @@ checkout.
    - one table of every point with the severity, tags and outcome most
      members gave, and each disagreement with each member's answer;
    - the tags, merged where members named the same overlap differently;
-   - the proposed changes, each with the members that proposed it.
+   - the proposed changes, each with the members that proposed it. A
+     point most members gave the outcome `repository` (ADR 0007) stays in
+     the table and is not a proposed change; list those points in one
+     line after the proposed changes.
 7. Put the proposed changes to the owner. File each one the owner accepts
    as its own issue, with the labels and milestone `AGENTS.md` describes
    and a line naming the survey issue. Then close the survey issue with a
