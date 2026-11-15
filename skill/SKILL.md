@@ -145,7 +145,8 @@ the owner's consent.
 
 Use `single.writer` for edits and `single.reviewer` for read-only work.
 For a `claude` row, `run_as` picks `cli` (`emb run --engine claude`) or
-`subagent`. Take engine, model and effort from a `set` row. For `emb run`,
+`subagent`. Take engine, model and effort from a `set` row: `emb run` with
+`--engine` alone resolves the row's model and effort. For `emb run`,
 once the brief is written, run `emb run --dry-run` with the start's exact
 options, including its claim, model, effort and read-only options when
 given. On success, copy its standard-output line as the visible announce

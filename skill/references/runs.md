@@ -30,7 +30,11 @@ trailer with an apostrophe, join single-quoted pieces with `'\''`.
   Claude subagent instead. With `--model`, that row is not read.
 - `--effort` wins. Otherwise the effort is the row's when the row names the
   same engine and model, else the driver's default, which may be none.
-  Pass the resolved effort when the choice has one.
+- With a `set` row and no model or effort named by the owner, pass neither
+  `--model` nor `--effort`: Ember takes both from the row, and the dry-run
+  line ends `(single.writer)`. Pass `--model` for a model the owner named
+  or picked, with `--effort` when that pick carries an effort, such as the
+  shortlist entry `gpt-6.1-sol@high`.
 
 The dry-run line (SKILL.md step 3) reads like
 `Team, Single tasks Writer: codex gpt-6.1-sol · high (single.writer)`. With
