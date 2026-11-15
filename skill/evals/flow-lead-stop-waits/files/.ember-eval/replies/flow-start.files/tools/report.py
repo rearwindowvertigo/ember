@@ -1,14 +1,14 @@
 """Print the totals of an orders file.
 
-Usage: python3 tools/report.py [--strict] data/orders.csv
+Usage: python3 tools/report.py data/orders.csv
 """
 
 import csv
 import sys
 
 
-def read_orders(path: str, *, strict: bool = True) -> list[dict[str, str]]:
-    """Read orders, raising on bad quantities or skipping them with warnings."""
+def read_orders(path: str) -> list[dict[str, str]]:
+    """Read orders, raising on quantities that are not whole numbers."""
     rows = []
     with open(path, newline="", encoding="utf-8") as stream:
         reader = csv.DictReader(stream)
@@ -17,10 +17,7 @@ def read_orders(path: str, *, strict: bool = True) -> list[dict[str, str]]:
                 int(row["quantity"])
             except (ValueError, TypeError) as error:
                 message = f"line {reader.line_num}: quantity must be a whole number"
-                if strict:
-                    raise ValueError(message) from error
-                print(f"warning: {message}", file=sys.stderr)
-                continue
+                raise ValueError(message) from error
             rows.append(row)
     return rows
 
@@ -33,19 +30,12 @@ def totals(rows: list[dict[str, str]]) -> tuple[int, float]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Print valid totals or report a strict input error with exit 65."""
+    """Print the totals of the file named in `argv`; return the exit code."""
     argv = sys.argv[1:] if argv is None else argv
-    strict = "--strict" in argv
-    paths = [arg for arg in argv if arg != "--strict"]
-    if argv.count("--strict") > 1 or len(paths) != 1 or paths[0].startswith("-"):
-        print("usage: report.py [--strict] <orders.csv>", file=sys.stderr)
+    if len(argv) != 1:
+        print("usage: report.py <orders.csv>", file=sys.stderr)
         return 64
-    try:
-        rows = read_orders(paths[0], strict=strict)
-    except ValueError as error:
-        print(str(error), file=sys.stderr)
-        return 65
-    quantity, revenue = totals(rows)
+    quantity, revenue = totals(read_orders(argv[0]))
     print(f"quantity: {quantity}")
     print(f"revenue: {revenue:.2f}")
     return 0

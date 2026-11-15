@@ -160,6 +160,7 @@ def run_config(model: str, read_only: bool, read: Sequence[str] = ()) -> str:
     """
     bash: dict[str, str] = {"*": "allow", **dict.fromkeys(GIT_DENIED, "deny")}
     permission: dict[str, Any] = {
+        "read": "allow",
         "edit": "deny" if read_only else "allow",
         "write": "deny" if read_only else "allow",
         "patch": "deny" if read_only else "allow",

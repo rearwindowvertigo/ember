@@ -298,6 +298,26 @@ def test_command_runs_the_view_with_its_server(
     assert not Path(run.worktree).exists()
 
 
+@pytest.mark.parametrize("read_only", [False, True])
+def test_config_explicitly_allows_all_reads(read_only: bool) -> None:
+    config = json.loads(opencode.run_config("a/model", read_only))
+    # The action-wide allow includes *.env and *.env.*.
+    assert config["agent"]["ember-worker"]["permission"]["read"] == "allow"
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize("with_read_paths", [False, True])
+def test_config_never_asks(
+    tmp_path: Path, read_only: bool, with_read_paths: bool
+) -> None:
+    read = [str(tmp_path / "case.env")] if with_read_paths else []
+    config = json.loads(opencode.run_config("a/model", read_only, read))
+    permissions = config["agent"]["ember-worker"]["permission"]
+    for rule in permissions.values():
+        effects = rule.values() if isinstance(rule, dict) else [rule]
+        assert all(effect in ("allow", "deny") for effect in effects)
+
+
 def test_read_only_agent_cannot_edit(
     driver: OpenCodeDriver, env: dict[str, str], tmp_path: Path
 ) -> None:

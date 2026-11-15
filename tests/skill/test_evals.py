@@ -2442,7 +2442,7 @@ def test_new_route_needs_reply(
     assert work.calls()[-1]["exit"] == 69
 
 
-def flow_plan(work: Case, tasks: list[dict[str, str]] | None = None) -> Path:
+def flow_plan(work: Case, tasks: list[dict[str, Any]] | None = None) -> Path:
     plan = work.work.parent / "plan.json"
     plan.write_text(
         json.dumps(
@@ -2464,6 +2464,143 @@ def flow_plan(work: Case, tasks: list[dict[str, str]] | None = None) -> Path:
         )
     )
     return plan
+
+
+def stopped_flow_plan(work: Case) -> Path:
+    return flow_plan(
+        work,
+        [
+            {
+                "id": "parse",
+                "subject": "fix: validate order quantities",
+                "task": "Raise ValueError naming the line for non-whole quantities.",
+                "files": ["tools/report.py", "tests/test_report.py"],
+            },
+            {
+                "id": "strict",
+                "subject": "feat: add strict reporting",
+                "task": "Add --strict to report errors with exit 65.",
+                "files": ["tools/report.py", "tests/test_report.py"],
+                "after": ["parse"],
+            },
+        ],
+    )
+
+
+@pytest.mark.parametrize("stage", ["parse", "writer", "answer"])
+def test_flow_lead_stop_stages(tmp_path: Path, env: dict[str, str], stage: str) -> None:
+    work = case("flow-lead-stop-waits", tmp_path, env)
+    plan = stopped_flow_plan(work)
+    tasks = json.loads(plan.read_text())["tasks"]
+    original = work.git("rev-parse", "HEAD")
+    start = work.emb("flow", "--plan", str(plan), "--start")
+    assert start.returncode == 0, start.stderr
+    flow_id = start.stdout.splitlines()[0].split()[1]
+    branch = f"ember/flow/{flow_id}"
+    tree = worktree_path(work, flow_id)
+    parse_tip = work.git("rev-parse", branch)
+    assert work.git("rev-parse", f"{branch}^") == original
+    assert work.git("log", "-1", "--format=%s", branch) == tasks[0]["subject"]
+    assert "--strict" not in (tree / "tools/report.py").read_text()
+    assert "warning:" not in (tree / "tools/report.py").read_text()
+    assert not work.git("branch", "--list", "ember/codex/*")
+    if stage != "parse":
+        watch = work.emb("flow", "--watch", flow_id, "--json")
+        assert watch.returncode == 0, watch.stderr
+        document = json.loads(watch.stdout)
+        assert document["tasks"][0]["merge_commit"] == parse_tip
+        task = document["tasks"][1]
+        assert task["merge_commit"] is None
+        tree = Path(task["worktree"])
+        assert tree.is_dir()
+        assert work.git("rev-parse", f"{task['branch']}^") == parse_tip
+        assert (
+            work.git("log", "-1", "--format=%s", task["branch"])
+            == (tasks[1]["subject"])
+        )
+        assert work.git("rev-parse", branch) == parse_tip
+        from ember.flows import command as flows
+
+        flow = {**document, "id": flow_id}
+        expected = flows._stop_reports(flow, document["stops"], False, {})
+        expected.append(flows._next(flow, "lead_stop", None, False))
+        assert watch.stderr.splitlines() == expected
+        assert (work.eval / "replies/flow-watch.1.err").read_text().splitlines() == (
+            expected
+        )
+    if stage == "answer":
+        reply = work.brief(
+            "Without --strict, skip the bad row with a warning on stderr.\n"
+        )
+        answer = work.emb("flow", "--lead", flow_id, "strict", "--send", reply)
+        assert answer.returncode == 0, answer.stderr
+        tree = worktree_path(work, flow_id)
+        assert work.git("rev-parse", f"{branch}^") == parse_tip
+        assert work.git("log", "-1", "--format=%B", branch) == (
+            tasks[1]["subject"] + "\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
+        )
+        for fixture in (work.eval / "replies/flow-lead.files").rglob("*.py"):
+            relative = fixture.relative_to(work.eval / "replies/flow-lead.files")
+            assert (tree / relative).read_bytes() == fixture.read_bytes()
+        watch = work.emb("flow", "--watch", flow_id, "--json")
+        assert watch.returncode == 0, watch.stderr
+        document = json.loads(watch.stdout)
+        assert document["event"] == "end"
+        assert document["tip"] == work.git("rev-parse", branch)
+        assert all(task["status"] == "merged" for task in document["tasks"])
+        assert {task["id"]: task["merge_commit"] for task in document["tasks"]} == {
+            "parse": parse_tip,
+            "strict": document["tip"],
+        }
+        for task, planned in zip(document["tasks"], tasks, strict=True):
+            assert (
+                work.git("log", "-1", "--format=%s", task["merge_commit"])
+                == (planned["subject"])
+            )
+    check = subprocess.run(
+        ["python3", "-m", "unittest", "discover", "-s", "tests"],
+        cwd=tree,
+        env={**work.env, "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check.returncode == 0, check.stderr
+    orders = tmp_path / "bad-orders.csv"
+    orders.write_text("date,item,quantity,price\n2026-01-01,Tea,1.5,2.00\n")
+    for strict in [False] if stage == "parse" else [False, True]:
+        result = subprocess.run(
+            [
+                "python3",
+                "tools/report.py",
+                *(["--strict"] if strict else []),
+                str(orders),
+            ],
+            cwd=tree,
+            env=work.env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        message = "line 2: quantity must be a whole number"
+        if strict:
+            assert (result.returncode, result.stdout, result.stderr) == (
+                65,
+                "",
+                message + "\n",
+            )
+        elif stage == "answer":
+            assert (result.returncode, result.stdout, result.stderr) == (
+                0,
+                "quantity: 0\nrevenue: 0.00\n",
+                f"warning: {message}\n",
+            )
+        else:
+            assert result.returncode == 1
+            assert result.stdout == ""
+            assert "Traceback" in result.stderr
+            assert f"ValueError: {message}\n" in result.stderr
+            assert "warning:" not in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -2488,7 +2625,7 @@ def test_worktree_paths_and_templates_follow_data_environment(
         link.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         link.symlink_to(target, target_is_directory=True)
     work = case("flow-lead-stop-waits", tmp_path, env)
-    result = work.emb("flow", "--plan", str(flow_plan(work)), "--start")
+    result = work.emb("flow", "--plan", str(stopped_flow_plan(work)), "--start")
     assert result.returncode == 0, result.stderr
     flow_id = result.stdout.splitlines()[0].removeprefix("flow ")
     tree = worktree_path(work, flow_id)
@@ -2504,7 +2641,10 @@ def test_worktree_paths_and_templates_follow_data_environment(
 @pytest.mark.parametrize("name", FLOW_CASES)
 def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) -> None:
     work = case(name, tmp_path, env)
-    plan = flow_plan(work)
+    plan = (
+        stopped_flow_plan(work) if name == "flow-lead-stop-waits" else flow_plan(work)
+    )
+    document = json.loads(plan.read_text())
     head = work.git("rev-parse", "HEAD")
     workers = json.loads(
         work.emb("flow", "--plan", str(plan), "--dry-run", "--json").stdout
@@ -2552,7 +2692,8 @@ def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) ->
     ]
     assert work.git("rev-parse", f"{branch}^") == head
     assert work.git("log", "-1", "--format=%B", branch) == (
-        "feat: extend the report\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
+        document["tasks"][0]["subject"]
+        + "\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
     )
     assert work.git("diff", "--name-only", f"HEAD...{branch}") == (
         "tests/test_report.py\ntools/report.py"
@@ -2564,6 +2705,9 @@ def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) ->
         "main": str(work.work),
         "branch": branch,
         "worktree": str(tree),
+        "subjects": {task["id"]: task["subject"] for task in document["tasks"]},
+        "trailers": document["trailers"],
+        "merge_commits": {document["tasks"][0]["id"]: work.git("rev-parse", branch)},
     }
     assert state["runs"] == {}
     check = subprocess.run(
@@ -2591,6 +2735,11 @@ def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) ->
         assert answer.stdout == f"queued answer 1: send for strict\nflow {flow_id}\n"
         watch = work.emb("flow", "--watch", flow_id, "--json")
         report = json.loads(watch.stdout)
+    else:
+        assert work.git("rev-parse", f"{branch}^") == head
+        for fixture in (work.eval / "replies/flow-start.files").rglob("*.py"):
+            relative = fixture.relative_to(work.eval / "replies/flow-start.files")
+            assert (tree / relative).read_bytes() == fixture.read_bytes()
     assert report["event"] == "end"
     assert all(task["status"] == "merged" for task in report["tasks"])
     assert report["next"] + "\n" == watch.stderr
@@ -3202,7 +3351,7 @@ def test_flow_stop_reports_match_commands(
     live: bool,
     capacity: bool,
 ) -> None:
-    """Every stop prints one report after next, also included in watch JSON."""
+    """Every stop prints one report before next, also included in watch JSON."""
     work = case("flow-lead-stop-waits", tmp_path, env)
     replies = work.eval / "replies"
     path = replies / "flow-watch.1.json"
@@ -3226,8 +3375,8 @@ def test_flow_stop_reports_match_commands(
         f"report: lead stop on flow-id; {state}; "
         "list every printed choice and recommend one",
     ]
-    assert result.stderr.splitlines()[0].startswith("next:")
-    assert result.stderr.splitlines()[1:] == expected
+    assert result.stderr.splitlines()[-1].startswith("next:")
+    assert result.stderr.splitlines()[:-1] == expected
     if as_json:
         assert json.loads(result.stdout)["report"] == expected
     else:
@@ -3597,7 +3746,7 @@ def test_flow_repeated_capacity_stop_keeps_report(
         result = work.emb("flow", "--watch", "flow-id", "--json")
         expected = "report: capacity on strict; recommend only the same-worker retry"
         assert json.loads(result.stdout)["report"] == [expected]
-        assert result.stderr.splitlines()[-1] == expected
+        assert result.stderr.splitlines().count(expected) == 1
 
 
 @pytest.mark.parametrize("with_previous", [False, True])
