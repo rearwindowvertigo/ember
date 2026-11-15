@@ -341,9 +341,11 @@ def test_install_sets_up_the_repository(tmp_path: Path, env: dict[str, str]) -> 
     )
     assert work.git("config", "core.sshCommand") == "false"
     assert work.git("status", "--porcelain") == ""
-    assert work.git("log", "--format=%s", "main") == (
-        "Add the order report tool and its tests"
-    )
+    assert work.git("log", "--format=%s", "main").splitlines() == [
+        "[docs] Add the readme, the agent notes and sample orders",
+        "[tests] Add tests for the order report",
+        "[report] Add the order report tool",
+    ]
     for name in ("README.md", "AGENTS.md", "CLAUDE.md", "tools/report.py"):
         assert (work.work / name).is_file()
     for name in ("bin/emb", "bin/stub.py", "replies/menu.json", "env.sh"):

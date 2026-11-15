@@ -73,10 +73,13 @@ which:
   and `ember.paths` from `src/ember` beside the stub, and installs the default
   replies in `.ember-eval/replies/` for each route the case gives no reply
   for (a case's own reply for a route replaces every default part of it);
-- makes the directory a git repository on `main` with one commit, an origin
+- makes the directory a git repository on `main` with three commits whose
+  subjects start with an area tag in square brackets (`[report] Add the
+  order report tool`) and an origin
   `git@github.com:example/order-tools.git` that no git command can reach
   (`core.sshCommand false`), and checks out the session branch from
-  `.ember-eval/case.env`;
+  `.ember-eval/case.env`. `AGENTS.md` states no commit convention, so the
+  history is the convention a session follows;
 - writes `.ember-eval/env.sh`, which sets `EMBER_EVAL_DIR` and puts the stub
   first on `PATH`.
 
@@ -441,9 +444,7 @@ python3 skill/evals/_runner/grade.py apply <case dir> <out dir> [--graders <n>]
   `then` in its front matter. It passes for a run when a Bash call matching
   `first` comes before the first Bash call matching `then` in the run's
   `trace.jsonl`. A backslash at a line's end joins the next line before
-  matching. The three read-first graders match `git log` as a command, with
-  or without options before `log`, and not as words in a file a call
-  writes. `batch` decides the grader for every run and saves `script.json`.
+  matching. `batch` decides the grader for every run and saves `script.json`.
 - A `type: llm` grader gets `expectation.md`, `task.md` and one folder per
   run under `runs/`, named `r01`, `r02` and so on in a shuffled order. Each
   holds the run's `calls.log` (the exact argv, order and exit of every

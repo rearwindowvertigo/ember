@@ -84,10 +84,13 @@ Stall after (`flow.stall`) unless you pass `--stall`.
 | `review` | String giving the reviewer's focus; default `""` | `"Check empty orders and rounding."` |
 
 Write `subject` in the repository's commit convention, with `!` for a
-breaking Conventional Commit. Find the convention before writing the plan:
-use the one `AGENTS.md` or `CONTRIBUTING` states; when neither states one,
-run `git log --oneline -10` in the checkout and follow the form of its
-subjects. It is the task's squash subject and the writer
+breaking Conventional Commit: the one `AGENTS.md` or `CONTRIBUTING` states;
+when neither states one, the form of the session branch's recent commit
+subjects, including any prefix or tag they share. Claude Code lists those
+subjects under the recent commits in your starting context; run
+`git log --oneline -10` in the checkout only when that list is absent, is
+for another repository or branch, or shows no single form. It is the
+task's squash subject and the writer
 brief's first line. Recorded flows keep their resolved subjects.
 
 `files` refuses a leading slash, an empty path component, `.` or `..`

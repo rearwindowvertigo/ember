@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -19,11 +20,6 @@ SCRIPT = (
     "first: 'git log'\nthen: 'emb merge .*--verdict'\n---\n\n"
     "A `git log` call runs before the merge.\n"
 )
-SCRIPT_GRADERS = [
-    "merge-and-cleanup-keeps/graders/02b-reads-convention-first.md",
-    "claim-and-menu-writer/graders/06b-reads-convention-first.md",
-    "flow-gap-check-first/graders/03b-reads-convention-first.md",
-]
 
 
 def load_grade() -> ModuleType:
@@ -413,56 +409,6 @@ def test_batch_copies_named_files_and_a_command_result(tmp_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("grader", SCRIPT_GRADERS)
-def test_the_convention_checks_follow_the_command_not_its_spelling(
-    grader: str,
-) -> None:
-    """The three read-first graders accept real reads and refuse mentions."""
-    grade = load_grade()
-    meta, _ = grade.front(EVALS / grader)
-    first, then = meta["first"], meta["then"]
-    target = (
-        "emb flow --plan p.json \\\n  --dry-run --claim c"
-        if "flow" in grader
-        else "emb merge ember/codex/x --into main \\\n  --verdict keep --note Keep"
-    )
-    for read in (
-        "git log --oneline -10 claude/report-since",
-        "git -C /repo log --oneline -10",
-        "git --no-pager log -5",
-        "cd /repo && git log --oneline",
-        "ls data; git log --oneline",
-        "cd /repo\n  git log --oneline -10",
-        "if true; then\n\tgit log -3\nfi",
-        "GIT_PAGER=cat git log --oneline -10",
-    ):
-        assert grade.order(first, then, [read, target])[0], read
-    assert grade.order(first, then, ["git log", f"/usr/bin/{target}"])[0]
-    assert grade.order(first, then, ["git log", f"cd /repo\n  {target}"])[0]
-    assert grade.order(first, then, ["git log", f"EMB_X=1 {target}"])[0]
-    for not_a_read in (
-        "cat > brief.md <<'B'\nRun no git command such as `git log` here.\nB",
-        "cat > brief.md <<'B'\ngit log --oneline -10 claude/report-since\nB",
-        "cat > brief.md <<-B\n\t(git log shows plain subjects)\n\tB\necho done",
-        "printf '%s\\n' 'read git log first'",
-        "git status --short",
-        "git show --stat HEAD",
-    ):
-        assert not grade.order(first, then, [not_a_read, target])[0], not_a_read
-    assert not grade.order(first, then, [target, "git log --oneline"])[0]
-    one_line = target.replace(" \\\n ", "")
-    if "flow" in grader:
-        # A help call is not the first dry run.
-        helped = f"{one_line} --help"
-        assert not grade.order(first, then, ["git log", helped])[0]
-        assert grade.order(first, then, [helped, "git log", target])[0]
-    else:
-        # `--help` in a note or subject does not hide the merge.
-        noted = f"{one_line} --subject 'List --since in --help'"
-        assert grade.order(first, then, ["git log", noted])[0]
-        assert not grade.order(first, then, ["git log", "emb merge --help"])[0]
-
-
 def test_shell_lines_drops_heredoc_bodies_and_joins_continued_lines() -> None:
     """Only the commands of a Bash call are matched."""
     grade = load_grade()
@@ -493,11 +439,14 @@ def test_an_owner_reply_is_shown_where_the_runner_marked_it(tmp_path: Path) -> N
 
 
 def test_the_fixture_gives_the_convention_only_in_its_history() -> None:
-    """The read-first graders rest on these three facts of the fixture."""
+    """The subject graders rest on these facts of the fixture."""
     fixture = EVALS / "_stubs" / "fixture"
     rules = (fixture / "AGENTS.md").read_text("utf-8").lower()
     for word in ("commit message", "convention", "subject"):
         assert word not in rules, word
     assert not list(fixture.glob("CONTRIBUTING*"))
     install = (EVALS / "_stubs" / "install.sh").read_text("utf-8")
-    assert "Add the order report tool and its tests" in install
+    subjects = re.findall(r'commit -q -m "([^"]+)"', install)
+    assert len(subjects) == 3
+    for subject in subjects:
+        assert re.fullmatch(r"\[[a-z]+\] [A-Z].*", subject), subject

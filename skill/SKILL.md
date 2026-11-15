@@ -297,8 +297,8 @@ the owner must hold: state each fact it names in plain words, do each thing
 it asks of that message (such as listing every printed choice with what it
 does), and offer nothing it rules out. Otherwise follow a `next:` line within these
 rules and the owner gates below. A line leaves the brief, the
-review bar, the verdict, `--note` and `--subject` to you; find the commit
-convention before writing `--subject` (step 9). After a turn with
+review bar, the verdict, `--note` and `--subject` to you; write `--subject`
+in the repository's commit convention (step 9). After a turn with
 commits the line is the verify command, then the merge command: review and
 report between them. Do not retry a
 refusal: a refusal is Ember or the owner saying no, and repeating it
@@ -407,8 +407,7 @@ Report a subagent or Claude Workflow in one or two plain sentences, naming
 its branch when it has one. Every worker with a branch gets one of the
 three verdicts, because only Keep work merges.
 
-For an editing run with commits the order is verify, review, report, read
-the commit convention (step 9), merge,
+For an editing run with commits the order is verify, review, report, merge,
 then finish as merge's `next:` line says; the merge closes the run. Park a
 read-only run or a run without commits with `emb run --close <run>` when its
 `next:` line names it. Park a discarded run with `emb run --close <run>`
@@ -431,10 +430,13 @@ Bash call, with no other command chained before or after it; do the same
 after a correction. Merge only Keep or Keep-with-fix work into the session
 branch. For an `emb run` branch, run the `emb merge` line in the `next:`
 line printed after the turn, writing `--note` and `--subject` yourself.
-Before writing `--subject`, find the repository's commit convention: use
-the one `AGENTS.md` or `CONTRIBUTING` states; when neither states one, run
-`git log --oneline -10 <session branch>` and follow the form of its
-subjects. Describe the reviewed result across all turns.
+Write `--subject` in the repository's commit convention: the one
+`AGENTS.md` or `CONTRIBUTING` states; when neither states one, the form of
+the session branch's recent commit subjects, including any prefix or tag
+they share. Claude Code lists those subjects under the recent commits in
+your starting context. Run `git log --oneline -10 <session branch>` only
+when that list is absent, is for another repository or branch, or shows no
+single form. Describe the reviewed result across all turns.
 Mark a breaking Conventional Commit with `!`. For a branch with no run
 record (a flow or `worktree-agent-*` branch), run:
 

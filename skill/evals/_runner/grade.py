@@ -52,7 +52,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tally import runs, sides  # noqa: E402
 
-RESULT_LIMIT = 1500
+RESULT_LIMIT = 3000
 COMMAND_TIMEOUT = 120
 
 TASK = """# Grade one expectation across every run
