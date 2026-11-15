@@ -24,6 +24,10 @@ worker may read what informs those decisions, or draft, but you decide or
 bring the open choice to the owner. Treat worker reports as unverified
 until you or a second worker checks them.
 
+After the conversation is compacted, read this file again from the
+installed skill before the next step: the copy kept in the conversation
+can end before the last step.
+
 The choice of worker is the owner's. You recommend one; the owner's
 request, a claimed one-time choice, a standing setting or the owner's live
 answer picks it. Every rule in this skill still binds how the picked worker
@@ -88,6 +92,10 @@ One task, including its worker and its cleanup, is one run. A Claude
 Workflow, flow or panel is one run for all its workers. Separately started
 tasks each claim; only the first consumes the pending one-time choice. A correction or
 `--recover` of an open run keeps its claim. A new worker starts a new run.
+A correction made because verification rejected a flow's result, before
+the flow branch is merged, runs under the flow's claim and merges into the
+flow branch, as `references/flows.md` says; a run started after the flow
+branch is merged claims anew.
 
 Before a later picker, read `emb choices --json --id <id> --brief`. Read the reply
 directly; do not write code to parse it. Read `references/claims.md` for a
