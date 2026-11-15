@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.26.1](https://github.com/rearwindowvertigo/ember/compare/v0.26.0...v0.26.1) (2026-11-15)
+
+
+### Fixed
+
+* **skill:** read SKILL.md again after a compaction ([2da5d53](https://github.com/rearwindowvertigo/ember/commit/2da5d530fabe6ec469bd61993545cb3f7f6c7cf7)), closes [#301](https://github.com/rearwindowvertigo/ember/issues/301)
+* **skill:** say which claim a flow correction uses ([95b184e](https://github.com/rearwindowvertigo/ember/commit/95b184e1c7ecc935ef19a3ebf48e46429ed6ddae)), closes [#300](https://github.com/rearwindowvertigo/ember/issues/300)
+
 ## [0.26.0](https://github.com/rearwindowvertigo/ember/compare/v0.25.1...v0.26.0) (2026-11-15)
 
 
