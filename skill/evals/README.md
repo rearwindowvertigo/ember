@@ -492,6 +492,15 @@ the `skill` column of `all graders`. `--base origin/main` adds the same
 number of runs with the skill text on `main`, for a comparison; the bar
 applies to `skill` only.
 
+When a case falls short, the author finds the root cause before changing
+anything: what causes the miss, which other cases and rules the same cause
+affects, and the fix that covers all of them, not only the run that
+failed. Where a change to a design or a decision would serve the intended
+behaviour better than a patch, the author says so to the owner. The cause
+and the fix are recorded on the change's issue. The fix changes the skill
+text, a grader or the fixture, and the case is then run five more times.
+The same text is not run again to get a better batch.
+
 ```
 bash skill/evals/_runner/run_repeat.sh [--runs <n>] [--jobs <n>] [--base <git ref>] <case dir> <out dir>
 ```
