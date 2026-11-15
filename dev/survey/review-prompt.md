@@ -69,11 +69,24 @@ earlier entries (`#<issue number>` or `<entry file name>`, then
 
 ### 5. Decide on changes
 
-For each point that is not a `note`, decide one outcome:
+For each point that is not a `note`, first judge the kind of fault its
+evidence shows, as ADR 0007 (`docs/decisions/`) says. A fault in Ember's
+own behaviour, output or text would show in any repository. A fault that
+arises from the kind of work the session's repository holds, such as
+visual layout, a renderer, a long test suite or one toolchain, would not.
+The entry's `task` line names the work. One entry is enough evidence for
+a fault in Ember; the number of entries that repeat a point does not
+change its kind.
 
-- `change`: a reasonable change to Ember, its skill, its docs or the survey
-  would address it. Say what to change, in which file, command or screen,
-  and what it would improve. Keep it to the point's evidence.
+Then decide one outcome:
+
+- `repository`: the point arises from the repository's kind of work. Say
+  which kind of work and why the same session in another repository would
+  not meet it. Propose no change.
+- `change`: the fault is in Ember, and a reasonable change to Ember, its
+  skill, its docs or the survey would address it. Say what to change, in
+  which file, command or screen, and what it would improve. Keep it to
+  the point's evidence.
 - `owner`: a change would conflict with something decided or not planned
   in `docs/design/`, `docs/decisions/` or the issue decisions, or needs a
   decision only the owner can make. Name the decision or the conflicting item.
@@ -100,6 +113,7 @@ Answer in Markdown, in this shape and nothing else:
 ## Changes
 
 - P1 (`change`): <what to change>, in <file, command or screen>; <what it improves>.
+- P2 (`repository`): <the kind of work>, <why another repository would not meet it>.
 - P4 (`owner`): <the decision needed>, <the conflicting item if any>.
 - P6 (`done`): <the change already in the repository>.
 - P7 (`none`): <why not>.
