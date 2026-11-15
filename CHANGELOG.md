@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.26.0](https://github.com/rearwindowvertigo/ember/compare/v0.25.1...v0.26.0) (2026-11-15)
+
+
+### Added
+
+* **cli:** count broken turn results in one status list warning ([5f028b0](https://github.com/rearwindowvertigo/ember/commit/5f028b0fd2d2895e11fd8ec41acdde75cfd46791))
+* **cli:** prune one claim's records with emb prune --claim ([ba2bff2](https://github.com/rearwindowvertigo/ember/commit/ba2bff20b245628df47c44aa0470f2ea54cfc63b))
+* **flows:** ask for the reason and options as printed at a lead stop ([4b9aa70](https://github.com/rearwindowvertigo/ember/commit/4b9aa708cd2d8ca0e164e6ae945709a3e8964155)), closes [#297](https://github.com/rearwindowvertigo/ember/issues/297)
+* **flows:** have the reviewer account for each outside file ([d6913f7](https://github.com/rearwindowvertigo/ember/commit/d6913f752013ffb4ee2487f825f5ace4c86ef4d2))
+* **flows:** read a flow plan's read paths in emb gapcheck --plan ([f0a1037](https://github.com/rearwindowvertigo/ember/commit/f0a1037392e633222dcd7ffcf3e4de1313b71da9))
+* **flows:** replace a failed flow's check on resume ([437f1ce](https://github.com/rearwindowvertigo/ember/commit/437f1ce594ab8396b1ca5c695da2f935a4dcfab8))
+* **flows:** run the plan check on the base with --check-base ([fe3eca8](https://github.com/rearwindowvertigo/ember/commit/fe3eca8e6e9ef0637297e70556c8f22f7c7bacd3))
+* **flows:** show the writer and reviewer at flow start ([f6cb0b1](https://github.com/rearwindowvertigo/ember/commit/f6cb0b14f67e6f374e516910e3115caa4ba8c2cf))
+
+
+### Fixed
+
+* **cli:** give OpenCode workers an explicit read rule ([5693754](https://github.com/rearwindowvertigo/ember/commit/569375476fac8dbbca8bb9073722e43fdaef7d2d))
+* **cli:** print the cleanup finish line only for an open claim ([8076247](https://github.com/rearwindowvertigo/ember/commit/80762473059152187a596b8c0de42fc5fcac5022))
+
 ## [0.25.1](https://github.com/rearwindowvertigo/ember/compare/v0.25.0...v0.25.1) (2026-11-12)
 
 
