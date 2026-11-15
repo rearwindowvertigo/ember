@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterator
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -452,6 +453,56 @@ def test_config(tmp_path: Path) -> None:
         "resource": "*",
         "effect": "deny",
     }
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_config_explicitly_allows_reads_over_defaults(read_only: bool) -> None:
+    config = json.loads(opencode2.run_config("a/model", read_only))
+    permissions = config["agents"]["ember-worker"]["permissions"]
+    for resource in ("*", "*.env", "*.env.*"):
+        assert {
+            "action": "read",
+            "resource": resource,
+            "effect": "allow",
+        } in permissions
+    # OpenCode v2.3.0 defaults precede agent rules; the last match wins.
+    defaults = [
+        {"action": "*", "resource": "*", "effect": "allow"},
+        {"action": "read", "resource": "*.env", "effect": "ask"},
+        {"action": "read", "resource": "*.env.*", "effect": "ask"},
+        {"action": "read", "resource": "*.env.example", "effect": "allow"},
+        {"action": "question", "resource": "*", "effect": "allow"},
+        {"action": "browser", "resource": "*", "effect": "deny"},
+        {"action": "skill", "resource": "browser", "effect": "deny"},
+    ]
+    for path in (
+        "README.md",
+        ".env",
+        "case.env",
+        ".env.local",
+        "case.env.local",
+        "nested/case.env",
+        "nested/case.env.local",
+        "case.env.example",
+    ):
+        effect = next(
+            rule["effect"]
+            for rule in reversed(defaults + permissions)
+            if fnmatchcase("read", rule["action"])
+            and fnmatchcase(path, rule["resource"])
+        )
+        assert effect == "allow", path
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize("with_read_paths", [False, True])
+def test_config_never_asks(
+    tmp_path: Path, read_only: bool, with_read_paths: bool
+) -> None:
+    read = [str(tmp_path / "case.env")] if with_read_paths else []
+    config = json.loads(opencode2.run_config("a/model", read_only, read))
+    permissions = config["agents"]["ember-worker"]["permissions"]
+    assert all(rule["effect"] in ("allow", "deny") for rule in permissions)
 
 
 def test_not_ready_and_safe_close(driver: OpenCode2Driver, run: Run) -> None:

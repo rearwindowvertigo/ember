@@ -25,6 +25,10 @@ the Codex profile and bubblewrap. The run has no branch or Ember commit
 step and keeps its reviewer brief. Older read-only records that name a
 source checkout keep that checkout protected as read-only.
 
+An OpenCode worker asks the owner nothing in its window. It allows file
+reads, including `*.env` and `*.env.*`; reading is limited by the sandbox
+and the read paths.
+
 A read-only Claude CLI worker has `Bash` limited to these commands, each
 with any arguments: `git diff`, `git log`, `git show`, `git status`,
 `git blame`, `git grep`, `git ls-files`, `git rev-parse`, `make check`,

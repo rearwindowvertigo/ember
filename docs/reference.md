@@ -1413,6 +1413,13 @@ options. The driver's payment-error note names the serving integration:
 `(<Integration> credit is exhausted)`. The name comes from the model list's
 integration metadata, with the integration id as fallback.
 
+Both OpenCode drivers allow file reads, including `*.env` and `*.env.*`.
+OpenCode 1 sets `read: allow`; OpenCode 2 sets ordered `read` allow rules
+for `*`, `*.env` and `*.env.*` after OpenCode's defaults, with the last
+matching rule winning. An OpenCode worker asks the owner nothing in its
+window. Reading is limited by the sandbox, the read paths and
+`external_directory`.
+
 The OpenCode column describes OpenCode 1. When `opencode --version` reports
 version 2 or later (`opencode v2.2.5`), Ember uses its OpenCode 2 driver. The
 pane runs, inside the same sandbox, a shell script that starts a private
