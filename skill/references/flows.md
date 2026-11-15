@@ -77,7 +77,7 @@ Stall after (`flow.stall`) unless you pass `--stall`.
 | Task field | Type and rule | Example |
 |---|---|---|
 | `id` | Required unique string matching `[a-z0-9][a-z0-9-]{0,39}` | `"totals"` |
-| `subject` | Required nonblank one-line string, at most 72 characters | `"feat: add order totals"` |
+| `subject` | Required nonblank one-line string, at most 72 characters | `"Add order totals"` |
 | `task` | Required nonblank string describing the work | `"Implement and test order totals."` |
 | `files` | Required non-empty list of unique exact relative POSIX file paths, with no trailing `/` | `["src/totals.py", "tests/test_totals.py"]` |
 | `after` | List of other task ids as strings; default `[]`; every id exists, no self dependency or cycle | `["schema"]` |
@@ -187,10 +187,15 @@ choices, not an assumed list:
 | Answer after `emb flow --lead <id> <task>` | Does |
 |---|---|
 | `--send <file>` | Send a correction to the existing writer, then review it. |
-| `--accept [--commit <commit>]` | Accept the task branch's current tip without another review. With `--commit`, accept that reviewed commit instead of the tip. |
+| `--accept [--commit <sha>]` | Accept the task branch's current tip without another review. With `--commit`, accept that reviewed commit instead of the tip. |
 | `--review [--reviewer W]` | Collect a running turn, then start fresh reviews and a fix budget. |
 | `--worker W` | Keep the old branch and start a new writer from the flow tip. |
 | `--drop` | Keep the branch and drop the task; its dependants stay blocked. Also accepted for a pending or blocked task. |
+
+In the stop message, say in words what each printed choice does. For
+`--accept [--commit <sha>]` say both: plain `--accept` takes the current
+tip with no further review, and `--commit <sha>` takes that reviewed
+commit instead of the tip.
 
 A merge conflict stops the task as `conflict`. Its `next:` line names the
 hand merge of the approved tip into the flow branch. After that merge, the
@@ -201,11 +206,10 @@ already in the flow branch needs no `--drop`.
 Do not settle a flow stop yourself, edit to choose its answer, or merge a
 task branch into the session branch. Call `emb flow --lead` only after the
 owner's answer. A `--send` file carries that decision, not your own choice.
-A choice you wrote into the plan or its failure model without the owner's
-word is yours, not a settled decision. At a stop, say what the plan says
-and that you chose it, then ask. Call a finding settled only when the
-owner's request, an owner answer or a sent correction settles it, and
-quote that source.
+At a stop, a choice you wrote into the plan or its failure model without
+the owner's word is yours, not the owner's decision. Say what the plan
+says and that you chose it, then ask. Do not call the finding settled,
+decided or covered by your plan.
 
 Every sent correction appears in that task's later reviewer briefs, in
 order, as a settled decision; files it allows are in scope for the review.

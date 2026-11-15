@@ -297,7 +297,8 @@ the owner must hold: state each fact it names in plain words, do each thing
 it asks of that message (such as listing every printed choice with what it
 does), and offer nothing it rules out. Otherwise follow a `next:` line within these
 rules and the owner gates below. A line leaves the brief, the
-review bar, the verdict, `--note` and `--subject` to you. After a turn with
+review bar, the verdict, `--note` and `--subject` to you; find the commit
+convention before writing `--subject` (step 9). After a turn with
 commits the line is the verify command, then the merge command: review and
 report between them. Do not retry a
 refusal: a refusal is Ember or the owner saying no, and repeating it
@@ -313,7 +314,9 @@ even a correction that avoids the denied paths. A denial with no `owner:`
 line (a startup file, a protected path, or a folder in Settings, Hidden
 notices) needs no answer: report it and carry on. Count turn results from each run's `turns` in
 `emb run --status [<run>] --json`, including failed turns followed by
-successful ones, and report null and missing fields as unknown; `references/runs.md`
+successful ones, and report a null `exit`, `seconds`, `state` or
+`provider_error`, and an older outcome's missing `provider_kind` and
+`attempts`, as unknown; `references/runs.md`
 (Turn results) describes unfinished and older results.
 
 When your check of a worker finds a `must` (step 7), correct it first with
@@ -403,7 +406,8 @@ Report a subagent or Claude Workflow in one or two plain sentences, naming
 its branch when it has one. Every worker with a branch gets one of the
 three verdicts, because only Keep work merges.
 
-For an editing run with commits the order is verify, review, report, merge,
+For an editing run with commits the order is verify, review, report, read
+the commit convention (step 9), merge,
 then finish as merge's `next:` line says; the merge closes the run. Park a
 read-only run or a run without commits with `emb run --close <run>` when its
 `next:` line names it. Park a discarded run with `emb run --close <run>`
