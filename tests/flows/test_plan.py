@@ -667,3 +667,25 @@ def test_standing_read_paths_supply_citations(
         "task a cites #93, which no read path supplies"
     ]
     assert plan.warnings(item, str(repo), env, [str(issue)]) == []
+
+
+@pytest.mark.parametrize(
+    "check",
+    [[], [" "], ["\t\n"], ["a\0"], ["a", "\0"], "true", None, {}, [1], ["a", False]],
+)
+def test_check_option_uses_plan_validation(
+    raw: dict[str, Any], tmp_path: Path, check: object
+) -> None:
+    raw["check"] = check
+    with pytest.raises(plan.PlanError) as original:
+        parsed(raw, tmp_path)
+    with pytest.raises(plan.PlanError) as option:
+        plan.parse_check(json.dumps(check))
+    assert original.value.code == option.value.code == 64
+    assert option.value.problems == tuple(
+        p.removeprefix("plan.") for p in original.value.problems
+    )
+
+
+def test_check_option_allows_empty_later_argument() -> None:
+    assert plan.parse_check('["command", ""]') == ["command", ""]

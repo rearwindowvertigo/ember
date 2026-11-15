@@ -85,5 +85,5 @@
     }
   ],
   "abandoned": [],
-  "next": "next: report every stop and choice to the owner; no runner is live, an answer starts it"
+  "next": "next: report each stop to the owner with every choice; an answer with emb flow --lead starts the runner"
 }

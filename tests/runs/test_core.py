@@ -3027,12 +3027,14 @@ def test_status_keeps_failed_turn_before_success(
 
 
 @pytest.mark.parametrize("all_runs", [False, True])
+@pytest.mark.parametrize("as_json", [False, True])
 @pytest.mark.parametrize("broken", [None, b"{", b"\xff", b"[]"])
 def test_status_warns_about_broken_outcome(
     tmp_path: Path,
     env: dict[str, str],
     capsys: pytest.CaptureFixture[str],
     all_runs: bool,
+    as_json: bool,
     broken: bytes | None,
 ) -> None:
     run = _bare_run(env, tmp_path, "claude", "none")
@@ -3052,21 +3054,90 @@ def test_status_warns_about_broken_outcome(
         path.write_bytes(broken)
     core_ = _core(env)
     assert (
-        core_.execute(lambda: core_.status(None if all_runs else run.id, as_json=True))
+        core_.execute(
+            lambda: core_.status(None if all_runs else run.id, as_json=as_json)
+        )
         == 0
     )
     out, err = capsys.readouterr()
-    result = json.loads(out)
-    if all_runs:
-        result = result[0]
-    assert result["turns"] == [
+    turns = [
         {"turn": 1, "exit": None, **good, "seconds": None, "denied_paths": []},
         {"turn": 2, **dict.fromkeys(("exit", "seconds", "denied_paths", *good))},
         {"turn": 3, "exit": None, **good, "seconds": None, "denied_paths": []},
     ]
-    assert len(err.splitlines()) == 1
-    assert err.startswith("WARNING: ")
-    assert str(path) in err
+    if as_json:
+        result = json.loads(out)
+        assert (result[0] if all_runs else result)["turns"] == turns
+    elif all_runs:
+        assert run.id in out and "turn 3" in out
+    else:
+        shown = next(
+            line.removeprefix("turns: ")
+            for line in out.splitlines()
+            if line.startswith("turns: ")
+        )
+        assert json.loads(shown) == turns
+    if all_runs:
+        assert err == (
+            "WARNING: 1 run has a turn result that cannot be read; "
+            "emb run --status <run> names the file\n"
+        )
+    else:
+        assert len(err.splitlines()) == 1
+        assert err.startswith("WARNING: ")
+        assert str(path) in err
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("broken_runs", [0, 1, 2])
+def test_status_list_counts_runs_with_read_errors(
+    tmp_path: Path,
+    env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    as_json: bool,
+    broken_runs: int,
+) -> None:
+    older = dict.fromkeys(
+        ("state", "reason", "provider_error", "signed_out", "incomplete")
+    )
+    runs = []
+    for index, engine in enumerate(("claude", "codex", "opencode")):
+        run = _bare_run(env, tmp_path, engine, "none")
+        run = replace(run, folder=record.make_run_dir(run.id, env), turn=3)
+        record.save(run)
+        runs.append(run)
+        for turn in range(1, 4):
+            path = record.outcome_path(run, turn)
+            if index < broken_runs:
+                if turn == 2:
+                    path.write_text("{")
+                elif turn == 3:
+                    path.mkdir()
+            else:
+                path.write_text(json.dumps(older))
+    core_ = _core(env)
+    assert core_.execute(lambda: core_.status(None, as_json=as_json)) == 0
+    out, err = capsys.readouterr()
+    if broken_runs:
+        counted = "1 run has" if broken_runs == 1 else "2 runs have"
+        assert err == (
+            f"WARNING: {counted} a turn result that cannot be read; "
+            "emb run --status <run> names the file\n"
+        )
+    else:
+        assert err == ""
+    if as_json:
+        documents = {item["id"]: item for item in json.loads(out)}
+        assert len(documents) == 3
+        for run in runs:
+            assert documents[run.id]["turns"] == record.turn_results(run)[0]
+        assert documents[runs[-1].id]["turns"] == [
+            {"turn": turn, "exit": None, "seconds": None, "denied_paths": [], **older}
+            for turn in range(1, 4)
+        ]
+    else:
+        assert len(out.splitlines()) == 3
+        assert all(run.id in out for run in runs)
 
 
 def test_status_every_run_includes_empty_turns(

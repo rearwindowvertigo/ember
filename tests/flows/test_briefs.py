@@ -172,6 +172,13 @@ def test_review(plan: Plan, task: Task, round: int) -> None:
     assert briefs.REVIEW_BAR in text
     assert "## Writer limits\n\n" + briefs._LIMITS in text
     assert "Judge each outside edit on whether the task needed it" in text
+    assert "In outside_files, give exactly one entry per file listed above" in text
+    assert "Copy the exact path into file" in text
+    assert "set needed to whether the task needed the edit" in text
+    assert "explain why in a one-line reason" in text
+    assert "Raise an edit the task did not need as a must or should finding" in text
+    assert "Check, in any file, changes to behaviour or user-facing wording" in text
+    assert "the task text does not ask for. Raise each as a finding" in text
     assert "Use must or should for findings about its need" in text
     assert (
         "An outside edit allowed by these limits is not a lead finding "
@@ -201,6 +208,8 @@ def test_review_without_report_or_outside_files(task: Task) -> None:
     )
     assert "The writer left no report." in text
     assert "Changed outside the declared files:\n    none" in text
+    assert "In outside_files, give exactly one entry" not in text
+    assert "Check, in any file, changes to behaviour or user-facing wording" in text
     assert "## Context" not in text and "## Failure model" not in text
     assert "## Merged sibling tasks" not in text
     assert "## Lead corrections" not in text

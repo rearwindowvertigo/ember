@@ -14,6 +14,7 @@ and the number of earlier calls on that route: the first of
     .err         standard error, a template
     .code        the exit code (default 0)
     .files/      a tree committed in a run or flow worktree
+    .task-files/ trees by task id committed on stopped flow task branches
     .untracked/  a tree left uncommitted in the run's worktree
     .reply       the turn's reply text, a template
     .outcome.json extra recorded turn-result fields
@@ -36,6 +37,16 @@ its reply has `.summary`, including with a non-zero `.code`.
 `help` prints the matching section
 of `replies/help.out`.
 
+`flow-watch` with `.task-files/<task id>/` creates the matching task's
+branch and worktree from the current flow tip, using its `.json` record,
+and commits the tree under the task's plan subject. Existing branches are
+left alone. `flow-lead --send <file>` with `.files/` commits that tree to
+the flow branch under the answered task's subject after reading the answer
+file. Both stages require a built flow and use the plan's trailers; a
+non-zero lead reply applies no tree. Without these parts, watches and lead
+answers apply no files. Built flows record each task's commit on the flow
+branch; watch and status JSON use those commits for merged tasks.
+
 The built routes print the `next:` line the real command prints, derived
 from the stub's own run state and git as `ember.runs.steps.derive` derives
 it, never from a template. `run-start`, `run-send`, `run-recover` and
@@ -46,7 +57,8 @@ record `step` and `next` and prints no next line. `merge` prints the newest
 matching run's line on standard error and gives it as `next` in its JSON;
 a kept branch, a branch with no run record and a flow branch give none.
 `cleanup --claim <id>` prints `next: emb choices --finish <id>` once on
-standard error unless a kept result holds that claim or `--dry-run` is set.
+standard error unless a kept result holds that claim, `--dry-run` is set,
+or the claim is recorded as `gone` in the stub's state.
 The `verify_branch.py` path comes from `ember.skill.link_path(os.environ)`.
 A run records `base_branch`, the branch checked out in its `--dir` checkout
 at start (null when detached). An exit-0 `choices --finish` records its
@@ -63,9 +75,12 @@ pending owner line; the recorded turn exit stays unchanged. Merge prints
 pending owner lines on standard error and in JSON's `owner_wait` array when
 nonempty. Status repeats the pending owner lines. `run-answered` clears the wait;
 a later turn or all suggested sandbox read paths also end it.
-Run, merge, cleanup and flow replies append the production `report:` lines
-after next or owner lines, including canned replies. Flow watch JSON also
-carries the report list. No `.reply` file holds a next line.
+Run, merge and cleanup replies, and flow watch and failure replies, append
+the production `report:` lines after next or owner lines, including canned
+replies. Flow replies whose template starts with `report:` keep reports
+before the other stderr lines. Flow watch JSON also carries the report list.
+No `.reply` file holds a next line.
+Done flow status reports appear on standard output, or in JSON's `reports`.
 With `EMBER_EVAL_SETUP` set, a call is neither logged
 nor counted, so a case can start a run while it is set up.
 `run-dry-run` checks the brief and repository and resolves the worker
@@ -92,7 +107,7 @@ import shutil
 import socket
 import subprocess
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -114,7 +129,7 @@ STATE = EVAL / "state.json"
 LOG = EVAL / "calls.log"
 PARTS = (
     ".out", ".json", ".err", ".code", ".files", ".untracked", ".reply", ".summary",
-    ".outcome.json",
+    ".outcome.json", ".task-files",
 )  # fmt: skip
 RUN_MODES = (
     "send",
@@ -1296,10 +1311,48 @@ def run_other(
 # emb flow and emb panel ----------------------------------------------------
 
 
+def flow_worker(
+    worker: flow_plan.Worker,
+    role: str,
+    settings: dict[str, Any],
+    variables: dict[str, str],
+) -> flow_plan.Worker:
+    """Resolve effort from the Team row and canned models without engine probes."""
+    effort, source = worker.effort, worker.effort_source
+    row = (settings.get("menu") or {}).get(flow_plan.ROW[role])
+    if (
+        effort is None
+        and row
+        and row["state"] == "set"
+        and row["engine"] == worker.engine
+        and row["model"] == worker.model
+    ):
+        effort = row["effort"]
+        if effort is not None:
+            source = f"single.{role}" if row.get("same") else flow_plan.ROW[role]
+    # Codex reads its model catalogue's default; Claude and OpenCode leave
+    # an omitted effort to the engine. The eval catalogue is a canned reply.
+    if effort is None and worker.engine == "codex":
+        models = json.loads(
+            read_part(reply_base("engines-models", 1), ".json", variables) or "{}"
+        )
+        effort = next(
+            (
+                model.get("default_effort")
+                for model in models.get("models", [])
+                if model["id"] == worker.model
+            ),
+            None,
+        )
+    return replace(worker, effort=effort, effort_source=source)
+
+
 def flow_start(
     args: list[str], state: dict[str, Any], base: Path | None, variables: dict[str, str]
 ) -> Reply:
     """Build a flow branch and commit the reply tree with the plan's subject."""
+    from ember.flows import command as flows
+
     plan_path = variables["PLAN"]
     try:
         plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
@@ -1311,8 +1364,22 @@ def flow_start(
         )
     try:
         document = flow_plan.from_json(plan, Path(plan_path))
+        settings = json.loads(
+            canned_reply(reply_base("choices-read-id", 1), variables, True).out
+        )
+        writer, reviewer = (
+            flow_worker(
+                flow_plan.resolve(role, option(args, f"--{role}"), document, settings),
+                role,
+                settings,
+                variables,
+            )
+            for role in flow_plan.ROLES
+        )
     except flow_plan.PlanError as error:
         return Reply(error.code, err=f"emb flow: {error}\nnext: emb flow --help\n")
+    except flow_plan.WorkerError as error:
+        return Reply(error.code, err=f"emb flow: {error}\n{error.line}\n")
     directory = Path(plan.get("dir") or variables["DIR"]).resolve()
     repo = main_checkout(directory)
     flow_id = new_run_id("flow")
@@ -1320,6 +1387,7 @@ def flow_start(
     worktree = worktree_path(flow_id)
     head = out(directory, "rev-parse", "HEAD")
     git(repo, "worktree", "add", "-q", "-b", branch, str(worktree), head)
+    merge_commits = {}
     tree = part(base, ".files")
     if tree is not None:
         copy_tree(tree, worktree)
@@ -1329,17 +1397,88 @@ def flow_start(
             trailers = plan.get("trailers") or []
             message = subject + ("\n\n" + "\n".join(trailers) if trailers else "")
             git(worktree, "commit", "-q", "--no-verify", "-m", message)
+            merge_commits[document.tasks[0].id] = out(worktree, "rev-parse", "HEAD")
     state["flows"][flow_id] = {
         "dir": str(directory),
         "main": str(repo),
         "branch": branch,
         "worktree": str(worktree),
+        "subjects": {task.id: task.subject for task in document.tasks},
+        "trailers": plan.get("trailers") or [],
+        "merge_commits": merge_commits,
     }
+    errors = io.StringIO()
+    flows._worker_lines(writer, reviewer, errors)
     return Reply(
         0,
         f"flow {flow_id}\nbranch {branch}\nworktree {worktree}\n",
-        f"next: emb flow --watch {flow_id} --json\n",
+        errors.getvalue() + f"next: emb flow --watch {flow_id} --json\n",
     )
+
+
+def flow_stage(
+    name: str,
+    args: list[str],
+    state: dict[str, Any],
+    base: Path,
+    variables: dict[str, str],
+) -> None:
+    """Apply opted-in watch task trees or a successful lead answer's tree."""
+    flow = state["flows"].get(variables["FLOW"])
+    if flow is None:
+        return
+    if name == "flow-watch" and part(base, ".task-files"):
+        document = json.loads(read_part(base, ".json", variables))
+        for task in document["tasks"]:
+            tree = Path(str(base) + ".task-files") / task["id"]
+            if not tree.is_dir() or branch_exists(Path(flow["dir"]), task["branch"]):
+                continue
+            worktree = Path(task["worktree"])
+            git(
+                flow["main"],
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                task["branch"],
+                str(worktree),
+                flow["branch"],
+            )
+            flow_commit(tree, worktree, flow, task["id"])
+    if name == "flow-lead" and part(base, ".files") and code_of(base) == 0:
+        answer = option(args, "--send")
+        if answer is None:
+            return
+        try:
+            Path(answer).read_text(encoding="utf-8")
+        except OSError as error:
+            raise Reply(66, err=f"emb flow: {error}\n") from error
+        index = next(
+            index + (1 if word.startswith("--lead=") else 2)
+            for index, word in enumerate(args)
+            if word == "--lead" or word.startswith("--lead=")
+        )
+        commit = flow_commit(
+            Path(str(base) + ".files"), Path(flow["worktree"]), flow, args[index]
+        )
+        if commit is not None:
+            flow["merge_commits"][args[index]] = commit
+        variables["TIP"] = out(flow["dir"], "rev-parse", flow["branch"])
+
+
+def flow_commit(
+    tree: Path, worktree: Path, flow: dict[str, Any], task: str
+) -> str | None:
+    """Commit a staged tree and return its commit, or None for unchanged files."""
+    subject = flow["subjects"][task]
+    copy_tree(tree, worktree)
+    git(worktree, "add", "-A")
+    if git(worktree, "diff", "--cached", "--quiet", check=False).returncode:
+        trailers = flow["trailers"]
+        message = subject + ("\n\n" + "\n".join(trailers) if trailers else "")
+        git(worktree, "commit", "-q", "--no-verify", "-m", message)
+        return out(worktree, "rev-parse", "HEAD")
+    return None
 
 
 def panel_start(
@@ -1714,8 +1853,13 @@ def cleanup(args: list[str], state: dict[str, Any], variables: dict[str, str]) -
                 lines.append(f"{action} {run['id']}: {verb} worktree {run['worktree']}")
     err = "" if lines else f"emb cleanup: no Ember run branch against {target}\n"
     # The claim-finish line: after exit 0 with --claim, unless a kept result
-    # holds that claim; never with --dry-run.
-    if claim is not None and not has(args, "--dry-run") and claim not in kept_claims:
+    # holds that claim or it is gone; never with --dry-run.
+    if (
+        claim is not None
+        and not has(args, "--dry-run")
+        and claim not in kept_claims
+        and state["claims"].get(claim) != "gone"
+    ):
         err += f"next: emb choices --finish {shlex.quote(claim)}\n"
     return Reply(0, "".join(line + "\n" for line in lines), err)
 
@@ -2069,7 +2213,12 @@ def flow_dry_run(args: list[str], variables: dict[str, str]) -> Reply:
         document = flow_plan.load(option(args, "--plan") or "")
         document = flows._parallel(flows._review_rounds(document, settings), settings)
         writer, reviewer = (
-            flow_plan.resolve(role, option(args, f"--{role}"), document, settings)
+            flow_worker(
+                flow_plan.resolve(role, option(args, f"--{role}"), document, settings),
+                role,
+                settings,
+                variables,
+            )
             for role in flow_plan.ROLES
         )
         output, errors = io.StringIO(), io.StringIO()
@@ -2220,6 +2369,8 @@ def dispatch(
         return flow_start(rest, state, base, variables)
     if name == "panel-start" and part(base, ".summary") is not None:
         return panel_start(state, base, variables, as_json)
+    if name in ("flow-watch", "flow-lead"):
+        flow_stage(name, rest, state, base, variables)
     response = canned_reply(base, variables, as_json)
     if (
         name == "gapcheck"
@@ -2273,8 +2424,53 @@ def command_reports(
         from ember.flows import command as flows
 
         reports = flows._exit_reports(reply.code)
-        if name == "flow-watch" and part(base, ".json"):
+        reports_first = reply.err.startswith("report:")
+        if name in ("flow-watch", "flow-status", "flow-start", "flow-resume") and part(
+            base, ".json"
+        ):
             document = json.loads(read_part(base, ".json", variables))
+            if isinstance(document, dict) and "status" in document:
+                known_flow = state["flows"].get(variables["FLOW"], {})
+                commits = known_flow.get("merge_commits", {})
+                for task in document.get("tasks", []):
+                    if task["status"] == "merged" and task["id"] in commits:
+                        task["merge_commit"] = commits[task["id"]]
+                flow = {
+                    "check_pending": False,
+                    **document,
+                    "id": document.get("flow", document.get("id")),
+                    "tasks": [
+                        {
+                            **task,
+                            "findings": task.get("finding_details", [])
+                            if isinstance(task.get("findings"), dict)
+                            else task.get("findings", []),
+                            "outside_files": task.get("outside_files", []),
+                        }
+                        for task in document.get("tasks", [])
+                    ],
+                }
+                reports = flows._exit_reports(reply.code, flow)
+                if (
+                    name == "flow-watch"
+                    and document["status"] == "failed"
+                    and "check_pending" not in document
+                    and "report" in document
+                ):
+                    # Watch snapshots carry reports, not the record's pending
+                    # check and wave fields needed to reconstruct them.
+                    reports = list(document["report"])
+                if name == "flow-status":
+                    document["reports"] = flows._done_reports(flow)
+                    if has(args, "--json"):
+                        reply.out = json.dumps(document, indent=2) + "\n"
+                    else:
+                        for line in document["reports"]:
+                            if line not in reply.out.splitlines():
+                                reply.out += line + "\n"
+                elif document.get("event") == "end":
+                    reports += flows._done_reports(flow)
+        if name == "flow-watch" and part(base, ".json"):
             stops = document.get("stops", [])
             saved = state.setdefault("flow_stops", {}).setdefault(
                 document.get("flow", ""), {}
@@ -2304,7 +2500,10 @@ def command_reports(
             for line in reply.err.splitlines()
             if not line.startswith("report:")
         )
-        reply.err += "".join(report + "\n" for report in reports)
+        report_text = "".join(report + "\n" for report in reports)
+        reply.err = (
+            report_text + reply.err if reports_first else reply.err + report_text
+        )
         return
     if name in ("merge", "cleanup") and reply.code == 75:
         conflict = re.search(

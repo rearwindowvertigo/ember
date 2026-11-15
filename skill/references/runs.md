@@ -30,7 +30,11 @@ trailer with an apostrophe, join single-quoted pieces with `'\''`.
   Claude subagent instead. With `--model`, that row is not read.
 - `--effort` wins. Otherwise the effort is the row's when the row names the
   same engine and model, else the driver's default, which may be none.
-  Pass the resolved effort when the choice has one.
+- With a `set` row and no model or effort named by the owner, pass neither
+  `--model` nor `--effort`: Ember takes both from the row, and the dry-run
+  line ends `(single.writer)`. Pass `--model` for a model the owner named
+  or picked, with `--effort` when that pick carries an effort, such as the
+  shortlist entry `gpt-6.1-sol@high`.
 
 The dry-run line (SKILL.md step 3) reads like
 `Team, Single tasks Writer: codex gpt-6.1-sol · high (single.writer)`. With
@@ -201,8 +205,13 @@ It has one entry per recorded turn number, oldest first: `turn`, `exit`,
 and `denied_paths`.
 New outcomes also expose `provider_kind`, the ordered `attempts` and retry
 timestamps. `provider_kind` is `capacity`, `usage_limit`, `outage` or null;
-older outcomes can omit it and `attempts`. Count turns separately from
-attempts: a successful turn can include failed capacity attempts.
+older outcomes can omit it and `attempts`. When a turn's entry lacks
+`provider_kind` or `attempts`, name each missing one as unknown for that
+turn and leave a recorded one as it is. Call any attempt total that covers
+a turn without recorded `attempts` a minimum: a missing key is not null
+and not zero attempts.
+Count turns separately from attempts: a successful turn can include
+failed capacity attempts.
 No recorded turns gives `turns: []`; no runs gives `[]`.
 `last_exit` and `last_reason` describe only the latest turn or failure;
 each summary line describes one turn. A turn with `exit: 73` and
@@ -215,8 +224,18 @@ Recovery updates the same result; its seconds accumulate across recovery.
 An unfinished result has `exit: null`. Older outcomes without exit code or
 seconds show null for those fields. A missing, unreadable or malformed
 outcome leaves its numbered entry with all other fields null and prints a
-`WARNING:` naming the file; other turns are unaffected. Report the warning
-and unknown results. Null is not success or evidence of no provider error.
+`WARNING:`; other turns are unaffected. Report the warning and unknown
+results. Null is not success or evidence of no provider error.
+
+The warning goes to standard error in text and JSON modes, and JSON keeps
+the numbered entries and null fields. `emb run --status <run>` prints one
+`WARNING:` per broken outcome, naming the file. Without a run id, status
+prints one line for all runs:
+`WARNING: <n> runs have a turn result that cannot be read; emb run --status <run> names the file`
+(`1 run has` for one run). A run with several broken outcomes is one run
+in `<n>`. The line covers only outcome files that cannot be read. An older
+outcome that omits fields is read without a warning, and the fields it
+omits are still unknown.
 
 ## Provider errors
 

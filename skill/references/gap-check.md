@@ -16,9 +16,12 @@ refused; a one-step plan is checked as one step.
 
 A reviewer reads only the plan, its worktree and its read paths; it cannot
 open an issue tracker. Put the text of each source the plan cites in the
-plan, or export it to a file in the session scratchpad and pass the file
-with `--read` (for a GitHub issue,
+plan, or export it to a file in the session scratchpad and add the file to
+the flow plan's `read` list or pass it with `--read` (for a GitHub issue,
 `gh issue view <n> --json number,title,state,body,comments --jq '"# #\(.number) \(.title) (\(.state))\n\n\(.body)\n\n## Comments\n\([.comments[].body]|join("\n\n---\n\n"))"' > <scratch>/issue-<n>.md`).
+`emb gapcheck --plan` on a flow plan grants and lists the plan's own `read`
+paths. `--read` adds to them. A path given both ways is used once. A flow
+plan that fails flow validation still supplies its `read` paths.
 `emb gapcheck` and `emb flow --dry-run` warn about each citation no read file
 supplies; treat that warning as a missing source. A read file that is empty
 or holds only whitespace is refused with exit 64, for `emb gapcheck --read`
@@ -76,8 +79,9 @@ the row cannot answer, ask the owner using the skill's worker question.
 
 For a flow, run the exact `gapcheck` command from the dry run (also printed
 after `gap check:`; it already carries `--json` and `--confirmed` after an
-`ask`). Add `--claim <id>` when absent and the redirect above. For a Claude
-Workflow, run the command above.
+`ask`). The printed command does not repeat the plan's `read` paths as
+`--read` options, in text or JSON. Add `--claim <id>` when absent and the
+redirect above. For a Claude Workflow, run the command above.
 Should `emb gapcheck` itself report `status` `skipped` or `ask`, the
 settings changed since you read them: treat it as the decision above.
 
@@ -189,7 +193,13 @@ comparison lines (or `gapcheck_comparison` in JSON):
   changed `files` or `after`, or changed waves. Run a whole-plan check.
 - `lead judgement` lists changed task text, context or failure model and
   the affected task ids. Judge whether these change scope or behaviour
-  enough to need a whole-plan check.
+  enough to need a whole-plan check. Changes only from writing recorded
+  answers into that text are the expected result of the step above. They
+  do not by themselves call for a repeat check. For example, writing a
+  recorded answer's timeout into the task text alone needs no repeat.
+  A `repeat needed` line still calls for a whole-plan check when the change
+  follows from a recorded answer. For example, adding a file the answer
+  names to a task's `files` needs a whole-plan check.
 - An incomplete earlier check or a result without a saved flow baseline
   reports `repeat needed`. For an incomplete check, complete it or run a
   whole-plan check without passing that result as `--previous`.

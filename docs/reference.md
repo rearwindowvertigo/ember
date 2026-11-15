@@ -1290,8 +1290,15 @@ completed after commit handling with the final exit code. Recovery updates
 that same result and accumulates its seconds. An outcome recorded without
 `exit` or `seconds` returns null for those fields. A missing, unreadable or
 malformed outcome file leaves its numbered entry with all other fields
-null and prints a `WARNING:` naming the file on standard error; other turns
-are unaffected.
+null; other turns are unaffected. `emb run --status <run>` prints a
+per-file `WARNING: <run>: <file error>` on standard error, such as
+`WARNING: <run>: cannot read <path>: <error>`. Without a run id, text and
+JSON status print one counted warning on standard error:
+`WARNING: <n> runs have a turn result that cannot be read; emb run --status <run> names the file`.
+For one run it says `WARNING: 1 run has a turn result that cannot be read; emb run --status <run> names the file`.
+A run with several broken outcomes counts once. No broken outcomes prints
+no turn-result warning; valid outcomes with absent or null optional fields
+do not count. Both JSON forms keep the numbered turn entries and null fields.
 
 Count turn results from `turns`. `last_exit` and `last_reason` describe only
 the latest turn or failure. A turn with `exit: 73` and
@@ -1406,6 +1413,13 @@ options. The driver's payment-error note names the serving integration:
 `(<Integration> credit is exhausted)`. The name comes from the model list's
 integration metadata, with the integration id as fallback.
 
+Both OpenCode drivers allow file reads, including `*.env` and `*.env.*`.
+OpenCode 1 sets `read: allow`; OpenCode 2 sets ordered `read` allow rules
+for `*`, `*.env` and `*.env.*` after OpenCode's defaults, with the last
+matching rule winning. An OpenCode worker asks the owner nothing in its
+window. Reading is limited by the sandbox, the read paths and
+`external_directory`.
+
 The OpenCode column describes OpenCode 1. When `opencode --version` reports
 version 2 or later (`opencode v2.2.5`), Ember uses its OpenCode 2 driver. The
 pane runs, inside the same sandbox, a shell script that starts a private
@@ -1502,7 +1516,7 @@ claim to the run.
 | `--model MODEL` | Use this model, whether or not shortlisted; requires `--engine` |
 | `--effort EFFORT` | Use this effort; requires `--engine` |
 | `--claim ID` | Read choices with this claim and pass it to the run |
-| `--read PATH` | Add a readable path to the run; repeatable; an empty or whitespace-only UTF-8 file exits 64. Also accepted with `--brief`, where it covers citations and lists sources. Citations in the plan that neither these paths nor the `sandbox.read` setting supply are warned about on standard error |
+| `--read PATH` | Add a readable path to the run; repeatable; an empty or whitespace-only UTF-8 file exits 64. Also accepted with `--brief`, where it covers citations and lists sources. Citations in the plan that none of the plan's `read` paths, these options or the `sandbox.read` setting supply are warned about on standard error |
 | `--window` | Open a terminal window on the run's session |
 | `--stall MINUTES` | Stop waiting after this many minutes without a screen change; default 10 |
 | `--json` | Print the result as JSON |
@@ -1529,12 +1543,22 @@ hash line, or a mismatch exits 64 with a `next:` line to run `--brief`
 again. `--brief-file` without `--reply` is a usage error. Changing the
 plan invalidates its saved brief for `--reply`.
 
-After option validation and the empty-plan check, each `--read` path that
-is a regular file (following symlinks) is read as UTF-8. Empty or
+For a flow plan, `--plan` supplies its own `read` paths; repeatable `--read`
+options add to them. A JSON object with `dir` and `tasks` also supplies a
+valid `read` list when other flow fields fail validation. Other plans
+supply no read paths. Plan paths come first, then option paths. Paths are
+made absolute, existing parent directories are resolved, and duplicates
+are removed by resolved identity, keeping the first occurrence's filename.
+This one list supplies the run's read grants, citation coverage, brief
+sources and empty-file checks, including with `--brief`.
+
+After option validation and the empty-plan check, each path in this list
+that is a regular file (following symlinks) is read as UTF-8. Empty or
 whitespace-only text (`str.strip()`) exits 64 before reading the previous
 result or applying the skip or ask decision, including with `--brief`.
 Standard error prints `emb gapcheck: the read file <path> is empty` for
-each empty file in argument order, then one `next: emb gapcheck --help`.
+each empty file in the combined path order, then one
+`next: emb gapcheck --help`.
 `--reply --read` is refused by option validation before this check;
 `--answer` does not perform it. The check skips folders and their contents,
 FIFOs, devices, missing paths and files that cannot be read or decoded.
@@ -1922,11 +1946,11 @@ stops, reviews the flow branch and merges it with `emb merge`.
 
 ```text
 emb flow --plan FILE --dry-run [--previous FILE] [--writer W] [--reviewer W] [--claim ID] [--json]
-emb flow --plan FILE --start [--writer W] [--reviewer W] [--claim ID] [--stall MINUTES]
+emb flow --plan FILE --start [--check-base] [--writer W] [--reviewer W] [--claim ID] [--stall MINUTES]
 emb flow --watch FLOW [--json]
 emb flow --status [FLOW] [--json]
 emb flow --lead FLOW TASK (--send FILE | --accept [--commit SHA] | --review [--reviewer W] | --worker W | --drop)
-emb flow --resume FLOW
+emb flow --resume FLOW [--check '<JSON argv list>' --reason TEXT]
 emb flow --cancel FLOW [--reason TEXT] [--json]
 ```
 
@@ -1936,6 +1960,7 @@ emb flow --cancel FLOW [--reason TEXT] [--json]
 | `--dry-run` | Validate the plan and workers, then print waves and a gap check command |
 | `--previous FILE` | With `--dry-run` only: compare this earlier result's saved plan and pass the result to the printed gap check command when complete |
 | `--start` | Create the flow branch, worktree and records, then start the runner |
+| `--check-base` | With `--start`: run the check in the prepared flow worktree before creating any task run; requires a plan check |
 | `--writer W`, `--reviewer W` | Name a worker as `<engine>:<model>[@<effort>]`; override the plan and menu |
 | `--claim ID` | Read choices with this claim; store it on the flow without creating or finishing a claim |
 | `--stall MINUTES` | With `--start`: minutes without screen changes before a task stops waiting; default 10 |
@@ -1950,6 +1975,8 @@ emb flow --cancel FLOW [--reason TEXT] [--json]
 | `--worker W` | Replace this task's writer and run its pipeline from the flow tip |
 | `--drop` | Drop the task; its dependants remain blocked |
 | `--resume FLOW` | Start another runner attempt for an idle, unfinished flow |
+| `--check JSON` | With `--resume`: replace the check of a failed flow with a pending check |
+| `--reason TEXT` | Required nonblank reason with `--resume --check`; also accepted with `--cancel` |
 | `--json` | Print JSON with `--dry-run`, `--watch` or `--status` |
 | `--help` | Print the options |
 
@@ -1995,6 +2022,27 @@ startup removes any dead session and launches the replacement. A session
 still running after the wait is kept and reported with exit 75. Module
 loading uses Python's `-I` mode and the absolute package root of the
 invoking Ember installation.
+
+With `--resume FLOW --check '<JSON argv list>' --reason TEXT`, the flow
+must be `failed` with `check_pending: true`, at any wave including 0.
+Other states, a live or starting runner, pending cancellation, a live
+session that does not end, or indeterminate preparation are refused with
+exit 75. A flow outside the required state reports
+`emb flow: the flow <id> is <status>; replacing a check requires failed with a pending check`
+and `next: emb flow --status <id>`. The replacement uses the plan check's validation: a non-empty
+list of strings, a nonblank first argument and no NUL characters. Empty
+later arguments are valid. Invalid JSON or argv, a missing or blank
+`--reason`, `--check` without `--resume`, or `--reason` without `--cancel`
+or `--resume --check` exits 64. Refusals leave the saved state unchanged.
+
+One atomic save replaces the flow record's `check` and appends to
+`check_changes` an object with `at` (epoch seconds), `old` (argv), `new`
+(argv) and `reason`. A `check_replaced` event with those fields follows
+the save. The saved `plan.json` stays unchanged. A runner launch failure
+after the save leaves the replacement in place; plain `--resume` uses it.
+The runner runs the pending check before scheduling further work and
+continues only after it passes. After start, the runner, `emb merge`,
+writer briefs and fix messages all read the check from the flow record.
 
 ### Plan
 
@@ -2065,8 +2113,8 @@ Warnings do not refuse a plan:
   `#93`, and a longer URL does not supply its prefix), or, for `#<n>` and
   `<owner>/<repo>#<n>`, when its file name holds the number as its own
   token, such as `issue-93.md`. The warning applies whatever the engines'
-  sandbox switches say. The printed gap check command passes each of the
-  plan's `read` paths as `--read`.
+  sandbox switches say. The printed gap check command uses `--plan`;
+  `emb gapcheck` reads the plan's paths without repeated `--read` options.
 
 A failed or timed-out folder probe emits no folder warning. It does not
 change plan validation. Git probes omit checkout override variables and
@@ -2199,8 +2247,27 @@ closes writer runs without force and removes their merged branches and
 worktrees when allowed. A refused close retains the branch and worktree
 with the cleanup reason. Dropped and replaced branches stay in `abandoned`.
 
-The check runs once after a wave's merges in the flow worktree, in its own
-process group. Git, runs and checks receive the flow environment without
+With `--start --check-base`, the record starts at `wave: 0` with
+`check_pending: true`. After preparation, the runner runs the check in the
+flow worktree before creating any task run. The attempt is recorded in
+`checks` and its `check` event with `wave: 0`. `check_pending` clears only
+after a passing check is saved. Interruption or cancellation leaves it
+pending, so resume reruns it before tasks; a saved passing base check is
+not repeated on later resumes. Resume keeps committed corrections on the
+flow branch rather than resetting it to the original base.
+
+A nonzero base-check exit or timeout ends the flow `failed`, with no task
+run and reason `the check failed on the base: exit <code>, see <log>`.
+Watch exits 82, shows the log tail and prints the base-specific report and
+next lines described below. `--check-base` without `--start`, or with a
+plan without `check`, exits 64 with `emb flow: --check-base needs --start`
+or `emb flow: --check-base needs a plan with a check`, respectively, and
+`next: emb flow --help`. Plain `--start` requests no base check;
+`--dry-run` runs no check.
+
+The check also runs once after a wave's merges in the flow worktree, in
+its own process group. Git, runs and checks receive the flow environment
+without
 `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`,
 `GIT_OBJECT_DIRECTORY`, `GIT_NAMESPACE`, `GIT_PREFIX` or
 `EMBER_FLOW_RUNNER`. Each attempt writes a private
@@ -2266,9 +2333,9 @@ and closing report headings. Lead corrections also
 preserve their text as written.
 
 Writer briefs, fix-round messages and lead `--send` corrections name the
-plan's check command as shell words and ask the writer to run it or say
-why it could not. With no plan check, they ask for tests for the changed
-files and quick static checks. They also ask the writer to search for tests
+flow record's current check command as shell words and ask the writer to
+run it or say why it could not. With no check, they ask for tests for the
+changed files and quick static checks. They also ask the writer to search for tests
 and callers, including outside the declared files, fix breaks caused by
 the change where the limits allow, and list other needed fixes under
 `Not done`. Failures from unavailable services or the environment are
@@ -2281,6 +2348,8 @@ wave changes remain forbidden. The review brief repeats these writer
 limits and asks the reviewer to judge whether each outside edit was needed,
 using `must` or `should` for findings about its need. An allowed outside
 edit is not a `lead` finding merely for being outside the declared files.
+The review brief also asks for findings on changes to behaviour or
+user-facing wording that the task text does not ask for, in any file.
 The review bar's severity rules also apply.
 
 The review brief starts with `Review of task <id>, round <n>, in flow
@@ -2290,7 +2359,11 @@ section when the setting or plan has read files, review focus, context,
 failure model, the base and head for `git diff` and `git log`, changed and
 outside files, and up to 20,000 characters of the writer's last report.
 The `Changed outside the declared files` section lists Ember's recorded
-`outside_files`, independently of the writer's report.
+`outside_files`, independently of the writer's report. When nonempty, it
+asks for exactly one `outside_files` reply entry per listed path, whether
+the task needed the edit, and a one-line reason. An edit the task did not
+need is raised as a `must` or `should` finding. Ember validates the entries;
+it does not judge whether an edit was needed.
 
 After a lead send answer is applied, later reviewer briefs for that task
 include its correction text under `Lead corrections`, in answer order,
@@ -2331,6 +2404,16 @@ The reviewer replies with one JSON object, no prose or code fence:
   ]
 }
 ```
+
+The reply also accepts `outside_files`, an array of objects with `file`
+(the listed path), `needed` (boolean) and `reason` (nonblank string).
+For example: `{"file": "src/shared.py", "needed": true, "reason": "The caller uses the changed argument."}`.
+The reader validates these entries separately from finding normalization.
+Omitting a listed file, repeating it, or giving it an invalid `needed` or
+`reason` makes the reply unreadable and stops the task. Entries for paths
+not in the task's outside list are ignored. With no outside paths, no
+entries are required. Validated entries are kept in the task's outside-path
+order and saved on the review's `outside_files` field.
 
 The schema requires `verdict` (`pass` or `fix`) and a `findings` array,
 which may be empty. Each finding requires `severity` (`must`, `should` or
@@ -2548,15 +2631,18 @@ refused. `save` updates `updated_at` and atomically replaces `flow.json`.
 | `review_budget` | `value`, `unit` and `source` of the saved review budget, as described under Reviews |
 | `preparation`, `preparation_history` | Current flow-worktree preparation and earlier attempts; same attempt fields as a run; absent without preparation |
 | `preparation_halt` | Preparation failure halting admission of new runs, or null; absent without a preparation halt |
-| `check`, `trailers`, `read` | Plan argv, commit trailers and readable paths; lists |
+| `check` | Current check argv; initialized from the plan and replaceable on resume |
+| `check_changes` | Replacement history: `at`, `old`, `new`, `reason`; defaults to `[]` when absent |
+| `trailers`, `read` | Plan commit trailers and readable paths; lists |
 | `stall_minutes` | Stall interval: `--stall`, else `flow.stall` (default 10) |
 | `whole_review` | Whether `flow.whole_review` was on at start; the skill then runs one whole-flow review before merging |
 | `claim` | Claim id or null; information for the flow |
 | `status` | `starting`, `running`, `checking`, `stopped`, `failed`, `done` or `cancelled` |
 | `reason` | Stop, failure or cancellation reason, or null |
 | `wave` | Last wave started; initially 0 |
-| `check_pending` | Whether a merge lacks a durably recorded passing check |
-| `checks` | Entries with `wave`, `exit`, `log`, `at`; one per attempt |
+| `check_pending` | Whether a base or wave check is owed; set at wave 0 by `--check-base` and after merges; cleared after saving a passing check |
+| `check_base` | Whether start requested the base check; defaults to false when absent; only `check_pending` controls whether a check runs |
+| `checks` | Entries with `wave`, `exit`, `log`, `at`; one per attempt; wave 0 is the base |
 | `answers_seen` | Complete answer lines already consumed; initially 0 |
 | `halted` | Reason new runs are halted, or null |
 | `abandoned` | Retained branches from dropped or replaced writers |
@@ -2575,7 +2661,7 @@ refused. `save` updates `updated_at` and atomically replaces `flow.json`.
 | `branch`, `worktree` | Writer branch and worktree, or null |
 | `task_base`, `head` | Starting flow tip and latest reviewed task head, or null |
 | `round` | Fix rounds in the current budget; initially 0 |
-| `reviews` | Entries with `round` (fix rounds), `review_round` (one-based round from the review brief), `run`, `verdict`, `must`, `should`, `lead`, `at`; verdict is `pass`, `fix` or `unreadable`; older entries may omit `review_round` |
+| `reviews` | Entries with `round` (fix rounds), `review_round` (one-based round from the review brief), `run`, `verdict`, `must`, `should`, `lead`, `at`, `outside_files` (validated reply entries); verdict is `pass`, `fix` or `unreadable`; entries may omit `review_round` or `outside_files` |
 | `findings` | Latest findings and retained earlier `should` and `lead` findings; each records `round` (one-based round from the review brief) and `run` (reviewer run id); older findings may omit them |
 | `changed_files`, `outside_files` | Last turn's changed paths and paths outside its declarations |
 | `entry` | Next operation: `write`, `send`, `review` or null |
@@ -2599,6 +2685,7 @@ Events have `seq` starting at 1, `at` in epoch seconds, and `kind`:
 | `lead_stop` | `task` or null, `status`, `reason`, `choices`; `provider_kind` from the run's last outcome when present |
 | `denied_paths` | `task`, `role`, `denied_paths`; each new denial includes `path`, `reason`, `allow_path`, `run` and `turn` |
 | `check` | `wave`, `exit`, `log`, `output` |
+| `check_replaced` | `at`, `old`, `new`, `reason`, matching the saved `check_changes` entry |
 | `end` | `status`, `reason`, `exit` |
 
 Creation writes event 1 with kind `flow` and status `starting`. Event reads
@@ -2628,7 +2715,8 @@ an error.
 
 Data goes to standard output; diagnostics and action lines go to standard
 error. `--dry-run` text prints one announce line for the writer and one
-for the reviewer on standard output, in the `emb run --dry-run` form:
+for the reviewer on standard output; `--start` prints the same lines on
+standard error, in the `emb run --dry-run` form:
 
 ```text
 Team, Flow writer: codex gpt-6.1-sol · high (flow.writer)
@@ -2644,7 +2732,12 @@ in place of the screen and `writer` or `reviewer` as the row, for example
 `default`; differing model and effort sources are labelled separately as
 in single-run announcements. JSON retains the `writer` and `reviewer`
 objects with `engine`, `model`, `effort` and `source`; it includes no
-announce lines or additional announcement fields.
+announce lines. When engine and model match, text dry run and start add
+`same model: writer and reviewer both resolve to <engine> <model>` on the
+same stream as their worker lines. Different efforts still count as the
+same model. This is a plain line, with no warning or report prefix; no
+setting changes or refusal follows. Dry-run JSON has `same_model`, true
+when engine and model match and false otherwise.
 
 The text then prints the base commit, `rounds <n> fix rounds, at most <n+1> reviews
 per task (<source>)`, the check as shell words (or `none`), numbered waves
@@ -2655,7 +2748,7 @@ whole-flow review on|off`, and the gap check line: `gap check: <command>`,
 source is `plan` when the plan sets `rounds`, otherwise `setting` (the
 owner's `flow.review_rounds` minus one). Warnings print as
 `WARNING: <text>`. JSON has `plan`, `dir`, `base`, `writer`, `reviewer`,
-`check`, `rounds`, `rounds_source`, `parallel`, `parallel_source` (`plan`
+`same_model`, `check`, `rounds`, `rounds_source`, `parallel`, `parallel_source` (`plan`
 or `setting`), `stall_minutes`, `whole_review`, `waves` (arrays of task
 ids), `warnings`, `gapcheck` (the shell command, or null when skipped),
 `gapcheck_status` (`run`, `skipped` or `ask`), `gapcheck_reason` and
@@ -2665,8 +2758,9 @@ names the flow's reviewer with `--engine`, `--model` and `--effort` when
 that reviewer came from `--reviewer` or the plan; otherwise it names none
 and `emb gapcheck` uses the `gapcheck.reviewer` row. With `ask` it carries
 `--confirmed`. It always carries `--json`, and carries `--previous FILE`
-when the dry run receives a complete result. Empty lists and zero finding
-counts remain in JSON.
+when the dry run receives a complete result. In text and JSON the command
+omits `--read` for the plan's own paths; `--plan` supplies them. Empty lists
+and zero finding counts remain in JSON.
 
 With `--previous`, the dry run compares the current plan with the earlier
 result's saved flow snapshot. It prints `gap check repeat needed:` for
@@ -2703,7 +2797,8 @@ branch ember/flow/<id>
 worktree <path>
 ```
 
-Its action line is `next: emb flow --watch <id> --json`. `--resume` prints
+The resolved worker lines and any same-model line follow on standard
+error. Its action line is `next: emb flow --watch <id> --json`. `--resume` prints
 `flow <id>`. `--lead` prints `queued answer <n>: <kind> for <task>`, then
 `flow <id>` when it starts a runner. Both end with the same watch action.
 
@@ -2769,19 +2864,23 @@ owner, then watch again if a runner is live; otherwise an answer starts
 the runner. At a successful end it says to review the flow branch and run
 `emb merge <flow branch> --into <your branch> --verdict keep --note '<verdict line>' --dir <dir>`.
 An end with unmerged tasks first says to report them to the owner. A failed
-pending check says to fix the flow branch with an `emb run` and merge,
-then resume. Other failures name `--status`; runner loss names `--resume`.
+pending wave check says to fix the flow branch with an `emb run` and
+merge, then resume. At wave 0 the line is
+`next: correct the check <shell argv> or commit a correction to the flow branch <branch> (an emb run on <worktree>, then emb merge <its branch> --into <branch> --verdict keep --note '<verdict line>'), then emb flow --resume <id>`.
+Other failures name `--status`; runner loss names `--resume`.
 
 The following report lines follow the action line on standard error,
 including with `--watch --json`:
 
 | Case | Report line |
 |---|---|
-| Lead stop, no live runner | `report: lead stop on <task>; no runner is live and the owner's answer starts it; list every printed choice and recommend one` |
-| Lead stop, live runner | `report: lead stop on <task>; the runner is still live for the other tasks; list every printed choice and recommend one` |
+| Lead stop, no live runner | `report: lead stop on <task>; no runner is live and the owner's answer starts it; give the reason as printed, list every printed choice by its option with what it does, and recommend one` |
+| Lead stop, live runner | `report: lead stop on <task>; the runner is still live for the other tasks; give the reason as printed, list every printed choice by its option with what it does, and recommend one` |
 | Lead stop after capacity | `report: capacity on <task>; recommend only the same-worker retry` |
 | Done with latest or retained `lead` or `should` task findings | `report: <lead count> lead and <should count> should findings remain on merged tasks; inspect each before merging` |
-| Exit 82, status `failed` with `check_pending` set | `report: the check failed after wave <n>; fix the flow branch, then resume` |
+| Done with merged tasks that have outside files | `report: <count> merged tasks changed files outside their declared files: <task> (<file count>), <task> (<file count>); inspect each before merging` (singular `task` for one) |
+| Exit 82, status `failed` with `check_pending` set, wave 0 | `report: the check failed on the base; correct the check or the flow branch, then resume; when the check command is wrong, replace it with emb flow --resume <id> --check '<JSON argv list>' --reason '<text>'` |
+| Exit 82, status `failed` with `check_pending` set, wave greater than 0 | `report: the check failed after wave <n>; fix the flow branch, then resume; when the check command is wrong, replace it with emb flow --resume <id> --check '<JSON argv list>' --reason '<text>'` |
 | Exit 82, every other case | `report: tasks unmerged; report every task's status and reason; leave the unmerged work and the flow branch to the owner` |
 | Exit 72 | `report: the runner is gone; work may still be running` |
 
@@ -2790,14 +2889,21 @@ events, it prints one per task currently `stopped` or `conflict`. A
 flow-level stop uses the flow id in place of `<task>`. A stop with saved
 `provider_kind: capacity` prints only the capacity line for that stop.
 The done report counts all latest and retained task findings and prints both
-counts. Zero `lead` and zero `should` findings print no done report line.
+counts. Zero `lead` and zero `should` findings print no findings report.
+The outside-files report lists merged tasks in plan order with each count,
+once per done report; no outside files prints no outside-files report.
 Every user-facing flow command that exits 82 or 72 prints the corresponding
 report line after its action line. `<n>` is the flow's recorded wave. When
 the flow record cannot be read, exit 82 prints the unmerged-tasks line.
 Flow `next:` lines remain in place when workers have pending owner actions;
 the single-run owner wait does not suppress them.
 
-`--status FLOW --json` prints `flow.json` plus `runner_live` and `check_output`.
+`--status FLOW --json` prints `flow.json` plus `runner_live`, `check_output`
+and `reports` (the done report lines, or `[]`). Text status prints those
+report lines on standard output. JSON includes the full `check_changes`
+history. Text status with replacements prints
+`latest check replacement: <JSON object>` for the last entry, including
+`at`, `old`, `new` and `reason`; no replacement prints no such line.
 `check_output` has the same string-or-null value as the watch report, including
 after a resume: a passing check replaces an earlier failed check's output
 with null. Text status prints the same bounded tail under `check log output:`
@@ -2813,7 +2919,7 @@ union with a `task` id on each entry; flow listings include this union too.
 No denials gives `[]`. Watch task reports include retained `denied_paths`.
 Text status names each denied path, reason, run and turn. Text prints
 every top-level field except `tasks` and the separately formatted
-`check_output`, then each task's state and reason.
+`check_output`, `reports` and `check_changes`, then each task's state and reason.
 `--status` alone lists flows oldest first as
 `<id>  <status>  <n>/<m> merged  <dir>`, or as JSON objects containing `id`,
 `status`, `reason`, `dir`, `branch`, `runner_live`, `merged`, `tasks`
@@ -2827,7 +2933,7 @@ skipped with `emb flow: skipped <error>` on standard error.
 |---|---|---|
 | 0 | Dry run printed, flow started, answer queued, runner resumed, flow cancelled, lead stop reported, or every task merged | Watch reports give their next action |
 | 1 | Unexpected error or unreadable settings database | `next: emb flow --status`; database errors name an owner action |
-| 64 | Invalid option combination, plan, flow, task, worker, commit or claim, or an empty or whitespace-only plan `read` file on `--dry-run` or `--start` | `next: emb flow --help` for invalid options, plans or empty read files, a worker's owner action, the claim action or `--status` |
+| 64 | Invalid option combination, plan, replacement check or reason, flow, task, worker, commit or claim, or an empty or whitespace-only plan `read` file on `--dry-run` or `--start` | `next: emb flow --help` for invalid options, plans or empty read files, a worker's owner action, the claim action or `--status` |
 | 65 | The plan directory is not in a checkout, or `--cancel` names an unknown flow | Repeat `--dry-run` with `dir` inside a checkout, or `next: emb flow --status` |
 | 66 | Unreadable plan or correction, or missing plan directory | `next: ls -l <path>` |
 | 69 | Missing git, tmux, engine or driver, disconnected engine, unusable runtime folder, or a worktree folder inside any Git working tree or the source repository's git folder | `owner:` naming the fix |
@@ -2835,7 +2941,7 @@ skipped with `emb flow: skipped <error>` on standard error.
 | 71 | Runner session failed to start | `next: emb flow --resume <id>` |
 | 72 | Runner lost before the flow ended | `next: emb flow --resume <id>` |
 | 74 | Interrupted watch; cursor unchanged | `next: emb flow --watch <id> --json` |
-| 75 | Runner live or starting, answer not allowed, flow already done, indeterminate preparation on resume, cancellation pending, cancellation of an ended flow, the 60-second cancellation deadline passed, or a lead answer on a cancelled flow | `--status` for indeterminate preparation or the cancellation deadline, `--status`, `--watch`, or `--resume` for a cancelled lead answer |
+| 75 | Runner live or starting, replacement check without a failed flow and pending check, answer not allowed, flow already done, indeterminate preparation on resume, cancellation pending, cancellation of an ended flow, the 60-second cancellation deadline passed, or a lead answer on a cancelled flow | `--status` for indeterminate preparation or the cancellation deadline, `--status`, `--watch`, or `--resume` for a cancelled lead answer |
 | 79 | Flow-worktree or task-run preparation failed | Inspect the named log, then `emb flow --resume <id>` |
 | 82 | Flow failed, was cancelled, or ended with tasks unmerged | The watch report's next action |
 
@@ -3558,14 +3664,27 @@ The merge JSON object has no `step` field.
 
 ```
 emb prune --older-than DAYS [--dry-run] [--json]
+emb prune --claim ID [--older-than DAYS] [--dry-run] [--json]
 ```
 
 Removes ended run, flow and panel folders under `runs_dir()`, including
 logs inside those folders, clean owned detached read-only worktrees, and
-orphaned worktrees in Ember's worktrees folder. `--older-than` is required and accepts a whole number of days, zero
-or greater. Age is measured from `ended_at`, or
-`updated_at` when there is no end time. A record qualifies at an age of at
+orphaned worktrees in Ember's worktrees folder. `--older-than` is required
+without `--claim` and accepts a whole number of days, zero or greater.
+Age is measured from `ended_at`, or `updated_at` when there is no end time. A record qualifies at an age of at
 least `DAYS × 86400` seconds; zero includes every ended record.
+
+`--claim ID` selects ended run, flow and panel records with that exact
+claim, then includes each selected flow's or panel's child runs through
+the explicit-id selection path. Child runs need not carry the claim and
+are included regardless of their age. Records of other claims are kept
+unless included as those children. Lock, ended, unreadable-record and
+shared-parent guards still apply. `--older-than` optionally filters the
+claim's records before child expansion; omitting it selects every ended
+record of the claim. Unfinished records, including unlocked `starting`
+records, stay unchanged. Claim-scoped pruning runs no orphan sweep.
+`--dry-run` and `--json` work with `--claim`; a claim with no records
+removes nothing and exits 0.
 
 Ended runs are `closed` or `failed`, with no sent turn, no collected writing
 turn and no live session. A closed read-only run with a detached worktree
@@ -3629,8 +3748,8 @@ that no record names, including flow task paths. It removes one only when
 every record could be read, the folder and its `.git` file pass the same
 checks, and the folder's modification time is at least `DAYS × 86400`
 seconds old. Other folders are kept and reported with the reason. A prune
-with explicit record ids, including Clear in the app, does not run this
-sweep.
+with `--claim` or explicit record ids, including Clear in the app, does
+not run this sweep.
 
 Prune lists branch-deletion commands only for branches that exist and are
 unmerged. A branch is unmerged
@@ -3674,16 +3793,18 @@ Read, lock, repository-query and removal failures are reported as
 `emb prune: <message>` on standard error. Processing continues after each
 failure. Exit 0 means processing completed without failures, including an
 empty runs folder, no matches or busy skips. Exit 1 means one or more
-operations failed; the output includes completed removals. Missing,
-negative or non-whole `--older-than` values exit 64.
+operations failed; the output includes completed removals. A negative or
+non-whole `--older-than` value, or omitting both `--older-than` and
+`--claim`, exits 64.
 
-`ember.prune.select(older_than, record_ids=None, *, env=None, now=None)`
+`ember.prune.select(older_than, record_ids=None, *, env=None, now=None, keep_starting=False)`
 selects records without changing files.
-`ember.prune.remove(older_than, record_ids=None, *, dry_run=False, env=None, now=None)`
+`ember.prune.remove(older_than, record_ids=None, *, claim=None, dry_run=False, env=None, now=None)`
 selects and removes them with the lock checks above. Explicit ids ignore
 age but still require ended records and qualifying selected parents.
 Missing, unreadable and unfinished explicit ids are returned in `skipped`
-with reasons. Supplying an empty id list selects nothing.
+with reasons. Supplying an empty id list selects nothing. `claim` and
+`record_ids` cannot be combined.
 
 No pruning happens automatically. Settings and the app's state file are
 not pruned.
@@ -3835,8 +3956,9 @@ output and a message on standard error.
 
 After exit 0 with `--claim ID`, unless `--dry-run`, the command prints
 `next: emb choices --finish <id>` once on standard error if no kept result
-has that claim, including when there are no results. Without `--claim`, it
-prints no claim-finish line. The command does not finish the claim itself.
+has that claim and its status is not `gone`, including when there are no
+results. A missing or unreadable claim is treated as open. Without
+`--claim`, it prints no claim-finish line. The command does not finish the claim itself.
 
 `--json` prints a list of objects:
 

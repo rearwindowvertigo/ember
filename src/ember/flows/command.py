@@ -67,7 +67,9 @@ def _usage(args: argparse.Namespace) -> str:
         )
     ]
     problem = None
-    if len(modes) != 1:
+    if args.check_base and modes != ["start"]:
+        problem = "--check-base needs --start"
+    elif len(modes) != 1:
         problem = (
             "give exactly one of --dry-run, --start, --watch, "
             "--status, --lead, --resume or --cancel"
@@ -95,8 +97,16 @@ def _usage(args: argparse.Namespace) -> str:
             problem = "--writer and --claim need --dry-run or --start"
         elif args.stall is not None and mode != "start":
             problem = "--stall needs --start"
-        elif args.reason is not None and mode != "cancel":
-            problem = "--reason needs --cancel"
+        elif args.check is not None and mode != "resume":
+            problem = "--check needs --resume"
+        elif args.check is not None and (
+            args.reason is None or not args.reason.strip()
+        ):
+            problem = "--check needs --reason with non-blank text"
+        elif args.reason is not None and not (
+            mode == "cancel" or (mode == "resume" and args.check is not None)
+        ):
+            problem = "--reason needs --cancel or --resume with --check"
         elif args.json and mode not in ("dry_run", "watch", "status", "cancel"):
             problem = "--json needs --dry-run, --watch, --status or --cancel"
     if problem:
@@ -252,17 +262,21 @@ def _session(
     argv: Callable[[str], list[str]],
     *,
     fresh: bool = False,
+    checked: bool = False,
 ) -> None:
     """Reserve startup and launch one session while lifecycle.lock is held."""
     flow_id = flow["id"]
     follow = f"next: emb flow --watch {flow_id} --json"
-    if lock.live(flow_id, env) or (not fresh and _starting(flow, env)):
+    if not checked and (
+        lock.live(flow_id, env) or (not fresh and _starting(flow, env))
+    ):
         raise CommandError(
             75, f"the runner for {flow_id} is running or starting", follow
         )
     _require_tool("tmux", env)
     try:
-        _wait_session_exit(flow_id, env, follow)
+        if not checked:
+            _wait_session_exit(flow_id, env, follow)
         (record.folder(flow_id, env) / record.CANCEL_NAME).unlink(missing_ok=True)
         events = record.read_events(flow_id, env)
         reservation = {"at": time.time(), "after": events[-1]["seq"] if events else 0}
@@ -297,6 +311,12 @@ def _prepare(
 ) -> tuple[plan.Plan, Path, Path, str, plan.Worker, plan.Worker, dict[str, Any]]:
     """Validate a plan, checkout, claim and both workers before creating state."""
     document = plan.load(args.plan)
+    if args.check_base and not document.check:
+        raise CommandError(
+            exits.USAGE,
+            "--check-base needs a plan with a check",
+            "next: emb flow --help",
+        )
     problems = []
     for item in document.read:
         path = Path(item).expanduser().absolute()
@@ -389,6 +409,34 @@ def _gapcheck_decision(
     return policy.decide(answers, len(document.tasks))
 
 
+def _same_model(writer: plan.Worker, reviewer: plan.Worker) -> bool:
+    """Return whether both workers use the same engine and model."""
+    return (writer.engine, writer.model) == (reviewer.engine, reviewer.model)
+
+
+def _worker_lines(writer: plan.Worker, reviewer: plan.Worker, out: TextIO) -> None:
+    """Print the resolved workers and whether their engine and model match."""
+    for worker in (writer, reviewer):
+        print(
+            WorkerSelection(
+                engine=worker.engine,
+                model=worker.model,
+                effort=worker.effort,
+                model_source=worker.model_source,
+                effort_source=worker.effort_source,
+                screen=worker.screen,
+                row=worker.row,
+            ).line(),
+            file=out,
+        )
+    if _same_model(writer, reviewer):
+        print(
+            "same model: writer and reviewer both resolve to "
+            f"{writer.engine} {writer.model}",
+            file=out,
+        )
+
+
 def _dry_run(
     args: argparse.Namespace,
     document: plan.Plan,
@@ -433,8 +481,6 @@ def _dry_run(
     ]
     if args.previous is not None and not (changes and changes["recovery"]):
         gapcheck += ["--previous", args.previous]
-    for path in document.read:
-        gapcheck += ["--read", path]
     if reviewer.source != "menu":
         # A reviewer named for this flow, by option or in the plan, also
         # checks its plan; the Gap check reviewer row covers the rest.
@@ -459,6 +505,7 @@ def _dry_run(
                     "base": base,
                     "writer": writer.to_json(),
                     "reviewer": reviewer.to_json(),
+                    "same_model": _same_model(writer, reviewer),
                     "check": list(document.check),
                     "rounds": document.rounds,
                     "rounds_source": document.rounds_source,
@@ -478,19 +525,7 @@ def _dry_run(
             file=out,
         )
     else:
-        for worker in (writer, reviewer):
-            print(
-                WorkerSelection(
-                    engine=worker.engine,
-                    model=worker.model,
-                    effort=worker.effort,
-                    model_source=worker.model_source,
-                    effort_source=worker.effort_source,
-                    screen=worker.screen,
-                    row=worker.row,
-                ).line(),
-                file=out,
-            )
+        _worker_lines(writer, reviewer, out)
         print(f"base {base}", file=out)
         print(
             f"rounds {document.rounds} fix rounds, at most {document.rounds + 1} "
@@ -577,6 +612,7 @@ def _start(
         stall_minutes=_stall_minutes(args, settings),
         claim=args.claim,
         whole_review=_whole_review(settings),
+        check_base=args.check_base,
     )
     # None denotes a frozen engine default, not permission to read a later menu.
     for role in plan.ROLES:
@@ -636,6 +672,7 @@ def _start(
         f"flow {flow_id}\nbranch {flow['branch']}\nworktree {flow['worktree']}",
         file=out,
     )
+    _worker_lines(writer, reviewer, err)
     print(f"next: emb flow --watch {flow_id} --json", file=err)
     return 0
 
@@ -665,12 +702,32 @@ def _not_done(flow: Mapping[str, Any]) -> None:
 
 
 def _resume(
-    flow_id: str, env: Mapping[str, str], argv: Callable[[str], list[str]], out: TextIO
+    flow_id: str,
+    env: Mapping[str, str],
+    argv: Callable[[str], list[str]],
+    out: TextIO,
+    *,
+    check: str | None = None,
+    reason: str | None = None,
 ) -> None:
     """Start an idle flow under the startup reservation lock."""
+    replacement = plan.parse_check(check) if check is not None else None
+    if replacement is not None and (reason is None or not reason.strip()):
+        raise CommandError(
+            64, "--check needs --reason with non-blank text", "next: emb flow --help"
+        )
     _load(flow_id, env)
     with lifecycle(flow_id, env):
         flow = _load(flow_id, env)
+        if replacement is not None and not (
+            flow["status"] == "failed" and flow["check_pending"]
+        ):
+            raise CommandError(
+                75,
+                f"the flow {flow_id} is {flow['status']}; "
+                "replacing a check requires failed with a pending check",
+                f"next: emb flow --status {flow_id}",
+            )
         _not_done(flow)
         if flow["status"] != "cancelled" and record.cancel_request(flow_id, env):
             raise CommandError(
@@ -678,7 +735,14 @@ def _resume(
                 f"cancellation of {flow_id} is pending",
                 f"next: emb flow --status {flow_id}",
             )
-        if not lock.live(flow_id, env) and not _starting(flow, env):
+        busy = lock.live(flow_id, env) or _starting(flow, env)
+        if replacement is not None and busy:
+            raise CommandError(
+                75,
+                f"the runner for {flow_id} is running or starting",
+                f"next: emb flow --status {flow_id}",
+            )
+        if not busy:
             from ember.flows.runner import RunnerError, preparation_known
 
             try:
@@ -687,7 +751,52 @@ def _resume(
                 raise CommandError(
                     exits.REFUSED, str(error), f"next: emb flow --status {flow_id}"
                 ) from error
-        _session(flow, env, argv)
+        if replacement is None:
+            _session(flow, env, argv)
+        else:
+            launch_error = None
+            try:
+                _require_tool("tmux", env)
+                _wait_session_exit(flow_id, env, f"next: emb flow --status {flow_id}")
+            except CommandError as error:
+                if error.code == 75:
+                    raise
+                launch_error = error
+            except (tmux.TmuxError, paths.RuntimeDirError) as error:
+                launch_error = error
+            change = {
+                "at": time.time(),
+                "old": flow["check"],
+                "new": replacement,
+                "reason": reason,
+            }
+            flow["check"] = replacement
+            flow["check_changes"].append(change)
+            record.save(flow, env)
+            try:
+                record.append_event(flow_id, {"kind": "check_replaced", **change}, env)
+                if launch_error is not None:
+                    raise launch_error
+                _session(flow, env, argv, checked=True)
+            except Exception as error:
+                code = (
+                    error.code
+                    if isinstance(error, CommandError)
+                    else 69
+                    if isinstance(error, paths.RuntimeDirError)
+                    else 71
+                    if isinstance(error, tmux.TmuxError)
+                    else 1
+                )
+                follow = f"next: emb flow --resume {flow_id}"
+                if isinstance(error, CommandError) and error.line != follow:
+                    follow = error.line + "\n" + follow
+                raise CommandError(
+                    code,
+                    f"{error}; the check replacement is saved; "
+                    f"emb flow --resume {flow_id} uses the new check",
+                    follow,
+                ) from error
     print(f"flow {flow_id}", file=out)
 
 
@@ -1030,6 +1139,15 @@ def _next(flow: Mapping[str, Any], event: str, code: int | None, live: bool) -> 
         )
     if flow["status"] == "failed":
         if flow["check_pending"]:
+            if flow["wave"] == 0:
+                return (
+                    f"next: correct the check {shlex.join(flow['check'])} or "
+                    f"commit a correction to the flow branch {branch} "
+                    f"(an emb run on {shlex.quote(flow['worktree'])}, "
+                    f"then emb merge <its branch> --into {branch} --verdict keep "
+                    "--note '<verdict line>'), "
+                    f"then emb flow --resume {flow_id}"
+                )
             return (
                 "next: fix the flow branch "
                 f"(an emb run on {shlex.quote(flow['worktree'])}, "
@@ -1049,9 +1167,19 @@ def _exit_reports(code: int | None, flow: Mapping[str, Any] | None = None) -> li
     """Return the settled report lines for a user-facing flow exit."""
     if code == NOT_MERGED:
         if flow is not None and flow["status"] == "failed" and flow["check_pending"]:
+            replacement = (
+                "; when the check command is wrong, replace it with "
+                f"emb flow --resume {flow['id']} --check '<JSON argv list>' "
+                "--reason '<text>'"
+            )
+            if flow["wave"] == 0:
+                return [
+                    "report: the check failed on the base; "
+                    "correct the check or the flow branch, then resume" + replacement
+                ]
             return [
                 f"report: the check failed after wave {flow['wave']}; "
-                "fix the flow branch, then resume"
+                "fix the flow branch, then resume" + replacement
             ]
         return [
             "report: tasks unmerged; report every task's status and reason; "
@@ -1063,7 +1191,7 @@ def _exit_reports(code: int | None, flow: Mapping[str, Any] | None = None) -> li
 
 
 def _done_reports(flow: Mapping[str, Any]) -> list[str]:
-    """Report latest and retained findings when a flow ends done."""
+    """Report retained findings and merged tasks' outside files for a done flow."""
     if flow["status"] != "done":
         return []
     counts = {
@@ -1074,12 +1202,27 @@ def _done_reports(flow: Mapping[str, Any]) -> list[str]:
         )
         for severity in ("lead", "should")
     }
-    if not any(counts.values()):
-        return []
-    return [
-        f"report: {counts['lead']} lead and {counts['should']} should findings "
-        "remain on merged tasks; inspect each before merging"
+    reports = []
+    if any(counts.values()):
+        reports.append(
+            f"report: {counts['lead']} lead and {counts['should']} should findings "
+            "remain on merged tasks; inspect each before merging"
+        )
+    outside = [
+        task
+        for task in flow["tasks"]
+        if task["status"] == "merged" and task["outside_files"]
     ]
+    if outside:
+        tasks = ", ".join(
+            f"{task['id']} ({len(task['outside_files'])})" for task in outside
+        )
+        reports.append(
+            f"report: {len(outside)} merged task{'' if len(outside) == 1 else 's'} "
+            f"changed files outside their declared files: {tasks}; "
+            "inspect each before merging"
+        )
+    return reports
 
 
 def _stop_reports(
@@ -1115,7 +1258,8 @@ def _stop_reports(
             )
             reports.append(
                 f"report: lead stop on {task}; {state}; "
-                "list every printed choice and recommend one"
+                "give the reason as printed, list every printed choice by its "
+                "option with what it does, and recommend one"
             )
     return reports
 
@@ -1325,6 +1469,7 @@ def _status(
         flow = _load(flow_id, env)
         flow["runner_live"] = lock.live(flow_id, env)
         flow["check_output"] = _check_output(flow_id, env)
+        flow["reports"] = _done_reports(flow)
         _denial_status(flow, env)
         for task in flow["tasks"]:
             task["findings"] = _finding_details(task)
@@ -1337,6 +1482,15 @@ def _status(
                     print(f"review_budget: {verdict.budget_text(value)}", file=out)
                 elif key == "check_output":
                     _print_check_output(value, out)
+                elif key == "reports":
+                    for line in value:
+                        print(line, file=out)
+                elif key == "check_changes":
+                    if value:
+                        print(
+                            f"latest check replacement: {json.dumps(value[-1])}",
+                            file=out,
+                        )
                 elif key != "tasks":
                     print(f"{key}: {value}", file=out)
             for task in flow["tasks"]:
@@ -1422,7 +1576,9 @@ def main(
             flow_id = args.lead[0]
         elif mode == "resume":
             flow_id = args.resume
-            _resume(flow_id, environment, argv, out)
+            _resume(
+                flow_id, environment, argv, out, check=args.check, reason=args.reason
+            )
         elif mode == "watch":
             return _watch(args.watch, args.json, environment, out, err)
         elif mode == "cancel":

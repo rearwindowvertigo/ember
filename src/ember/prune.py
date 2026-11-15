@@ -209,28 +209,11 @@ def _old(entry: Entry, days: int, now: float) -> bool:
     return days == 0 or now - at >= days * 86400
 
 
-def select(
-    older_than: int,
-    record_ids: Sequence[str] | None = None,
-    *,
-    env: Mapping[str, str] | None = None,
-    now: float | None = None,
-) -> Selection:
-    """Select ended or abandoned records without changing records or processes.
-
-    Explicit ids ignore age. A selected parent includes its ended runs of
-    any age. A run named by parents requires every parent to be selected.
-    Unlocked starting runs are considered failed for selection. Missing,
-    unreadable and other unfinished explicit ids are returned as skips.
-    """
-    if type(older_than) is not int or older_than < 0:
-        raise ValueError("older_than must be a non-negative whole number")
-    env = os.environ if env is None else env
-    at = time.time() if now is None else now
-    result = Selection()
+def _record_names(env: Mapping[str, str]) -> list[str]:
+    """List record folders, excluding unpublished creation folders."""
     root = paths.runs_dir(env)
     try:
-        names = sorted(
+        return sorted(
             item.name
             for item in root.iterdir()
             if not item.name.startswith(paths.CREATION_TMP_PREFIX)
@@ -253,7 +236,60 @@ def select(
             )
         )
     except FileNotFoundError:
-        names = []
+        return []
+
+
+def _claim_records(
+    claim: str, older_than: int, env: Mapping[str, str], now: float
+) -> Selection:
+    """Filter claim-matched records by ended state and age before expanding ids."""
+    result = Selection()
+    try:
+        names = _record_names(env)
+    except OSError as error:
+        result.errors.append(str(error))
+        return result
+    for ident in names:
+        try:
+            entry = _load(ident, env)
+            if entry.data.get("claim") != claim:
+                continue
+            reason = _ended(entry, env)
+            if reason is None and not _old(entry, older_than, now):
+                reason = "younger than the requested age"
+            if reason is None:
+                result.records[ident] = entry
+            else:
+                result.skipped.append(dict(id=ident, reason=reason))
+        except _RECORD_ERRORS as error:
+            result.errors.append(str(error))
+            result.skipped.append(dict(id=ident, reason=str(error)))
+    return result
+
+
+def select(
+    older_than: int,
+    record_ids: Sequence[str] | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    now: float | None = None,
+    keep_starting: bool = False,
+) -> Selection:
+    """Select ended or abandoned records without changing records or processes.
+
+    Explicit ids ignore age. A selected parent includes its ended runs of
+    any age. A run named by parents requires every parent to be selected.
+    Unlocked starting runs are considered failed for selection. Missing,
+    unreadable and other unfinished explicit ids are returned as skips.
+    With keep_starting, starting runs are kept without abandonment.
+    """
+    if type(older_than) is not int or older_than < 0:
+        raise ValueError("older_than must be a non-negative whole number")
+    env = os.environ if env is None else env
+    at = time.time() if now is None else now
+    result = Selection()
+    try:
+        names = _record_names(env)
     except OSError as error:
         result.errors.append(str(error))
         return result
@@ -270,7 +306,11 @@ def select(
             continue
         try:
             entry = _load(ident, env)
-            if entry.kind == "run" and entry.data["status"] == runs.STARTING:
+            if (
+                not keep_starting
+                and entry.kind == "run"
+                and entry.data["status"] == runs.STARTING
+            ):
                 # A live start holds this lock before writing its first record.
                 # The preview changes no record and ends no preparation group.
                 try:
@@ -789,6 +829,7 @@ def remove(
     older_than: int,
     record_ids: Sequence[str] | None = None,
     *,
+    claim: str | None = None,
     dry_run: bool = False,
     env: Mapping[str, str] | None = None,
     now: float | None = None,
@@ -798,11 +839,26 @@ def remove(
     Unlocked starting runs are failed and their preparation groups ended.
     Dry runs list the same candidates without changing records or processes.
     Failures are collected while remaining records are processed.
+    A claim selects ended records by age before explicit-id expansion, keeps
+    starting runs unchanged and runs no unscoped orphan sweep.
     """
     env = os.environ if env is None else env
     at = time.time() if now is None else now
-    selection = select(older_than, record_ids, env=env, now=at)
-    result = Result(errors=list(selection.errors))
+    if claim is not None and record_ids is not None:
+        raise ValueError("claim and record_ids cannot be combined")
+    if type(older_than) is not int or older_than < 0:
+        raise ValueError("older_than must be a non-negative whole number")
+    scoped = Selection()
+    if claim is not None:
+        scoped = _claim_records(claim, older_than, env, at)
+        record_ids = list(scoped.records)
+    selection = select(
+        older_than, record_ids, env=env, now=at, keep_starting=claim is not None
+    )
+    result = Result(
+        errors=list(dict.fromkeys([*scoped.errors, *selection.errors])),
+        skipped=list(scoped.skipped),
+    )
     with contextlib.ExitStack() as locks:
         unavailable: set[str] = set()
         # Hold parents throughout child selection, rechecks and removal.
@@ -818,7 +874,9 @@ def remove(
                 unavailable.add(entry.id)
                 result.errors.append(str(error))
                 result.skipped.append(dict(id=entry.id, reason=str(error)))
-        current = select(older_than, record_ids, env=env, now=at)
+        current = select(
+            older_than, record_ids, env=env, now=at, keep_starting=claim is not None
+        )
         result.errors.extend(
             error for error in current.errors if error not in result.errors
         )
@@ -842,7 +900,11 @@ def remove(
                 entry = _load(ident, env)
                 _hold(entry, locks, env)
                 entry = _load(ident, env)
-                if entry.kind == "run" and entry.data["status"] == runs.STARTING:
+                if (
+                    claim is None
+                    and entry.kind == "run"
+                    and entry.data["status"] == runs.STARTING
+                ):
                     failed = abandon_start(
                         runs.from_json(entry.data, runs.run_dir(ident, env), env),
                         dry_run=dry_run,
@@ -963,13 +1025,20 @@ def remove(
             dry_run=dry_run,
             readable=readable,
         )
-    result.skipped = list({item["id"]: item for item in result.skipped}.values())
+    result.skipped = list(
+        {
+            item["id"]: item
+            for item in result.skipped
+            if claim is None or item["id"] not in removed
+        }.values()
+    )
     return result
 
 
 def main(
     older_than: int,
     *,
+    claim: str | None = None,
     dry_run: bool = False,
     as_json: bool = False,
     env: Mapping[str, str] | None = None,
@@ -979,7 +1048,7 @@ def main(
     """Print pruning results and return 1 when any operation failed."""
     out = sys.stdout if out is None else out
     err = sys.stderr if err is None else err
-    result = remove(older_than, dry_run=dry_run, env=env)
+    result = remove(older_than, claim=claim, dry_run=dry_run, env=env)
     if as_json:
         print(json.dumps(result.to_json(), indent=2), file=out)
     else:

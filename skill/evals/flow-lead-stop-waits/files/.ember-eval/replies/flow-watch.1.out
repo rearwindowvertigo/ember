@@ -4,7 +4,7 @@ strict: stopped · round 0 · needs the lead
   lead: What report.py prints without --strict for a file with a bad row: skip it with a warning, or print no totals and exit 1?
   blocks: none
 emb flow --lead {{FLOW}} strict --send <file>
-emb flow --lead {{FLOW}} strict --accept [--commit <commit>]
+emb flow --lead {{FLOW}} strict --accept [--commit <sha>]
 emb flow --lead {{FLOW}} strict --review
 emb flow --lead {{FLOW}} strict --worker <engine>:<model>[@<effort>]
 emb flow --lead {{FLOW}} strict --drop

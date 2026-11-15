@@ -46,6 +46,24 @@ Stall after (`flow.stall`) unless you pass `--stall`.
   variables the check needs in that shell each time. Its timeout is
   `check_timeout`, an integer number of seconds, at least 1, default `1800`.
   Tests that need a local service, such as a database, can go in this check.
+  For a flow not meant to repair a failing base, run the plan's exact check
+  argv on the base, on this machine, before `--start`. Start only when it
+  exits 0. To have Ember do this before starting tasks, use
+  `emb flow --plan <file> --start --check-base`. It runs the check in the
+  prepared flow worktree at wave 0, before creating any task run. A non-zero
+  exit or timeout ends the flow `failed`, with a reason starting
+  `the check failed on the base` and the check log tail. The `report:` and
+  `next:` lines say to correct the check or the flow branch, then resume.
+  An interrupted or cancelled base check stays pending and runs on resume;
+  a passed base check does not run again on later resumes. `--check-base`
+  without `--start` or a plan check exits 64. A flow meant to repair a
+  failing base starts without `--check-base`.
+  Leave out a test this machine cannot run through a wrapper script named
+  as the check argv. The wrapper lists each excluded file and fails on any
+  other failure. Name the exclusions to the owner and in the report.
+  The check runs once after every wave's merges. Each writer is told to
+  run it too. A chain of one-task waves runs the wave check once per task;
+  wave count multiplies check time.
 - `failure_model`: the cases that must work and those accepted.
 - `context`: only settled decisions and the rules tasks need.
 - `read`: the files that hold each source the plan cites, such as an
@@ -59,15 +77,20 @@ Stall after (`flow.stall`) unless you pass `--stall`.
 | Task field | Type and rule | Example |
 |---|---|---|
 | `id` | Required unique string matching `[a-z0-9][a-z0-9-]{0,39}` | `"totals"` |
-| `subject` | Required nonblank one-line string, at most 72 characters | `"feat: add order totals"` |
+| `subject` | Required nonblank one-line string, at most 72 characters | `"Add order totals"` |
 | `task` | Required nonblank string describing the work | `"Implement and test order totals."` |
 | `files` | Required non-empty list of unique exact relative POSIX file paths, with no trailing `/` | `["src/totals.py", "tests/test_totals.py"]` |
 | `after` | List of other task ids as strings; default `[]`; every id exists, no self dependency or cycle | `["schema"]` |
 | `review` | String giving the reviewer's focus; default `""` | `"Check empty orders and rounding."` |
 
-Write `subject` in the repository's commit convention, read from
-`AGENTS.md`, `CONTRIBUTING` or `git log`, with `!` for a breaking
-Conventional Commit. It is the task's squash subject and the writer
+Write `subject` in the repository's commit convention, with `!` for a
+breaking Conventional Commit: the one `AGENTS.md` or `CONTRIBUTING` states;
+when neither states one, the form of the session branch's recent commit
+subjects, including any prefix or tag they share. Claude Code lists those
+subjects under the recent commits in your starting context; run
+`git log --oneline -10` in the checkout only when that list is absent, is
+for another repository or branch, or shows no single form. It is the
+task's squash subject and the writer
 brief's first line. Recorded flows keep their resolved subjects.
 
 `files` refuses a leading slash, an empty path component, `.` or `..`
@@ -120,6 +143,13 @@ branch and worktree from the start output before watching. Do not poll
 `--status` while a watch runs. Follow the printed `next:` and `owner:` lines
 as SKILL.md step 6 says.
 
+Start prints the resolved writer and reviewer announce lines on standard
+error, as the text dry run does in its output. Both print
+`same model: writer and reviewer both resolve to <engine> <model>` when
+both roles resolve to one engine and model, even with different efforts.
+The JSON dry run carries this fact as `same_model`. Report it to the owner
+in one sentence and change nothing.
+
 Ember creates the flow worktree at `worktrees/<id>` in its data folder,
 `$XDG_DATA_HOME/ember` (default `~/.local/share/ember`), outside every
 repository. The flow record and branch use the same resolved path; the
@@ -153,18 +183,26 @@ continuation; inspect its log and worktree.
 A `lead_stop` returns exit 0; it is not a completed flow. For every stop,
 send the owner one message naming the task, status, reason, open `lead`
 and `must` findings, the tasks it blocks (or none), and every fact its
-`report:` line names, such as whether a runner is live. End the message with
-one direct question ending in a question mark. Use the report's available
-choices, not an assumed list:
+`report:` line names, such as whether a runner is live. Give the status and
+the reason in Ember's printed words, such as `stopped` and `needs the
+lead`, and say what they mean. End the message with one direct question
+ending in a question mark. Use the report's available choices, not an
+assumed list:
 
 | Answer after `emb flow --lead <id> <task>` | Does |
 |---|---|
 | `--send <file>` | Send a correction to the existing writer, then review it. |
-| `--accept` | Accept the task branch's current tip without another review. |
-| `--accept --commit <commit>` | Accept the specified reviewed commit. |
+| `--accept [--commit <sha>]` | Accept the task branch's current tip without another review. With `--commit`, accept that reviewed commit instead of the tip. |
 | `--review [--reviewer W]` | Collect a running turn, then start fresh reviews and a fix budget. |
 | `--worker W` | Keep the old branch and start a new writer from the flow tip. |
 | `--drop` | Keep the branch and drop the task; its dependants stay blocked. Also accepted for a pending or blocked task. |
+
+In the stop message, name each choice you offer by its printed option and
+say in words what it does. For
+`--accept [--commit <sha>]` say both: plain `--accept` takes the current
+tip with no further review, and `--commit <sha>` takes that reviewed
+commit instead of the tip. A `conflict` stop and a provider error limit
+what you offer, as their paragraphs below say.
 
 A merge conflict stops the task as `conflict`. Its `next:` line names the
 hand merge of the approved tip into the flow branch. After that merge, the
@@ -175,6 +213,10 @@ already in the flow branch needs no `--drop`.
 Do not settle a flow stop yourself, edit to choose its answer, or merge a
 task branch into the session branch. Call `emb flow --lead` only after the
 owner's answer. A `--send` file carries that decision, not your own choice.
+At a stop, a choice you wrote into the plan or its failure model without
+the owner's word is yours, not the owner's decision. Say what the plan
+says and that you chose it, then ask. Do not call the finding settled,
+decided or covered, by your plan or by anything else you chose.
 
 Every sent correction appears in that task's later reviewer briefs, in
 order, as a settled decision; files it allows are in scope for the review.
@@ -230,6 +272,29 @@ Exit 75 from `--cancel` means the flow had already ended or the 60-second
 deadline from writing `cancel.json` passed with the request still pending;
 follow `next: emb flow --status <id>`.
 
+A plain `emb flow --resume <flow>` reruns the saved check after a failed
+check. The `next:` line after a wave check failure assumes the branch is
+at fault. When the command is wrong, replace it with:
+
+```bash
+emb flow --resume <flow> --check '<JSON argv list>' --reason <text>
+```
+
+Replacement requires a `failed` flow with `check_pending`, at any wave
+including wave 0, and no running or starting runner. Other states or a
+pending cancellation are refused with exit 75. An indeterminate worktree
+preparation state also refuses continuation. The argv uses the plan's
+`check` validation: a non-empty JSON list of strings, a nonblank command
+and no NUL characters. Later arguments may be empty. Invalid argv or a
+missing or blank reason exits 64. A refused call changes nothing.
+Ember saves the replacement and its history entry atomically in the flow
+record, with the time, old argv, new argv and reason. The saved plan stays
+unchanged. The runner, `emb merge`, writer briefs and fix briefs use the
+flow record's check. If runner launch fails after the save, the replacement
+stays and a plain resume uses it. The new check runs before any pending
+wave and must pass. No option accepts a wave without a passing check.
+A flow merged while `failed` keeps that status in its record.
+
 ## Provider errors
 
 Each task's run retries `capacity` as `references/runs.md` (Provider errors)
@@ -254,6 +319,23 @@ actions and hidden-path restrictions as `references/sandbox-and-exits.md` (Denie
 describes.
 
 ## Verify, merge and report
+
+At a `done` flow's end, a `report:` line names each merged task with outside
+files and its count. For example:
+
+```text
+report: 2 merged tasks changed files outside their declared files: a (1), b (2); inspect each before merging
+```
+
+Watch and `emb flow --status <id>` show the line; single-flow status JSON
+holds it in `reports`. Inspect each named task's outside files before
+merging. Each review's `outside_files` has one entry per outside file:
+`file`, `needed` and a one-line `reason`. A missing, repeated or invalid
+entry for a listed file makes the review unreadable. Reviewers judge
+whether each edit was needed and raise an unneeded edit as `must` or
+`should` under the review bar. An allowed outside edit is not a `lead`
+finding just for being outside the list. Reviewers also check changes to
+behaviour or user-facing wording the task did not ask for, in any file.
 
 `emb merge` checks a completed flow branch against the local `--into`
 target. With a matching flow record whose status is `done`, the flow tip

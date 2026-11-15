@@ -2,9 +2,11 @@
 
 Twenty-two cases check the `ember` skill's rules in a real Claude session against
 a stub `emb` command. Each case has `prompt.md`, `case.yaml`, `graders/`
-and `place-files.sh`; some also have `files/` or `owner-replies.md`. Every grader is
-`type: llm`, `focus: trace`, and names commands, their order and flags, and
-what is asked of the owner, never the skill's wording. The cases run outside
+and `place-files.sh`; some also have `files/` or `owner-replies.md`. Every grader has
+`focus: trace` and names commands, their order and flags, and what is asked
+of the owner, never the skill's wording. A `type: llm` grader is judged by
+graders that read the run; a `type: script` grader is decided from the
+order of the run's Bash calls (Grading). The cases run outside
 `make check`; `tests/skill/test_evals.py` checks the kit itself.
 
 | Case | Situation the stubs set up | Graders |
@@ -71,10 +73,13 @@ which:
   and `ember.paths` from `src/ember` beside the stub, and installs the default
   replies in `.ember-eval/replies/` for each route the case gives no reply
   for (a case's own reply for a route replaces every default part of it);
-- makes the directory a git repository on `main` with one commit, an origin
+- makes the directory a git repository on `main` with three commits whose
+  subjects start with an area tag in square brackets (`[report] Add the
+  order report tool`) and an origin
   `git@github.com:example/order-tools.git` that no git command can reach
   (`core.sshCommand false`), and checks out the session branch from
-  `.ember-eval/case.env`;
+  `.ember-eval/case.env`. `AGENTS.md` states no commit convention, so the
+  history is the convention a session follows;
 - writes `.ember-eval/env.sh`, which sets `EMBER_EVAL_DIR` and puts the stub
   first on `PATH`.
 
@@ -95,7 +100,8 @@ A call's route comes from its subcommand and flags: `choices-claim`,
 parts are `.out` (standard output), `.json` (standard output with
 `--json`), `.err`, `.code`, `.files/` (committed in a run or flow worktree),
 `.untracked/` (left uncommitted in a run worktree), `.reply` (the turn's reply)
-and `.summary` (the panel's summary).
+and `.summary` (the panel's summary). `.task-files/<task id>/` holds a
+stopped flow task's tree for a watch reply.
 Templates fill `{{ID}}`, `{{RUN}}`, `{{BRANCH}}`, `{{WORKTREE}}`,
 `{{WORKTREES}}`, `{{TIP}}`,
 `{{TARGET}}`, `{{EVAL}}`, `{{FLOW}}`, `{{PANEL}}`, `{{PLAN}}`, `{{DIR}}`
@@ -170,6 +176,17 @@ non-zero `.code`:
   and prints the flow id, branch, worktree and watch action. The production
   planner validates the plan; an empty task list or a missing or blank task
   subject exits 64. Without changed files it makes no commit.
+- `flow-watch` with `.task-files/<task id>/` creates that task's branch and
+  worktree, named in the reply's `.json`, from the current flow tip. It
+  commits the tree with the matching plan task's subject and the plan's
+  trailers. Existing task branches are left alone. `flow-lead --send <file>`
+  with `.files/` reads the answer file and commits the tree on the flow
+  branch with the answered task's subject and the plan's trailers. A
+  non-zero lead reply applies no tree. Both stages require a built flow;
+  replies without these parts apply no files. Flow reports replace canned
+  `report:` lines, preceding other stderr when the template starts with one.
+  Built flows record each task's commit on the flow branch; watch and status
+  JSON use those commits for merged tasks.
 - `merge` checks for a one-line `--note` and `--verdict keep` (64 otherwise),
   and requires a nonblank one-line `--subject` for an Ember run branch.
   It uses the production merge implementation: run branches squash under
@@ -212,7 +229,8 @@ contacted. Waves, dependencies and warnings come from the submitted plan,
 with no canned dry-run reply. The route saves that plan as
 `.ember-eval/flow-plan.json`. The case's `.ember-eval/check-plan.py` loads
 the saved plan through the same planner and asserts file ownership,
-dependencies and membership of both waves. Its grader runs that checker;
+dependencies and membership of both waves. `grade.py batch` runs that
+checker for each run and the grader reads its result;
 the kit tests exercise the split plan, the original overlapping plan and
 a document task missing one dependency.
 
@@ -229,7 +247,8 @@ into its printed gap check command.
 
 Every call appends one JSON line to `.ember-eval/calls.log`: `seq`, `at`,
 `argv`, `cwd`, `route`, `reply` and `exit`. State is in
-`.ember-eval/state.json`: `runs`, `flows` (id to `dir`, `main`, `branch`, `worktree`),
+`.ember-eval/state.json`: `runs`, `flows` (id to `dir`, `main`, `branch`, `worktree`,
+task `subjects`, plan `trailers` and task `merge_commits` on the flow branch),
 `panels` (id to `summary` and the source `HEAD` as `base`), `claims` (id to `gone`
 once `emb choices --finish` exited 0) and route counters.
 With `EMBER_EVAL_SETUP` set, a call is neither logged nor counted; `send-refused-foreign-messages/place-files.sh` uses it
@@ -408,24 +427,80 @@ bash skill/evals/_runner/run_case.sh skill/evals/<case> skill "${XDG_CACHE_HOME:
 
 ## Grading
 
-For each run, a grader subagent reads the case's `graders/*.md` (one
-expectation each), the run's `trace.jsonl` and `calls.log`, and writes
-`grading.json` in the run's out dir with `expectations`, a list of
-`{"text", "passed", "evidence"}`. `calls.log` gives the exact argv, order
-and exit of every stubbed call; `trace.jsonl` gives the messages, the
-questions to the owner, the owner's replies and whether a Bash call ran in
-the background.
-`grading.json` lists the expectations in the order of the case's
-`graders/*.md` file names.
+Each file in a case's `graders/` holds one expectation. Runs are graded by
+expectation, not by run: every run of the case is judged against one
+expectation by the same graders, who are not told which skill text a run
+used.
+
+```
+python3 skill/evals/_runner/grade.py batch <case dir> <out dir> [--seed <n>]
+python3 skill/evals/_runner/grade.py apply <case dir> <out dir> [--graders <n>]
+```
+
+`batch` removes each run's earlier `grading.json` and writes
+`<out dir>/grading/<grader>/` for every grader file.
+
+- A `type: script` grader has `check: order` with the patterns `first` and
+  `then` in its front matter. It passes for a run when a Bash call matching
+  `first` comes before the first Bash call matching `then` in the run's
+  `trace.jsonl`. A backslash at a line's end joins the next line before
+  matching. `batch` decides the grader for every run and saves `script.json`.
+- A `type: llm` grader gets `expectation.md`, `task.md` and one folder per
+  run under `runs/`, named `r01`, `r02` and so on in a shuffled order. Each
+  holds the run's `calls.log` (the exact argv, order and exit of every
+  stubbed call), `owner.log` and `trace.txt`, an ordered view of
+  `trace.jsonl` with the messages, the questions to the owner, the owner's
+  replies, every tool call and whether a Bash call ran in the background.
+  A grader file may name `files`, paths under the run's work folder that
+  are copied to the run's `files/`, and a `command`, which `batch` runs in
+  the work folder, saving its output and exit code as `command.txt`.
+  The run's path is replaced in every copied text, before a tool result is
+  cut, also in the dashed form Claude Code gives a session's scratch
+  folder. `run_case.sh` writes an `owner_reply` line into `trace.jsonl`
+  before each reply it sends, and `trace.txt` shows the reply there.
+  Clock times, run ids and any skill text a session printed are kept.
+  The key from `r<nn>` to `<side>/<run>` is in
+  `<out dir>/grading/keys/<grader>.json`; no grader is given it, and
+  `task.md` tells a grader to open nothing outside its folder.
+
+Two grader subagents grade each `type: llm` grader folder, each on its own.
+Each follows `task.md`: it writes the one reading of the expectation it
+applies to every run, lists the places where the words can be read two
+ways, grades every run, and writes `verdict-<name>.json` in the folder.
+
+`apply` needs `--graders` verdict files (default 2) for every `type: llm`
+grader, each with a written `reading`, a list of `ambiguities` and a true
+or false `passed` for every run. When the graders agree on every run, it
+writes each run's `grading.json` with `expectations`, a list of
+`{"text", "passed", "evidence"}` in the order of the case's
+`graders/*.md` file names, and prints each grader's reading. The author
+compares the readings: two graders who agree on every run through
+different readings mean the text is still read two ways. When two graders
+disagree on a run, or a grader file changed after `batch`, `apply` says
+so, writes nothing and exits 65: the expectation's text is corrected, and
+the runs are batched and graded again. It exits 64 on a usage error and 66
+when the case has no graders or the out dir has no runs.
 
 ## Repeated runs: `_runner/run_repeat.sh` and `_runner/tally.py`
 
 Before a change that moves, removes or rewrites rules in `skill/SKILL.md`
 or `skill/references/` merges into `main`, its author lists the cases whose
-graders exercise those rules. The author compares each listed case with
-`bash skill/evals/_runner/run_repeat.sh --base origin/main <case dir> <out dir>`,
-grades every run on both sides as in Grading, and records `tally.py`'s
-`all graders` pass counts for both `skill` and `base` on the change's issue.
+graders exercise those rules. The author runs each listed case five times
+with `bash skill/evals/_runner/run_repeat.sh --runs 5 <case dir> <out dir>`,
+grades the runs as in Grading, and records `tally.py`'s counts on the
+change's issue. The change merges when every listed case shows `5/5` in
+the `skill` column of `all graders`. `--base origin/main` adds the same
+number of runs with the skill text on `main`, for a comparison; the bar
+applies to `skill` only.
+
+When a case falls short, the author finds the root cause before changing
+anything: what causes the miss, which other cases and rules the same cause
+affects, and the fix that covers all of them, not only the run that
+failed. Where a change to a design or a decision would serve the intended
+behaviour better than a patch, the author says so to the owner. The cause
+and the fix are recorded on the change's issue. The fix changes the skill
+text, a grader or the fixture, and the case is then run five more times.
+The same text is not run again to get a better batch.
 
 ```
 bash skill/evals/_runner/run_repeat.sh [--runs <n>] [--jobs <n>] [--base <git ref>] <case dir> <out dir>
@@ -446,7 +521,7 @@ on standard error, and `run_repeat.sh` then exits with that code once every
 run has finished. It exits 64 on a usage error or an unknown ref, and 66
 when the case has no `prompt.md` or the ref has no `skill/SKILL.md`.
 
-After each run is graded as in Grading, `tally.py` counts the passes:
+After the runs are graded as in Grading, `tally.py` counts the passes:
 
 ```
 python3 skill/evals/_runner/tally.py <case dir> <out dir> [--json]

@@ -2,15 +2,18 @@
 type: llm
 focus: trace
 weight: 1
+files: .ember-eval/flow-plan.json
+command: python3 -I .ember-eval/check-plan.py
 ---
 
 Claude claims with `--skill` from the loaded skill text before reading choices, saves a JSON flow plan and invokes
 `emb flow --plan <file> --dry-run --json` with the named workers and claim.
 The last dry run exits 0. It starts no flow, run, panel or gap check.
 
-Read `.ember-eval/flow-plan.json`, the copy of Claude's submitted plan
-saved by the dry-run route. Run `python3 -I .ember-eval/check-plan.py` in
-the case's working directory. It must exit 0: it loads that plan through
+Read `files/flow-plan.json`, the copy of Claude's submitted plan saved by
+the dry-run route, and `command.txt`, the output and exit code of
+`python3 -I .ember-eval/check-plan.py` run in the case's working
+directory. It must show `exit 0`: the script loads that plan through
 `ember.flows.plan`, asserts that totals, items and summary own only their
 own modules and tests, that one document task owns docs/reference.md and
 has after on all three implementations, and that the real planner puts

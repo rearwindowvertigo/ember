@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from ember import paths, prune
+from ember.cli import main
 from ember.flows import lock as flow_lock
 from ember.flows import plan
 from ember.flows import record as flows
@@ -1995,3 +1996,171 @@ def test_prune_sweeps_020_cache_temporary_entries(
     assert orphan.exists() is not removed
     assert link.is_symlink() is not removed
     assert (outside / "keep").read_text() == "keep"
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_claim_prunes_records_and_children(
+    env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    dry_run: bool,
+    as_json: bool,
+) -> None:
+    child = run(env)
+    parent = flow(env, claim="mine")
+    parent["tasks"][0]["writer_run"] = child.id
+    flows.save(parent, env)
+    member = run(env)
+    group = panel(env, member, claim="mine")
+    standalone = run(env, claim="mine")
+    opened = run(env, claim="mine", status=runs.WAITING, ended_at=None)
+    other_child = run(env)
+    other_flow = flow(env, claim="other")
+    other_flow["tasks"][0]["writer_run"] = other_child.id
+    flows.save(other_flow, env)
+    other_panel = panel(env, claim="other")
+    other_run = run(env, claim="other")
+    unclaimed = run(env)
+    arguments = ["prune", "--claim", "mine"]
+    if dry_run:
+        arguments.append("--dry-run")
+    if as_json:
+        arguments.append("--json")
+    assert main(arguments, env=env) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    removed = {child.id, parent["id"], member.id, group["id"], standalone.id}
+    if as_json:
+        result = json.loads(captured.out)
+        assert {item["id"] for item in result["removed"]} == removed
+        assert result["skipped"] == [dict(id=opened.id, reason="not ended")]
+    else:
+        verb = "would remove" if dry_run else "removed"
+        for ident in removed:
+            assert any(
+                verb in line and ident in line for line in captured.out.splitlines()
+            )
+        assert f"skipped {opened.id}: not ended" in captured.out
+    for ident in removed:
+        assert runs.run_dir(ident, env).exists() == dry_run
+    for ident in (
+        opened.id,
+        other_child.id,
+        other_flow["id"],
+        other_panel["id"],
+        other_run.id,
+        unclaimed.id,
+    ):
+        assert runs.run_dir(ident, env).exists()
+
+
+@pytest.mark.parametrize("parent_kind", ["flow", "panel"])
+@pytest.mark.parametrize("age", [86400, 86399])
+def test_claim_age_filters_parents_before_expanding_children(
+    env: dict[str, str], parent_kind: str, age: int
+) -> None:
+    child = run(env, ended_at=NOW, claim="mine")
+    if parent_kind == "flow":
+        parent = flow(env, claim="mine", ended_at=NOW - age)
+        parent["tasks"][0]["writer_run"] = child.id
+        flows.save(parent, env)
+    else:
+        parent = panel(env, child, claim="mine", ended_at=NOW - age)
+    old = run(env, claim="mine", ended_at=NOW - 86400)
+    young = run(env, claim="mine", ended_at=NOW - 86399)
+    result = prune.remove(1, claim="mine", env=env, now=NOW)
+    expected = {old.id, parent["id"], child.id} if age == 86400 else {old.id}
+    assert ids(result) == expected
+    assert not result.errors
+    assert not any(item["id"] in expected for item in result.skipped)
+    assert dict(id=young.id, reason="younger than the requested age") in result.skipped
+    assert young.folder.exists()
+    assert child.folder.exists() == (age < 86400)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("has_record", [False, True])
+def test_claim_never_sweeps_orphans(
+    env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    dry_run: bool,
+    has_record: bool,
+) -> None:
+    tree = orphan(env)
+    record = run(env, claim="mine") if has_record else None
+
+    def unexpected(*args: object, **kwargs: object) -> None:
+        pytest.fail("claim pruning ran an orphan sweep")
+
+    monkeypatch.setattr(prune, "_sweep_orphans", unexpected)
+    monkeypatch.setattr(prune, "_sweep_tmp", unexpected)
+    result = prune.remove(0, claim="mine", env=env, dry_run=dry_run)
+    assert ids(result) == ({record.id} if record else set())
+    assert not result.errors
+    assert tree.exists()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("parent_kind", [None, "flow", "panel"])
+def test_claim_keeps_unlocked_starting_records(
+    env: dict[str, str], dry_run: bool, parent_kind: str | None
+) -> None:
+    with live_preparation() as process:
+        child = replace(starting_run(env, process, "editing"), claim="mine")
+        runs.save(child)
+        parent_id = None
+        if parent_kind == "flow":
+            parent = flow(env, claim="mine")
+            parent["tasks"][0]["writer_run"] = child.id
+            flows.save(parent, env)
+            parent_id = parent["id"]
+        elif parent_kind == "panel":
+            parent_id = panel(env, child, claim="mine")["id"]
+        before = (child.folder / runs.RECORD_NAME).read_bytes()
+        result = prune.remove(0, claim="mine", env=env, dry_run=dry_run)
+        assert not result.removed and not result.failed and not result.errors
+        assert dict(id=child.id, reason="not ended") in result.skipped
+        assert (child.folder / runs.RECORD_NAME).read_bytes() == before
+        assert process.poll() is None
+        if parent_id:
+            assert runs.run_dir(parent_id, env).exists()
+
+
+@pytest.mark.parametrize("busy", [False, True])
+def test_claim_keeps_busy_or_unreadable_children(
+    env: dict[str, str], busy: bool
+) -> None:
+    child = run(env)
+    parent = panel(env, child, claim="mine")
+    with contextlib.ExitStack() as stack:
+        if busy:
+            stack.enter_context(held_command_lock(child))
+        else:
+            (child.folder / runs.RECORD_NAME).write_text("{")
+        result = prune.remove(0, claim="mine", env=env)
+    assert not result.removed
+    assert bool(result.errors) != busy
+    assert child.folder.exists()
+    assert runs.run_dir(parent["id"], env).exists()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_claim_rechecks_starting_state_under_lock(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch, dry_run: bool
+) -> None:
+    child = run(env, claim="mine")
+    original = prune._hold
+    starting = replace(child, status=runs.STARTING, ended_at=None)
+
+    def hold(
+        entry: prune.Entry, stack: contextlib.ExitStack, env: Mapping[str, str]
+    ) -> None:
+        original(entry, stack, env)
+        if entry.id == child.id:
+            runs.save(starting)
+
+    monkeypatch.setattr(prune, "_hold", hold)
+    result = prune.remove(0, claim="mine", env=env, dry_run=dry_run)
+    assert not result.removed and not result.failed and not result.errors
+    assert result.skipped == [dict(id=child.id, reason="not ended")]
+    assert runs.load(child.id, env) == starting

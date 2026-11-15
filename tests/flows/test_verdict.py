@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import fields
 from pathlib import Path
 
@@ -251,3 +252,93 @@ def test_schema_agrees_with_module() -> None:
     } - {"round", "run"}
     assert set(finding["required"]) == set(finding["properties"]) - {"note"}
     assert finding["additionalProperties"] is False
+    outside = schema["properties"]["outside_files"]
+    assert outside == {"type": "array", "items": {"$ref": "#/$defs/outside_file"}}
+    entry = schema["$defs"]["outside_file"]
+    assert entry["type"] == "object" and entry["additionalProperties"] is False
+    assert set(entry["required"]) == {item.name for item in fields(verdict.OutsideFile)}
+    assert entry["properties"]["file"] == {"type": "string"}
+    assert entry["properties"]["needed"] == {"type": "boolean"}
+    reason = entry["properties"]["reason"]
+    assert reason["type"] == "string"
+    assert re.search(reason["pattern"], "Needed by the caller")
+    assert not re.search(reason["pattern"], " \n\t")
+    assert not re.search(reason["pattern"], "")
+
+
+def test_outside_files_keep_task_order_and_normalize_findings() -> None:
+    review = verdict.read(
+        json.dumps(
+            {
+                "verdict": "pass",
+                "findings": ["malformed"],
+                "outside_files": [
+                    {"file": "b", "needed": False, "reason": "Unrelated wording"},
+                    {"file": "unlisted", "needed": [], "reason": None},
+                    {"file": "unlisted"},
+                    {"file": []},
+                    None,
+                    {"file": "a", "needed": True, "reason": "Caller needs the change"},
+                ],
+            }
+        ),
+        outside=["a", "b"],
+    )
+    assert review.problem is None
+    assert review.outside_files == (
+        verdict.OutsideFile("a", True, "Caller needs the change"),
+        verdict.OutsideFile("b", False, "Unrelated wording"),
+    )
+    assert review.outside_files[0].to_json() == {
+        "file": "a",
+        "needed": True,
+        "reason": "Caller needs the change",
+    }
+    assert review.findings[0].severity == "should"
+    assert review.decision(0) == ("accept", None)
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        None,
+        {},
+        [],
+        [{"file": "./a", "needed": True, "reason": "Not an exact path"}],
+        [{"file": "a", "needed": True, "reason": "Needed"}] * 2,
+        [{"file": "a", "needed": True, "reason": "Needed"}, {"file": "a"}],
+        [{"file": "a", "reason": "Needed"}],
+        [{"file": "a", "needed": 1, "reason": "Needed"}],
+        [{"file": "a", "needed": "true", "reason": "Needed"}],
+        [{"file": "a", "needed": None, "reason": "Needed"}],
+        [{"file": "a", "needed": True}],
+        [{"file": "a", "needed": True, "reason": None}],
+        [{"file": "a", "needed": True, "reason": 1}],
+        [{"file": "a", "needed": True, "reason": ""}],
+        [{"file": "a", "needed": True, "reason": " \n\t"}],
+    ],
+)
+def test_invalid_outside_files_are_unreadable(entries: object) -> None:
+    review = verdict.read(
+        json.dumps({"verdict": "pass", "findings": [], "outside_files": entries}),
+        outside=["a", "b"],
+    )
+    assert review.verdict is None and review.outside_files == ()
+    assert review.problem is not None
+    assert "a (" in review.problem and "b (missing)" in review.problem
+    assert review.decision(1) == ("stop", f"the review is unreadable: {review.problem}")
+
+
+def test_outside_files_property_is_required_only_for_listed_paths() -> None:
+    text = json.dumps({"verdict": "pass", "findings": []})
+    assert verdict.read(text).outside_files == ()
+    missing = verdict.read(text, outside=["src/helper.py"])
+    assert missing.problem == "the reply's outside_files: src/helper.py (missing)"
+    unrelated = json.dumps(
+        {
+            "verdict": "pass",
+            "findings": [],
+            "outside_files": [{"file": "unknown"}],
+        }
+    )
+    assert verdict.read(unrelated) == verdict.read(text)

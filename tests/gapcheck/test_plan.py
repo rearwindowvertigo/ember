@@ -146,3 +146,161 @@ def test_load_errors(tmp_path: Path, bad_bytes: bytes | None) -> None:
     with pytest.raises(PlanError, match=f"cannot read the plan {path}:") as error:
         load(path)
     assert isinstance(error.value.__cause__, (OSError, UnicodeDecodeError))
+
+
+@pytest.mark.parametrize("valid", [False, True])
+def test_flow_read_paths_survive_other_validation_errors(
+    tmp_path: Path, valid: bool
+) -> None:
+    path = tmp_path / "plan.json"
+    source = tmp_path / "issue.md"
+    path.write_text(
+        json.dumps(
+            {
+                "dir": str(tmp_path),
+                "read": [str(source)],
+                "tasks": [
+                    {
+                        "id": "a",
+                        "subject": "feat: build",
+                        "task": "Build",
+                        "files": ["a.py"],
+                    }
+                ]
+                if valid
+                else [],
+            }
+        )
+    )
+    document = load(path)
+    assert (document.flow is not None) is valid
+    assert bool(document.flow_problems) is not valid
+    assert document.read == (str(source),)
+    assert document.read_paths() == (str(source),)
+
+
+@pytest.mark.parametrize(
+    "read", [None, "file", {}, [1], ["relative"], ["/a", 1], ["/a", "/a"]]
+)
+def test_invalid_flow_read_list_is_not_used(tmp_path: Path, read: object) -> None:
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps({"dir": str(tmp_path), "tasks": [], "read": read}))
+    document = load(path)
+    assert document.flow is None
+    assert any("plan.read" in problem for problem in document.flow_problems)
+    assert document.read_paths() == ()
+
+
+@pytest.mark.parametrize("fields", [{}, {"tasks": []}, {"dir": "/repo"}])
+def test_non_flow_json_ignores_read(tmp_path: Path, fields: dict[str, object]) -> None:
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps({**fields, "read": ["/source"]}))
+    document = load(path)
+    assert document.read == () and document.flow_problems == ()
+
+
+def test_read_paths_normalize_and_keep_first_occurrence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    source = tmp_path / "issue.md"
+    source.write_text("source")
+    (tmp_path / "alias.md").symlink_to(source)
+    (tmp_path / "nested").mkdir()
+    path = tmp_path / "plan.json"
+    path.write_text(
+        json.dumps({"dir": str(tmp_path), "tasks": [], "read": [str(source)]})
+    )
+    assert load(path).read_paths(
+        [
+            "~/issue.md",
+            "./issue.md",
+            "nested/../issue.md",
+            "alias.md",
+            "other.md",
+            str(source),
+        ]
+    ) == (str(source), str(tmp_path / "other.md"))
+
+
+def test_read_paths_resolve_directory_symlinks_before_parent_components(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    sources = tmp_path / "sources"
+    sources.mkdir()
+    archive = tmp_path / "archive"
+    (archive / "release").mkdir(parents=True)
+    (sources / "current").symlink_to(archive / "release", target_is_directory=True)
+    target = archive / "source.md"
+    target.write_text("Source text")
+    source = archive / "issue-291.md"
+    source.symlink_to(target)
+    (sources / source.name).write_text("Wrong source")
+    given = sources / "current" / ".." / source.name
+    path = tmp_path / "plan.json"
+    path.write_text(
+        json.dumps({"dir": str(tmp_path), "tasks": [], "read": [str(given)]})
+    )
+    reads = load(path).read_paths(["sources/current/../issue-291.md", str(source)])
+    assert reads == (str(source),)
+    assert Path(reads[0]).read_text() == "Source text"
+    assert Path(reads[0]).name == "issue-291.md"
+
+
+def test_read_paths_preserve_an_unresolvable_parent(tmp_path: Path) -> None:
+    source = tmp_path / "missing" / ".." / "issue.md"
+    (tmp_path / "issue.md").write_text("Wrong source")
+    path = tmp_path / "plan.md"
+    path.write_text("Review")
+    existing = tmp_path / "issue.md"
+    assert load(path).read_paths([str(source), str(existing)]) == (
+        str(source),
+        str(existing),
+    )
+
+
+@pytest.mark.parametrize(
+    ("spelling", "kept"),
+    [
+        ("sources/release/..", "sources"),
+        ("sources/release/../", "sources"),
+        ("current/..", "sources"),
+        ("sources//./", "sources"),
+        ("sources//./release", "sources/release"),
+        ("current/.", "sources/release"),
+        ("current/./", "sources/release"),
+        ("current/", "current"),
+        ("~/sources/", "sources"),
+    ],
+)
+def test_read_paths_deduplicate_resolved_folders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spelling: str, kept: str
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    release = tmp_path / "sources" / "release"
+    release.mkdir(parents=True)
+    (tmp_path / "current").symlink_to(release, target_is_directory=True)
+    given = spelling if spelling.startswith("~") else f"{tmp_path}/{spelling}"
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps({"dir": str(tmp_path), "tasks": [], "read": [given]}))
+    expected = tmp_path / kept
+    assert load(path).read_paths([str(expected.resolve())]) == (str(expected),)
+
+
+def test_read_paths_keep_first_citation_filename_and_distinct_files(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.md"
+    source.write_text("Source text")
+    cited = tmp_path / "issue-291.md"
+    cited.symlink_to(source)
+    other = tmp_path / "other.md"
+    other.write_text("Source text")
+    path = tmp_path / "plan.json"
+    path.write_text(
+        json.dumps({"dir": str(tmp_path), "tasks": [], "read": [str(cited)]})
+    )
+    assert load(path).read_paths([str(source), str(other)]) == (str(cited), str(other))

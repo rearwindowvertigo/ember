@@ -92,7 +92,11 @@ if [ ! -d "$work/.git" ]; then
     git -C "$work" config core.sshCommand false
     printf '.ember-eval/\n' >> "$work/.git/info/exclude"
     git -C "$work" remote add origin "$REMOTE_URL"
+    git -C "$work" add tools
+    git -C "$work" commit -q -m "[report] Add the order report tool"
+    git -C "$work" add tests
+    git -C "$work" commit -q -m "[tests] Add tests for the order report"
     git -C "$work" add -A
-    git -C "$work" commit -q -m "Add the order report tool and its tests"
+    git -C "$work" commit -q -m "[docs] Add the readme, the agent notes and sample orders"
     git -C "$work" checkout -q -b "$SESSION_BRANCH"
 fi

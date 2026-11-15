@@ -187,7 +187,28 @@ def test_case_files_parse(case: str) -> None:
     assert graders
     for grader in graders:
         meta, text = front_matter(grader)
-        assert meta == {"type": "llm", "focus": "trace", "weight": "1"}, grader
+        if meta.get("type") == "script":
+            # Decided by _runner/grade.py from the order of the run's Bash calls.
+            assert set(meta) == {
+                "type",
+                "focus",
+                "weight",
+                "check",
+                "first",
+                "then",
+            }, grader
+            assert (meta["focus"], meta["weight"], meta["check"]) == (
+                "trace",
+                "1",
+                "order",
+            ), grader
+            for pattern in (meta["first"], meta["then"]):
+                assert re.compile(pattern.strip("'\"")).pattern, grader
+        else:
+            # An llm grader may name files and a command for grade.py to copy.
+            extra = {key: meta.pop(key) for key in ("files", "command") if key in meta}
+            assert all(value.strip() for value in extra.values()), grader
+            assert meta == {"type": "llm", "focus": "trace", "weight": "1"}, grader
         assert text.strip()
     replies = folder / "owner-replies.md"
     if replies.exists():
@@ -320,9 +341,11 @@ def test_install_sets_up_the_repository(tmp_path: Path, env: dict[str, str]) -> 
     )
     assert work.git("config", "core.sshCommand") == "false"
     assert work.git("status", "--porcelain") == ""
-    assert work.git("log", "--format=%s", "main") == (
-        "Add the order report tool and its tests"
-    )
+    assert work.git("log", "--format=%s", "main").splitlines() == [
+        "[docs] Add the readme, the agent notes and sample orders",
+        "[tests] Add tests for the order report",
+        "[report] Add the order report tool",
+    ]
     for name in ("README.md", "AGENTS.md", "CLAUDE.md", "tools/report.py"):
         assert (work.work / name).is_file()
     for name in ("bin/emb", "bin/stub.py", "replies/menu.json", "env.sh"):
@@ -1337,20 +1360,28 @@ def test_stub_merge_prints_no_line_for_a_kept_branch(
     assert "next:" not in merged.stderr
 
 
+@pytest.mark.parametrize("claim_status", [None, "claimed", "none", "gone"])
 def test_stub_cleanup_prints_the_claim_finish_line_by_the_reference_rule(
-    tmp_path: Path, env: dict[str, str]
+    tmp_path: Path, env: dict[str, str], claim_status: str | None
 ) -> None:
-    """The line follows exit 0 with --claim, unless a kept result holds the claim."""
+    """Only an open claim with no kept result gets a finish line after cleanup."""
     work = case("claim-and-menu-writer", tmp_path, env)
     claim = "cleanup-abc123"
     started = work.emb(
         "run", "--engine", "codex", "--dir", ".", "--task-file", work.brief(),
         "--claim", claim,
     )  # fmt: skip
+    if claim_status == "gone":
+        assert work.emb("choices", "--finish", claim).returncode == 0
+    elif claim_status is not None:
+        state_file = work.eval / "state.json"
+        state = json.loads(state_file.read_text())
+        state["claims"][claim] = claim_status
+        state_file.write_text(json.dumps(state))
     run_id = started.stdout.splitlines()[0].removeprefix("run ")
     branch = f"ember/codex/{run_id}"
     target = "claude/report-since"
-    finish = f"next: emb choices --finish {claim}\n"
+    finish = "" if claim_status == "gone" else f"next: emb choices --finish {claim}\n"
     # The branch is not contained: a kept result holds the claim.
     kept = work.emb("cleanup", "--merged-into", target, "--claim", claim)
     assert kept.stdout.startswith(f"kept {branch}: not contained in {target}")
@@ -1365,7 +1396,7 @@ def test_stub_cleanup_prints_the_claim_finish_line_by_the_reference_rule(
         not in work.emb("cleanup", "--merged-into", target).stderr
     )
     work.git("merge", "--no-edit", "-q", branch)
-    # Contained: a dry run prints no line, the real cleanup does.
+    # Contained: only real cleanup of an open claim prints the line.
     dry = work.emb("cleanup", "--merged-into", target, "--claim", claim, "--dry-run")
     assert dry.stdout.startswith(f"would remove {branch}")
     assert "emb choices --finish" not in dry.stderr
@@ -2041,8 +2072,15 @@ def test_runner_reply_loop(tmp_path: Path, env: dict[str, str]) -> None:
     assert [json.loads(line)["type"] for line in trace] == [
         "assistant",
         "result",
+        "owner_reply",
         "result",
     ]
+    # The runner marks each reply in the trace, before the turn it starts.
+    assert json.loads(trace[2]) == {
+        "type": "owner_reply",
+        "n": 1,
+        "text": "Leave it as it is.",
+    }
     assert (out / "prompt.txt").read_text().startswith("Add a `--since")
     assert json.loads((out / "run.json").read_text())["exit"] == 0
     assert len((out / "calls.log").read_text().splitlines()) == 2
@@ -2406,7 +2444,7 @@ def test_new_route_needs_reply(
     assert work.calls()[-1]["exit"] == 69
 
 
-def flow_plan(work: Case, tasks: list[dict[str, str]] | None = None) -> Path:
+def flow_plan(work: Case, tasks: list[dict[str, Any]] | None = None) -> Path:
     plan = work.work.parent / "plan.json"
     plan.write_text(
         json.dumps(
@@ -2428,6 +2466,143 @@ def flow_plan(work: Case, tasks: list[dict[str, str]] | None = None) -> Path:
         )
     )
     return plan
+
+
+def stopped_flow_plan(work: Case) -> Path:
+    return flow_plan(
+        work,
+        [
+            {
+                "id": "parse",
+                "subject": "fix: validate order quantities",
+                "task": "Raise ValueError naming the line for non-whole quantities.",
+                "files": ["tools/report.py", "tests/test_report.py"],
+            },
+            {
+                "id": "strict",
+                "subject": "feat: add strict reporting",
+                "task": "Add --strict to report errors with exit 65.",
+                "files": ["tools/report.py", "tests/test_report.py"],
+                "after": ["parse"],
+            },
+        ],
+    )
+
+
+@pytest.mark.parametrize("stage", ["parse", "writer", "answer"])
+def test_flow_lead_stop_stages(tmp_path: Path, env: dict[str, str], stage: str) -> None:
+    work = case("flow-lead-stop-waits", tmp_path, env)
+    plan = stopped_flow_plan(work)
+    tasks = json.loads(plan.read_text())["tasks"]
+    original = work.git("rev-parse", "HEAD")
+    start = work.emb("flow", "--plan", str(plan), "--start")
+    assert start.returncode == 0, start.stderr
+    flow_id = start.stdout.splitlines()[0].split()[1]
+    branch = f"ember/flow/{flow_id}"
+    tree = worktree_path(work, flow_id)
+    parse_tip = work.git("rev-parse", branch)
+    assert work.git("rev-parse", f"{branch}^") == original
+    assert work.git("log", "-1", "--format=%s", branch) == tasks[0]["subject"]
+    assert "--strict" not in (tree / "tools/report.py").read_text()
+    assert "warning:" not in (tree / "tools/report.py").read_text()
+    assert not work.git("branch", "--list", "ember/codex/*")
+    if stage != "parse":
+        watch = work.emb("flow", "--watch", flow_id, "--json")
+        assert watch.returncode == 0, watch.stderr
+        document = json.loads(watch.stdout)
+        assert document["tasks"][0]["merge_commit"] == parse_tip
+        task = document["tasks"][1]
+        assert task["merge_commit"] is None
+        tree = Path(task["worktree"])
+        assert tree.is_dir()
+        assert work.git("rev-parse", f"{task['branch']}^") == parse_tip
+        assert (
+            work.git("log", "-1", "--format=%s", task["branch"])
+            == (tasks[1]["subject"])
+        )
+        assert work.git("rev-parse", branch) == parse_tip
+        from ember.flows import command as flows
+
+        flow = {**document, "id": flow_id}
+        expected = flows._stop_reports(flow, document["stops"], False, {})
+        expected.append(flows._next(flow, "lead_stop", None, False))
+        assert watch.stderr.splitlines() == expected
+        assert (work.eval / "replies/flow-watch.1.err").read_text().splitlines() == (
+            expected
+        )
+    if stage == "answer":
+        reply = work.brief(
+            "Without --strict, skip the bad row with a warning on stderr.\n"
+        )
+        answer = work.emb("flow", "--lead", flow_id, "strict", "--send", reply)
+        assert answer.returncode == 0, answer.stderr
+        tree = worktree_path(work, flow_id)
+        assert work.git("rev-parse", f"{branch}^") == parse_tip
+        assert work.git("log", "-1", "--format=%B", branch) == (
+            tasks[1]["subject"] + "\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
+        )
+        for fixture in (work.eval / "replies/flow-lead.files").rglob("*.py"):
+            relative = fixture.relative_to(work.eval / "replies/flow-lead.files")
+            assert (tree / relative).read_bytes() == fixture.read_bytes()
+        watch = work.emb("flow", "--watch", flow_id, "--json")
+        assert watch.returncode == 0, watch.stderr
+        document = json.loads(watch.stdout)
+        assert document["event"] == "end"
+        assert document["tip"] == work.git("rev-parse", branch)
+        assert all(task["status"] == "merged" for task in document["tasks"])
+        assert {task["id"]: task["merge_commit"] for task in document["tasks"]} == {
+            "parse": parse_tip,
+            "strict": document["tip"],
+        }
+        for task, planned in zip(document["tasks"], tasks, strict=True):
+            assert (
+                work.git("log", "-1", "--format=%s", task["merge_commit"])
+                == (planned["subject"])
+            )
+    check = subprocess.run(
+        ["python3", "-m", "unittest", "discover", "-s", "tests"],
+        cwd=tree,
+        env={**work.env, "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert check.returncode == 0, check.stderr
+    orders = tmp_path / "bad-orders.csv"
+    orders.write_text("date,item,quantity,price\n2026-01-01,Tea,1.5,2.00\n")
+    for strict in [False] if stage == "parse" else [False, True]:
+        result = subprocess.run(
+            [
+                "python3",
+                "tools/report.py",
+                *(["--strict"] if strict else []),
+                str(orders),
+            ],
+            cwd=tree,
+            env=work.env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        message = "line 2: quantity must be a whole number"
+        if strict:
+            assert (result.returncode, result.stdout, result.stderr) == (
+                65,
+                "",
+                message + "\n",
+            )
+        elif stage == "answer":
+            assert (result.returncode, result.stdout, result.stderr) == (
+                0,
+                "quantity: 0\nrevenue: 0.00\n",
+                f"warning: {message}\n",
+            )
+        else:
+            assert result.returncode == 1
+            assert result.stdout == ""
+            assert "Traceback" in result.stderr
+            assert f"ValueError: {message}\n" in result.stderr
+            assert "warning:" not in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -2452,7 +2627,7 @@ def test_worktree_paths_and_templates_follow_data_environment(
         link.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         link.symlink_to(target, target_is_directory=True)
     work = case("flow-lead-stop-waits", tmp_path, env)
-    result = work.emb("flow", "--plan", str(flow_plan(work)), "--start")
+    result = work.emb("flow", "--plan", str(stopped_flow_plan(work)), "--start")
     assert result.returncode == 0, result.stderr
     flow_id = result.stdout.splitlines()[0].removeprefix("flow ")
     tree = worktree_path(work, flow_id)
@@ -2468,9 +2643,31 @@ def test_worktree_paths_and_templates_follow_data_environment(
 @pytest.mark.parametrize("name", FLOW_CASES)
 def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) -> None:
     work = case(name, tmp_path, env)
-    plan = flow_plan(work)
+    plan = (
+        stopped_flow_plan(work) if name == "flow-lead-stop-waits" else flow_plan(work)
+    )
+    document = json.loads(plan.read_text())
     head = work.git("rev-parse", "HEAD")
-    result = work.emb("flow", "--plan", str(plan), "--start", "--claim", "run-abc123")
+    workers = json.loads(
+        work.emb("flow", "--plan", str(plan), "--dry-run", "--json").stdout
+    )
+    named = name == "owner-away-named-workers"
+    options = (
+        [
+            argument
+            for role in ("writer", "reviewer")
+            for argument in (
+                f"--{role}",
+                f"{workers[role]['engine']}:{workers[role]['model']}"
+                f"@{workers[role]['effort']}",
+            )
+        ]
+        if named
+        else []
+    )
+    result = work.emb(
+        "flow", "--plan", str(plan), "--start", "--claim", "run-abc123", *options
+    )
     assert result.returncode == 0, result.stderr
     flow_id = result.stdout.splitlines()[0].removeprefix("flow ")
     assert re.fullmatch(r"flow-\d{8}-\d{6}-[0-9a-f]{6}", flow_id)
@@ -2481,10 +2678,24 @@ def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) ->
         f"branch {branch}",
         f"worktree {tree}",
     ]
-    assert result.stderr == f"next: emb flow --watch {flow_id} --json\n"
+    lines = [
+        (f"option, {role}" if named else f"Team, Single tasks {role.title()}")
+        + f": {workers[role]['engine']} {workers[role]['model']} · "
+        f"{workers[role]['effort']} ({'option' if named else f'single.{role}'})"
+        for role in ("writer", "reviewer")
+    ]
+    if workers["same_model"]:
+        lines.append(
+            "same model: writer and reviewer both resolve to "
+            f"{workers['writer']['engine']} {workers['writer']['model']}"
+        )
+    assert result.stderr.splitlines() == lines + [
+        f"next: emb flow --watch {flow_id} --json"
+    ]
     assert work.git("rev-parse", f"{branch}^") == head
     assert work.git("log", "-1", "--format=%B", branch) == (
-        "feat: extend the report\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
+        document["tasks"][0]["subject"]
+        + "\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
     )
     assert work.git("diff", "--name-only", f"HEAD...{branch}") == (
         "tests/test_report.py\ntools/report.py"
@@ -2496,6 +2707,9 @@ def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) ->
         "main": str(work.work),
         "branch": branch,
         "worktree": str(tree),
+        "subjects": {task["id"]: task["subject"] for task in document["tasks"]},
+        "trailers": document["trailers"],
+        "merge_commits": {document["tasks"][0]["id"]: work.git("rev-parse", branch)},
     }
     assert state["runs"] == {}
     check = subprocess.run(
@@ -2523,6 +2737,11 @@ def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) ->
         assert answer.stdout == f"queued answer 1: send for strict\nflow {flow_id}\n"
         watch = work.emb("flow", "--watch", flow_id, "--json")
         report = json.loads(watch.stdout)
+    else:
+        assert work.git("rev-parse", f"{branch}^") == head
+        for fixture in (work.eval / "replies/flow-start.files").rglob("*.py"):
+            relative = fixture.relative_to(work.eval / "replies/flow-start.files")
+            assert (tree / relative).read_bytes() == fixture.read_bytes()
     assert report["event"] == "end"
     assert all(task["status"] == "merged" for task in report["tasks"])
     assert report["next"] + "\n" == watch.stderr
@@ -3134,7 +3353,7 @@ def test_flow_stop_reports_match_commands(
     live: bool,
     capacity: bool,
 ) -> None:
-    """Every stop prints one report after next, also included in watch JSON."""
+    """Every stop prints one report before next, also included in watch JSON."""
     work = case("flow-lead-stop-waits", tmp_path, env)
     replies = work.eval / "replies"
     path = replies / "flow-watch.1.json"
@@ -3154,12 +3373,14 @@ def test_flow_stop_reports_match_commands(
         "report: capacity on strict; recommend only the same-worker retry"
         if capacity
         else f"report: lead stop on strict; {state}; "
-        "list every printed choice and recommend one",
+        "give the reason as printed, list every printed choice by its option "
+        "with what it does, and recommend one",
         f"report: lead stop on flow-id; {state}; "
-        "list every printed choice and recommend one",
+        "give the reason as printed, list every printed choice by its option "
+        "with what it does, and recommend one",
     ]
-    assert result.stderr.splitlines()[0].startswith("next:")
-    assert result.stderr.splitlines()[1:] == expected
+    assert result.stderr.splitlines()[-1].startswith("next:")
+    assert result.stderr.splitlines()[:-1] == expected
     if as_json:
         assert json.loads(result.stdout)["report"] == expected
     else:
@@ -3217,6 +3438,225 @@ def test_flow_dry_run_announces_both_workers(
             f"{worker['effort']} ({source})"
         )
     assert text.stderr == ""
+
+
+@pytest.mark.parametrize(
+    ("reviewer", "same_model"),
+    [
+        ("codex:gpt-6.1-sol@medium", True),
+        ("codex:gpt-6.1-sol-mini@medium", False),
+        ("opencode:gpt-6.1-sol@medium", False),
+    ],
+)
+def test_flow_start_announces_resolved_workers(
+    tmp_path: Path, env: dict[str, str], reviewer: str, same_model: bool
+) -> None:
+    work = case("flow-gap-check-first", tmp_path, env)
+    # Use the production planner, as the submitted-plan eval cases do.
+    (work.eval / "real-flow-planner").touch()
+    args = [
+        "flow", "--plan", str(flow_plan(work)),
+        "--writer", "codex:gpt-6.1-sol@high", "--reviewer", reviewer,
+    ]  # fmt: skip
+    preview = work.emb(*args, "--dry-run")
+    assert preview.returncode == 0, preview.stderr
+    document = json.loads(work.emb(*args, "--dry-run", "--json").stdout)
+    started = work.emb(*args, "--start")
+    assert started.returncode == 0, started.stderr
+    engine_model, effort = reviewer.split("@")
+    engine, model = engine_model.split(":")
+    lines = [
+        "option, writer: codex gpt-6.1-sol · high (option)",
+        f"option, reviewer: {engine} {model} · {effort} (option)",
+    ]
+    if same_model:
+        lines += ["same model: writer and reviewer both resolve to codex gpt-6.1-sol"]
+    assert document["same_model"] is same_model
+    assert preview.stdout.splitlines()[: len(lines)] == lines
+    assert all(line not in preview.stderr for line in lines)
+    flow_id = started.stdout.splitlines()[0].removeprefix("flow ")
+    assert started.stderr.splitlines() == lines + [
+        f"next: emb flow --watch {flow_id} --json"
+    ]
+    assert "same model:" not in started.stdout
+    if not same_model:
+        assert "same model:" not in preview.stdout
+
+
+@pytest.mark.parametrize(
+    ("row_engine", "row_model", "row_effort", "same", "effort", "source"),
+    [
+        ("codex", "gpt-6.1-sol", "high", True, "high", "single.writer"),
+        ("codex", "gpt-6.1-sol", "high", False, "high", "flow.writer"),
+        ("codex", "other", "high", False, "medium", "option"),
+        ("opencode", "gpt-6.1-sol", "high", False, "medium", "option"),
+        ("codex", "gpt-6.1-sol", None, False, "medium", "option"),
+    ],
+)
+def test_flow_worker_option_inherits_effort_without_engine_probes(
+    tmp_path: Path,
+    env: dict[str, str],
+    row_engine: str,
+    row_model: str,
+    row_effort: str | None,
+    same: bool,
+    effort: str,
+    source: str,
+) -> None:
+    work = case("flow-gap-check-first", tmp_path, env)
+    settings_path = work.eval / "replies/choices-read-id.out"
+    settings = json.loads(settings_path.read_text())
+    settings["menu"]["flow.writer"].update(
+        state="set", engine=row_engine, model=row_model, effort=row_effort, same=same
+    )
+    settings_path.write_text(json.dumps(settings))
+    marker = work.eval / "engine-probed"
+    for engine in ("codex", "claude", "opencode"):
+        binary = work.eval / "bin" / engine
+        binary.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexit 99\n")
+        binary.chmod(0o755)
+    (work.eval / "real-flow-planner").touch()
+    args = [
+        "flow", "--plan", str(flow_plan(work)),
+        "--writer", "codex:gpt-6.1-sol", "--reviewer", "claude:opus",
+    ]  # fmt: skip
+    provenance = "option" if source == "option" else f"model: option, effort: {source}"
+    lines = [
+        f"option, writer: codex gpt-6.1-sol · {effort} ({provenance})",
+        "option, reviewer: claude opus · default (option)",
+    ]
+    started = work.emb(*args, "--start")
+    assert started.returncode == 0, started.stderr
+    assert started.stderr.splitlines()[:2] == lines
+    preview = work.emb(*args, "--dry-run")
+    assert preview.returncode == 0, preview.stderr
+    assert preview.stdout.splitlines()[:2] == lines
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("mode", ["watch", "status", "resume", "start"])
+@pytest.mark.parametrize("wave", [0, 2])
+def test_flow_failed_check_reports(
+    tmp_path: Path, env: dict[str, str], as_json: bool, mode: str, wave: int
+) -> None:
+    work = case("small-change-no-worker", tmp_path, env)
+    base = work.eval / "replies" / f"flow-{mode}"
+    document = {
+        "flow": "flow-id",
+        "status": "failed",
+        "check_pending": True,
+        "wave": wave,
+        "event": "end",
+        "tasks": [],
+        "stops": [],
+    }
+    expected = (
+        "report: the check failed on the base; "
+        "correct the check or the flow branch, then resume"
+        if wave == 0
+        else "report: the check failed after wave 2; fix the flow branch, then resume"
+    ) + (
+        "; when the check command is wrong, replace it with "
+        "emb flow --resume flow-id --check '<JSON argv list>' --reason '<text>'"
+    )
+    if mode == "watch":
+        # Production watch snapshots carry the report, not these record fields.
+        del document["check_pending"], document["wave"]
+        document["report"] = [expected]
+    base.with_suffix(".json").write_text(json.dumps(document))
+    base.with_suffix(".code").write_text("82")
+    base.with_suffix(".out").write_text("fixture output\n")
+    base.with_suffix(".err").write_text(
+        "next: emb flow --resume flow-id\n"
+        + (expected + "\n" if mode == "watch" else "")
+    )
+    args = (
+        ["--start", "--plan", str(flow_plan(work))]
+        if mode == "start"
+        else [f"--{mode}", "flow-id"]
+    )
+    result = work.emb("flow", *args, *(["--json"] if as_json else []))
+    assert result.returncode == 82, result.stderr
+    assert result.stderr == f"next: emb flow --resume flow-id\n{expected}\n"
+    if as_json and mode == "watch":
+        snapshot = json.loads(result.stdout)
+        assert snapshot["report"] == [expected]
+        assert "check_pending" not in snapshot and "wave" not in snapshot
+    elif not as_json:
+        assert "report:" not in result.stdout
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("mode", ["watch", "status"])
+@pytest.mark.parametrize("outside_count", [0, 1, 2])
+@pytest.mark.parametrize("captured_reports", [False, True])
+def test_flow_done_reports(
+    tmp_path: Path,
+    env: dict[str, str],
+    as_json: bool,
+    mode: str,
+    outside_count: int,
+    captured_reports: bool,
+) -> None:
+    work = case("small-change-no-worker", tmp_path, env)
+    tasks: list[dict[str, Any]] = [
+        {
+            "id": name,
+            "status": "merged",
+            "findings": [{"severity": "lead"}, {"severity": "should"}],
+            "outside_files": [f"{name}.py", f"test_{name}.py"]
+            if index < outside_count
+            else [],
+        }
+        for index, name in enumerate(("first", "second"))
+    ]
+    if mode == "watch":
+        for task in tasks:
+            task["finding_details"] = task["findings"]
+            task["findings"] = {"lead": 1, "should": 1, "must": 0}
+    document = {
+        "id": "flow-id",
+        "flow": "flow-id",
+        "status": "done",
+        "event": "end",
+        "tasks": tasks,
+        "stops": [],
+    }
+    expected = [
+        "report: 2 lead and 2 should findings remain on merged tasks; "
+        "inspect each before merging"
+    ]
+    if outside_count:
+        names = "first (2)" if outside_count == 1 else "first (2), second (2)"
+        expected += [
+            f"report: {outside_count} merged task{'s' if outside_count == 2 else ''} "
+            f"changed files outside their declared files: {names}; "
+            "inspect each before merging"
+        ]
+    report_key = "report" if mode == "watch" else "reports"
+    if captured_reports:
+        document[report_key] = expected
+    base = work.eval / "replies" / f"flow-{mode}"
+    base.with_suffix(".json").write_text(json.dumps(document))
+    captured = "".join(line + "\n" for line in expected) if captured_reports else ""
+    base.with_suffix(".out").write_text(
+        "fixture output\n" + (captured if mode == "status" else "")
+    )
+    base.with_suffix(".err").write_text(
+        "next: review the flow branch\n" + captured if mode == "watch" else ""
+    )
+    result = work.emb("flow", f"--{mode}", "flow-id", *(["--json"] if as_json else []))
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.splitlines() == (
+        ["next: review the flow branch", *expected] if mode == "watch" else []
+    )
+    if as_json:
+        assert json.loads(result.stdout)[report_key] == expected
+    elif mode == "status":
+        assert result.stdout.splitlines() == ["fixture output", *expected]
+    else:
+        assert "report:" not in result.stdout
 
 
 def test_merge_conflict_prints_owner_then_report(
@@ -3310,7 +3750,7 @@ def test_flow_repeated_capacity_stop_keeps_report(
         result = work.emb("flow", "--watch", "flow-id", "--json")
         expected = "report: capacity on strict; recommend only the same-worker retry"
         assert json.loads(result.stdout)["report"] == [expected]
-        assert result.stderr.splitlines()[-1] == expected
+        assert result.stderr.splitlines().count(expected) == 1
 
 
 @pytest.mark.parametrize("with_previous", [False, True])

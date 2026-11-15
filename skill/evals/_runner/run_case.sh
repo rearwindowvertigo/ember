@@ -115,6 +115,9 @@ if [ -z "$override" ] && [ -f "$replies" ]; then
         reply=$(grep -E '^[0-9]+\. ' "$replies" | sed -n "${n}p" | sed 's/^[0-9]*\. [^:]*: //')
         [ -n "$reply" ] || break
         echo "owner reply $n: $reply" >> "$out/owner.log"
+        python3 -I -c 'import json, sys
+print(json.dumps({"type": "owner_reply", "n": int(sys.argv[1]), "text": sys.argv[2]}))' \
+            "$n" "$reply" >> "$out/trace.jsonl"
         run_claude "$out/trace.jsonl" --resume "$sid" "$reply"
         code=$?
         n=$((n + 1))

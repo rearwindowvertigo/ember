@@ -46,10 +46,20 @@
 
 Before a change that moves, removes or rewrites rules in `skill/SKILL.md`
 or `skill/references/` merges into `main`, its author lists the cases whose
-graders exercise those rules and compares each with
-`bash skill/evals/_runner/run_repeat.sh --base origin/main <case dir> <out dir>`.
-The author grades every run on both sides and records `tally.py`'s
-`all graders` pass counts for both `skill` and `base` on the change's issue.
+graders exercise those rules and runs each five times with
+`bash skill/evals/_runner/run_repeat.sh --runs 5 <case dir> <out dir>`.
+The author grades the runs with `skill/evals/_runner/grade.py` and records
+`tally.py`'s counts on the change's issue. The change merges when every
+listed case shows `5/5` in the `skill` column of `all graders`.
+
+When a case falls short, the author finds the root cause before changing
+anything: what causes the miss, which other cases and rules the same cause
+affects, and the fix that covers all of them, not only the run that
+failed. Where a change to a design or a decision would serve the intended
+behaviour better than a patch, the author says so to the owner. The cause
+and the fix are recorded on the change's issue. The fix changes the skill
+text, a grader or the fixture, and the case is then run five more times.
+The same text is not run again to get a better batch.
 The [eval README](../skill/evals/README.md#repeated-runs-_runnerrun_repeatsh-and-_runnertallypy)
 describes repeated runs, grading and tallying.
 

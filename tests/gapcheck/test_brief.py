@@ -3,8 +3,66 @@ from pathlib import Path
 
 import pytest
 
+from ember import citations
 from ember.gapcheck import brief, plan, previous, reply
 from runs.stub_engine import make_env  # pyrefly: ignore[missing-import]
+
+
+@pytest.mark.parametrize("valid", [False, True])
+def test_flow_sources_are_listed_once_despite_validation_errors(
+    tmp_path: Path, valid: bool
+) -> None:
+    path = tmp_path / "flow.json"
+    source = tmp_path / "issue.md"
+    source.write_text("source")
+    extra = tmp_path / "extra.md"
+    extra.write_text("extra source")
+    path.write_text(
+        json.dumps(
+            {
+                "dir": str(tmp_path),
+                "read": [str(source)],
+                "tasks": [
+                    {
+                        "id": "a",
+                        "subject": "feat: build",
+                        "task": "Build",
+                        "files": ["a.py"],
+                    }
+                ]
+                if valid
+                else [],
+            }
+        )
+    )
+    document = plan.load(path)
+    sources = citations.source_files(document.read_paths([str(source), str(extra)]))
+    rendered = brief.text(document, str(tmp_path), sources=sources)
+    assert rendered.splitlines().count(f"- {source}") == 1
+    assert rendered.splitlines().count(f"- {extra}") == 1
+    assert ("## How this flow runs" in rendered) is valid
+
+
+def test_folder_ending_in_parent_component_lists_sources_once(tmp_path: Path) -> None:
+    folder = tmp_path / "sources"
+    (folder / "release").mkdir(parents=True)
+    source = folder / "issue-291.md"
+    source.write_text("Source text")
+    path = tmp_path / "flow.json"
+    path.write_text(
+        json.dumps(
+            {
+                "dir": str(tmp_path),
+                "tasks": [],
+                "read": [str(folder / "release" / "..")],
+            }
+        )
+    )
+    document = plan.load(path)
+    sources = citations.source_files(document.read_paths([str(folder)]))
+    assert sources == [source]
+    rendered = brief.text(document, str(tmp_path), sources=sources)
+    assert rendered.splitlines().count(f"- {source}") == 1
 
 
 @pytest.fixture(autouse=True)

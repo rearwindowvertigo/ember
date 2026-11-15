@@ -110,6 +110,10 @@ def run_config(model: str, read_only: bool, read: Sequence[str] = ()) -> str:
             {"action": "shell", "resource": command, "effect": "deny"}
             for command in GIT_DENIED
         ),
+        # Agent rules follow the defaults; the last matching rule wins.
+        {"action": "read", "resource": "*", "effect": "allow"},
+        {"action": "read", "resource": "*.env", "effect": "allow"},
+        {"action": "read", "resource": "*.env.*", "effect": "allow"},
     ]
     if read_only:
         permissions.append({"action": "edit", "resource": "*", "effect": "deny"})

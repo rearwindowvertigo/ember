@@ -145,7 +145,8 @@ the owner's consent.
 
 Use `single.writer` for edits and `single.reviewer` for read-only work.
 For a `claude` row, `run_as` picks `cli` (`emb run --engine claude`) or
-`subagent`. Take engine, model and effort from a `set` row. For `emb run`,
+`subagent`. Take engine, model and effort from a `set` row: `emb run` with
+`--engine` alone resolves the row's model and effort. For `emb run`,
 once the brief is written, run `emb run --dry-run` with the start's exact
 options, including its claim, model, effort and read-only options when
 given. On success, copy its standard-output line as the visible announce
@@ -297,7 +298,8 @@ the owner must hold: state each fact it names in plain words, do each thing
 it asks of that message (such as listing every printed choice with what it
 does), and offer nothing it rules out. Otherwise follow a `next:` line within these
 rules and the owner gates below. A line leaves the brief, the
-review bar, the verdict, `--note` and `--subject` to you. After a turn with
+review bar, the verdict, `--note` and `--subject` to you; write `--subject`
+in the repository's commit convention (step 9). After a turn with
 commits the line is the verify command, then the merge command: review and
 report between them. Do not retry a
 refusal: a refusal is Ember or the owner saying no, and repeating it
@@ -313,7 +315,10 @@ even a correction that avoids the denied paths. A denial with no `owner:`
 line (a startup file, a protected path, or a folder in Settings, Hidden
 notices) needs no answer: report it and carry on. Count turn results from each run's `turns` in
 `emb run --status [<run>] --json`, including failed turns followed by
-successful ones, and report unknown fields as unknown; `references/runs.md`
+successful ones, and report a null `exit`, `seconds`, `state` or
+`provider_error`, every field of a turn whose outcome could not be read,
+and an older outcome's missing `provider_kind` and `attempts`, as unknown;
+`references/runs.md`
 (Turn results) describes unfinished and older results.
 
 When your check of a worker finds a `must` (step 7), correct it first with
@@ -425,9 +430,14 @@ Repeat the same verdict in the step 8 report. Run `emb merge` as its own
 Bash call, with no other command chained before or after it; do the same
 after a correction. Merge only Keep or Keep-with-fix work into the session
 branch. For an `emb run` branch, run the `emb merge` line in the `next:`
-line printed after the turn, writing `--note` and `--subject` yourself. Write
-`--subject` in the repository's commit convention, read from `AGENTS.md`,
-`CONTRIBUTING` or `git log`. Describe the reviewed result across all turns.
+line printed after the turn, writing `--note` and `--subject` yourself.
+Write `--subject` in the repository's commit convention: the one
+`AGENTS.md` or `CONTRIBUTING` states; when neither states one, the form of
+the session branch's recent commit subjects, including any prefix or tag
+they share. Claude Code lists those subjects under the recent commits in
+your starting context. Run `git log --oneline -10 <session branch>` only
+when that list is absent, is for another repository or branch, or shows no
+single form. Describe the reviewed result across all turns.
 Mark a breaking Conventional Commit with `!`. For a branch with no run
 record (a flow or `worktree-agent-*` branch), run:
 
@@ -515,6 +525,11 @@ those, run `emb choices --finish <id>` after merge or discard for editing
 work (once the owner's decision on the kept branch is reported), after review
 for read-only work, at once for no worker. Failed or cancelled runs still get
 review and a decision on their partial work before the finish. `references/claims.md` says what its reply means.
+
+Run, flow and panel records stay in Ember's state folder after cleanup
+and finish. On the owner's word, remove them with `emb prune`, including
+`emb prune --claim <id>`, or Overview's Clear. Never delete record folders
+by hand.
 
 ## Owner questions
 
