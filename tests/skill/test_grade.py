@@ -79,7 +79,10 @@ def make(
         (run / "work").mkdir(parents=True)
         lines = [bash(command) for command in called]
         lines += (extra or {}).get(name, [])
-        lines.append(json.dumps({"type": "result", "result": f"done in {run}/work"}))
+        lines.append(json.dumps({"type": "result", "result": "started, no pause"}))
+        lines.append(
+            json.dumps({"type": "result", "result": f"done in {run}/work, go on?"})
+        )
         lines.append(json.dumps({"type": "result", "result": "second turn done"}))
         (run / "trace.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
         (run / "calls.log").write_text(f"1 emb ground --dir {run}/work\n", "utf-8")
@@ -146,7 +149,7 @@ def test_batch_hides_the_side_of_every_run(tmp_path: Path) -> None:
             assert "base/run-" not in text
     trace = (folder / "runs" / "r01" / "trace.txt").read_text("utf-8")
     assert "TOOL CALL Bash" in trace
-    assert "done in <RUN>/work" in trace
+    assert "done in <RUN>/work, go on?" in trace
 
 
 def test_a_path_cut_inside_a_tool_result_does_not_name_the_side(
@@ -182,9 +185,34 @@ def test_a_relative_out_dir_replaces_no_part_of_a_word(tmp_path: Path) -> None:
     assert "<RUN>/work" in (run / "calls.log").read_text("utf-8")
     trace = (run / "trace.txt").read_text("utf-8")
     assert "=== OWNER REPLY 1:\nowner reply 1: go on without a pause" in trace
-    assert trace.index("done in <RUN>/work") < trace.index("=== OWNER REPLY 1")
+    assert trace.index("started, no pause") < trace.index("done in <RUN>/work")
+    assert trace.index("go on?") < trace.index("=== OWNER REPLY 1")
     assert trace.index("=== OWNER REPLY 1") < trace.index("second turn done")
-    assert "OWNER REPLY 2" not in trace
+    assert trace.count("=== OWNER REPLY") == 1
+
+
+def test_the_dashed_form_of_a_run_path_is_replaced(tmp_path: Path) -> None:
+    """A scratch folder named after the run's work folder does not name the side."""
+    out = tmp_path / "out"
+    extra = {
+        name: [
+            tool_result(
+                "/tmp/claude-1000/"
+                + f"{out / name}/work".replace("/", "-")
+                .replace("_", "-")
+                .replace(".", "-")
+                + "/abc/scratchpad/plan.json"
+            )
+        ]
+        for name in ALL
+    }
+    case, out = make(tmp_path, extra)
+    assert run_grade("batch", case, out).returncode == 0
+    for path in (out / "grading" / "01-reports" / "runs").rglob("trace.txt"):
+        text = path.read_text(encoding="utf-8")
+        assert "/tmp/claude-1000/<RUN>-work/abc/scratchpad/plan.json" in text
+        assert "skill-run" not in text
+        assert "base-run" not in text
 
 
 def test_apply_writes_grading_when_two_graders_agree(tmp_path: Path) -> None:

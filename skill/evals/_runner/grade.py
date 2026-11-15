@@ -69,8 +69,9 @@ run read:
 - `owner.log`: the owner's replies that were sent.
 - `trace.txt`: the session in order: every assistant text, every tool call
   with its full input (including `run_in_background`), each tool result cut
-  to {limit} characters, each turn's final text, and after it the owner's
-  reply that started the next turn.
+  to {limit} characters and each turn's final text. `=== OWNER REPLY n`
+  marks where the owner's reply n was sent: after the turn result that
+  asked.
 - `files/` and `command.txt`, where the expectation names them: files
   copied from the run's work folder, and the output and exit code of a
   command run there.
@@ -169,7 +170,8 @@ def compact(
 
     Every text is passed through `clean` before a tool result is cut to the
     limit, so a path that names the side cannot survive as a cut fragment.
-    Each owner reply follows the final text of the turn it answered.
+    Each owner reply follows the turn result it answered: the runner sends
+    the next reply after a result that contains a question mark.
     """
     lines = []
     number = 0
@@ -180,9 +182,10 @@ def compact(
         if kind == "result":
             final = clean(str(item.get("result")))
             lines.append(f"=== TURN RESULT (final text of this turn):\n{final}\n")
-            if turn < len(sent):
+            # run_case.sh sends the next reply after a result with a question mark.
+            if "?" in final and turn < len(sent):
                 lines.append(f"=== OWNER REPLY {turn + 1}:\n{clean(sent[turn])}\n")
-            turn += 1
+                turn += 1
         if kind not in ("assistant", "user"):
             continue
         for part in parts(item):
@@ -239,12 +242,16 @@ def scrubber(run: Path, out: Path) -> Callable[[str], str]:
     """Return a function that replaces the run's and the out dir's paths.
 
     Only absolute spellings are replaced, longest first, so a relative out
-    dir such as `out` never replaces part of a word.
+    dir such as `out` never replaces part of a word. Each spelling is also
+    replaced in its dashed form.
     """
     marks = {}
     for path, mark in ((run, "<RUN>"), (out, "<OUT>")):
         for spelling in (str(path.absolute()), str(path.resolve())):
             marks.setdefault(spelling, mark)
+            # Claude Code names a session's scratch folder after its working
+            # folder, with every other character turned into a dash.
+            marks.setdefault(re.sub(r"[^A-Za-z0-9]", "-", spelling), mark)
     ordered = sorted(marks.items(), key=lambda item: len(item[0]), reverse=True)
 
     def clean(text: str) -> str:

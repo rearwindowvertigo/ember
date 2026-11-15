@@ -440,7 +440,10 @@ python3 skill/evals/_runner/grade.py apply <case dir> <out dir> [--graders <n>]
   are copied to the run's `files/`, and a `command`, which `batch` runs in
   the work folder, saving its output and exit code as `command.txt`.
   The run's path is replaced in every copied text, before a tool result is
-  cut. Clock times, run ids and any skill text a session printed are kept.
+  cut, also in the dashed form Claude Code gives a session's scratch
+  folder. `trace.txt` marks each owner reply after the turn result that
+  asked. Clock times, run ids and any skill text a session printed are
+  kept.
   The key from `r<nn>` to `<side>/<run>` is in
   `<out dir>/grading/keys/<grader>.json`; no grader is given it, and
   `task.md` tells a grader to open nothing outside its folder.
