@@ -50,7 +50,7 @@ graders exercise those rules and runs each five times with
 `bash skill/evals/_runner/run_repeat.sh --runs 5 <case dir> <out dir>`.
 The author grades the runs with `skill/evals/_runner/grade.py` and records
 `tally.py`'s counts on the change's issue. The change merges when every
-listed case shows `5/5` on `all graders`.
+listed case shows `5/5` in the `skill` column of `all graders`.
 The [eval README](../skill/evals/README.md#repeated-runs-_runnerrun_repeatsh-and-_runnertallypy)
 describes repeated runs, grading and tallying.
 
