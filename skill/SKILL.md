@@ -88,6 +88,10 @@ One task, including its worker and its cleanup, is one run. A Claude
 Workflow, flow or panel is one run for all its workers. Separately started
 tasks each claim; only the first consumes the pending one-time choice. A correction or
 `--recover` of an open run keeps its claim. A new worker starts a new run.
+A correction made because verification rejected a flow's result, before
+the flow branch is merged, runs under the flow's claim and merges into the
+flow branch, as `references/flows.md` says; a run started after the flow
+branch is merged claims anew.
 
 Before a later picker, read `emb choices --json --id <id> --brief`. Read the reply
 directly; do not write code to parse it. Read `references/claims.md` for a
