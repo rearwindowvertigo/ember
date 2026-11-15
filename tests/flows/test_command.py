@@ -1026,7 +1026,8 @@ def test_watch_reports_each_stop(
         else:
             reports.append(
                 f"report: lead stop on {task_id or flow['id']}; {state}; "
-                "list every printed choice and recommend one"
+                "give the reason as printed, list every printed choice by its "
+                "option with what it does, and recommend one"
             )
         record.append_event(flow["id"], event, env)
     options = ["--watch", flow["id"], *(["--json"] if as_json else [])]

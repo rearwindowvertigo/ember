@@ -1,2 +1,2 @@
-report: lead stop on strict; no runner is live and the owner's answer starts it; list every printed choice and recommend one
+report: lead stop on strict; no runner is live and the owner's answer starts it; give the reason as printed, list every printed choice by its option with what it does, and recommend one
 next: report each stop to the owner with every choice; an answer with emb flow --lead starts the runner

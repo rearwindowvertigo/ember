@@ -1258,7 +1258,8 @@ def _stop_reports(
             )
             reports.append(
                 f"report: lead stop on {task}; {state}; "
-                "list every printed choice and recommend one"
+                "give the reason as printed, list every printed choice by its "
+                "option with what it does, and recommend one"
             )
     return reports
 

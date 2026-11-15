@@ -3371,9 +3371,11 @@ def test_flow_stop_reports_match_commands(
         "report: capacity on strict; recommend only the same-worker retry"
         if capacity
         else f"report: lead stop on strict; {state}; "
-        "list every printed choice and recommend one",
+        "give the reason as printed, list every printed choice by its option "
+        "with what it does, and recommend one",
         f"report: lead stop on flow-id; {state}; "
-        "list every printed choice and recommend one",
+        "give the reason as printed, list every printed choice by its option "
+        "with what it does, and recommend one",
     ]
     assert result.stderr.splitlines()[-1].startswith("next:")
     assert result.stderr.splitlines()[:-1] == expected

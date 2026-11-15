@@ -180,9 +180,11 @@ continuation; inspect its log and worktree.
 A `lead_stop` returns exit 0; it is not a completed flow. For every stop,
 send the owner one message naming the task, status, reason, open `lead`
 and `must` findings, the tasks it blocks (or none), and every fact its
-`report:` line names, such as whether a runner is live. End the message with
-one direct question ending in a question mark. Use the report's available
-choices, not an assumed list:
+`report:` line names, such as whether a runner is live. Give the status and
+the reason in Ember's printed words, such as `stopped` and `needs the
+lead`, and say what they mean. End the message with one direct question
+ending in a question mark. Use the report's available choices, not an
+assumed list:
 
 | Answer after `emb flow --lead <id> <task>` | Does |
 |---|---|
@@ -192,7 +194,8 @@ choices, not an assumed list:
 | `--worker W` | Keep the old branch and start a new writer from the flow tip. |
 | `--drop` | Keep the branch and drop the task; its dependants stay blocked. Also accepted for a pending or blocked task. |
 
-In the stop message, say in words what each choice you offer does. For
+In the stop message, name each choice you offer by its printed option and
+say in words what it does. For
 `--accept [--commit <sha>]` say both: plain `--accept` takes the current
 tip with no further review, and `--commit <sha>` takes that reviewed
 commit instead of the tip. A `conflict` stop and a provider error limit

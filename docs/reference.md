@@ -2874,8 +2874,8 @@ including with `--watch --json`:
 
 | Case | Report line |
 |---|---|
-| Lead stop, no live runner | `report: lead stop on <task>; no runner is live and the owner's answer starts it; list every printed choice and recommend one` |
-| Lead stop, live runner | `report: lead stop on <task>; the runner is still live for the other tasks; list every printed choice and recommend one` |
+| Lead stop, no live runner | `report: lead stop on <task>; no runner is live and the owner's answer starts it; give the reason as printed, list every printed choice by its option with what it does, and recommend one` |
+| Lead stop, live runner | `report: lead stop on <task>; the runner is still live for the other tasks; give the reason as printed, list every printed choice by its option with what it does, and recommend one` |
 | Lead stop after capacity | `report: capacity on <task>; recommend only the same-worker retry` |
 | Done with latest or retained `lead` or `should` task findings | `report: <lead count> lead and <should count> should findings remain on merged tasks; inspect each before merging` |
 | Done with merged tasks that have outside files | `report: <count> merged tasks changed files outside their declared files: <task> (<file count>), <task> (<file count>); inspect each before merging` (singular `task` for one) |
