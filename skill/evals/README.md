@@ -97,7 +97,8 @@ A call's route comes from its subcommand and flags: `choices-claim`,
 parts are `.out` (standard output), `.json` (standard output with
 `--json`), `.err`, `.code`, `.files/` (committed in a run or flow worktree),
 `.untracked/` (left uncommitted in a run worktree), `.reply` (the turn's reply)
-and `.summary` (the panel's summary).
+and `.summary` (the panel's summary). `.task-files/<task id>/` holds a
+stopped flow task's tree for a watch reply.
 Templates fill `{{ID}}`, `{{RUN}}`, `{{BRANCH}}`, `{{WORKTREE}}`,
 `{{WORKTREES}}`, `{{TIP}}`,
 `{{TARGET}}`, `{{EVAL}}`, `{{FLOW}}`, `{{PANEL}}`, `{{PLAN}}`, `{{DIR}}`
@@ -172,6 +173,17 @@ non-zero `.code`:
   and prints the flow id, branch, worktree and watch action. The production
   planner validates the plan; an empty task list or a missing or blank task
   subject exits 64. Without changed files it makes no commit.
+- `flow-watch` with `.task-files/<task id>/` creates that task's branch and
+  worktree, named in the reply's `.json`, from the current flow tip. It
+  commits the tree with the matching plan task's subject and the plan's
+  trailers. Existing task branches are left alone. `flow-lead --send <file>`
+  with `.files/` reads the answer file and commits the tree on the flow
+  branch with the answered task's subject and the plan's trailers. A
+  non-zero lead reply applies no tree. Both stages require a built flow;
+  replies without these parts apply no files. Flow reports replace canned
+  `report:` lines, preceding other stderr when the template starts with one.
+  Built flows record each task's commit on the flow branch; watch and status
+  JSON use those commits for merged tasks.
 - `merge` checks for a one-line `--note` and `--verdict keep` (64 otherwise),
   and requires a nonblank one-line `--subject` for an Ember run branch.
   It uses the production merge implementation: run branches squash under
@@ -232,7 +244,8 @@ into its printed gap check command.
 
 Every call appends one JSON line to `.ember-eval/calls.log`: `seq`, `at`,
 `argv`, `cwd`, `route`, `reply` and `exit`. State is in
-`.ember-eval/state.json`: `runs`, `flows` (id to `dir`, `main`, `branch`, `worktree`),
+`.ember-eval/state.json`: `runs`, `flows` (id to `dir`, `main`, `branch`, `worktree`,
+task `subjects`, plan `trailers` and task `merge_commits` on the flow branch),
 `panels` (id to `summary` and the source `HEAD` as `base`), `claims` (id to `gone`
 once `emb choices --finish` exited 0) and route counters.
 With `EMBER_EVAL_SETUP` set, a call is neither logged nor counted; `send-refused-foreign-messages/place-files.sh` uses it

@@ -14,6 +14,7 @@ and the number of earlier calls on that route: the first of
     .err         standard error, a template
     .code        the exit code (default 0)
     .files/      a tree committed in a run or flow worktree
+    .task-files/ trees by task id committed on stopped flow task branches
     .untracked/  a tree left uncommitted in the run's worktree
     .reply       the turn's reply text, a template
     .outcome.json extra recorded turn-result fields
@@ -35,6 +36,16 @@ when its reply has neither override. `panel-start` writes a summary whenever
 its reply has `.summary`, including with a non-zero `.code`.
 `help` prints the matching section
 of `replies/help.out`.
+
+`flow-watch` with `.task-files/<task id>/` creates the matching task's
+branch and worktree from the current flow tip, using its `.json` record,
+and commits the tree under the task's plan subject. Existing branches are
+left alone. `flow-lead --send <file>` with `.files/` commits that tree to
+the flow branch under the answered task's subject after reading the answer
+file. Both stages require a built flow and use the plan's trailers; a
+non-zero lead reply applies no tree. Without these parts, watches and lead
+answers apply no files. Built flows record each task's commit on the flow
+branch; watch and status JSON use those commits for merged tasks.
 
 The built routes print the `next:` line the real command prints, derived
 from the stub's own run state and git as `ember.runs.steps.derive` derives
@@ -66,7 +77,8 @@ nonempty. Status repeats the pending owner lines. `run-answered` clears the wait
 a later turn or all suggested sandbox read paths also end it.
 Run, merge and cleanup replies, and flow watch and failure replies, append
 the production `report:` lines after next or owner lines, including canned
-replies. Flow watch JSON also carries the report list.
+replies. Flow replies whose template starts with `report:` keep reports
+before the other stderr lines. Flow watch JSON also carries the report list.
 No `.reply` file holds a next line.
 Done flow status reports appear on standard output, or in JSON's `reports`.
 With `EMBER_EVAL_SETUP` set, a call is neither logged
@@ -117,7 +129,7 @@ STATE = EVAL / "state.json"
 LOG = EVAL / "calls.log"
 PARTS = (
     ".out", ".json", ".err", ".code", ".files", ".untracked", ".reply", ".summary",
-    ".outcome.json",
+    ".outcome.json", ".task-files",
 )  # fmt: skip
 RUN_MODES = (
     "send",
@@ -1375,6 +1387,7 @@ def flow_start(
     worktree = worktree_path(flow_id)
     head = out(directory, "rev-parse", "HEAD")
     git(repo, "worktree", "add", "-q", "-b", branch, str(worktree), head)
+    merge_commits = {}
     tree = part(base, ".files")
     if tree is not None:
         copy_tree(tree, worktree)
@@ -1384,11 +1397,15 @@ def flow_start(
             trailers = plan.get("trailers") or []
             message = subject + ("\n\n" + "\n".join(trailers) if trailers else "")
             git(worktree, "commit", "-q", "--no-verify", "-m", message)
+            merge_commits[document.tasks[0].id] = out(worktree, "rev-parse", "HEAD")
     state["flows"][flow_id] = {
         "dir": str(directory),
         "main": str(repo),
         "branch": branch,
         "worktree": str(worktree),
+        "subjects": {task.id: task.subject for task in document.tasks},
+        "trailers": plan.get("trailers") or [],
+        "merge_commits": merge_commits,
     }
     errors = io.StringIO()
     flows._worker_lines(writer, reviewer, errors)
@@ -1397,6 +1414,71 @@ def flow_start(
         f"flow {flow_id}\nbranch {branch}\nworktree {worktree}\n",
         errors.getvalue() + f"next: emb flow --watch {flow_id} --json\n",
     )
+
+
+def flow_stage(
+    name: str,
+    args: list[str],
+    state: dict[str, Any],
+    base: Path,
+    variables: dict[str, str],
+) -> None:
+    """Apply opted-in watch task trees or a successful lead answer's tree."""
+    flow = state["flows"].get(variables["FLOW"])
+    if flow is None:
+        return
+    if name == "flow-watch" and part(base, ".task-files"):
+        document = json.loads(read_part(base, ".json", variables))
+        for task in document["tasks"]:
+            tree = Path(str(base) + ".task-files") / task["id"]
+            if not tree.is_dir() or branch_exists(Path(flow["dir"]), task["branch"]):
+                continue
+            worktree = Path(task["worktree"])
+            git(
+                flow["main"],
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                task["branch"],
+                str(worktree),
+                flow["branch"],
+            )
+            flow_commit(tree, worktree, flow, task["id"])
+    if name == "flow-lead" and part(base, ".files") and code_of(base) == 0:
+        answer = option(args, "--send")
+        if answer is None:
+            return
+        try:
+            Path(answer).read_text(encoding="utf-8")
+        except OSError as error:
+            raise Reply(66, err=f"emb flow: {error}\n") from error
+        index = next(
+            index + (1 if word.startswith("--lead=") else 2)
+            for index, word in enumerate(args)
+            if word == "--lead" or word.startswith("--lead=")
+        )
+        commit = flow_commit(
+            Path(str(base) + ".files"), Path(flow["worktree"]), flow, args[index]
+        )
+        if commit is not None:
+            flow["merge_commits"][args[index]] = commit
+        variables["TIP"] = out(flow["dir"], "rev-parse", flow["branch"])
+
+
+def flow_commit(
+    tree: Path, worktree: Path, flow: dict[str, Any], task: str
+) -> str | None:
+    """Commit a staged tree and return its commit, or None for unchanged files."""
+    subject = flow["subjects"][task]
+    copy_tree(tree, worktree)
+    git(worktree, "add", "-A")
+    if git(worktree, "diff", "--cached", "--quiet", check=False).returncode:
+        trailers = flow["trailers"]
+        message = subject + ("\n\n" + "\n".join(trailers) if trailers else "")
+        git(worktree, "commit", "-q", "--no-verify", "-m", message)
+        return out(worktree, "rev-parse", "HEAD")
+    return None
 
 
 def panel_start(
@@ -2287,6 +2369,8 @@ def dispatch(
         return flow_start(rest, state, base, variables)
     if name == "panel-start" and part(base, ".summary") is not None:
         return panel_start(state, base, variables, as_json)
+    if name in ("flow-watch", "flow-lead"):
+        flow_stage(name, rest, state, base, variables)
     response = canned_reply(base, variables, as_json)
     if (
         name == "gapcheck"
@@ -2340,11 +2424,17 @@ def command_reports(
         from ember.flows import command as flows
 
         reports = flows._exit_reports(reply.code)
+        reports_first = reply.err.startswith("report:")
         if name in ("flow-watch", "flow-status", "flow-start", "flow-resume") and part(
             base, ".json"
         ):
             document = json.loads(read_part(base, ".json", variables))
             if isinstance(document, dict) and "status" in document:
+                known_flow = state["flows"].get(variables["FLOW"], {})
+                commits = known_flow.get("merge_commits", {})
+                for task in document.get("tasks", []):
+                    if task["status"] == "merged" and task["id"] in commits:
+                        task["merge_commit"] = commits[task["id"]]
                 flow = {
                     "check_pending": False,
                     **document,
@@ -2410,7 +2500,10 @@ def command_reports(
             for line in reply.err.splitlines()
             if not line.startswith("report:")
         )
-        reply.err += "".join(report + "\n" for report in reports)
+        report_text = "".join(report + "\n" for report in reports)
+        reply.err = (
+            report_text + reply.err if reports_first else reply.err + report_text
+        )
         return
     if name in ("merge", "cleanup") and reply.code == 75:
         conflict = re.search(
