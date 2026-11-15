@@ -24,6 +24,10 @@ worker may read what informs those decisions, or draft, but you decide or
 bring the open choice to the owner. Treat worker reports as unverified
 until you or a second worker checks them.
 
+After the conversation is compacted, read this file again from the
+installed skill before the next step: the copy kept in the conversation
+can end before the last step.
+
 The choice of worker is the owner's. You recommend one; the owner's
 request, a claimed one-time choice, a standing setting or the owner's live
 answer picks it. Every rule in this skill still binds how the picked worker
