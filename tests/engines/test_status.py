@@ -428,6 +428,33 @@ def test_parse_opencode_auth_reads_opencode_2_columns() -> None:
     )
 
 
+OPENCODE_2_3_AUTH_LIST = (
+    "Claude Agent  Claude Agent                stored\n"
+    "OpenRouter    OpenRouter                  stored\n"
+)
+"""`opencode auth list --standalone` output captured from OpenCode 2.3.2."""
+
+
+def test_parse_opencode_auth_reads_opencode_2_3_columns() -> None:
+    assert status.parse_opencode_auth(OPENCODE_2_3_AUTH_LIST) == (
+        ("Claude Agent", None),
+        ("OpenRouter", None),
+    )
+
+
+def test_parse_opencode_auth_reads_opencode_2_3_columns_with_ansi() -> None:
+    output = (
+        "\x1b[1mClaude Agent\x1b[0m  Claude Agent                "
+        "\x1b[32mstored\x1b[0m\n"
+    )
+    assert status.parse_opencode_auth(output) == (("Claude Agent", None),)
+
+
+def test_parse_opencode_auth_rejects_unrecognizable_output() -> None:
+    with pytest.raises(status.ProbeError, match="opencode auth list printed"):
+        status.parse_opencode_auth("Error: something went wrong\n")
+
+
 def test_parse_opencode_auth_reads_opencode_1_lines() -> None:
     output = (
         "┌  Credentials ~/.local/share/opencode/auth.json\n│\n"
