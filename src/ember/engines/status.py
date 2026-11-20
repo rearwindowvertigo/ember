@@ -383,6 +383,7 @@ _AUTH_LINE = re.compile(
     re.IGNORECASE,
 )
 _AUTH_LOGIN = {"oauth": "oauth", "api": "api", "api key": "api"}
+_AUTH_COLUMNS = re.compile(r"(?P<name>\S.*?)\s{2,}\S.*?\s{2,}stored", re.IGNORECASE)
 
 
 def parse_opencode_auth(output: str) -> tuple[tuple[str, str | None], ...]:
@@ -390,9 +391,12 @@ def parse_opencode_auth(output: str) -> tuple[tuple[str, str | None], ...]:
 
     OpenCode 1 prints `●  <name> <method>` lines inside terminal borders;
     OpenCode 2 prints `<name>  <method>  <state>` columns, where the method is
-    `OAuth` or `API key`. ANSI styling and borders are ignored. `oauth` and
-    `api` are the login methods; another recognized method, such as
-    `wellknown` or `env`, is connected with an unknown login method. An
+    `OAuth` or `API key`. OpenCode 2.3 prints `<name>  <label>  stored`
+    columns, where the middle column is a display label rather than a method;
+    such a line is connected with an unknown login method. ANSI styling and
+    borders are ignored. `oauth` and `api` are the login methods; another
+    recognized method, such as `wellknown` or `env`, is connected with an
+    unknown login method. An
     explicit empty list is valid; output with neither credentials nor an
     empty-list message fails.
 
@@ -407,6 +411,8 @@ def parse_opencode_auth(output: str) -> tuple[tuple[str, str | None], ...]:
         if match:
             method = " ".join(match["method"].lower().split())
             entries.append((match["name"].strip(), _AUTH_LOGIN.get(method)))
+        elif match := _AUTH_COLUMNS.fullmatch(line):
+            entries.append((match["name"].strip(), None))
     if entries:
         return tuple(entries)
     if re.search(
