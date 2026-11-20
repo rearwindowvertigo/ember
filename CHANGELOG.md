@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.26.2](https://github.com/rearwindowvertigo/ember/compare/v0.26.1...v0.26.2) (2026-11-20)
+
+
+### Fixed
+
+* **engines:** read OpenCode 2.3 auth list columns ([22544a3](https://github.com/rearwindowvertigo/ember/commit/22544a3d9c98b7115df1459dc3859cb99e7ae243)), closes [#306](https://github.com/rearwindowvertigo/ember/issues/306)
+
 ## [0.26.1](https://github.com/rearwindowvertigo/ember/compare/v0.26.0...v0.26.1) (2026-11-15)
 
 
