@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.28.0](https://github.com/rearwindowvertigo/ember/compare/v0.27.0...v0.28.0) (2026-11-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* **choices:** limit provider.capacity_wait to seven preset waits
+
+### Added
+
+* **app:** warn in Overview when the temporary volume is nearly full ([f21e7e0](https://github.com/rearwindowvertigo/ember/commit/f21e7e0b53bbaf810cb97de5b8b39778cf23ddd1))
+* **choices:** limit provider.capacity_wait to seven preset waits ([13657ca](https://github.com/rearwindowvertigo/ember/commit/13657ca6198328d1bfdfb69465a922f3b58ed32f))
+
+
+### Fixed
+
+* **app:** limit a picker's list to 10 rows and scroll the rest ([65a14bb](https://github.com/rearwindowvertigo/ember/commit/65a14bbcabf96c6192c04fada3a3f6ba915eda6d))
+* **app:** place every info icon 8 px after its label ([5865b23](https://github.com/rearwindowvertigo/ember/commit/5865b232cf42203bee3491b6a5c867b1f247c9f2))
+* **app:** show what is behind the rounded corners of lists and menus ([3fbcf7d](https://github.com/rearwindowvertigo/ember/commit/3fbcf7d88202c8db9472fb6c77b3680389556214))
+* **cli:** print a report line that names the worker tip after emb merge ([750c974](https://github.com/rearwindowvertigo/ember/commit/750c974a746d8678b934933141b8f06e2b5c6b15))
+* **flows:** remove a worker's temporary files once its task is accepted ([91de56f](https://github.com/rearwindowvertigo/ember/commit/91de56f670154b4239ef8f532b6ebafe5deb2612))
+* **runs:** refuse a start when the temporary volume is nearly full ([1b39d0d](https://github.com/rearwindowvertigo/ember/commit/1b39d0dc0dd68e6b3586b03e0645c82c2a36885d))
+* **runs:** skip a process group removed while a scope's members are read ([66535d2](https://github.com/rearwindowvertigo/ember/commit/66535d25b40780adad9548ae4da51fced38d6389)), closes [#330](https://github.com/rearwindowvertigo/ember/issues/330)
+* **skill:** give the owner no forced removal command for a kept worktree ([3968457](https://github.com/rearwindowvertigo/ember/commit/3968457c719d2e17cf1f24497c37987c1e06690b)), closes [#329](https://github.com/rearwindowvertigo/ember/issues/329)
+
 ## [0.27.0](https://github.com/rearwindowvertigo/ember/compare/v0.26.2...v0.27.0) (2026-11-21)
 
 
