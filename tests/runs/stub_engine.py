@@ -16,7 +16,8 @@ writes each turn's outcome to `turn-<n>.json` in its output folder:
 - `@hang`: stop changing the screen until `release` exists in the output
   folder.
 - `@fail`, `@provider`, `@signedout <reason>`: a failed turn.
-- `@exit`: end the engine without a reply.
+- `@exit [<text>]`: end the engine without a reply; with text, leave it as
+  the pane's last line above tmux's dead pane notice.
 - `@git <args>`: run git in the working folder.
 """
 
@@ -231,6 +232,8 @@ def handle(message, turn):
             )
             return
         elif word == "@exit":
+            if rest:
+                show(rest + "\nPane is dead (status 1, Fri Nov 20 20:06:13 2026)\n")
             sys.exit(0)
         elif word == "@git":
             subprocess.run(["git", *rest.split()], check=False)

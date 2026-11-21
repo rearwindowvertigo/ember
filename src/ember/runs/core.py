@@ -1557,9 +1557,13 @@ class Core:
             state = self._session_state(run.id)
             if state != LIVE:
                 self._stop_if_closed(run)
+                message = f"the engine of {run.id} exited before it took its brief"
+                outage = None
+                if state == DEAD:
+                    message, outage = self._exit_reason(run, driver, message)
                 raise RunError(
-                    exits.ENGINE_FAILED,
-                    f"the engine of {run.id} exited before it took its brief",
+                    exits.PROVIDER_ERROR if outage else exits.ENGINE_FAILED,
+                    message,
                     "starting",
                     run=run.id,
                 )
@@ -1582,6 +1586,24 @@ class Core:
             return tmux.capture(run_id, env=self.env)
         except tmux.TmuxError, paths.RuntimeDirError:
             return previous
+
+    def _exit_reason(
+        self, run: Run, driver: Driver, message: str
+    ) -> tuple[str, TurnOutcome | None]:
+        """Add a dead engine's last words to a reason and classify them.
+
+        Returns:
+            The reason, and the driver's provider outcome with that reason,
+            or `None` for an engine failure.
+        """
+        # Only a fresh capture of the dead pane holds the engine's exit.
+        screen = self._screen_text(run.id, None)
+        words = driver.exit_words(screen) if screen else None
+        if not words:
+            return message, None
+        message = f"{message}: {words}"
+        outcome = driver.exit_outcome(words)
+        return message, None if outcome is None else replace(outcome, reason=message)
 
     def _stable_screen(self, driver: Driver, screen: str | None) -> str | None:
         """Return the screen text that the wait loops compare for changes."""
@@ -1932,15 +1954,19 @@ class Core:
                     return self._wait_outcome(run, outcome, ended)
                 if state == DEAD:
                     # A failed turn: its edits are collected and committed.
-                    message = f"the engine of {run.id} exited before the turn ended"
+                    message, outage = self._exit_reason(
+                        run,
+                        driver,
+                        f"the engine of {run.id} exited before the turn ended",
+                    )
                     self._record_exit(
                         run,
-                        exits.ENGINE_FAILED,
+                        exits.PROVIDER_ERROR if outage else exits.ENGINE_FAILED,
                         message,
                         status=record.FAILED,
                         ended_at=time.time(),
                     )
-                    return TurnOutcome(engines.FAILED, reason=message)
+                    return outage or TurnOutcome(engines.FAILED, reason=message)
                 message = f"the session of {run.id} is gone"
                 self._record_exit(
                     run,
@@ -2096,6 +2122,8 @@ class Core:
                 attempts = self._saved_outcome(run).get("attempts", [])
                 if attempts and attempts[-1]["sending"] and not attempts[-1]["sent"]:
                     variant = "uncertain"
+                elif variant == "outage" and self._session_state(run.id) == DEAD:
+                    variant = "ended"
             if outcome.signed_out and not outcome.provider_error:
                 fix = self._signed_out_fix(run.engine)
                 if fix:

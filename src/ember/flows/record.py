@@ -1,12 +1,13 @@
 """Private flow records, numbered event and answer logs, and watch cursors."""
 
+import contextlib
 import fcntl
 import json
 import math
 import os
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,10 @@ FLOW_STATUSES = (
 ENDED = ("done", "failed", "cancelled")
 CANCEL_NAME = "cancel.json"
 ANSWER_KINDS = ("send", "accept", "review", "worker", "drop")
+ANSWERS_LOCK_NAME = "answers.lock"
+QUEUE_KINDS = ("withdraw", "reviewer")
+"""Answer log lines that change no task: `withdraw` removes a task's unapplied
+answer, and `reviewer`, which has no task, changes the flow's saved reviewer."""
 
 # A trailing question mark permits null; brackets require a list of that type.
 _FLOW_FIELDS = {
@@ -295,6 +300,8 @@ def _validate(flow_id: str, flow: object) -> None:
             raise FlowError(flow_id, "flow.json has an invalid preparation")
     if "preparation_halt" in flow and not _matches(flow["preparation_halt"], "str?"):
         raise FlowError(flow_id, "flow.json has an invalid preparation_halt")
+    if "answers_taken" in flow and not _matches(flow["answers_taken"], "[int]"):
+        raise FlowError(flow_id, "flow.json has an invalid answers_taken")
     for key, low, high in (
         ("rounds", 0, 3),
         ("parallel", 1, 8),
@@ -582,7 +589,13 @@ def _append(
                 **item,
                 choices.OPENCODE_ID_FORMAT: 1,
             }
-            if item["kind"] not in ANSWER_KINDS or not isinstance(item["task"], str):
+            if item["kind"] == "reviewer":
+                if item["task"] is not None or not isinstance(item["worker"], str):
+                    raise FlowError(flow_id, "reviewer answer needs a worker only")
+            elif item["kind"] not in (
+                *ANSWER_KINDS,
+                *QUEUE_KINDS,
+            ) or not isinstance(item["task"], str):
                 raise FlowError(flow_id, "answer needs a task and a valid kind")
             if item["kind"] == "send":
                 source = item["file"]
@@ -667,6 +680,68 @@ def read_answers(
             )
             answer[choices.OPENCODE_ID_FORMAT] = 1
     return answers
+
+
+@contextlib.contextmanager
+def answers_lock(flow_id: str, env: Mapping[str, str] | None = None) -> Iterator[None]:
+    """Hold the lock that serializes queueing an answer with applying one.
+
+    `emb flow --lead` holds it from reading the queue through its append,
+    and the runner from checking that an answer is still in effect through
+    saving its marker. An answer the command reports as replaced or
+    withdrawn is therefore never applied afterwards.
+
+    Yields:
+        Nothing, while the lock is held.
+    """
+    fd = paths.open_private_file(folder(flow_id, env) / ANSWERS_LOCK_NAME)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def answer_queue(
+    flow: Mapping[str, Any], lines: Sequence[Mapping[str, Any] | None]
+) -> list[tuple[int, Mapping[str, Any], list[int]]]:
+    """Return the unapplied answers that are in effect, oldest first.
+
+    A line is unapplied from the flow's cursor (`answers_seen`) on, unless the
+    runner took it ahead of the cursor (`answers_taken`). A later line for the
+    same task replaces the earlier unapplied ones. A `withdraw` line removes
+    them and is not in effect itself. `reviewer` lines have no task; the last
+    one is in effect. Unreadable lines are left to the runner.
+
+    Args:
+        flow: The flow record.
+        lines: The answer log, as `read_answers` returns it.
+
+    Returns:
+        For each answer in effect, its line index, the line, and the numbers
+        of the answers it replaces.
+    """
+    taken = set(flow.get("answers_taken", []))
+    queued: dict[object, list[tuple[int, Mapping[str, Any]]]] = {}
+    for index in range(flow["answers_seen"], len(lines)):
+        answer = lines[index]
+        if answer is None:
+            continue
+        waiting = queued.setdefault(answer.get("task"), [])
+        if index in taken or answer.get("kind") == "withdraw":
+            waiting.clear()
+        else:
+            waiting.append((index, answer))
+    result = [
+        (
+            waiting[-1][0],
+            waiting[-1][1],
+            [answer.get("n", index + 1) for index, answer in waiting[:-1]],
+        )
+        for waiting in queued.values()
+        if waiting
+    ]
+    return sorted(result, key=lambda item: item[0])
 
 
 def read_cursor(flow_id: str, env: Mapping[str, str] | None = None) -> int:

@@ -5997,3 +5997,97 @@ def test_a_session_that_ends_at_the_wait_interrupt_is_handled_as_a_dead_engine(
     assert outcome.reason is not None
     assert outcome.reason.startswith(f"the engine of {run.id} exited")
     assert record.load(run.id, env).status == record.FAILED
+
+
+class _ExitDriver(StubDriver):
+    """Classifies an engine's last words that say a request timed out."""
+
+    def exit_outcome(self, words: str) -> engines.TurnOutcome | None:
+        if "timed out" not in words:
+            return None
+        return engines.TurnOutcome(
+            engines.FAILED, reason=words, provider_error=True, provider_kind="outage"
+        )
+
+
+def test_a_dead_engine_leaves_its_last_words_in_the_reason(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    brief = _brief(tmp_path, "Task\n@write e.txt e\n@exit Error: bad config\n")
+    driver = _ExitDriver("claude", script_path(env))
+    assert _start(_core(env, driver), repo, brief) == 71
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    reason = f"the engine of {run.id} exited before the turn ended: Error: bad config"
+    assert f"emb run: {reason}" in err.splitlines()
+    assert err.splitlines()[-1] == f"next: emb run --status {run.id}"
+    saved = record.load_outcome(run, 1)
+    assert (saved["exit"], saved["reason"]) == (71, reason)
+    assert (saved["provider_error"], saved["provider_kind"]) == (False, None)
+    assert saved["incomplete"] == "engine failure"
+
+
+def test_a_dead_engine_that_could_not_reach_the_provider_is_73(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    words = "Error: account/read failed: discovery timed out (code -32603)"
+    brief = _brief(tmp_path, f"Task\n@write e.txt e\n@exit {words}\n")
+    driver = _ExitDriver("claude", script_path(env))
+    assert _start(_core(env, driver), repo, brief) == 73
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    reason = f"the engine of {run.id} exited before the turn ended: {words}"
+    lines = err.splitlines()
+    assert f"emb run: {reason}" in lines
+    assert lines[-1] == (
+        f"next: emb run --close {run.id}, then emb run --engine <engine> "
+        "--dir <git checkout> --task-file <file> (a new run after the provider's "
+        "outage clears; the engine of this run ended)"
+    )
+    assert run.last_variant == "ended"
+    saved = record.load_outcome(run, 1)
+    assert (saved["exit"], saved["reason"]) == (73, reason)
+    assert (saved["provider_error"], saved["provider_kind"]) == (True, "outage")
+    assert saved["incomplete"] == "provider error"
+    assert [a["provider_kind"] for a in saved["attempts"]] == ["outage"]
+    assert (run.status, run.last_exit) == (record.FAILED, 73)
+    assert len(run.commits) == 1
+
+
+@pytest.mark.parametrize(
+    ("words", "code"),
+    [("Error: request timed out", 73), ("Error: bad config", 71), ("", 71)],
+)
+def test_an_engine_that_dies_before_its_brief_reports_its_last_words(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    words: str,
+    code: int,
+) -> None:
+    program = (
+        "import os, pathlib; "
+        f"{words!r} and pathlib.Path(os.environ['STUB_PANE'], 'screen')"
+        f".write_text({words!r} + '\\nPane is dead (status 1)\\n')"
+    )
+
+    class Broken(_ExitDriver):
+        def command(self, run: record.Run, first_message: str) -> LaunchSpec:
+            return LaunchSpec(
+                argv=(sys.executable, "-I", "-c", program),
+                cwd=Path(run.worktree),
+                first_message="x",
+            )
+
+    driver = Broken("claude", script_path(env))
+    assert _start(_core(env, driver), repo, _brief(tmp_path, "T\n")) == code
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    message = f"the engine of {run.id} exited before it took its brief"
+    assert f"emb run: {message}{': ' + words if words else ''}" in err.splitlines()
+    assert (run.status, run.turn, run.last_exit) == (record.FAILED, 0, code)
+    close = f"next: emb run --close {run.id}, then emb run --engine <engine> "
+    assert err.splitlines()[-1].startswith(close)
+    assert ("outage clears" in err.splitlines()[-1]) == (code == 73)
+    assert run.last_variant == "starting"

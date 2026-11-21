@@ -10,7 +10,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import replace
 from pathlib import Path
@@ -270,6 +270,8 @@ class _Runner:
         self.finished = False
         self.failure: str | None = None
         self.preparation_recovered = False
+        self.ahead: set[str] = set()
+        """Tasks whose review started during the running wave."""
 
     def _save(self) -> None:
         """Save while the caller holds the record mutex."""
@@ -578,14 +580,22 @@ class _Runner:
         if code == 124:
             reason = f"stalled; the turn keeps running in {run_id}"
         provider_kind = None
+        engine = self.worker(task, role)["engine"]
         if code == 73 and run_id:
             with contextlib.suppress(runs.RecordError):
                 run = runs.load(run_id, self.env)
-                provider_kind = runs.load_outcome(run, run.turn).get("provider_kind")
+                # The saved worker can have changed since the run started.
+                engine = run.engine
+                if run.turn == 0 or run.last_variant == "starting":
+                    # A start that could not reach its provider has no turn.
+                    provider_kind = "outage"
+                provider_kind = (
+                    runs.load_outcome(run, run.turn).get("provider_kind")
+                    or provider_kind
+                )
         if code == 73 and provider_kind != "capacity":
             with self.mutex:
                 if not self.flow.get("preparation_halt"):
-                    engine = self.worker(task, role)["engine"]
                     self.flow["halted"] = f"provider error on {engine}; new runs halted"
                     self._save()
         if role == "writer" and run_id:
@@ -947,6 +957,12 @@ class _Runner:
                 action = self.review(task, recovering=recovering)
                 recovering = False
             if action != "fix":
+                return
+            if task["id"] in self.ahead:
+                # A fix is a writer turn; one decided by a review that
+                # started during a wave waits for the next wave, as a
+                # recovered fix decision does.
+                self.change(task, status="pending", entry="review", recover_review=True)
                 return
             path = self.artifact(
                 task,
@@ -1400,157 +1416,283 @@ class _Runner:
             self._save()
 
     def answers(self) -> set[str]:
-        """Apply each answer with its consumption marker and preparation decision.
+        """Apply every unapplied answer in effect and move the cursor to the end.
+
+        Each answer is applied with its consumption marker and preparation
+        decision. A line the runner took ahead of the cursor, a line that a
+        later line for the same task replaced, and a `withdraw` line are
+        passed without effect.
 
         Returns:
-            Tasks with queued answers, including those whose answers were refused.
+            Tasks with applied answers, including those whose answers were
+            refused.
         """
         answered: set[str] = set()
         lines = record.read_answers(self.id, self.env)
+        queue = {index for index, _, _ in record.answer_queue(self.flow, lines)}
         for index in range(self.flow["answers_seen"], len(lines)):
-            answer = lines[index]
-            task = None
-            problem = None
-            fields: dict[str, Any] = {}
-            try:
-                if answer is None:
-                    raise RunnerError(f"unreadable answer line {index + 1}")
-                task = record.task_entry(self.flow, answer["task"])
-                answered.add(task["id"])
-                kind = answer["kind"]
-                if (
-                    kind == "accept"
-                    and task["status"] == "merged"
-                    and answer.get("commit") == task.get("merge_tip")
-                ):
-                    # Reconciliation already recorded this hand-merged tip.
-                    with self.mutex:
-                        self.flow["answers_seen"] = index + 1
-                        self._save()
-                    continue
-                if kind not in record.allowed_answers(task):
-                    raise RunnerError(f"task {task['id']} is {task['status']}")
-                fields = {
-                    "answer": answer["n"],
-                    "reason": None,
-                    "entry": None,
-                    "explicit_review": kind == "review",
-                }
-                if kind == "accept" and task["status"] == "conflict":
-                    if answer["commit"] != task.get("merge_tip"):
-                        raise RunnerError(
-                            f"{answer['commit']} is not the approved tip "
-                            f"{task.get('merge_tip')}"
-                        )
-                    if not self.holds(answer["commit"]):
-                        raise RunnerError(
-                            f"{answer['commit']} is not in {self.flow['branch']}"
-                        )
-                    fields.update(status="conflict")
-                elif kind == "accept":
-                    tip = self.tip(task["branch"])
-                    if tip != answer["commit"]:
-                        raise RunnerError(
-                            f"the branch moved from {answer['commit']} to {tip}"
-                        )
-                    fields.update(status="accepted", head=tip)
-                elif kind in ("send", "review", "worker"):
-                    hook_refused = False
-                    if kind == "send" and task["writer_run"]:
-                        run = runs.load(task["writer_run"], self.env)
-                        hook_refused = (
-                            run.turn_state == runs.COLLECTED
-                            and (run.folder / HOOK_REFUSAL_NAME).exists()
-                        )
-                    fields.update(
-                        status="pending",
-                        entry="write" if kind == "worker" else kind,
-                        round=task["round"] if hook_refused else 0,
-                        review_action=None,
-                        recover_review=False,
-                    )
-                    if kind == "send":
-                        fields["answer_file"] = answer["file"]
-                        fields["corrections"] = [*task["corrections"], answer["file"]]
-                    if kind in ("review", "worker") and answer.get("worker"):
-                        role = "reviewer" if kind == "review" else "writer"
-                        fields[role] = self.freeze(
-                            plan.parse_worker(answer["worker"], "answer").to_json()
-                        )
-                    if kind == "review":
-                        run = runs.load(task["writer_run"], self.env)
-                        active = run.turn_state in (runs.SENT, runs.COLLECTED)
-                        fields.update(
-                            reviewer_run=None,
-                            validate_turn=active,
-                            turn_pending=active and task.get("turn_pending", False),
-                            earlier=[],
-                        )
-                        if not active:
-                            fields["fix_base"] = None
-                else:
-                    fields.update(status="dropped", reason="dropped by the lead")
-                if kind in ("worker", "drop"):
-                    fields["answer_effect"] = {
-                        "n": answer["n"],
-                        "run": task["writer_run"],
-                    }
-                    if kind == "worker":
-                        fields.update(
-                            writer_run=None,
-                            branch=None,
-                            worktree=None,
-                            head=None,
-                            task_base=None,
-                            reviewer_run=None,
-                            fix_base=None,
-                            turn_pending=False,
-                            validate_turn=False,
-                            earlier=[],
-                        )
-                if "preparation_blocked" in task:
-                    fields["preparation_blocked"] = None
-                    if (
-                        task["preparation_blocked"] == "reviewer"
-                        and task["reviewer_run"]
-                    ):
-                        previous = {"role": "reviewer", "run": task["reviewer_run"]}
-                        fields["preparation_runs"] = [
-                            *task.get("preparation_runs", []),
-                            previous,
-                        ]
-                        fields["reviewer_run"] = None
-                        fields.setdefault(
-                            "answer_effect", {"n": answer["n"], "run": None}
-                        )["preparation_run"] = task["reviewer_run"]
-            except (RunnerError, KeyError, TypeError, plan.PlanError) as error:
-                number = answer.get("n", index + 1) if answer else index + 1
-                problem = f"answer {number} refused: {error}"
+            if lines[index] is None or index in queue:
+                self._apply_answer(index, lines[index], answered, ahead=False)
+                continue
             with self.mutex:
-                if problem:
-                    self._lead(task, problem)
-                elif task is not None and answer is not None:
-                    if (
-                        answer["kind"] in ("worker", "drop")
-                        and task["branch"]
-                        and task["branch"] not in self.flow["abandoned"]
-                    ):
-                        self.flow["abandoned"].append(task["branch"])
-                    task.update(fields)
-                    if not self.flow.get("preparation_halt"):
-                        self.flow["halted"] = None
-                self.flow["answers_seen"] = index + 1
+                self._consume(index, False)
                 self._save()
-                if not problem and task is not None:
-                    self._event(
-                        "task",
-                        task=task["id"],
-                        status=task["status"],
-                        reason=task["reason"],
-                    )
-            if task is not None and not problem:
-                self.answer_effect(task)
         return answered
+
+    def answers_ahead(self, running: Iterable[str], free: int) -> list[dict[str, Any]]:
+        """Apply queued answers that need no wave boundary, ahead of the cursor.
+
+        A `reviewer` answer changes the flow's saved reviewer. A `review`
+        answer is applied when a job slot is free, new runs are not halted,
+        the task has no running job and its declared files overlap no
+        running task's files. Every other answer stays queued for the next
+        pass of `answers`.
+
+        Args:
+            running: The ids of the tasks whose jobs are running.
+            free: The number of free job slots.
+
+        Returns:
+            The tasks whose reviews are now scheduled, for the caller to run.
+        """
+        scheduled: list[dict[str, Any]] = []
+        active = set(running)
+        occupied = [path for name in active for path in self.plan.task(name).files]
+        lines = record.read_answers(self.id, self.env)
+        for index, answer, _ in record.answer_queue(self.flow, lines):
+            kind = answer.get("kind")
+            if kind == "reviewer":
+                self._apply_answer(index, answer, set(), ahead=True)
+                continue
+            # An applied answer lifts a halt; one queued before a halt of
+            # the running wave waits for the wave's end to do so.
+            if kind != "review" or len(scheduled) >= free or self.flow["halted"]:
+                continue
+            try:
+                task = record.task_entry(self.flow, answer["task"])
+                planned = self.plan.task(task["id"])
+            except KeyError, TypeError, plan.PlanError:
+                continue
+            if (
+                task["id"] in active
+                or "review" not in record.allowed_answers(task)
+                or not plan.pick_wave([planned], occupied)
+            ):
+                continue
+            self._apply_answer(index, answer, set(), ahead=True)
+            if task["status"] == "pending" and task["entry"] == "review":
+                scheduled.append(task)
+                active.add(task["id"])
+                occupied.extend(planned.files)
+        return scheduled
+
+    def unapplied(self) -> bool:
+        """Return whether the answer log holds a line no pass has consumed."""
+        taken = set(self.flow.get("answers_taken", []))
+        count = len(record.read_answers(self.id, self.env))
+        return any(
+            index not in taken for index in range(self.flow["answers_seen"], count)
+        )
+
+    def _consume(self, index: int, ahead: bool) -> None:
+        """Mark an answer line consumed while the caller holds the record mutex."""
+        taken = [item for item in self.flow.get("answers_taken", []) if item != index]
+        if ahead:
+            taken.append(index)
+        else:
+            self.flow["answers_seen"] = index + 1
+            taken = [item for item in taken if item > index]
+        self.flow["answers_taken"] = taken
+
+    def _apply_answer(
+        self,
+        index: int,
+        answer: Mapping[str, Any] | None,
+        answered: set[str],
+        *,
+        ahead: bool,
+    ) -> None:
+        """Apply one answer line with its consumption marker.
+
+        The answers lock is held from the check that the line is still in
+        effect through the save of its marker, so a command cannot replace
+        or withdraw the line in between.
+
+        Args:
+            index: The line's index in the answer log.
+            answer: The line, or `None` for an unreadable one.
+            answered: Receives the answer's task.
+            ahead: Mark the line taken ahead of the cursor, not the cursor.
+        """
+        with record.answers_lock(self.id, self.env):
+            task = self._apply_locked(index, answer, answered, ahead=ahead)
+        if task is not None:
+            self.answer_effect(task)
+
+    def _apply_locked(
+        self,
+        index: int,
+        answer: Mapping[str, Any] | None,
+        answered: set[str],
+        *,
+        ahead: bool,
+    ) -> dict[str, Any] | None:
+        """Apply an answer under the answers lock; return its task when applied."""
+        task = None
+        problem = None
+        fields: dict[str, Any] = {}
+        try:
+            if answer is None:
+                raise RunnerError(f"unreadable answer line {index + 1}")
+            lines = record.read_answers(self.id, self.env)
+            if all(index != item[0] for item in record.answer_queue(self.flow, lines)):
+                # Replaced or withdrawn since the caller read the queue.
+                if not ahead:
+                    with self.mutex:
+                        self._consume(index, False)
+                        self._save()
+                return None
+            if answer["kind"] == "reviewer":
+                worker = self.freeze(
+                    plan.parse_worker(answer["worker"], "answer").to_json()
+                )
+                with self.mutex:
+                    self.flow["reviewer"] = worker
+                    self._consume(index, ahead)
+                    self._save()
+                    self._event("reviewer", answer=answer["n"], worker=worker)
+                return None
+            task = record.task_entry(self.flow, answer["task"])
+            answered.add(task["id"])
+            kind = answer["kind"]
+            if (
+                kind == "accept"
+                and task["status"] == "merged"
+                and answer.get("commit") == task.get("merge_tip")
+            ):
+                # Reconciliation already recorded this hand-merged tip.
+                with self.mutex:
+                    self._consume(index, ahead)
+                    self._save()
+                return None
+            if kind not in record.allowed_answers(task):
+                raise RunnerError(f"task {task['id']} is {task['status']}")
+            fields = {
+                "answer": answer["n"],
+                "reason": None,
+                "entry": None,
+                "explicit_review": kind == "review",
+            }
+            if kind == "accept" and task["status"] == "conflict":
+                if answer["commit"] != task.get("merge_tip"):
+                    raise RunnerError(
+                        f"{answer['commit']} is not the approved tip "
+                        f"{task.get('merge_tip')}"
+                    )
+                if not self.holds(answer["commit"]):
+                    raise RunnerError(
+                        f"{answer['commit']} is not in {self.flow['branch']}"
+                    )
+                fields.update(status="conflict")
+            elif kind == "accept":
+                tip = self.tip(task["branch"])
+                if tip != answer["commit"]:
+                    raise RunnerError(
+                        f"the branch moved from {answer['commit']} to {tip}"
+                    )
+                fields.update(status="accepted", head=tip)
+            elif kind in ("send", "review", "worker"):
+                hook_refused = False
+                if kind == "send" and task["writer_run"]:
+                    run = runs.load(task["writer_run"], self.env)
+                    hook_refused = (
+                        run.turn_state == runs.COLLECTED
+                        and (run.folder / HOOK_REFUSAL_NAME).exists()
+                    )
+                fields.update(
+                    status="pending",
+                    entry="write" if kind == "worker" else kind,
+                    round=task["round"] if hook_refused else 0,
+                    review_action=None,
+                    recover_review=False,
+                )
+                if kind == "send":
+                    fields["answer_file"] = answer["file"]
+                    fields["corrections"] = [*task["corrections"], answer["file"]]
+                if kind in ("review", "worker") and answer.get("worker"):
+                    role = "reviewer" if kind == "review" else "writer"
+                    fields[role] = self.freeze(
+                        plan.parse_worker(answer["worker"], "answer").to_json()
+                    )
+                if kind == "review":
+                    run = runs.load(task["writer_run"], self.env)
+                    active = run.turn_state in (runs.SENT, runs.COLLECTED)
+                    fields.update(
+                        reviewer_run=None,
+                        validate_turn=active,
+                        turn_pending=active and task.get("turn_pending", False),
+                        earlier=[],
+                    )
+                    if not active:
+                        fields["fix_base"] = None
+            else:
+                fields.update(status="dropped", reason="dropped by the lead")
+            if kind in ("worker", "drop"):
+                fields["answer_effect"] = {
+                    "n": answer["n"],
+                    "run": task["writer_run"],
+                }
+                if kind == "worker":
+                    fields.update(
+                        writer_run=None,
+                        branch=None,
+                        worktree=None,
+                        head=None,
+                        task_base=None,
+                        reviewer_run=None,
+                        fix_base=None,
+                        turn_pending=False,
+                        validate_turn=False,
+                        earlier=[],
+                    )
+            if "preparation_blocked" in task:
+                fields["preparation_blocked"] = None
+                if task["preparation_blocked"] == "reviewer" and task["reviewer_run"]:
+                    previous = {"role": "reviewer", "run": task["reviewer_run"]}
+                    fields["preparation_runs"] = [
+                        *task.get("preparation_runs", []),
+                        previous,
+                    ]
+                    fields["reviewer_run"] = None
+                    fields.setdefault("answer_effect", {"n": answer["n"], "run": None})[
+                        "preparation_run"
+                    ] = task["reviewer_run"]
+        except (RunnerError, KeyError, TypeError, plan.PlanError) as error:
+            number = answer.get("n", index + 1) if answer else index + 1
+            problem = f"answer {number} refused: {error}"
+        with self.mutex:
+            if problem:
+                self._lead(task, problem)
+            elif task is not None and answer is not None:
+                if (
+                    answer["kind"] in ("worker", "drop")
+                    and task["branch"]
+                    and task["branch"] not in self.flow["abandoned"]
+                ):
+                    self.flow["abandoned"].append(task["branch"])
+                task.update(fields)
+                if not self.flow.get("preparation_halt"):
+                    self.flow["halted"] = None
+            self._consume(index, ahead)
+            self._save()
+            if not problem and task is not None:
+                self._event(
+                    "task",
+                    task=task["id"],
+                    status=task["status"],
+                    reason=task["reason"],
+                )
+        return task if not problem else None
 
     def dependencies(self) -> None:
         """Propagate dependency blocking and unblocking to a fixed point."""
@@ -1619,16 +1761,31 @@ class _Runner:
                     }
             self._save()
         executor = ThreadPoolExecutor(max_workers=self.flow["parallel"])
-        futures = [executor.submit(self.pipeline, task) for task in wave]
+        running = {executor.submit(self.pipeline, task): task for task in wave}
+        futures = list(running)
+        self.ahead = set()
         try:
             pending = set(futures)
             while pending and not self.shutdown.is_set():
                 _, pending = wait(pending, timeout=self.poll)
+                if not pending or self.shutdown.is_set():
+                    break
+                # A review answer does not wait for the wave to end.
+                for task in self.answers_ahead(
+                    [running[future]["id"] for future in pending],
+                    self.flow["parallel"] - len(pending),
+                ):
+                    self.ahead.add(task["id"])
+                    future = executor.submit(self.pipeline, task)
+                    running[future] = task
+                    futures.append(future)
+                    pending.add(future)
             if not self.shutdown.is_set():
                 for future in futures:
                     future.result()
         finally:
             executor.shutdown(wait=not self.shutdown.is_set(), cancel_futures=True)
+            self.ahead = set()
 
     def begin(self) -> None:
         """Initialize one runner attempt before recovery and scheduling."""
@@ -1756,8 +1913,7 @@ class _Runner:
                     and not self.flow.get("preparation_halt")
                     and code != exits.PREPARATION_FAILED
                     and record.cancel_request(self.id, self.env) is None
-                    and len(record.read_answers(self.id, self.env))
-                    > self.flow["answers_seen"]
+                    and self.unapplied()
                 ):
                     continuing = True
                     continue

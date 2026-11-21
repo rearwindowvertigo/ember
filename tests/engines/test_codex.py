@@ -1151,3 +1151,57 @@ def test_a_status_line_without_a_message_is_the_same_wait_at_every_count() -> No
         for n in (1, 2, 5)
     }
     assert waits == {engines.ProviderWait("outage", "Reconnecting...")}
+
+
+EXIT_ERROR = (
+    "Error: account/read failed: account/read failed: workspace routing "
+    "discovery timed out (code -32603)"
+)
+
+
+def test_the_exit_words_are_codex_error_line(setup: Setup) -> None:
+    driver = CodexDriver(setup.env)
+    dead = "Pane is dead (status 1, Fri Nov 20 20:06:13 2026)\n"
+    assert driver.exit_words(f"the brief's last line\n{EXIT_ERROR}\n{dead}") == (
+        EXIT_ERROR
+    )
+    assert driver.exit_words(f"the brief's last line\n{dead}") is None
+    assert driver.exit_words(f"{EXIT_ERROR}\na later line\n{dead}") is None
+    assert driver.exit_words("") is None
+    # Tool output is indented, and a live pane holds no exit.
+    assert driver.exit_words(f"    Error: request timed out\n{dead}") is None
+    assert driver.exit_words(f"{EXIT_ERROR}\n") is None
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        EXIT_ERROR,
+        "Error: failed to refresh available models: request timed out",
+        "Error: failed to lookup address information: Try again",
+        "Error: IO error: Connection reset by peer (os error 104)",
+        "Error: Connection failed: error sending request",
+        "Error: failed to connect to Responses WebSocket",
+        "Error: account/read failed: HTTP 503 Service Unavailable",
+        "Error: account/rateLimits/read failed: connection closed",
+    ],
+)
+def test_an_exit_error_about_the_network_is_an_outage(setup: Setup, words: str) -> None:
+    assert CodexDriver(setup.env).exit_outcome(words) == engines.TurnOutcome(
+        engines.FAILED, reason=words, provider_error=True, provider_kind="outage"
+    )
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        "Error: unknown variant `bogus` in config.toml",
+        "the request timed out",
+        "Run the tests; note that some timed out last week",
+        "Error: failed to connect to MCP server `local`",
+        "Error: MCP server `local` timed out during startup",
+        "Error: account/read failed: 401 Unauthorized",
+    ],
+)
+def test_other_last_words_are_not_classified(setup: Setup, words: str) -> None:
+    assert CodexDriver(setup.env).exit_outcome(words) is None

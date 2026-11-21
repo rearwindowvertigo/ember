@@ -1208,13 +1208,173 @@ def test_stale_and_unreadable_answers_advance_cursor(h: Harness) -> None:
     h.answer("accept", commit=flow["base"])
     with (record.folder(h.id, h.env) / record.ANSWERS_NAME).open("a") as stream:
         stream.write("not json\n")
+    flow = h.run()
+    assert flow["answers_seen"] == 2
+    assert flow["tasks"][0]["status"] == "stopped"
+    reasons = [e.get("reason", "") or "" for e in record.read_events(h.id, h.env)]
+    assert any("the branch moved" in reason for reason in reasons)
+    assert any("unreadable answer line 2" in reason for reason in reasons)
     h.answer("drop")
     flow = h.run()
     assert flow["answers_seen"] == 3
     assert flow["tasks"][0]["status"] == "dropped"
-    reasons = [e.get("reason", "") or "" for e in record.read_events(h.id, h.env)]
-    assert any("the branch moved" in reason for reason in reasons)
-    assert any("unreadable answer line 2" in reason for reason in reasons)
+
+
+def _stopped_for_the_lead(h: Harness, *tasks: dict[str, Any]) -> dict[str, Any]:
+    """Run a flow whose task a stops for the lead after a failed review."""
+    h.scripts_update(**{"Review of task a,": "@reply " + FIX})
+    h.create([task("a"), *tasks], rounds=0)
+    flow = h.run()
+    assert flow["tasks"][0]["status"] == "stopped"
+    h.script_data = {"a read-only review;": "@reply " + PASS}
+    h.scripts_update()
+    return flow
+
+
+def _refusals(h: Harness) -> list[str]:
+    return [
+        reason
+        for event in record.read_events(h.id, h.env)
+        if "refused" in (reason := event.get("reason") or "")
+    ]
+
+
+def test_a_later_answer_replaces_the_unapplied_answer_of_its_task(h: Harness) -> None:
+    _stopped_for_the_lead(h)
+    h.answer("accept", commit="0" * 40)
+    h.answer("review")
+    h.answer("review", worker="codex:another@low")
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["status"] == "merged"
+    assert item["answer"] == 3
+    assert item["reviewer"]["model"] == "another"
+    assert runs.load(item["reviews"][-1]["run"], h.env).model == "another"
+    assert (flow["answers_seen"], flow["answers_taken"]) == (3, [])
+    assert _refusals(h) == []
+
+
+def test_a_withdrawn_answer_is_not_applied(h: Harness) -> None:
+    _stopped_for_the_lead(h)
+    h.answer("drop")
+    h.answer("withdraw")
+    flow = h.run()
+    assert flow["tasks"][0]["status"] == "stopped"
+    assert flow["tasks"][0]["answer"] is None
+    assert (flow["status"], flow["answers_seen"]) == ("stopped", 2)
+    assert _refusals(h) == []
+    h.answer("review")
+    assert h.run()["tasks"][0]["status"] == "merged"
+
+
+def test_a_reviewer_answer_changes_the_saved_reviewer_for_later_reviews(
+    h: Harness,
+) -> None:
+    before = _stopped_for_the_lead(h)
+    assert before["reviewer"]["model"] == "gpt-5"
+    record.append_answer(
+        h.id, {"kind": "reviewer", "worker": "codex:another@low"}, h.env
+    )
+    h.answer("review")
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert flow["reviewer"]["model"] == "another"
+    assert item["reviewer"] is None
+    assert runs.load(item["reviews"][-1]["run"], h.env).model == "another"
+    assert item["status"] == "merged"
+    assert flow["answers_seen"] == 2
+    events = [e for e in record.read_events(h.id, h.env) if e["kind"] == "reviewer"]
+    assert [(e["answer"], e["worker"]["model"]) for e in events] == [(1, "another")]
+
+
+def _wait_for(condition: Callable[[], object], seconds: float = 30) -> None:
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+
+def _hold_wave(h: Harness, *tasks: dict[str, Any]) -> None:
+    """Create a flow whose task a stops for the lead while task c keeps writing."""
+    h.scripts_update(**{"Review of task a,": "@reply " + FIX})
+    h.create([task("a"), *tasks], rounds=0)
+    flow = h.flow()
+    flow["stall_minutes"] = 5
+    record.save(flow, h.env)
+
+
+def _release(h: Harness, name: str) -> None:
+    item = next(t for t in h.flow()["tasks"] if t["id"] == name)
+    (runs.load(item["writer_run"], h.env).folder / "stub" / "release").touch()
+
+
+def _status(h: Harness, name: str) -> str:
+    return next(t["status"] for t in h.flow()["tasks"] if t["id"] == name)
+
+
+def test_a_review_answer_starts_while_the_wave_still_runs(h: Harness) -> None:
+    _hold_wave(h, task("c", text="@write c value\n@hang"))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(h.run)
+        _wait_for(lambda: _status(h, "a") == "stopped")
+        assert _status(h, "c") == "writing"
+        h.script_data = {"a read-only review;": "@reply " + PASS}
+        h.scripts_update()
+        h.answer("review")
+        _wait_for(lambda: _status(h, "a") == "accepted")
+        taken = h.flow()
+        assert _status(h, "c") == "writing" and not future.done()
+        assert (taken["answers_seen"], taken["answers_taken"]) == (0, [0])
+        _release(h, "c")
+        flow = future.result(timeout=60)
+    assert [t["status"] for t in flow["tasks"]] == ["merged", "merged"]
+    assert (flow["answers_seen"], flow["answers_taken"]) == (1, [])
+    assert _refusals(h) == []
+
+
+def test_other_answers_wait_for_the_end_of_the_wave(h: Harness) -> None:
+    _hold_wave(h, task("c", text="@write c value\n@hang"))
+    correction = h.tmp / "correction.md"
+    correction.write_text("@write a corrected")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(h.run)
+        _wait_for(lambda: _status(h, "a") == "stopped")
+        h.script_data = {"a read-only review;": "@reply " + PASS}
+        h.scripts_update()
+        h.answer("drop")
+        h.answer("send", file=str(correction))
+        time.sleep(0.5)
+        waiting = h.flow()
+        assert _status(h, "a") == "stopped" and not future.done()
+        assert (waiting["answers_seen"], waiting.get("answers_taken", [])) == (0, [])
+        _release(h, "c")
+        flow = future.result(timeout=60)
+    assert [t["status"] for t in flow["tasks"]] == ["merged", "merged"]
+    assert flow["tasks"][0]["answer"] == 2
+    assert flow["answers_seen"] == 2
+    assert _refusals(h) == []
+
+
+def test_a_review_answer_waits_while_a_running_task_holds_its_files(
+    h: Harness,
+) -> None:
+    _hold_wave(h, task("c", text="@write c value\n@hang", files=["a", "c"]))
+    assert h.flow()["plan_waves"] == [["a"], ["c"]]
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(h.run)
+        _wait_for(lambda: _status(h, "c") == "writing")
+        assert _status(h, "a") == "stopped"
+        h.script_data = {"a read-only review;": "@reply " + PASS}
+        h.scripts_update()
+        h.answer("review")
+        time.sleep(0.5)
+        waiting = h.flow()
+        assert _status(h, "a") == "stopped" and not future.done()
+        assert (waiting["answers_seen"], waiting.get("answers_taken", [])) == (0, [])
+        _release(h, "c")
+        flow = future.result(timeout=60)
+    assert flow["tasks"][0]["status"] == "merged"
+    assert flow["answers_seen"] == 1
 
 
 def test_dropped_pending_task_never_starts_and_blocks_dependants(h: Harness) -> None:
@@ -2800,3 +2960,100 @@ def test_replace_failed_check_before_pending_wave(
         assert started == []
         assert final["tasks"] == failed["tasks"]
         assert final["checks"][-1]["exit"] == 2
+
+
+def test_an_answer_replaced_after_the_queue_was_read_is_not_applied(
+    h: Harness,
+) -> None:
+    _stopped_for_the_lead(h)
+    h.answer("drop")
+    instance = h.instance()
+    lines = record.read_answers(h.id, h.env)
+    h.answer("withdraw")
+    instance._apply_answer(0, lines[0], set(), ahead=False)
+    assert instance.flow["tasks"][0]["status"] == "stopped"
+    assert instance.flow["answers_seen"] == 1
+    h.answer("drop")
+    read = record.read_answers(h.id, h.env)
+    h.answer("review")
+    instance._apply_answer(2, read[2], set(), ahead=True)
+    assert instance.flow["tasks"][0]["status"] == "stopped"
+    assert instance.flow["answers_taken"] == []
+    assert h.run()["tasks"][0]["status"] == "merged"
+    assert _refusals(h) == []
+
+
+def test_reviews_ahead_wait_for_a_halt_a_running_job_and_a_free_slot(
+    h: Harness,
+) -> None:
+    _stopped_for_the_lead(h)
+    h.answer("review")
+    instance = h.instance()
+    assert instance.answers_ahead([], 0) == []
+    assert instance.answers_ahead(["a"], 1) == []
+    instance.flow["halted"] = "provider error on codex; new runs halted"
+    assert instance.answers_ahead([], 1) == []
+    assert instance.flow["halted"] and instance.flow["tasks"][0]["status"] == "stopped"
+    instance.flow["halted"] = None
+    (scheduled,) = instance.answers_ahead([], 1)
+    assert (scheduled["id"], scheduled["status"], scheduled["entry"]) == (
+        "a",
+        "pending",
+        "review",
+    )
+    assert instance.flow["answers_taken"] == [0]
+    assert instance.answers_ahead([], 1) == []
+
+
+def test_a_runner_that_stopped_after_taking_an_answer_ahead_applies_it_once(
+    h: Harness,
+) -> None:
+    before = _stopped_for_the_lead(h)
+    h.answer("review")
+    instance = h.instance()
+    assert len(instance.answers_ahead([], 1)) == 1
+    saved = h.flow()
+    assert (saved["answers_seen"], saved["answers_taken"]) == (0, [0])
+    assert not instance.unapplied()
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["status"] == "merged"
+    assert len(item["reviews"]) == len(before["tasks"][0]["reviews"]) + 1
+    assert (flow["answers_seen"], flow["answers_taken"]) == (1, [])
+    assert _refusals(h) == []
+
+
+def test_a_fix_decided_by_a_review_started_in_a_wave_waits_for_the_next_wave(
+    h: Harness,
+) -> None:
+    h.scripts_update(**{"Review of task a,": "@reply " + FIX})
+    h.create([task("a"), task("c", text="@write c value\n@hang")], rounds=1)
+    flow = h.flow()
+    flow["stall_minutes"] = 5
+    record.save(flow, h.env)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(h.run)
+        _wait_for(lambda: _status(h, "a") == "stopped")
+        stopped = h.flow()["tasks"][0]
+        turns = runs.load(stopped["writer_run"], h.env).turn
+        h.answer("review")
+        # The answer itself makes the task pending; the deferred fix is the
+        # pending state with the review's saved decision.
+        _wait_for(
+            lambda: (
+                (item := h.flow()["tasks"][0])["status"] == "pending"
+                and item.get("recover_review") is True
+            )
+        )
+        waiting = h.flow()["tasks"][0]
+        assert (waiting["entry"], waiting["review_action"]) == ("review", "fix")
+        assert waiting["recover_review"] is True
+        time.sleep(0.3)
+        assert _status(h, "a") == "pending" and _status(h, "c") == "writing"
+        assert runs.load(stopped["writer_run"], h.env).turn == turns
+        assert not future.done()
+        _release(h, "c")
+        flow = future.result(timeout=60)
+    item = flow["tasks"][0]
+    assert runs.load(item["writer_run"], h.env).turn == turns + 1
+    assert flow["tasks"][1]["status"] == "merged"

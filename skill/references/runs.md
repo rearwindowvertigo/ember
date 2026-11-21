@@ -258,6 +258,12 @@ provider (<kind>): <message>`, and `emb run --status` shows the wait as
 a `capacity` wait at once and retries as above; any other wait ends at
 exit 73 once it has lasted the stall time.
 
+When an engine's process ends, the reason holds what it printed last;
+for Codex that is its final `Error:` line, when it printed one. A
+Codex that ended because it could not reach its provider exits 73 as an
+`outage`, and its `next:` line is a new run: the ended session takes no
+`--send`.
+
 Exhausted or disabled retries end at exit 73. `usage_limit` and `outage`
 exit 73 without retrying. Codex recognizes capacity and usage-limit
 messages; Claude and both OpenCode drivers classify provider errors as

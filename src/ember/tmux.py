@@ -267,6 +267,50 @@ def interrupt(name: str, *, env: Mapping[str, str] | None = None) -> None:
     send_keys(name, "C-c", env=env)
 
 
+DEAD_PANE_NOTICE = "Pane is dead"
+"""How tmux begins the line it adds to a pane whose program has ended, when
+`remain-on-exit` is on."""
+
+LAST_WORDS_LIMIT = 300
+"""The longest text `last_words` returns."""
+
+
+def last_line(screen: str) -> str | None:
+    """Return the last line a dead pane's program printed, as the pane shows it.
+
+    Args:
+        screen: The text of a pane whose program has ended.
+
+    Returns:
+        The last line that is not empty, above tmux's `Pane is dead`
+        notice, with its indentation; `None` when the text holds no such
+        notice or no line above it.
+    """
+    lines = screen.splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines or not lines[-1].strip().startswith(DEAD_PANE_NOTICE):
+        return None
+    for line in reversed(lines[:-1]):
+        if line.strip():
+            return line.rstrip()
+    return None
+
+
+def last_words(screen: str) -> str | None:
+    """Return the last line a dead pane's program printed, without margins.
+
+    Args:
+        screen: The text of a pane whose program has ended.
+
+    Returns:
+        `last_line`, stripped and cut to `LAST_WORDS_LIMIT` characters;
+        `None` when there is none.
+    """
+    line = last_line(screen)
+    return None if line is None else line.strip()[:LAST_WORDS_LIMIT]
+
+
 def capture(
     name: str, *, lines: int | None = None, env: Mapping[str, str] | None = None
 ) -> str:

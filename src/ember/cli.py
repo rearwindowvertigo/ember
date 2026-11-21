@@ -316,7 +316,11 @@ def _add_flow(parser: argparse.ArgumentParser) -> None:
         "--status", nargs="?", const="", metavar="FLOW", help="show one or all flows"
     )
     parser.add_argument(
-        "--lead", nargs=2, metavar=("FLOW", "TASK"), help="answer a task's lead stop"
+        "--lead",
+        nargs="+",
+        metavar=("FLOW", "TASK"),
+        help="answer a task's lead stop; with --reviewer and no task, change "
+        "the flow's saved reviewer",
     )
     parser.add_argument("--resume", metavar="FLOW", help="restart a flow's runner")
     parser.add_argument(
@@ -345,6 +349,9 @@ def _add_flow(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--review", action="store_true", help="start a fresh review")
     parser.add_argument("--worker", metavar="W", help="replace the writer with W")
     parser.add_argument("--drop", action="store_true", help="drop the task")
+    parser.add_argument(
+        "--withdraw", action="store_true", help="withdraw the task's queued answer"
+    )
     parser.add_argument("--json", action="store_true", help="print JSON")
 
 
