@@ -31,7 +31,7 @@ wheels = [
 
 [[package]]
 name = "ember-app"
-version = "0.26.2"
+version = "0.27.0"
 source = { editable = "." }
 dependencies = [
     { name = "pyside6-essentials" },
