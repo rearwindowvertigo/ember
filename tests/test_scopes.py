@@ -1,4 +1,5 @@
 import contextlib
+import errno
 import json
 import os
 import signal
@@ -253,3 +254,34 @@ while True:
         if process.poll() is None:
             process.kill()
         process.communicate(timeout=10)
+
+
+def test_members_skip_a_group_removed_while_it_is_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    (tmp_path / "cgroup.procs").write_text("123\n")
+    (gone / "cgroup.procs").write_text("456\n")
+    read_text = Path.read_text
+
+    def read(self: Path) -> str:
+        if self.parent == gone:
+            raise OSError(errno.ENODEV, os.strerror(errno.ENODEV))
+        return read_text(self)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    assert scopes._members(tmp_path) == [123]
+
+
+def test_members_report_other_read_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "cgroup.procs").write_text("123\n")
+
+    def read(self: Path) -> str:
+        raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+    monkeypatch.setattr(Path, "read_text", read)
+    with pytest.raises(scopes.ScopeError, match="cannot read scope members"):
+        scopes._members(tmp_path)
