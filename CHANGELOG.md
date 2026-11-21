@@ -15,12 +15,10 @@
 
 ### Fixed
 
-* **app:** construct the tooltip window with its own flags ([796d3b4](https://github.com/rearwindowvertigo/ember/commit/796d3b4f7c91a2c8400bde2348cee1882a08baaa))
 * **app:** limit a picker's list to 10 rows and scroll the rest ([65a14bb](https://github.com/rearwindowvertigo/ember/commit/65a14bbcabf96c6192c04fada3a3f6ba915eda6d))
 * **app:** place every info icon 8 px after its label ([5865b23](https://github.com/rearwindowvertigo/ember/commit/5865b232cf42203bee3491b6a5c867b1f247c9f2))
 * **app:** show what is behind the rounded corners of lists and menus ([3fbcf7d](https://github.com/rearwindowvertigo/ember/commit/3fbcf7d88202c8db9472fb6c77b3680389556214))
 * **cli:** print a report line that names the worker tip after emb merge ([750c974](https://github.com/rearwindowvertigo/ember/commit/750c974a746d8678b934933141b8f06e2b5c6b15))
-* **flows:** keep the pending turn fields and describe check folder removal ([6cfccd5](https://github.com/rearwindowvertigo/ember/commit/6cfccd5cfbb886d61e3dd72e7569b52c7bd6cdec))
 * **flows:** remove a worker's temporary files once its task is accepted ([91de56f](https://github.com/rearwindowvertigo/ember/commit/91de56f670154b4239ef8f532b6ebafe5deb2612))
 * **runs:** refuse a start when the temporary volume is nearly full ([1b39d0d](https://github.com/rearwindowvertigo/ember/commit/1b39d0dc0dd68e6b3586b03e0645c82c2a36885d))
 * **runs:** skip a process group removed while a scope's members are read ([66535d2](https://github.com/rearwindowvertigo/ember/commit/66535d25b40780adad9548ae4da51fced38d6389)), closes [#330](https://github.com/rearwindowvertigo/ember/issues/330)
