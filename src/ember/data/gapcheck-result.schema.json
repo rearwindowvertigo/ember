@@ -86,10 +86,18 @@
           ],
           "minLength": 1
         },
+        "speed": {
+          "enum": [
+            "standard",
+            "fast",
+            null
+          ]
+        },
         "source": {
           "enum": [
             "option",
-            "menu"
+            "menu",
+            "fallback"
           ]
         }
       }

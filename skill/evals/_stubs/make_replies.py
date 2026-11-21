@@ -564,6 +564,8 @@ def panel_replies() -> dict[str, str]:
             closed=True,
             reason=None if n < 3 else "the turn ended with no reply",
             attempts=[{"kind": "start", "at": began, "exit": 0 if n < 3 else 80}],
+            # A Codex member's run records the standard tier by default.
+            speed="standard" if member["engine"] == "codex" else None,
         )
     panel = panel_records.new_panel(
         panel_id,
@@ -830,6 +832,7 @@ def gapcheck_replies() -> dict[str, str]:
             engine="codex",
             model=model,
             effort=effort,
+            speed="standard",
             source="option" if named else "menu",
         )
         made["run"] = dict(

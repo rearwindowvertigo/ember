@@ -519,7 +519,7 @@ def test_run_start_commits_on_its_branch(tmp_path: Path, env: dict[str, str]) ->
     commit = work.git("rev-parse", branch)
     worker_line, next_line = result.stderr.splitlines()
     assert worker_line == (
-        "Team, Single tasks Writer: codex gpt-6.1-sol · high (single.writer)"
+        "Team, Single tasks Writer: codex gpt-6.1-sol · high · standard (single.writer)"
     )
     assert next_line == (
         f"next: python3 {skill_script(work)} --repo {work.work} "
@@ -529,7 +529,9 @@ def test_run_start_commits_on_its_branch(tmp_path: Path, env: dict[str, str]) ->
         "--note '<verdict>' --subject '<subject>'"
     )
     reply = work.eval / "runs" / run_id / "turn-1.md"
-    assert lines[1] == "codex gpt-6.1-sol · high · 240s · exit 0 · 2 files · turn 1"
+    assert lines[1] == (
+        "codex gpt-6.1-sol · high · standard · 240s · exit 0 · 2 files · turn 1"
+    )
     assert lines[2:9] == [
         f"run {run_id}",
         f"worktree {worktree}",
@@ -645,6 +647,7 @@ def test_run_preview_then_start(
         "effort": effort,
         "model_source": model_source,
         "effort_source": effort_source,
+        "speed": "standard",
     }
     assert json.loads(result.stdout) == expected
     source = (
@@ -652,7 +655,7 @@ def test_run_preview_then_start(
         if model_source == effort_source
         else f"model: {model_source}, effort: {effort_source}"
     )
-    line = f"Team, Single tasks {row}: codex {model} · {effort} ({source})\n"
+    line = f"Team, Single tasks {row}: codex {model} · {effort} · standard ({source})\n"
     preview = work.emb(*args, "--dry-run")
     assert preview.returncode == 0 and preview.stderr == ""
     assert preview.stdout == line
@@ -692,12 +695,12 @@ def test_read_only_start_makes_detached_worktree(
         "--read-only",
     )  # fmt: skip
     assert result.returncode == 0, result.stderr
-    assert "codex gpt-6.1-sol-mini · medium · " in result.stdout
+    assert "codex gpt-6.1-sol-mini · medium · standard · " in result.stdout
     assert "branch -\n" in result.stdout
     assert work.git("branch", "--list", "ember/*") == ""
     run_id = result.stdout.splitlines()[0].removeprefix("run ")
     assert result.stderr == (
-        "Team, Single tasks Reviewer: codex gpt-6.1-sol-mini · medium "
+        "Team, Single tasks Reviewer: codex gpt-6.1-sol-mini · medium · standard "
         "(single.reviewer)\n"
         f"next: emb run --close {run_id}\n"
     )
@@ -792,7 +795,7 @@ def test_read_only_change_warning_names_its_detached_worktree(
     run_id = result.stdout.splitlines()[0].removeprefix("run ")
     evidence = worktree_path(work, run_id) / "evidence.txt"
     assert result.stderr == (
-        "Team, Single tasks Reviewer: codex gpt-6.1-sol-mini · medium "
+        "Team, Single tasks Reviewer: codex gpt-6.1-sol-mini · medium · standard "
         "(single.reviewer)\n"
         f"WARNING: read-only run {run_id} changed {evidence}\n"
         f"next: emb run --close {run_id}\n"
@@ -1844,6 +1847,28 @@ def test_denied_path_case_keeps_every_attempt_and_owner_action(
     assert work.emb("choices", "--set", "sandbox.read=/eval/home/.ssh").returncode == 77
 
 
+def test_stub_names_the_speed_the_settings_reply_gives(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    work = case("claim-and-menu-writer", tmp_path, env)
+    path = work.eval / "replies/choices-read.out"
+    document = json.loads(path.read_text())
+    assert document["answers"]["fast.codex"]["value"] == []
+    document["answers"]["fast.codex"] = {"value": ["gpt-6.1-sol"], "layer": "setting"}
+    path.write_text(json.dumps(document))
+    args = ["run", "--engine", "codex", "--dir", ".", "--task-file", work.brief()]
+    preview = work.emb(*args, "--dry-run")
+    assert preview.stdout == (
+        "Team, Single tasks Writer: codex gpt-6.1-sol · high · fast (single.writer)\n"
+    )
+    started = work.emb(*args)
+    assert started.returncode == 0, started.stderr
+    lines = started.stdout.splitlines()
+    assert lines[1].startswith("codex gpt-6.1-sol · high · fast · ")
+    status = json.loads(work.emb("run", "--status", lines[0][4:], "--json").stdout)
+    assert status["speed"] == "fast"
+
+
 @pytest.mark.parametrize("variant", ["capacity", "usage_limit", "outage", "uncertain"])
 def test_provider_error_case_streams_and_status(
     tmp_path: Path, env: dict[str, str], variant: str
@@ -2721,7 +2746,9 @@ def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) ->
     lines = [
         (f"option, {role}" if named else f"Team, Single tasks {role.title()}")
         + f": {workers[role]['engine']} {workers[role]['model']} · "
-        f"{workers[role]['effort']} ({'option' if named else f'single.{role}'})"
+        f"{workers[role]['effort']}"
+        f"{' · ' + workers[role]['speed'] if workers[role]['speed'] else ''} "
+        f"({'option' if named else f'single.{role}'})"
         for role in ("writer", "reviewer")
     ]
     if workers["same_model"]:
@@ -3473,9 +3500,10 @@ def test_flow_dry_run_announces_both_workers(
         worker = document[role]
         label = f"option, {role}" if named else f"Team, Single tasks {role.title()}"
         source = "option" if named else f"single.{role}"
+        speed = f" · {worker['speed']}" if worker["speed"] else ""
         assert text.stdout.splitlines()[index] == (
             f"{label}: {worker['engine']} {worker['model']} · "
-            f"{worker['effort']} ({source})"
+            f"{worker['effort']}{speed} ({source})"
         )
     assert text.stderr == ""
 
@@ -3506,8 +3534,9 @@ def test_flow_start_announces_resolved_workers(
     engine_model, effort = reviewer.split("@")
     engine, model = engine_model.split(":")
     lines = [
-        "option, writer: codex gpt-6.1-sol · high (option)",
-        f"option, reviewer: {engine} {model} · {effort} (option)",
+        "option, writer: codex gpt-6.1-sol · high · standard (option)",
+        f"option, reviewer: {engine} {model} · {effort}"
+        f"{' · standard' if engine == 'codex' else ''} (option)",
     ]
     if same_model:
         lines += ["same model: writer and reviewer both resolve to codex gpt-6.1-sol"]
@@ -3562,7 +3591,7 @@ def test_flow_worker_option_inherits_effort_without_engine_probes(
     ]  # fmt: skip
     provenance = "option" if source == "option" else f"model: option, effort: {source}"
     lines = [
-        f"option, writer: codex gpt-6.1-sol · {effort} ({provenance})",
+        f"option, writer: codex gpt-6.1-sol · {effort} · standard ({provenance})",
         "option, reviewer: claude opus · default (option)",
     ]
     started = work.emb(*args, "--start")

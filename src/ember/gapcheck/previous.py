@@ -204,7 +204,11 @@ def _schema_error(
     if "const" in schema and value != schema["const"]:
         return f"{path}: expected {schema['const']!r}"
     if "enum" in schema and value not in schema["enum"]:
-        return f"{path}: expected one of {', '.join(schema['enum'])}"
+        options = (
+            item if isinstance(item, str) else json.dumps(item)
+            for item in schema["enum"]
+        )
+        return f"{path}: expected one of {', '.join(options)}"
     if isinstance(value, dict):
         properties = schema.get("properties", {})
         for key in schema.get("required", []):

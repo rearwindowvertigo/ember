@@ -75,7 +75,8 @@ class RecordMissingError(RecordError):
 class Run:
     """A run's record, with its folder and environment.
 
-    Every field except `folder` and `env` is stored in `run.json`.
+    The record stores its populated fields in `run.json` and keeps `folder`
+    and `env` in memory.
     """
 
     id: str
@@ -229,21 +230,28 @@ class Run:
     env: Mapping[str, str] = field(default_factory=dict, compare=False, repr=False)
     """The environment the run's commands use."""
 
+    speed: str | None = None
+    """The Codex tier at start, or None for other engines and older records."""
+
     def to_json(self) -> dict[str, Any]:
         """Return the stored fields as a JSON-ready dict.
 
         Returns:
-            Every field except `folder` and `env`, with tuples as lists,
-            plus the marker for full OpenCode model ids.
+            The stored record with tuples as lists and the full OpenCode model
+            id marker. Empty preparation, start arguments, run links and speed
+            are omitted.
         """
         result: dict[str, Any] = {}
         for item in fields(self):
             if item.name in ("folder", "env"):
                 continue
             value = getattr(self, item.name)
-            if (
-                item.name in ("preparation", "start_argv", "continues", "fallback_from")
-                and not value
+            if not value and item.name in (
+                "preparation",
+                "start_argv",
+                "continues",
+                "fallback_from",
+                "speed",
             ):
                 continue
             result[item.name] = list(value) if isinstance(value, tuple) else value
@@ -257,6 +265,7 @@ _TYPES: dict[str, tuple[tuple[type, ...], bool]] = {
     "engine": (_STR, False),
     "model": (_STR, False),
     "effort": (_STR, True),
+    "speed": (_STR, True),
     "read_only": ((bool,), False),
     "repo": (_STR, False),
     "worktree": (_STR, False),
@@ -669,6 +678,7 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
         "start_argv": [],
         "continues": None,
         "fallback_from": None,
+        "speed": None,
         **value,
     }
     values: dict[str, Any] = {}
@@ -700,6 +710,10 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
         raise RecordError(name, "run.json names another run")
     if values["sandbox"] not in SANDBOXES:
         raise RecordError(name, "run.json has an invalid sandbox")
+    if values["speed"] is not None and (
+        values["engine"] != "codex" or values["speed"] not in choices.SPEEDS
+    ):
+        raise RecordError(name, "run.json has an invalid speed")
     if values["status"] not in STATUSES:
         raise RecordError(name, "run.json has an invalid status")
     if values["turn_state"] is not None and values["turn_state"] not in TURN_STATES:

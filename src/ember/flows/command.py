@@ -431,7 +431,19 @@ def _same_model(writer: plan.Worker, reviewer: plan.Worker) -> bool:
     return (writer.engine, writer.model) == (reviewer.engine, reviewer.model)
 
 
-def _worker_lines(writer: plan.Worker, reviewer: plan.Worker, out: TextIO) -> None:
+def _speed(worker: plan.Worker, answers: Mapping[str, Mapping[str, Any]]) -> str | None:
+    """Return the speed a start of the worker gets now; None for other engines."""
+    if worker.engine != "codex":
+        return None
+    return choices.codex_speed(answers, worker.model)
+
+
+def _worker_lines(
+    writer: plan.Worker,
+    reviewer: plan.Worker,
+    out: TextIO,
+    answers: Mapping[str, Mapping[str, Any]],
+) -> None:
     """Print the resolved workers and whether their engine and model match."""
     for worker in (writer, reviewer):
         print(
@@ -443,6 +455,7 @@ def _worker_lines(writer: plan.Worker, reviewer: plan.Worker, out: TextIO) -> No
                 effort_source=worker.effort_source,
                 screen=worker.screen,
                 row=worker.row,
+                speed=_speed(worker, answers),
             ).line(),
             file=out,
         )
@@ -520,8 +533,14 @@ def _dry_run(
                     "plan": str(document.path),
                     "dir": str(top),
                     "base": base,
-                    "writer": writer.to_json(),
-                    "reviewer": reviewer.to_json(),
+                    "writer": {
+                        **writer.to_json(),
+                        "speed": _speed(writer, settings["answers"]),
+                    },
+                    "reviewer": {
+                        **reviewer.to_json(),
+                        "speed": _speed(reviewer, settings["answers"]),
+                    },
                     "same_model": _same_model(writer, reviewer),
                     "check": list(document.check),
                     "rounds": document.rounds,
@@ -542,7 +561,7 @@ def _dry_run(
             file=out,
         )
     else:
-        _worker_lines(writer, reviewer, out)
+        _worker_lines(writer, reviewer, out, settings["answers"])
         print(f"base {base}", file=out)
         print(
             f"rounds {document.rounds} fix rounds, at most {document.rounds + 1} "
@@ -689,7 +708,7 @@ def _start(
         f"flow {flow_id}\nbranch {flow['branch']}\nworktree {flow['worktree']}",
         file=out,
     )
-    _worker_lines(writer, reviewer, err)
+    _worker_lines(writer, reviewer, err, settings["answers"])
     print(f"next: emb flow --watch {flow_id} --json", file=err)
     return 0
 

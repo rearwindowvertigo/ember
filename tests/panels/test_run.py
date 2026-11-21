@@ -396,6 +396,9 @@ def test_recovery_ends_abandoned_preparation_without_restarting(
 
 
 def test_parallel_members_and_run_options(h: Harness) -> None:
+    choices.set_settings(
+        {"shortlist.codex": ["model@low"], "fast.codex": ["model"]}, env=h.env
+    )
     h.create()
     h.script(codex="@hang", opencode="@hang", claude="@hang")
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -420,6 +423,13 @@ def test_parallel_members_and_run_options(h: Harness) -> None:
         saved = runs.load(item["run"], h.env)
         assert saved.status == "closed" and item["closed"]
         assert saved.effort == item["effort"] == "low"
+        assert (
+            item["speed"]
+            == saved.speed
+            == ("fast" if saved.engine == "codex" else None)
+        )
+        if saved.engine == "codex":
+            assert "codex:model · low · fast · answered" in run.member_line(item)
         assert saved.read_only and saved.claim is None
         assert saved.read == (str(h.tmp),) and saved.trailers == ()
         assert saved.worktree != str(h.repo) and saved.branch is None

@@ -915,10 +915,11 @@ class CodexDriver(Driver):
 
         Returns:
             `codex -C <worktree> -m <model> -c check_for_update_on_startup=false
-            [-c model_reasoning_effort=...] -a never
+            [-c model_reasoning_effort=...] [tier option] -a never
             [--sandbox danger-full-access] --search`, in the worktree, with
             the first message to paste. The sandbox option is
-            added only for a run whose sandbox is `none`.
+            added only for a run whose sandbox is `none`. Standard adds
+            `-c features.fast_mode=false` and Fast adds `-c service_tier="fast"`.
 
         Raises:
             DriverError: Codex is not on PATH, or Codex does not trust the
@@ -934,6 +935,10 @@ class CodexDriver(Driver):
         argv += ["-c", "check_for_update_on_startup=false"]
         if run.effort is not None:
             argv += ["-c", f"model_reasoning_effort={json.dumps(run.effort)}"]
+        if run.speed == "standard":
+            argv += ["-c", "features.fast_mode=false"]
+        elif run.speed == "fast":
+            argv += ["-c", 'service_tier="fast"']
         argv += ["-a", "never"]
         if run.sandbox == "none":
             argv += ["--sandbox", "danger-full-access"]

@@ -66,6 +66,32 @@ def history_gap(name: str, **extra: Any) -> dict[str, Any]:  # noqa: ANN401
     return {"step": 3, "title": "Old", **made}
 
 
+def test_reviewer_speed_is_optional_in_saved_results() -> None:
+    reviewer = {"engine": "codex", "model": "gpt", "effort": "high", "source": "menu"}
+    assert previous.validate(result(reviewer=reviewer))["reviewer"] == reviewer
+    for speed in ("standard", "fast", None):
+        worker = {**reviewer, "speed": speed}
+        assert previous.validate(result(reviewer=worker))["reviewer"] == worker
+    with pytest.raises(
+        previous.PreviousError, match="expected one of standard, fast, null"
+    ):
+        previous.validate(result(reviewer={**reviewer, "speed": "unknown"}))
+
+
+def test_a_result_of_a_fallback_reviewer_is_accepted() -> None:
+    reviewer = {
+        "engine": "claude",
+        "model": "opus",
+        "effort": "high",
+        "source": "fallback",
+    }
+    assert previous.validate(result(reviewer=reviewer))["reviewer"] == reviewer
+    with pytest.raises(
+        previous.PreviousError, match="expected one of option, menu, fallback"
+    ):
+        previous.validate(result(reviewer={**reviewer, "source": "held"}))
+
+
 def test_result_gaps_with_ids_and_answers(tmp_path: Path) -> None:
     document = result(
         {"step": 1, "title": "Read", "gaps": [gap("a", answer="Keep")]},

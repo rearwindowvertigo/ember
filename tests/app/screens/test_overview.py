@@ -582,6 +582,7 @@ def test_record_formatters(env: dict[str, str]) -> None:
         "1. Codex · test-model · default · Pending · -s"
     )
     assert overview.member_line(make_member(seconds=12.6)).endswith("13s")
+    assert " · default · fast · " in overview.member_line(make_member(speed="fast"))
     item = flows.PanelItem(panel, "x" * 100, None, False)
     assert overview.panel_detail(item) == "project"
     assert overview.panel_detail(replace(item, question="")) == "project"
@@ -1921,6 +1922,9 @@ def test_a_run_without_a_subject_keeps_its_worker_in_the_title(
     env: dict[str, str],
 ) -> None:
     run = replace(make_run(env, LIVE_A), subject="  ")
+    assert overview.worker_line(
+        replace(run, engine="codex", effort="low", speed="fast")
+    ) == (f"Codex · {run.model} · low · fast")
     assert overview.run_title(run) == f"Run · {overview.worker_line(run)}"
     assert not overview.run_detail(run).startswith(overview.worker_line(run))
     run = replace(run, subject="Fix the\nbug")

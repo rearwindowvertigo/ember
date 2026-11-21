@@ -858,7 +858,7 @@ def _per_million(value: float) -> str:
     return f"${value * 1_000_000:.2f}/M"
 
 
-def _model_line(model: models.Model) -> str:
+def _model_line(model: models.Model, speed: str | None = None) -> str:
     parts = [model.id]
     if model.label != model.id:
         parts.append(model.label)
@@ -867,6 +867,8 @@ def _model_line(model: models.Model) -> str:
         if model.default_effort:
             efforts += f" (default {model.default_effort})"
         parts.append(efforts)
+    if speed is not None:
+        parts[-1] += f" · {speed}"
     if model.context_length is not None:
         parts.append(f"context {model.context_length}")
     if model.prompt_price is not None:
@@ -883,8 +885,23 @@ def _run_engines(args: argparse.Namespace, env: Mapping[str, str] | None) -> int
         listing = models.list_models(args.models, env, refresh=args.refresh)
         if listing.reason:
             print(f"emb engines: {listing.reason}", file=sys.stderr)
+        speeds = {}
+        if args.models == "codex" and listing.models:
+            try:
+                answers = choices.read(env=env)["answers"]
+            except db.DatabaseError as error:
+                # The list does not depend on the settings; it goes out without speeds.
+                print(f"emb engines: {error}", file=sys.stderr)
+            else:
+                speeds = {
+                    m.id: choices.codex_speed(answers, m.id) for m in listing.models
+                }
         if args.json:
-            print(json.dumps(listing.to_json(), indent=2))
+            document = listing.to_json()
+            if speeds:
+                for row in document["models"]:
+                    row["speed"] = speeds[row["id"]]
+            print(json.dumps(document, indent=2))
             return EX_OK
         fetched = (
             "never read"
@@ -893,7 +910,7 @@ def _run_engines(args: argparse.Namespace, env: Mapping[str, str] | None) -> int
         )
         print(f"{args.models} models from {listing.source}, {fetched}")
         for model in listing.models:
-            print(_model_line(model))
+            print(_model_line(model, speeds.get(model.id)))
         return EX_OK
     result = status.read(env, refresh=args.refresh)
     held: dict[str, list[holds.Hold]] = {}

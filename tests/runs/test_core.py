@@ -467,7 +467,9 @@ def test_dry_run_resolves_team_without_creating_launch_artifacts(
     out, err = capsys.readouterr()
     role = "Reviewer" if read_only else "Writer"
     source = "single.reviewer" if read_only else "single.writer"
-    assert out == f"Team, Single tasks {role}: codex gpt-6.1-sol · high ({source})\n"
+    assert out == (
+        f"Team, Single tasks {role}: codex gpt-6.1-sol · high · standard ({source})\n"
+    )
     assert err == ""
     assert driver.commands == []
     # Queries may create SQLite sidecars and the repository worktree lock.
@@ -677,6 +679,7 @@ def test_dry_run_reports_driver_default_and_ignores_subagent_row(
     data = json.loads(out)
     assert (data["model_source"], data["effort_source"]) == (source, source)
     assert data["effort"] == default
+    assert data["speed"] is None
     assert err == ""
     assert (
         _start(_core(env, driver), repo, brief, engine=engine, dry_run=True, **options)
@@ -3165,6 +3168,30 @@ def test_status_text(
     assert "next:" not in out and "next:" not in err
 
 
+def test_codex_speed_in_dry_run_turn_and_status(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    choices.set_settings(
+        {"shortlist.codex": ["gpt-5@low"], "fast.codex": ["gpt-5"]}, env=env
+    )
+    worker = _core(env, _driver(env, "codex"))
+    brief = _brief(tmp_path, "Task")
+    options = {"engine": "codex", "model": "gpt-5", "effort": "low"}
+    assert _start(worker, repo, brief, dry_run=True, as_json=True, **options) == 0
+    assert json.loads(capsys.readouterr().out)["speed"] == "fast"
+    assert _start(worker, repo, brief, **options) == 0
+    out, err = capsys.readouterr()
+    run_id = _run_id(out)
+    assert "codex gpt-5 · low · fast (" in err
+    assert "codex gpt-5 · low · fast · " in out
+    assert worker.status(run_id, as_json=True) == 0
+    assert json.loads(capsys.readouterr().out)["speed"] == "fast"
+    assert worker.status(run_id) == 0
+    assert "speed: fast" in capsys.readouterr().out.splitlines()
+    assert worker.status(None) == 0
+    assert capsys.readouterr().out == f"{run_id}  waiting  live  turn 1  Task\n"
+
+
 def test_run_error_carries_context() -> None:
     error = RunError(75, "busy", "close", run="r")
     assert (error.code, str(error), error.variant, error.context) == (
@@ -3489,7 +3516,9 @@ def test_recovery_keeps_pending_retry_budget_settings_and_wait_seconds(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    choices.set_settings({"provider.capacity_wait": "5"}, env=env)
+    choices.set_settings(
+        {"provider.capacity_wait": "5", "fast.codex": ["gpt-5"]}, env=env
+    )
     driver = _ProviderDriver(env, ["capacity"])
     clock = _RetryClock(driver)
     monkeypatch.setattr(core, "time", clock)
@@ -3509,11 +3538,17 @@ def test_recovery_keeps_pending_retry_budget_settings_and_wait_seconds(
     clock.elapsed += 40
     clock.on_sleep = None
     choices.set_settings(
-        {"provider.capacity_retries": "0", "provider.capacity_wait": "600"}, env=env
+        {
+            "provider.capacity_retries": "0",
+            "provider.capacity_wait": "600",
+            "fast.codex": [],
+        },
+        env=env,
     )
     assert _core(env, driver).execute(lambda: _core(env, driver).recover(run.id)) == 73
     saved = record.load_outcome(run, 1)
     assert len(driver.messages) == 3
+    assert all(saved_run.speed == "fast" for saved_run, _ in driver.messages)
     assert len(saved["attempts"]) == 3
     assert saved["attempts"][1]["id"] == before["attempts"][1]["id"]
     assert saved["seconds"] >= before["seconds"] + 45
@@ -3530,6 +3565,7 @@ def test_recovery_keeps_pending_retry_budget_settings_and_wait_seconds(
     assert core_.execute(lambda: core_.send(run.id, message)) == 0
     assert len(driver.messages) == 2
     assert all(r.turn == 2 for r, _ in driver.messages)
+    assert all(r.speed == "fast" for r, _ in driver.messages)
     assert [text for _, text in driver.messages] == ["Follow up", "Follow up"]
     assert record.load_outcome(run, 2)["seconds"] >= 5
     assert "retry 1 of 2 in 5s" in capsys.readouterr().err
@@ -3548,6 +3584,7 @@ def test_recovery_keeps_pending_retry_budget_settings_and_wait_seconds(
     )
     next_run = record.load(_run_id(capsys.readouterr().out), env)
     assert (next_run.capacity_retries, next_run.capacity_wait) == (0, 600)
+    assert next_run.speed == "standard"
 
 
 @pytest.mark.parametrize("external", [False, True])
@@ -6228,6 +6265,34 @@ def test_a_start_on_a_held_worker_goes_to_the_fallback_entry(
     assert _start(_core(env), repo, brief, read_only=True, base=base) == 0
     member = record.load(_run_id(capsys.readouterr().out), env)
     assert member.engine == "claude"
+
+
+@pytest.mark.parametrize(
+    ("engine", "model", "speed"),
+    [("claude", "opus", None), ("codex", "gpt-mini", "fast")],
+)
+def test_held_codex_model_uses_replacement_speed(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    engine: str,
+    model: str,
+    speed: str | None,
+) -> None:
+    choices.set_settings(
+        {
+            "shortlist.codex": ["gpt-5@high", "gpt-mini@low"],
+            "fast.codex": ["gpt-mini"],
+            "provider.fallback": [f"{engine}:{model}"],
+        },
+        env=env,
+    )
+    holds.start("codex", "gpt-5", "capacity", 15, env=env)
+    brief = _brief(tmp_path, "Task\n@reply done\n")
+    assert _start(_core(env), repo, brief, engine="codex", model="gpt-5") == 0
+    saved = record.load(_run_id(capsys.readouterr().out), env)
+    assert (saved.engine, saved.model, saved.speed) == (engine, model, speed)
 
 
 def test_a_successful_turn_ends_the_hold(

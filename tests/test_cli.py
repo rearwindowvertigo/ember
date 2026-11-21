@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from ember import __version__, branches, choices, deps, holds, paths, skill
+from ember import __version__, branches, choices, db, deps, holds, paths, skill
 from ember.cli import main
 from ember.engines import models, status
 
@@ -622,6 +622,43 @@ def test_engines_models_json(
     assert data["source"] == "cli"
     assert data["reason"] is None
     assert data["models"][1]["id"] == "opus"
+    assert "speed" not in data["models"][1]
+
+
+def test_engines_models_codex_speed(
+    env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listing = models.ModelList(
+        (models.Model("one", "one", ("low",)), models.Model("two", "two")),
+        models.CLI,
+        None,
+        None,
+    )
+    monkeypatch.setattr(models, "list_models", lambda *args, **kwargs: listing)
+    choices.set_settings(
+        {"shortlist.codex": ["one@low"], "fast.codex": ["one"]}, env=env
+    )
+    code, out, err = _engines(["--models", "codex", "--json"], env, capsys)
+    assert code == 0 and not err
+    assert [row["speed"] for row in json.loads(out)["models"]] == ["fast", "standard"]
+    code, out, err = _engines(["--models", "codex"], env, capsys)
+    assert code == 0 and not err
+    assert out.splitlines()[1:] == ["one  efforts low · fast", "two · standard"]
+
+    def unreadable(*args: object, **kwargs: object) -> dict[str, Any]:
+        raise db.DatabaseError("the settings database cannot be read")
+
+    # The list does not depend on the settings: it goes out without speeds.
+    monkeypatch.setattr(choices, "read", unreadable)
+    code, out, err = _engines(["--models", "codex"], env, capsys)
+    assert code == 0
+    assert err == "emb engines: the settings database cannot be read\n"
+    assert out.splitlines()[1:] == ["one  efforts low", "two"]
+    code, out, err = _engines(["--models", "codex", "--json"], env, capsys)
+    assert code == 0
+    assert all("speed" not in row for row in json.loads(out)["models"])
 
 
 def test_engines_models_text_from_cache(
@@ -916,6 +953,7 @@ def test_run_dry_run_text_and_json_sources(
         "engine": "claude",
         "model": model,
         "effort": effort,
+        "speed": None,
         "model_source": model_source,
         "effort_source": effort_source,
     }

@@ -40,6 +40,7 @@ SETTING = "setting"
 DEFAULT = "default"
 
 ENGINES = ("claude", "codex", "opencode")
+SPEEDS = ("standard", "fast")
 SANDBOXED = ("codex", "opencode", "claude")
 """The engines with a `sandbox.<engine>` switch, in display order."""
 MENU_KEYS = ("single.writer", "single.reviewer")
@@ -207,6 +208,24 @@ def shortlist_models(engine: str, entries: Iterable[str]) -> dict[str, str | Non
         if match:
             result[match["model"]] = match["effort"]
     return result
+
+
+def codex_speed(answers: Mapping[str, Mapping[str, Any]], model: str) -> str:
+    """Return the owner's standing speed for this Codex model.
+
+    Answers without `fast.codex` give `standard`.
+    """
+    fast = answers.get("fast.codex", {}).get("value", [])
+    return "fast" if model in fast else "standard"
+
+
+def _fast_codex(value: object) -> None:
+    models = _string_list(value)
+    for model in models:
+        if _MENU_MODEL["codex"].fullmatch(model) is None:
+            _fail(f"{model!r} is not a Codex model name")
+    if len(set(models)) != len(models):
+        _fail("a model is listed more than once")
 
 
 def _shortlist(engine: str) -> Validator:
@@ -410,6 +429,16 @@ def _keys() -> dict[str, Key]:
         )
     )
     keys += [_key(f"engine.{engine}", _ON_OFF, "on") for engine in ENGINES]
+    keys.append(
+        Key(
+            "fast.codex",
+            _STANDING,
+            _fast_codex,
+            _constant([]),
+            is_list=True,
+            pattern="Codex model names from the shortlist, comma-separated",
+        )
+    )
     keys += [
         Key(
             f"shortlist.{engine}",
@@ -1335,6 +1364,13 @@ def _check_shortlisted(
         for value in _string_list(values.get("provider.fallback", []))
         if value not in kept
     )
+    if "fast.codex" in values:
+        kept_fast = set(_string_list(stored.get("fast.codex", [])))
+        entries.extend(
+            ("fast.codex", f"codex:{model}")
+            for model in _string_list(values["fast.codex"])
+            if model not in kept_fast
+        )
     for name, value in entries:
         if not isinstance(value, str) or value in ("ask", SAME):
             continue
