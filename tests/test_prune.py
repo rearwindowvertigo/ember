@@ -1861,6 +1861,62 @@ def test_prune_removes_run_temporary_folder_with_record(
 
 
 @pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("scoped", [False, True])
+def test_prune_removes_flow_check_folder_with_record(
+    env: dict[str, str], dry_run: bool, scoped: bool
+) -> None:
+    ident = flow(env)["id"]
+    folder = paths.ensure_check_tmp_dir(ident)
+    orphan = paths.ensure_check_tmp_dir("flow-20260101-000000-123abc")
+    result = prune.remove(0, [ident] if scoped else None, env=env, dry_run=dry_run)
+    assert not result.errors
+    assert dict(id=str(folder), kind="tmp") in result.removed
+    assert folder.exists() == dry_run
+    assert flows.folder(ident, env).exists() == dry_run
+    assert orphan.is_dir() and str(orphan) not in ids(result)
+
+
+def test_prune_refuses_check_symlink_before_removing_orphan_worktree(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    tree = orphan(env)
+    ident = flow(env, worktree=str(tree))["id"]
+    target = tmp_path / "outside"
+    target.mkdir()
+    check = paths.check_tmp_dir(ident)
+    check.symlink_to(target)
+    for dry_run in (True, False):
+        result = prune.remove(0, [ident], env=env, dry_run=dry_run)
+        assert not result.removed
+        assert [item["id"] for item in result.skipped] == [ident]
+        assert len(result.errors) == 1 and str(check) in result.errors[0]
+        assert flows.folder(ident, env).is_dir()
+        assert (tree / "work.txt").read_text() == "work\n"
+        assert check.is_symlink() and target.is_dir()
+
+
+def test_prune_reports_removed_artifacts_when_flow_record_removal_fails(
+    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree = orphan(env)
+    ident = flow(env, worktree=str(tree))["id"]
+    folder = flows.folder(ident, env)
+    check = paths.ensure_check_tmp_dir(ident)
+    rmtree = prune.shutil.rmtree
+
+    def refuse_record(path: Path | str, *, dir_fd: int | None = None) -> None:
+        if path == folder:
+            raise PermissionError("record removal refused")
+        rmtree(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(prune.shutil, "rmtree", refuse_record)
+    result = prune.remove(0, [ident], env=env)
+    assert result.errors == [f"{ident}: record removal refused"]
+    assert ids(result) == {str(tree), str(check)}
+    assert not tree.exists() and not check.exists() and folder.is_dir()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
 def test_prune_sweeps_unrecorded_temporary_entries(
     env: dict[str, str], tmp_path: Path, dry_run: bool
 ) -> None:

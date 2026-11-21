@@ -518,7 +518,8 @@ in the status cache of `emb engines`, which is checked once first when there
 is no cache (69, naming the fix command); the driver exists (69); the model
 and effort (64); Codex trusts the repository root (69); the checkout has a
 commit and, for an editing run, the repository has a main checkout (70);
-for a sandboxed Codex run, no `sandbox_mode` key (69); and, for a sandboxed
+for a sandboxed Codex run, room on the temporary volume, creation of the
+run's temporary folder and no `sandbox_mode` key (69); and, for a sandboxed
 run, a `bwrap` that runs `/bin/true` in a minimal sandbox
 within 10 seconds (69, with `owner: install bubblewrap (the bwrap command)
 or make it work, or set sandbox.<engine> to off`), and the workers' cache
@@ -558,6 +559,20 @@ For an untrusted Codex repository, both a dry run and a start exit 69 with
 `Codex does not trust <repo>; the owner trusts it by running codex there once and choosing to trust the folder`
 and `owner: run codex in <repo> once and choose to trust the folder`.
 Neither creates a run, worktree, branch or session, or prints a `next:` line.
+
+A sandboxed Codex start exits 69 before creating its temporary folder,
+worktree or branch if `/tmp` has fewer than 50,000 free inodes or less
+than 256 MiB free. The diagnostic and owner action go to standard error.
+
+```text
+emb run: the temporary volume /tmp has <MiB> MiB free (<count> free inodes, minimum 50,000 inodes where reported and 256 MiB)
+owner: free files or space on /tmp
+```
+
+If the volume reports no inode count, only free space is checked and the
+message uses `free inode count unavailable`. If Ember cannot read the
+volume statistics, the start proceeds to folder creation. `--dry-run`
+skips the volume check.
 
 With `--dry-run`, the start runs the input, repository, claim and
 worker-selection checks, including Codex project trust, through the commit
@@ -660,9 +675,15 @@ exits 69 if any entry already exists there, including a symlink, or creation
 fails. The error names the folder. The Codex profile makes it writable and
 sets `TMPDIR` to it through `shell_environment_policy.set`. The shared `/tmp`
 stays writable. Codex walks `/tmp` and denies every other entry matching
-`ember-<6 hex>` by name. Ember removes the folder on close, worktree removal
-or record pruning. An unscoped prune also removes matching folders no record
-names, only when owned by the current user, not symlinks, and every record
+`ember-<6 hex>` by name. A writer keeps its files between turns. When a
+flow accepts a task, Ember cleans the sandboxed Codex writer's folder only
+if the run is open and its turn is collected or committed. A writer whose
+turn is still running keeps its files at acceptance. Cleanup keeps `config`,
+`data`, `state` and every top-level entry whose name starts with `codex-`.
+It removes all other entries, unlinking symlinks without following them.
+A removal error prints a warning and the flow continues. Ember removes the
+whole folder on close, worktree removal or record pruning. An unscoped prune also removes matching
+folders no record names, only when owned by the current user, not symlinks, and every record
 could be read. It also sweeps unrecorded entries in
 `$XDG_CACHE_HOME/ember/tmp` from 0.20.0 under the same record-readability rule.
 Removal does not follow symlinks out of the folder. With `sandbox.codex` off,
@@ -1360,7 +1381,7 @@ evidence that no provider error occurred.
 | 64 | Usage error, unanswerable menu row, switched-off engine or invalid claim | `next: emb run --help`, or `owner:` naming the setting |
 | 65 | Not a git checkout | `next:` a start inside a checkout |
 | 66 | Missing file or path | `next:` a start with existing paths |
-| 69 | Engine, driver, `git` or `tmux` missing, engine not signed in, Codex does not trust the repository root (also with `--dry-run`), a sandbox conflict, a kept path inside Ember's hidden folders outside its own worktree, a worktree folder inside any Git working tree or the source repository's git folder, a switched-on sandbox without a working `bwrap`, or no usable runtime folder | `owner:` naming the fix |
+| 69 | Engine, driver, `git` or `tmux` missing, engine not signed in, Codex does not trust the repository root (also with `--dry-run`), a sandboxed Codex start with fewer than 50,000 free inodes or less than 256 MiB free on `/tmp`, a sandbox conflict, a kept path inside Ember's hidden folders outside its own worktree, a worktree folder inside any Git working tree or the source repository's git folder, a switched-on sandbox without a working `bwrap`, or no usable runtime folder | `owner:` naming the fix |
 | 70 | Worktree creation failed, or no main checkout or commit | `next: git -C <dir> worktree prune, then ...` |
 | 71 | Engine or session failed, or OpenCode 2 message delivery is uncertain | `next: emb run --status <run>`, including an uncertain follow-up whose new turn stays `sent`; for other failed sends, `next: emb run --send <run> ...` |
 | 72 | Session or window unavailable, or the run was closed | `next: emb run --status <run>`, or a new start |
@@ -2442,7 +2463,11 @@ its own process group. Git, runs and checks receive the flow environment
 without
 `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`,
 `GIT_OBJECT_DIRECTORY`, `GIT_NAMESPACE`, `GIT_PREFIX` or
-`EMBER_FLOW_RUNNER`. Each attempt writes a private
+`EMBER_FLOW_RUNNER`. For each base or wave check, the runner sets
+`TMPDIR` to `/tmp/ember-<flow id>`, using the full flow id. It replaces
+any stale check folder with an empty one before the attempt. When the
+check passes, fails, times out or is cancelled, the runner removes the
+folder and keeps the log. Each attempt writes a private
 `check-<wave>-<attempt>.log`; its check entry names that file, and its event
 contains the last 4000 characters. A timeout kills the process group and
 records exit 124; failure to start records 127. After a check, the runner
@@ -3854,6 +3879,14 @@ from the repository's main checkout, which cleanup never removes.
 The cleanup's lines follow the first line. A branch that is not an Ember run
 branch is kept with `not an Ember run branch; next: git branch -d BRANCH`.
 
+At exit 0, `emb merge` prints one report line on standard error with the
+full hashes. The line also appears with `--json` and when cleanup keeps the
+worktree.
+
+```text
+report: the worker branch tip is <tip>; the landed commit is <landed>; name the tip, not the landed commit, and each kept line with its reason
+```
+
 After successful cleanup, the command derives the next line from the
 newest matching run without a parent and prints it once on standard error
 when non-null, using the rules in `emb run` Status. Cleanup normally closes
@@ -4880,6 +4913,18 @@ detail line starts with the parent's type and first fact, such as
 records, newest first by end time, update time and id, with update time used
 when end time is absent. Its cap of twenty applies to top-level rows across
 runs, flows and panels. Each empty section shows its empty state.
+
+When run records refresh, Overview shows one warning if `/tmp` has fewer
+than 50,000 free inodes or less than 256 MiB free.
+
+```text
+/tmp is nearly full: <count> free files, <MiB> MiB free. Ember refuses new Codex runs until files or space are freed.
+```
+
+When the volume reports no inode count, the warning uses
+`free file count unavailable` and follows the free-space threshold alone.
+The warning disappears when the volume meets the applicable minimums or
+its statistics are unavailable.
 
 Live comes first. Finished starts as a preview of its three newest
 top-level rows, each with its nested runs, and a `Show all <n>` button in

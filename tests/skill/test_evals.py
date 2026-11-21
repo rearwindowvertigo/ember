@@ -883,6 +883,13 @@ def start(work: Case) -> tuple[str, str, Path]:
     return run_id, f"ember/codex/{run_id}", worktree_path(work, run_id)
 
 
+def merge_report(tip: str, landed: str) -> str:
+    return (
+        f"report: the worker branch tip is {tip}; the landed commit is {landed}; "
+        "name the tip, not the landed commit, and each kept line with its reason"
+    )
+
+
 def test_merge_merges_and_cleans_up(tmp_path: Path, env: dict[str, str]) -> None:
     work = case("claim-and-menu-writer", tmp_path, env)
     run_id, branch, worktree = start(work)
@@ -927,6 +934,7 @@ def test_merge_merges_and_cleans_up(tmp_path: Path, env: dict[str, str]) -> None
         f"removed {branch}: closed {run_id}; removed worktree {worktree}; "
         f"deleted at {tip}\n"
     )
+    assert result.stderr.splitlines() == [merge_report(tip, merge)]
     assert work.git("log", "-1", "--format=%s") == ("feat: add report date filtering")
     assert len(work.git("log", "-1", "--format=%P").split()) == 1
     assert f"Ember-Task-Tip: {tip}" in work.git("log", "-1", "--format=%B")
@@ -949,6 +957,7 @@ def test_stub_merge_prints_pending_owner_lines(
 ) -> None:
     work = case("claim-and-menu-writer", tmp_path, env)
     run_id, branch, worktree = start(work)
+    tip = work.git("rev-parse", branch)
     owners = ["owner: allow a denied path", "owner: answer another pending action"]
     state_file = work.eval / "state.json"
     state = json.loads(state_file.read_text())
@@ -962,7 +971,8 @@ def test_stub_merge_prints_pending_owner_lines(
         *(["--json"] if as_json else []),
     )  # fmt: skip
     assert result.returncode == 0, result.stderr
-    assert result.stderr.splitlines() == owners
+    landed = work.git("rev-parse", "HEAD")
+    assert result.stderr.splitlines() == [*owners, merge_report(tip, landed)]
     if as_json:
         document = json.loads(result.stdout)
         assert document["owner_wait"] == owners
@@ -1068,6 +1078,7 @@ def test_merge_squashes_turns_with_trailers_and_json_warnings(
         "target",
         "note",
         "warnings",
+        "tip",
         "merge_commit",
         "contained_before",
         "cleanup",
@@ -1077,7 +1088,11 @@ def test_merge_squashes_turns_with_trailers_and_json_warnings(
     assert report["warnings"] == [
         f"WARNING: {branch} holds a breaking change; the subject has no !"
     ]
-    assert result.stderr == report["warnings"][0] + "\n"
+    assert report["tip"] == tip
+    assert result.stderr.splitlines() == [
+        *report["warnings"],
+        merge_report(tip, report["merge_commit"]),
+    ]
     assert report["merge_commit"] == work.git("rev-parse", "HEAD")
     assert report["contained_before"] is False
     assert report["cleanup"][0]["action"] == "removed"
@@ -1113,6 +1128,11 @@ def test_merge_keeps_a_dirty_worktree(tmp_path: Path, env: dict[str, str]) -> No
     assert worktree.is_dir()
     assert work.git("branch", "--list", branch) != ""
     assert work.git("log", "-1", "--format=%s") == ("feat: add report date filtering")
+    tip = work.git("rev-parse", branch)
+    landed = work.git("rev-parse", "HEAD")
+    (work.work / "later.txt").write_text("Later target edit\n")
+    work.git("add", "later.txt")
+    work.git("commit", "-m", "fix: update target after squash")
     again = work.emb(
         "merge",
         branch,
@@ -1125,10 +1145,9 @@ def test_merge_keeps_a_dirty_worktree(tmp_path: Path, env: dict[str, str]) -> No
         "--subject",
         "feat: add report date filtering",
     )
+    assert again.returncode == 0, again.stderr
+    assert again.stderr.splitlines() == [merge_report(tip, landed)]
     assert again.stdout.startswith(f"Verdict: Keep\nalready contained: {branch} at ")
-    (work.work / "later.txt").write_text("Later target edit\n")
-    work.git("add", "later.txt")
-    work.git("commit", "-m", "fix: update target after squash")
     (worktree / "tools" / "__pycache__" / "report.cpython-314.pyc").unlink()
     (worktree / "tests" / "__pycache__" / "test_report.cpython-314.pyc").unlink()
     cleaned = work.emb("cleanup", "--merged-into", "claude/report-since")
@@ -1344,7 +1363,7 @@ def test_stub_records_no_base_branch_when_detached(
     assert stderr_next(started) == line
 
 
-def test_stub_merge_prints_no_line_for_a_kept_branch(
+def test_stub_merge_prints_no_next_line_for_a_kept_branch(
     tmp_path: Path, env: dict[str, str]
 ) -> None:
     work = case("merge-and-cleanup-keeps", tmp_path, env)

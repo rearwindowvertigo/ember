@@ -29,6 +29,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from bisect import bisect_left
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -311,7 +312,8 @@ def is_contained(
     if tree.returncode or not tree.stdout.strip():
         return False
     if not scratch:
-        return _merge_tree(directory, tip, target, env) == tree.stdout.strip()
+        merged_tree = _merge_tree(directory, tip, target, env)
+        return merged_tree == tree.stdout.strip()
     objects = _git(
         directory,
         "rev-parse",
@@ -331,7 +333,8 @@ def is_contained(
             "GIT_OBJECT_DIRECTORY": folder,
             "GIT_ALTERNATE_OBJECT_DIRECTORIES": alternates,
         }
-        return _merge_tree(directory, tip, target, trial) == tree.stdout.strip()
+        merged_tree = _merge_tree(directory, tip, target, trial)
+        return merged_tree == tree.stdout.strip()
 
 
 def _merge_tree(
@@ -1818,6 +1821,37 @@ def _commit_tree(
     return commit.stdout.strip()
 
 
+@dataclass(frozen=True)
+class MergeReport:
+    """The summary and full commit IDs captured before merge cleanup."""
+
+    tip: str
+    landed: str
+    summary: str
+
+    def report(self) -> str:
+        """Return the lead's report instruction for a successful merge."""
+        return (
+            f"report: the worker branch tip is {self.tip}; "
+            f"the landed commit is {self.landed}; "
+            "name the tip, not the landed commit, and each kept line with its reason"
+        )
+
+    def commit_fields(self, merge_commit: str | None) -> dict[str, str | None]:
+        """Keep merge_commit null when the target already contained the branch."""
+        fields = {"tip": self.tip, "merge_commit": merge_commit}
+        if merge_commit is None:
+            fields["landed_commit"] = self.landed
+        return fields
+
+
+def _merged(branch: str, tip: str, target: str, commit: str) -> tuple[str, MergeReport]:
+    """Return the new commit and its summary and report lines."""
+    return commit, MergeReport(
+        tip, commit, f"merged {branch} at {tip} into {target}: {commit}"
+    )
+
+
 def _squash(
     repo: Repository,
     branch: str,
@@ -1828,7 +1862,7 @@ def _squash(
     subject: str,
     note: str | None,
     warnings: list[str] | None = None,
-) -> tuple[str, str]:
+) -> tuple[str, MergeReport]:
     """Build a reviewed commit before fast-forwarding the target worktree."""
     tree = repo.git("merge-tree", "--write-tree", "--name-only", "-z", head, tip)
     if tree.returncode:
@@ -1893,7 +1927,7 @@ def _squash(
         warnings.append(
             f"WARNING: {branch} holds a breaking change; the subject has no !"
         )
-    return made, f"merged {branch} at {tip} into {target}: {made}"
+    return _merged(branch, tip, target, made)
 
 
 def _merge_completed_flow(
@@ -1904,7 +1938,7 @@ def _merge_completed_flow(
     head: str,
     tip: str,
     note: str | None,
-) -> tuple[str, str]:
+) -> tuple[str, MergeReport]:
     """Build the merge commit before fast-forwarding the target worktree.
 
     The merge tree and commit leave the target's index and files untouched.
@@ -1979,7 +2013,68 @@ def _merge_completed_flow(
             f"fast-forward of {target} failed: {_git_message(advanced)}",
             f"next: git -C {shlex.quote(str(worktree))} status, then repeat emb merge",
         )
-    return made, f"merged {branch} at {tip} into {target}: {made}"
+    return _merged(branch, tip, target, made)
+
+
+def _first_containing_commit(repo: Repository, tip: str, head: str) -> str | None:
+    """Find the recorded squash or the first target commit holding the changes."""
+    recorded = landed_commit(repo.top, tip, head, repo.env)
+    if recorded is not None:
+        return recorded
+
+    def reaches_tip(commit: str) -> bool:
+        """Return whether the target commit reaches the worker tip."""
+        check = repo.git("merge-base", "--is-ancestor", tip, commit)
+        if check.returncode not in (0, 1):
+            raise GitFailedError(
+                exits.WORKTREE_FAILED,
+                f"cannot check commit ancestry: {_git_message(check)}",
+                f"next: git -C {repo.top} log --first-parent {head}",
+            )
+        return check.returncode == 0
+
+    reachable = reaches_tip(head)
+    if not reachable:
+        tree = repo.git("rev-parse", f"{head}^{{tree}}")
+        if tree.returncode:
+            raise GitFailedError(
+                exits.WORKTREE_FAILED,
+                f"cannot read the target tree: {_git_message(tree)}",
+                f"next: git -C {repo.top} status",
+            )
+        if _merge_tree(repo.top, tip, head, repo.env) != tree.stdout.strip():
+            return None
+
+    # Exclude all ancestors of the worker tip. Include the tip itself for a
+    # fast-forward landing on the target's first-parent history.
+    history = repo.git(
+        "rev-list",
+        "--first-parent",
+        "--reverse",
+        "--no-commit-header",
+        "--format=%H %T",
+        head,
+        "--not",
+        f"{tip}^@",
+        "--",
+    )
+    if history.returncode:
+        raise GitFailedError(
+            exits.WORKTREE_FAILED,
+            f"cannot read the target history: {_git_message(history)}",
+            f"next: git -C {repo.top} log --first-parent {head}",
+        )
+    rows = history.stdout.splitlines()
+    if reachable:
+        # Once a first-parent commit reaches the tip, all later ones do too.
+        commits = [line.split()[0] for line in rows]
+        return commits[bisect_left(commits, True, key=reaches_tip)]
+    for line in rows:
+        commit, tree_id = line.split()
+        if commit == head or _merge_tree(repo.top, tip, commit, repo.env) == tree_id:
+            return commit
+    # The target is the fork point and the worker made no net tree change.
+    return head
 
 
 def _merge(
@@ -1991,7 +2086,7 @@ def _merge(
     subject: str | None = None,
     *,
     warnings: list[str] | None = None,
-) -> tuple[str | None, str]:
+) -> tuple[str | None, MergeReport]:
     """Merge `branch` into `target` in `worktree` unless it is contained.
 
     A `note` is added as an `Ember-Verdict:` trailer. A `subject` selects
@@ -1999,7 +2094,7 @@ def _merge(
 
     Returns:
         The landed commit, or `None` when the branch was contained, and the
-        line printed.
+        report for the branch and target.
     """
     head = repo.tip(target)
     branch_tip = repo.tip(branch)
@@ -2012,9 +2107,11 @@ def _merge(
     flow = _completed_flow(repo, branch)
     if flow is not None:
         _check_flow_base(repo, flow, branch, target, head, branch_tip)
-    if is_contained(repo.top, branch_tip, head, repo.env):
-        return (
-            None,
+    landed = _first_containing_commit(repo, branch_tip, head)
+    if landed is not None:
+        return None, MergeReport(
+            branch_tip,
+            landed,
             f"already contained: {branch} at {branch_tip} in {target} at {head}",
         )
     _check_no_operation(repo, branch, target, worktree)
@@ -2049,7 +2146,7 @@ def _merge(
     )
     if merged.returncode == 0:
         commit = repo.git("rev-parse", "HEAD", cwd=worktree).stdout.strip()
-        return commit, f"merged {branch} at {branch_tip} into {target}: {commit}"
+        return _merged(branch, branch_tip, target, commit)
     conflicts = repo.git(
         "diff", "--name-only", "--diff-filter=U", "-z", cwd=worktree
     ).stdout.split("\0")
@@ -2181,7 +2278,7 @@ def merge(
             )
         worktree = _target_worktree(repo, target)
         warnings: list[str] = []
-        commit, line = _merge(
+        commit, result = _merge(
             repo,
             branch,
             target,
@@ -2198,7 +2295,7 @@ def merge(
     if not as_json:
         if note is not None:
             print(f"Verdict: {note}", file=out)
-        print(line, file=out, flush=True)
+        print(result.summary, file=out, flush=True)
     job = Cleanup(
         repo,
         target,
@@ -2229,7 +2326,7 @@ def merge(
             "target": target,
             "note": note,
             "warnings": warnings,
-            "merge_commit": commit,
+            **result.commit_fields(commit),
             "contained_before": contained_before,
             "cleanup": [item.to_json() for item in job.results],
             "next": next_line,
@@ -2241,6 +2338,7 @@ def merge(
         print(owner_line, file=err)
     if failure is not None:
         return _print_failure("merge", failure, err, failures)
+    print(result.report(), file=err)
     if next_line is not None:
         print(next_line, file=err)
     return exits.OK

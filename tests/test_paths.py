@@ -506,6 +506,44 @@ def test_run_tmp_dir_refuses_invalid_ids(home: Path, ident: str) -> None:
         paths.run_tmp_dir(ident, {"HOME": str(home)})
 
 
+@pytest.mark.parametrize(
+    ("files", "free_inodes", "free_blocks", "low"),
+    [
+        (100_000, 49_999, 65_536, True),
+        (100_000, 50_000, 65_535, True),
+        (100_000, 50_000, 65_536, False),
+        (0, 0, 65_536, False),
+        (0, 0, 65_535, True),
+    ],
+)
+def test_run_tmp_volume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    files: int,
+    free_inodes: int,
+    free_blocks: int,
+    low: bool,
+) -> None:
+    volume = Mock(
+        f_files=files, f_favail=free_inodes, f_bavail=free_blocks, f_frsize=4096
+    )
+    statvfs = Mock(return_value=volume)
+    monkeypatch.setattr(os, "statvfs", statvfs)
+    assert paths.run_tmp_volume(tmp_path) == (
+        free_inodes if files else None,
+        free_blocks * 4096,
+        low,
+    )
+    statvfs.assert_called_once_with(tmp_path)
+
+
+def test_run_tmp_volume_handles_statvfs_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    statvfs = Mock(side_effect=OSError("volume unavailable"))
+    monkeypatch.setattr(os, "statvfs", statvfs)
+    assert paths.run_tmp_volume() is None
+    statvfs.assert_called_once_with(paths.RUN_TMP_ROOT)
+
+
 def test_ensure_run_tmp_dir_sets_private_modes(home: Path) -> None:
     env = {"HOME": str(home)}
     parent = paths.RUN_TMP_ROOT
@@ -588,3 +626,141 @@ def test_run_temporary_helpers_accept_a_private_base(tmp_path: Path) -> None:
     assert paths.run_tmp_dir(ident, base=tmp_path) == folder
     assert paths.remove_run_tmp_dir(ident, base=tmp_path)
     assert not folder.exists()
+
+
+def test_clean_run_tmp_dir_keeps_selected_names_and_codex_entries(
+    tmp_path: Path,
+) -> None:
+    ident = "codex-20260101-000000-aabbcc"
+    folder = paths.ensure_run_tmp_dir(ident, base=tmp_path)
+    keep = {"config", "data", "state"}
+    for name in {*keep, "codex-session"}:
+        (folder / name).mkdir()
+        (folder / name / "saved").touch()
+    (folder / "codex-log").touch()
+    (folder / "file").touch()
+    nested = folder / "pytest" / "nested"
+    nested.mkdir(parents=True)
+    (nested / "result").touch()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "untouched").touch()
+    (nested / "link").symlink_to(outside)
+    (folder / "link").symlink_to(outside)
+
+    for _ in range(2):
+        paths.clean_run_tmp_dir(ident, keep, base=tmp_path)
+        assert {entry.name for entry in folder.iterdir()} == {
+            *keep,
+            "codex-session",
+            "codex-log",
+        }
+        assert (outside / "untouched").is_file()
+        for name in {*keep, "codex-session"}:
+            assert (folder / name / "saved").is_file()
+
+
+@pytest.mark.parametrize("at_parent", [False, True])
+def test_clean_run_tmp_dir_refuses_symlinked_folder(
+    tmp_path: Path, at_parent: bool
+) -> None:
+    ident = "codex-20260101-000000-aabbcc"
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if at_parent:
+        base.symlink_to(outside)
+        target = paths.ensure_run_tmp_dir(ident, base=outside)
+    else:
+        base.mkdir()
+        paths.run_tmp_dir(ident, base=base).symlink_to(outside)
+        target = outside
+    (target / "saved").touch()
+    with pytest.raises(OSError):
+        paths.clean_run_tmp_dir(ident, [], base=base)
+    assert (target / "saved").is_file()
+
+
+def test_clean_run_tmp_dir_ignores_a_missing_folder(tmp_path: Path) -> None:
+    ident = "codex-20260101-000000-aabbcc"
+    for base in (tmp_path, tmp_path / "missing"):
+        paths.clean_run_tmp_dir(ident, [], base=base)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["flow-20260101-000000-aabbcc", "panel-20260101-000000-aabbcc", "codex-aabbcc"],
+)
+def test_clean_run_tmp_dir_refuses_invalid_id_with_matching_suffix(
+    tmp_path: Path, invalid: str
+) -> None:
+    folder = paths.ensure_run_tmp_dir("codex-20260101-000000-aabbcc", base=tmp_path)
+    leftover = folder / "leftover"
+    leftover.touch()
+    with pytest.raises(ValueError, match="run id"):
+        paths.clean_run_tmp_dir(invalid, [], base=tmp_path)
+    assert leftover.is_file()
+
+
+def test_clean_run_tmp_dir_continues_after_removal_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ident = "codex-20260101-000000-aabbcc"
+    folder = paths.ensure_run_tmp_dir(ident, base=tmp_path)
+    for name in ("first", "second", "removable"):
+        (folder / name).touch()
+    unlink = os.unlink
+    errors: list[str] = []
+
+    def fail_two(name: str, *, dir_fd: int) -> None:
+        if name != "removable":
+            errors.append(name)
+            raise PermissionError(name)
+        unlink(name, dir_fd=dir_fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "unlink", fail_two)
+        with pytest.raises(PermissionError) as caught:
+            paths.clean_run_tmp_dir(ident, [], base=tmp_path)
+    assert str(caught.value) == errors[0]
+    assert (
+        set(errors) == {entry.name for entry in folder.iterdir()} == {"first", "second"}
+    )
+
+
+def test_check_tmp_dir_uses_full_id_and_private_mode(tmp_path: Path) -> None:
+    flow = "flow-20261121-172129-05d358"
+    prev = os.umask(0o777)
+    try:
+        folder = paths.ensure_check_tmp_dir(flow, base=tmp_path)
+    finally:
+        os.umask(prev)
+    assert folder == tmp_path / f"ember-{flow}"
+    assert not paths.RUN_TMP_PATTERN.fullmatch(folder.name)
+    assert stat.S_IMODE(folder.stat().st_mode) == 0o700
+    assert paths.remove_check_tmp_dir(flow, base=tmp_path)
+    assert not paths.remove_check_tmp_dir(flow, base=tmp_path)
+
+
+@pytest.mark.parametrize("kind", ["symlink", "file", "foreign"])
+def test_check_tmp_helpers_leave_unowned_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    flow = "flow-20261121-172129-05d358"
+    folder = paths.check_tmp_dir(flow, base=tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "saved").touch()
+    if kind == "symlink":
+        folder.symlink_to(outside)
+    elif kind == "file":
+        folder.touch()
+    else:
+        folder.mkdir()
+        foreign = os.getuid() + 1
+        monkeypatch.setattr(os, "getuid", lambda: foreign)
+    for operation in (paths.ensure_check_tmp_dir, paths.remove_check_tmp_dir):
+        with pytest.raises(PermissionError, match=str(folder)):
+            operation(flow, base=tmp_path)
+        assert folder.exists() and (outside / "saved").is_file()

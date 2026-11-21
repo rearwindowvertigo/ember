@@ -17,8 +17,9 @@ from typing import Any
 
 import pytest
 
-from ember import branches, choices, holds, paths, prepare
+from ember import branches, choices, holds, paths, prepare, processes, sandbox
 from ember.cli import build_parser
+from ember.engines import LaunchSpec
 from ember.flows import briefs, command, lock, plan, record, runner
 from ember.runs import record as runs
 from ember.runs.core import Core, StartOptions
@@ -957,21 +958,195 @@ def test_check_timeout_kills_group(h: Harness) -> None:
 
 
 def test_check_cleans_files_and_environment(h: Harness) -> None:
+    temporary = paths.RUN_TMP_ROOT / f"ember-{h.id}"
+    temporary.mkdir()
+    (temporary / "stale").touch()
     h.create(
         [task("a"), task("b", after=["a"])],
+        check_base=True,
         check=[
             sys.executable,
             "-c",
             "import os,pathlib; assert 'GIT_DIR' not in os.environ; "
             "assert 'EMBER_FLOW_RUNNER' not in os.environ; "
+            "assert os.environ['INHERITED'] == 'kept'; "
+            "folder = pathlib.Path(os.environ['TMPDIR']); "
+            "assert folder.is_dir() and not list(folder.iterdir()); "
+            "(folder / 'file').touch(); print(folder); "
             "pathlib.Path('leftover').write_text('x')",
         ],
     )
-    h.env.update(GIT_DIR="wrong", EMBER_FLOW_RUNNER=h.id)
+    h.env.update(
+        GIT_DIR="wrong", EMBER_FLOW_RUNNER=h.id, TMPDIR="old", INHERITED="kept"
+    )
     flow = h.run()
     assert flow["status"] == "done"
-    assert len(flow["checks"]) == 2
+    assert [check["wave"] for check in flow["checks"]] == [0, 1, 2]
+    assert all(
+        Path(c["log"]).read_text().strip() == str(temporary) for c in flow["checks"]
+    )
+    assert not list(paths.RUN_TMP_ROOT.iterdir())
     assert not (Path(flow["worktree"]) / "leftover").exists()
+
+
+@pytest.mark.parametrize("acceptance", ["review", "lead", "recovery"])
+def test_acceptance_cleans_the_open_writer_tmp(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, acceptance: str
+) -> None:
+    choices.set_settings({"sandbox.codex": "on"}, env=h.env)
+    monkeypatch.setattr(sandbox, "require", lambda engine, env=None: None)
+    monkeypatch.setattr(
+        h.driver, "foreign_input", lambda run: None if run.read_only else "owner typed"
+    )
+    kept = {"config", "data", "state", "codex-session"}
+
+    def launch(core: Core, spec: LaunchSpec, run: runs.Run, common: Path) -> LaunchSpec:
+        if not run.read_only:
+            folder = paths.run_tmp_dir(run.id)
+            for name in kept:
+                (folder / name).mkdir(exist_ok=True)
+            (folder / "leftover").touch()
+        return spec
+
+    monkeypatch.setattr(Core, "_sandboxed", launch)
+    if acceptance != "review":
+        h.scripts_update(**{"Review of task a,": "@reply " + FIX})
+    h.create(rounds=0)
+    flow = h.run()
+    item = flow["tasks"][0]
+    folder = paths.run_tmp_dir(item["writer_run"])
+    if acceptance != "review":
+        assert item["status"] == "stopped"
+        assert (folder / "leftover").exists()
+        if acceptance == "lead":
+            h.answer("accept", commit=item["head"])
+        else:
+            item.update(status="merging", merge_tip=item["head"])
+            record.save(flow, h.env)
+        item = h.run()["tasks"][0]
+    assert item["status"] == "merged"
+    assert {entry.name for entry in folder.iterdir()} == kept
+    followup = h.tmp / "followup.md"
+    followup.write_text("@write a later")
+    core = h.factory(h.env)
+    assert core.send(item["writer_run"], str(followup), force=True) == 0
+    assert runs.load(item["writer_run"], h.env).turn == 2
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_writer_tmp_removal_error_warns_and_flow_continues(
+    h: Harness,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    missing: bool,
+) -> None:
+    h.scripts_update(**{"Review of task a,": "@reply " + FIX})
+    h.create(rounds=0)
+    task = h.run()["tasks"][0]
+    writer = runs.load(task["writer_run"], h.env)
+    runs.save(replace(writer, sandbox=sandbox.CODEX))
+    if not missing:
+
+        def denied(run_id: str, keep: list[str], env: Mapping[str, str]) -> None:
+            raise PermissionError("cannot unlink blocked")
+
+        monkeypatch.setattr(paths, "clean_run_tmp_dir", denied)
+    h.answer("accept", commit=task["head"])
+    assert h.run()["status"] == "done"
+    warnings = capsys.readouterr().err.count(
+        f"WARNING: cannot clean writer {writer.id}"
+    )
+    assert warnings == (0 if missing else 1)
+
+
+def test_check_refuses_symlink_at_its_temporary_path(h: Harness) -> None:
+    h.create(check_base=True, check=["true"])
+    folder = paths.check_tmp_dir(h.id)
+    outside = h.tmp / "outside"
+    outside.mkdir()
+    (outside / "saved").touch()
+    folder.symlink_to(outside)
+    flow = h.run()
+    assert flow["status"] == "failed" and flow["checks"][0]["exit"] != 0
+    assert str(folder) in flow["reason"]
+    assert folder.is_symlink() and (outside / "saved").is_file()
+
+
+def test_failed_check_identity_save_reaps_group_before_removing_tmp(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ready = h.tmp / "ready"
+    h.create(
+        check_base=True,
+        check=[
+            sys.executable,
+            "-c",
+            "import os, pathlib, time\n"
+            "child = os.fork()\n"
+            f"if child: pathlib.Path({str(ready)!r}).write_text(str(child))\n"
+            "time.sleep(60)",
+        ],
+    )
+    instance = h.instance()
+    save = instance._save
+    group: list[processes.Process] = []
+
+    def fail_identity() -> None:
+        if identity := instance.flow.get("active_check"):
+            _wait_for(lambda: ready.exists() and ready.read_text())
+            group.extend(processes.tree(identity["pid"]))
+            assert {pid for pid, _ in group} == {
+                identity["pid"],
+                int(ready.read_text()),
+            }
+            raise OSError("cannot save process identity")
+        save()
+
+    monkeypatch.setattr(instance, "_save", fail_identity)
+    remove = paths.remove_check_tmp_dir
+
+    def inspect(flow_id: str) -> bool:
+        leader = instance.flow["active_check"]["pid"]
+        with pytest.raises(ChildProcessError):
+            os.waitpid(leader, os.WNOHANG)
+        _wait_for(lambda: not any(processes.running(process) for process in group))
+        return remove(flow_id)
+
+    monkeypatch.setattr(paths, "remove_check_tmp_dir", inspect)
+    assert not instance.check()
+    assert not paths.check_tmp_dir(h.id).exists()
+    saved = h.flow()
+    assert saved["active_check"] is None
+    assert "cannot save process identity" in Path(saved["checks"][0]["log"]).read_text()
+
+
+@pytest.mark.parametrize("exit_code", [0, 3])
+def test_check_folder_removal_error_keeps_check_exit_and_log(
+    h: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    exit_code: int,
+) -> None:
+    h.create(
+        check=[sys.executable, "-c", f"print('checked'); raise SystemExit({exit_code})"]
+    )
+
+    def denied(flow_id: str) -> bool:
+        raise PermissionError("removal denied")
+
+    monkeypatch.setattr(paths, "remove_check_tmp_dir", denied)
+    flow = h.run()
+    assert flow["status"] == ("failed" if exit_code else "done")
+    (check,) = flow["checks"]
+    assert check["exit"] == exit_code
+    assert Path(check["log"]).read_text() == "checked\n"
+    warnings = [
+        line
+        for line in capsys.readouterr().err.splitlines()
+        if "removal denied" in line
+    ]
+    folder = paths.check_tmp_dir(h.id)
+    assert warnings == [f"WARNING: cannot remove check folder {folder}: removal denied"]
 
 
 @pytest.mark.parametrize("kind", ["accept", "review", "send", "worker", "drop"])
@@ -1418,6 +1593,75 @@ def test_run_id_is_saved_during_active_turn_and_stall_can_be_reviewed(
     assert h.run()["tasks"][0]["status"] == "merged"
 
 
+def test_lead_accept_after_stall_preserves_active_writer_files(h: Harness) -> None:
+    h.create([task("a", text="@write a value\n@hang")])
+    item = h.run()["tasks"][0]
+    writer = runs.load(item["writer_run"], h.env)
+    assert "stalled" in item["reason"] and writer.turn_state == runs.SENT
+    runs.save(replace(writer, sandbox=sandbox.CODEX))
+    folder = paths.ensure_run_tmp_dir(writer.id, h.env)
+    (folder / "active-test").touch()
+    instance = h.instance()
+    h.answer("accept", commit=instance.tip(item["branch"]))
+    instance.answers()
+    assert h.flow()["tasks"][0]["status"] == "accepted"
+    assert h.run()["tasks"][0]["status"] == "merged"
+    assert runs.load(writer.id, h.env).turn_state == runs.SENT
+    assert (folder / "active-test").exists()
+
+
+def test_lead_accept_cleans_leftovers_of_a_later_refused_turn(h: Harness) -> None:
+    h.scripts_update(**{"Review of task a,": "@reply " + FIX})
+    h.create(rounds=0)
+    item = h.run()["tasks"][0]
+    assert item["status"] == "stopped"
+    writer = runs.load(item["writer_run"], h.env)
+    runs.save(replace(writer, sandbox=sandbox.CODEX))
+    hook = h.repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    correction = h.tmp / "fix.md"
+    correction.write_text("@write a correction")
+    core = h.factory(h.env)
+    assert core.execute(lambda: core.send(writer.id, str(correction))) != 0
+    later = runs.load(writer.id, h.env)
+    assert later.turn > writer.turn and later.turn_state == runs.COLLECTED
+    folder = paths.ensure_run_tmp_dir(writer.id)
+    (folder / "pytest").mkdir()
+    h.answer("accept", commit=item["head"])
+    h.instance().answers()
+    assert h.flow()["tasks"][0]["status"] == "accepted"
+    assert not list(folder.iterdir())
+
+
+def test_resume_merges_without_retrying_interrupted_accept_cleanup(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h.scripts_update(**{"Review of task a,": "@reply " + FIX})
+    h.create(rounds=0)
+    item = h.run()["tasks"][0]
+    writer = runs.load(item["writer_run"], h.env)
+    runs.save(replace(writer, sandbox=sandbox.CODEX))
+    folder = paths.ensure_run_tmp_dir(writer.id)
+    (folder / "remaining").touch()
+
+    def interrupt(run_id: str, keep: list[str], env: Mapping[str, str]) -> None:
+        raise KeyboardInterrupt
+
+    h.answer("accept", commit=item["head"])
+    with monkeypatch.context() as patch:
+        patch.setattr(paths, "clean_run_tmp_dir", interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            h.instance().answers()
+    assert h.flow()["tasks"][0]["status"] == "accepted"
+    monkeypatch.setattr(h.driver, "foreign_input", lambda run: "owner typed")
+    monkeypatch.setattr(
+        runner._Runner, "clean_writer_tmp", lambda *args: pytest.fail("cleanup retried")
+    )
+    assert h.run()["tasks"][0]["status"] == "merged"
+    assert (folder / "remaining").exists()
+
+
 def test_stream_handles_split_announcements(h: Harness) -> None:
     captured: list[str] = []
     stream = runner._RunIdStream(captured.append)
@@ -1656,8 +1900,11 @@ def test_check_cleanup_failure_retains_pending(
     assert h.run()["status"] == "done"
 
 
+@pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("delivered", [False, True])
-def test_recover_scheduled_correction_once(h: Harness, delivered: bool) -> None:
+def test_recover_scheduled_correction_once(
+    h: Harness, delivered: bool, legacy: bool
+) -> None:
     h.create()
     flow, writer = started_writer(h)
     path = h.tmp / "send.md"
@@ -1674,13 +1921,14 @@ def test_recover_scheduled_correction_once(h: Harness, delivered: bool) -> None:
         task_base=writer.base,
         head=writer.expected_head,
         fix_base=writer.expected_head,
-        turn_target=2,
-        turn_pending=True,
+        turn_pending=2,
         turn_file=str(path),
         turn_kind="send",
         answer=1,
         wave=1,
     )
+    if legacy:
+        flow["tasks"][0].update(turn_pending=True, turn_target=2)
     record.save(flow, h.env)
     item = h.run()["tasks"][0]
     assert item["status"] == "merged"
@@ -2323,6 +2571,8 @@ def test_cancel_live_runner_keeps_turns_and_stops_check(
                 assert time.monotonic() < deadline, flow
                 time.sleep(0.01)
             check_pid = (flow.get("active_check") or {}).get("pid")
+            if phase == "checking":
+                assert paths.check_tmp_dir(h.id).is_dir()
             out = io.StringIO()
             command._cancel(h.id, "scope changed", True, h.env, out, io.StringIO())
             assert future.result(timeout=10) == 0
@@ -2334,6 +2584,7 @@ def test_cancel_live_runner_keeps_turns_and_stops_check(
     assert not lock.live(h.id, h.env)
     report = json.loads(out.getvalue())
     if phase == "checking":
+        assert not paths.check_tmp_dir(h.id).exists()
         assert check_pid is not None and runner._process_start(check_pid) is None
         assert flow["check_pending"] and flow["checks"][-1]["exit"] == 124
         assert report["open_runs"] == []
@@ -2693,7 +2944,10 @@ def test_failed_base_check_watch_reports(h: Harness, timeout: bool) -> None:
         check=[
             sys.executable,
             "-c",
-            "import time; print('base failed', flush=True); "
+            "import os, pathlib, time; "
+            "folder = pathlib.Path(os.environ['TMPDIR']); "
+            f"assert folder == pathlib.Path({str(paths.check_tmp_dir(h.id))!r}); "
+            "(folder / 'leftover').touch(); print('base failed', flush=True); "
             + ("time.sleep(60)" if timeout else "raise SystemExit(3)"),
         ],
         check_timeout=1,
@@ -2705,6 +2959,7 @@ def test_failed_base_check_watch_reports(h: Harness, timeout: bool) -> None:
     assert runs.list_runs(h.env) == ([], [])
     (check,) = flow["checks"]
     assert check["wave"] == 0 and check["exit"] == (124 if timeout else 3)
+    assert not paths.check_tmp_dir(h.id).exists()
     reason = f"the check failed on the base: exit {check['exit']}, see {check['log']}"
     assert flow["reason"] == reason
     report = (

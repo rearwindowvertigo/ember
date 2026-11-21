@@ -132,6 +132,49 @@ def test_empty(context: AppContext, qtbot: QtBot) -> None:
     assert screen.finished_card.isVisible()
 
 
+def test_tmp_volume_warning_follows_run_reloads(
+    context: AppContext, qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    screen = screen_for(context, qtbot)
+    alert = screen.tmp_volume_alert
+    assert not alert.isVisible()
+
+    def reload(volume: paths.RunTmpVolume | None) -> None:
+        def read_volume() -> paths.RunTmpVolume | None:
+            assert threading.current_thread() is not threading.main_thread()
+            return volume
+
+        with monkeypatch.context() as patch:
+            patch.setattr(paths, "run_tmp_volume", read_volume)
+            with qtbot.waitSignal(context.runs.reloaded):
+                context.runs.reload()
+
+    for volume, counts in (
+        (paths.RunTmpVolume(49_999, 512 * 1024**2, True), "49,999 free files, 512"),
+        (paths.RunTmpVolume(60_000, 255 * 1024**2 + 1, True), "60,000 free files, 255"),
+        (paths.RunTmpVolume(80_000, 512 * 1024**2, False), None),
+        (
+            paths.RunTmpVolume(None, 128 * 1024**2, True),
+            "free file count unavailable, 128",
+        ),
+        (None, None),
+    ):
+        reload(volume)
+        if counts is None:
+            assert not alert.isVisible()
+        else:
+            text = (
+                f"{paths.RUN_TMP_ROOT} is nearly full: {counts} MiB free. "
+                "Ember refuses new Codex runs until files or space are freed."
+            )
+            assert alert.isVisible()
+            assert alert.tone() == "warning"
+            assert alert.title_label.text() == alert.accessibleName() == text
+            assert [
+                a for a in screen.findChildren(overview.Alert) if a.isVisible()
+            ] == [alert]
+
+
 def test_live_header_collapses_when_empty(
     env: dict[str, str], context: AppContext, qtbot: QtBot
 ) -> None:
@@ -478,6 +521,35 @@ def test_runs_folder_error_and_try_again(
     assert not screen.state_view.error.isVisible()
     assert screen.live_card.isVisible()
     assert list(screen.live_rows) == [LIVE_A, LIVE_B]
+
+
+def test_tmp_volume_recovers_while_runs_folder_is_unreadable(
+    context: AppContext, qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    screen = screen_for(context, qtbot)
+
+    def refuse(_env: object) -> object:
+        raise PermissionError("Permission denied")
+
+    monkeypatch.setattr(record, "list_runs", refuse)
+    with monkeypatch.context() as patch:
+        volume = paths.RunTmpVolume(49_999, 512 * 1024**2, True)
+        patch.setattr(paths, "run_tmp_volume", lambda: volume)
+        with qtbot.waitSignal(context.runs.failed):
+            context.runs.reload()
+        assert screen.state_view.error.isVisible()
+        assert screen.tmp_volume_alert.isVisible()
+        assert (
+            "49,999 free files, 512 MiB free"
+            in screen.tmp_volume_alert.accessibleName()
+        )
+
+        volume = paths.RunTmpVolume(60_000, 512 * 1024**2, False)
+        with qtbot.waitSignal(context.runs.failed):
+            qtbot.mouseClick(screen.state_view.retry_button, Qt.MouseButton.LeftButton)
+    assert screen.state_view.error.isVisible()
+    assert "Permission denied" in screen.state_view.error_text.text()
+    assert not screen.tmp_volume_alert.isVisible()
 
 
 def test_empty_state_after_the_last_run_goes(
