@@ -455,6 +455,9 @@ QLineEdit, QComboBox {
     selection-background-color: @accent;
     selection-color: #ffffff;
 }
+QComboBox {
+    combobox-popup: 0;
+}
 QComboBox[changed="true"] {
     border: 1px solid @accent;
 }

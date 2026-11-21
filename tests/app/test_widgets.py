@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 from PySide6 import QtGui
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QSignalBlocker, Qt, QTimer
 from PySide6.QtGui import (
     QClipboard,
     QContextMenuEvent,
@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 from pytestqt.qtbot import QtBot
 
 from ember.app import theme, widgets
+from ember.app.screens import menu
 
 
 @pytest.mark.parametrize("height", [40, 64])
@@ -411,6 +412,200 @@ def test_picker_dropdown_paints(qtbot: QtBot) -> None:
     hinted = view.sizeHintForRow(1)
     assert hinted > view.sizeHintForRow(0)
     picker.hidePopup()
+
+
+@pytest.mark.parametrize("count", [0, 1, 5, 10, 596])
+def test_picker_popup_fits_up_to_ten_rows(
+    qapp: QApplication, qtbot: QtBot, count: int
+) -> None:
+    theme.apply(qapp, "light")
+    picker = widgets.Picker()
+    qtbot.addWidget(picker)
+    for row in range(count):
+        picker.add_option(str(row), row)
+    picker.setCurrentIndex(count - 1)
+    picker.show()
+    picker.showPopup()
+    view = picker.view()
+    popup = view.window()
+    qtbot.waitExposed(popup)
+    height = sum(view.sizeHintForRow(i) for i in range(min(10, count)))
+    assert view.viewport().height() == height
+    assert popup.height() == height + 18  # 8 px padding and 1 px border per edge.
+    assert view.verticalScrollBar().isVisible() == (count > 10)
+    assert popup.height() < picker.screen().availableGeometry().height() // 2
+    if count:
+        selected = picker.model().index(count - 1, 0)
+        assert view.viewport().rect().contains(view.visualRect(selected))
+    qtbot.keyClick(view, Qt.Key.Key_Escape)
+    assert not popup.isVisible()
+
+
+def test_picker_popup_counts_headers_and_resizes_for_visible_hints(
+    qapp: QApplication, qtbot: QtBot
+) -> None:
+    theme.apply(qapp, "light")
+    picker = widgets.Picker()
+    qtbot.addWidget(picker)
+    picker.add_header("Workers")
+    for row in range(1, 26):
+        picker.add_option(str(row), row, hint="Shortlisted" if row < 13 else None)
+    picker.show()
+    picker.showPopup()
+    view = picker.view()
+    qtbot.waitExposed(view.window())
+    viewport = view.viewport()
+
+    def check_page(first: int) -> None:
+        assert view.indexAt(QPoint()).row() == first
+        assert view.indexAt(viewport.rect().bottomLeft()).row() == first + 9
+        assert viewport.height() == sum(
+            view.sizeHintForRow(row) for row in range(first, first + 10)
+        )
+
+    check_page(0)
+    assert view.sizeHintForRow(1) > view.sizeHintForRow(0)
+    assert view.verticalScrollBar().isVisible()
+    qtbot.keyClick(view, Qt.Key.Key_End)
+    check_page(16)
+    qtbot.keyClick(view, Qt.Key.Key_Return)
+    assert picker.value() == 25
+    picker.showPopup()
+    check_page(16)
+    bar = view.verticalScrollBar()
+    popup = view.window()
+    window = popup.windowHandle()
+    assert window is not None
+    QTest.wheelEvent(
+        window, viewport.mapTo(popup, viewport.rect().center()), QPoint(0, 120)
+    )
+    assert bar.value() < 16
+    check_page(bar.value())
+    bar.setValue(6)
+    check_page(6)
+    option = picker.model().index(8, 0)
+    qtbot.mouseClick(
+        viewport, Qt.MouseButton.LeftButton, pos=view.visualRect(option).center()
+    )
+    assert picker.value() == 8
+
+
+def test_open_picker_refits_after_blocked_model_rebuild(
+    qapp: QApplication, qtbot: QtBot
+) -> None:
+    theme.apply(qapp, "light")
+    picker = widgets.Picker()
+    qtbot.addWidget(picker)
+    picker.add_option("All providers", None)
+    picker.show()
+    picker.showPopup()
+    view = picker.view()
+    qtbot.waitExposed(view.window())
+    assert view.viewport().height() == view.sizeHintForRow(0)
+
+    with QSignalBlocker(picker):
+        picker.clear()
+        picker.add_option("All providers", None, "4 models")
+        for row in range(4):
+            picker.add_option(str(row), row, "1 model")
+        picker.setCurrentIndex(0)
+
+    qtbot.waitUntil(
+        lambda: (
+            view.viewport().height() == sum(view.sizeHintForRow(i) for i in range(5))
+        )
+    )
+    assert view.isVisible()
+    assert view.verticalScrollBar().value() == 0
+    assert not view.verticalScrollBar().isVisible()
+
+
+@pytest.mark.parametrize("count", [10, 20])
+def test_picker_fits_complete_hinted_rows_on_short_screen(
+    qapp: QApplication, qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, count: int
+) -> None:
+    theme.apply(qapp, "light")
+    picker = widgets.Picker()
+    qtbot.addWidget(picker)
+    for row in range(count):
+        picker.add_option(str(row), row, "Hint line")
+    picker.setCurrentIndex(count - 1)
+    picker.show()
+    view = picker.view()
+    normal_height = 10 * view.sizeHintForRow(0) + 2 * view.frameWidth()
+    area = QRect(0, 0, 853, normal_height - 25)
+    screen = picker.screen()
+    monkeypatch.setattr(screen, "availableGeometry", lambda: area)
+    picker.showPopup()
+    qtbot.waitExposed(view.window())
+    assert area.contains(view.window().geometry())
+    assert view.verticalScrollBar().isVisible() == (count > 10)
+    viewport = view.viewport().rect()
+    first = view.indexAt(viewport.topLeft()).row()
+    last = view.indexAt(viewport.bottomLeft()).row()
+    assert last == count - 1
+    if count == 10:
+        assert first == 0
+    assert view.visualRect(picker.model().index(first, 0)).top() == viewport.top()
+    assert view.visualRect(picker.model().index(last, 0)).bottom() == viewport.bottom()
+    body = QtGui.QFontMetrics(theme.font("body"))
+    caption = QtGui.QFontMetrics(theme.font("caption"))
+    assert view.sizeHintForRow(last) >= body.height() + caption.height()
+
+
+def _check_gap_check_popup() -> None:
+    app = QApplication([])
+    theme.apply(app, "light")
+    picker = widgets.Picker()
+    # DejaVu Sans at 16 px gives the combo box the reported 19 px line height.
+    picker.setStyleSheet("QComboBox { font-size: 16px; }")
+    for value, label in menu.WHEN:
+        picker.add_option(label, value, menu.when_hint(value))
+    assert picker.set_value("ask")
+    picker.show()
+    picker.showPopup()
+    app.processEvents()
+
+    view = picker.view()
+    area = picker.screen().availableGeometry()
+    assert area.height() == 384
+    assert area.contains(view.window().geometry())
+    assert not view.verticalScrollBar().isVisible()
+    assert picker.count() == 10
+    for row in range(picker.count()):
+        assert (
+            view.viewport()
+            .rect()
+            .contains(view.visualRect(picker.model().index(row, 0)))
+        )
+
+
+def test_gap_check_popup_fits_at_double_scale(
+    env: dict[str, str], tmp_path: Path
+) -> None:
+    config = tmp_path / "screen.json"
+    config.write_text('{"screens": [{"width": 1366, "height": 768}]}')
+    test_file = Path(__file__).resolve()
+    process = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import runpy, sys; "
+            "runpy.run_path(sys.argv[1])['_check_gap_check_popup']()",
+            str(test_file),
+        ],
+        env={
+            **os.environ,
+            **env,
+            "PYTHONPATH": str(test_file.parents[2] / "src"),
+            "QT_QPA_PLATFORM": f"offscreen:configfile={config}",
+            "QT_SCALE_FACTOR": "2",
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert process.returncode == 0, process.stdout + process.stderr
 
 
 def test_badge_tones(qtbot: QtBot) -> None:
