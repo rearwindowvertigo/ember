@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ember import prune, sandbox
+from ember import paths, prune, sandbox
 from ember.app import icons, state, theme
 from ember.app.flows import FlowItem, PanelItem, plan_wave
 from ember.app.runs import DONE, FINISHED_LIMIT, LIVE
@@ -1180,6 +1180,9 @@ class OverviewScreen(QWidget):
         self.alerts.setSpacing(8)
         layout.addLayout(self.alerts)
         self.sandbox_alerts: dict[str, Alert] = {}
+        self.tmp_volume_alert = Alert("warning", "")
+        self.tmp_volume_alert.hide()
+        layout.addWidget(self.tmp_volume_alert)
         self.denied_area = QVBoxLayout()
         self.denied_area.setSpacing(8)
         layout.addLayout(self.denied_area)
@@ -1345,6 +1348,7 @@ class OverviewScreen(QWidget):
         """Redraw the records and run rows after either model changes."""
         self._stale = False
         runs = self.context.runs
+        self._draw_tmp_volume(runs.tmp_volume())
         parents: list[FlowItem | PanelItem] = [
             *self.records.flows(),
             *self.records.panels(),
@@ -1969,6 +1973,24 @@ class OverviewScreen(QWidget):
 
         dialog.finished.connect(confirmed)
         dialog.open()
+
+    def _draw_tmp_volume(self, volume: paths.RunTmpVolume | None) -> None:
+        if volume is None or not volume.low:
+            self.tmp_volume_alert.hide()
+            return
+        files = (
+            "free file count unavailable"
+            if volume.free_inodes is None
+            else f"{volume.free_inodes:,} free files"
+        )
+        text = (
+            f"{paths.RUN_TMP_ROOT} is nearly full: {files}, "
+            f"{volume.free_bytes // 1024**2} MiB free. "
+            "Ember refuses new Codex runs until files or space are freed."
+        )
+        self.tmp_volume_alert.title_label.setText(text)
+        self.tmp_volume_alert.setAccessibleName(text)
+        self.tmp_volume_alert.show()
 
     # Sandbox alerts
 
