@@ -226,6 +226,16 @@ def _breakable(word: str, metrics: QFontMetrics) -> str:
     return PATH_BREAK.join(html.escape(piece, quote=False) for piece in pieces if piece)
 
 
+def _set_translucent_popup(window: QWidget) -> None:
+    """Let the desktop show through the popup's rounded corners."""
+    window.setWindowFlags(
+        window.windowFlags()
+        | Qt.WindowType.FramelessWindowHint
+        | Qt.WindowType.NoDropShadowWindowHint
+    )
+    window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+
 class TipPopup(QWidget):
     """Ember's tooltip window: `fill-primary` with `on-primary`, rounded corners.
 
@@ -238,13 +248,8 @@ class TipPopup(QWidget):
 
     def __init__(self) -> None:
         """Create the hidden window."""
-        super().__init__(
-            None,
-            Qt.WindowType.ToolTip
-            | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.NoDropShadowWindowHint,
-        )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        super().__init__(None, Qt.WindowType.ToolTip)
+        _set_translucent_popup(self)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(*self.PADDING, *self.PADDING)
@@ -930,6 +935,10 @@ class Picker(QComboBox):
         self.setItemDelegate(self._delegate)
         self.setMaxVisibleItems(self.MAX_VISIBLE_ROWS)
         view = self.view()
+        container = cast(QFrame, view.window())
+        _set_translucent_popup(container)
+        container.setFrameShape(QFrame.Shape.NoFrame)
+        view.viewport().setAutoFillBackground(False)
         view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerItem)
         view.verticalScrollBar().valueChanged.connect(self._fit_popup)
@@ -962,6 +971,10 @@ class Picker(QComboBox):
         """Reduce short lists' vertical padding when the work area requires it."""
         view = self.view()
         count = self.count()
+        empty = count == 0
+        if bool(view.property("empty")) != empty:
+            view.setProperty("empty", empty)
+            repolish(view)
         self._delegate.vertical_padding = self._delegate.PAD
         if 0 < count <= self.maxVisibleItems():
             available = (
@@ -1504,6 +1517,7 @@ class _CommandLabel(QLabel):
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: D102
         menu = QMenu(self)
+        _set_translucent_popup(menu)
         copy = menu.addAction("Copy")
         copy.setEnabled(self.hasSelectedText())
         copy.triggered.connect(

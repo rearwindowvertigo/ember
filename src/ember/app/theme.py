@@ -499,6 +499,10 @@ QComboBox QAbstractItemView {
     selection-background-color: @bg-selected;
     selection-color: @text-primary;
 }
+QComboBox QAbstractItemView[empty="true"] {
+    /* Only the two padded borders are visible in an empty list. */
+    border-radius: 9px;
+}
 QMenu {
     background: @bg-raised;
     color: @text-primary;

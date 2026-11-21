@@ -17,6 +17,7 @@ from PySide6.QtGui import (
     QGuiApplication,
     QHelpEvent,
     QIcon,
+    QImage,
     QPaintEvent,
     QTextLayout,
     QWindow,
@@ -414,6 +415,43 @@ def test_picker_dropdown_paints(qtbot: QtBot) -> None:
     picker.hidePopup()
 
 
+def _assert_rounded_popup(window: QWidget) -> None:
+    assert window.isVisible()
+    image = QImage(window.size(), QImage.Format.Format_ARGB32_Premultiplied)
+    image.fill(Qt.GlobalColor.transparent)
+    window.render(image)
+    bounds = image.rect()
+    for corner in (
+        bounds.topLeft(),
+        bounds.topRight(),
+        bounds.bottomLeft(),
+        bounds.bottomRight(),
+    ):
+        assert image.pixelColor(corner).alpha() == 0, corner
+    assert image.pixelColor(bounds.center()).alpha() == 255
+    assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
+    assert window.windowFlags() & Qt.WindowType.NoDropShadowWindowHint
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+@pytest.mark.parametrize("count", [0, 1, 20])
+def test_picker_popup_has_transparent_corners(
+    qapp: QApplication, qtbot: QtBot, mode: str, count: int
+) -> None:
+    theme.apply(qapp, mode)
+    picker = widgets.Picker()
+    qtbot.addWidget(picker)
+    for row in range(count):
+        picker.add_option(str(row), row)
+    picker.setCurrentIndex(count - 1)
+    picker.show()
+    picker.showPopup()
+    view = picker.view()
+    qtbot.waitExposed(view.window())
+    assert view.verticalScrollBar().isVisible() == (count > picker.maxVisibleItems())
+    _assert_rounded_popup(view.window())
+
+
 @pytest.mark.parametrize("count", [0, 1, 5, 10, 596])
 def test_picker_popup_fits_up_to_ten_rows(
     qapp: QApplication, qtbot: QtBot, count: int
@@ -790,16 +828,34 @@ def test_run_command_dialog_copies_original(qtbot: QtBot) -> None:
     assert dialog.result() == QDialog.DialogCode.Rejected
     assert dialog.isVisible()
 
+
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_copy_menu_has_transparent_corners_and_copies_selection(
+    qapp: QApplication, qtbot: QtBot, mode: str
+) -> None:
+    theme.apply(qapp, mode)
+    dialog = _dialog(qtbot, "/opt/tools/bin/tool")
+    label = dialog.command
+    label.setSelection(0, 6)
+    QGuiApplication.clipboard().clear()
+
     def copy_selection() -> None:
         menu = label.findChild(QMenu)
         assert menu is not None
-        menu.actions()[0].trigger()
-        menu.close()
+        try:
+            copy = menu.actions()[0]
+            menu.setActiveAction(copy)
+            _assert_rounded_popup(menu)
+            copy.trigger()
+        finally:
+            menu.close()
 
     QTimer.singleShot(0, copy_selection)
-    label.setSelection(0, 6)
-    event = QContextMenuEvent(QContextMenuEvent.Reason.Mouse, QPoint(), QPoint())
-    label.contextMenuEvent(event)
+    point = label.rect().center()
+    event = QContextMenuEvent(
+        QContextMenuEvent.Reason.Mouse, point, label.mapToGlobal(point)
+    )
+    QApplication.sendEvent(label, event)
     assert QGuiApplication.clipboard().text() == "/opt/"
 
 
