@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from pytestqt.qtbot import QtBot
 
 from ember import deps
-from ember.app import flows, state, theme
+from ember.app import flows, icons, state, theme
 from ember.app import window as window_module
 from ember.app.context import STALE_TITLE, AppContext
 from ember.app.screens import KEYS, SCREENS
@@ -473,6 +473,12 @@ def test_sidebar_collapses_below_960_and_expands_at_960(
     theme.apply(qapp, mode)
     window, _context, _quit = _window(env, qtbot)
     window.show()
+    assert window.mark.pixmap().toImage() == icons.mark().toImage()
+    other = next(name for name in theme.MODES if name != mode)
+    theme.apply(qapp, other)
+    assert window.mark.pixmap().toImage() == icons.mark().toImage()
+    assert window.mark.pixmap().cacheKey() == icons.mark().cacheKey()
+    theme.apply(qapp, mode)
     for width, collapsed in [(959, True), (960, False), (640, True), (1100, False)]:
         window.resize(width, 480)
         qtbot.waitUntil(lambda width=width: window.width() == width)

@@ -4712,6 +4712,10 @@ inside its own frame.
 At window widths of 960 pixels and above, the sidebar is 220 pixels wide
 and shows the Ember mark and name, one row per screen (Overview, Team,
 Engines, Dependencies, Settings) and `Ember <version>` at the bottom.
+The mark is three interlocking rings without a tile, drawn at 24 pixels:
+`#ededed` in dark mode and `#0d0d0d` in light mode. The window's icon is
+the same rings on a charcoal tile; a bolder drawing serves 16, 24 and 32
+pixels.
 A row's count appears as a pill in `type-caption` with `on-accent` text
 (`#ffffff` in both themes) on `accent`. The pill is 18 pixels tall and at
 least 18 pixels wide; a wider count makes it wider. A 2-pixel ring matches
@@ -5372,7 +5376,7 @@ has no maintainer scripts:
 | `/usr/lib/ember/lib/python3.14/site-packages/ember/` | Ember |
 | `/usr/share/ember/skill/` | The `ember` skill, without its eval cases |
 | `/usr/share/applications/io.github.rearwindowvertigo.Ember.desktop` | The desktop entry: `Exec=emb app` |
-| `/usr/share/icons/hicolor/scalable/apps/io.github.rearwindowvertigo.Ember.svg` | The icon |
+| `/usr/share/icons/hicolor/scalable/apps/io.github.rearwindowvertigo.Ember.svg` | The icon, drawn as filled outlines without SVG masks or clip paths |
 | `/usr/share/doc/ember/copyright` | The copyright file |
 | `/usr/share/doc/ember/icu-LICENSE` | The licence of the ICU libraries Qt bundles |
 | `/usr/share/doc/ember/changelog.gz` | The changelog, when the build had `CHANGELOG.md` |
