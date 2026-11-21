@@ -939,6 +939,7 @@ def remove(
             ident = entry.id
             if ident in unavailable:
                 continue
+            artifacts = Result()
             try:
                 abandoned = entry.abandoned
                 if not (dry_run and abandoned):
@@ -966,7 +967,12 @@ def remove(
                     paths.run_tmp_dir(ident, env) if entry.kind == "run" else None
                 )
                 had_tmp = temporary is not None and os.path.lexists(temporary)
-                artifacts = Result()
+                if entry.kind == "flow" and paths.remove_check_tmp_dir(
+                    ident, dry_run=dry_run
+                ):
+                    artifacts.removed.append(
+                        dict(id=str(paths.check_tmp_dir(ident)), kind="tmp")
+                    )
                 _artifacts(
                     entry,
                     env,
@@ -985,10 +991,6 @@ def remove(
                     shutil.rmtree(runs.run_dir(ident, env))
                 result.removed.append(dict(id=ident, kind=entry.kind))
                 removed.add(ident)
-                result.errors.extend(artifacts.errors)
-                result.removed.extend(
-                    item for item in artifacts.removed if item not in result.removed
-                )
                 result.skipped.extend(artifacts.skipped)
                 for item in artifacts.branches:
                     if not any(
@@ -1005,6 +1007,10 @@ def remove(
             except _RECORD_ERRORS as error:
                 result.errors.append(f"{ident}: {error}")
                 result.skipped.append(dict(id=ident, reason=str(error)))
+            result.errors.extend(artifacts.errors)
+            result.removed.extend(
+                item for item in artifacts.removed if item not in result.removed
+            )
     if record_ids is None:
         readable = not result.errors
         _sweep_orphans(

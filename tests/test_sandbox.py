@@ -2314,3 +2314,24 @@ def test_bubblewrap_does_not_walk_codex_temporary_folders(
     assert ("--tmpfs", "/tmp") in zip(args, args[1:], strict=False)
     assert str(folder) not in args
     assert "TMPDIR" not in dict(_pairs(args, "--setenv"))
+
+
+def test_flow_check_folder_can_be_kept_in_a_worker_profile(
+    env: dict[str, str], home: Path
+) -> None:
+    own = paths.ensure_run_tmp_dir("codex-20260101-000000-aabbcc", env)
+    check = paths.ensure_check_tmp_dir("flow-20260101-000000-aabbcc")
+    worktree = home / "worktree"
+    worktree.mkdir()
+    common = worktree / ".git"
+    common.mkdir()
+    config = _profile(
+        sandbox.codex_args(worktree, common, [check], temporary=own, env=env)
+    )
+    filesystem = config["permissions"]["ember"]["filesystem"]
+    sandbox.check_kept(worktree, common, [check], env=env, temporary=own)
+    assert not any(
+        check.is_relative_to(path)
+        for path, access in filesystem.items()
+        if access == "deny"
+    )

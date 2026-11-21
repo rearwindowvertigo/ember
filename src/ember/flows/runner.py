@@ -16,7 +16,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, TextIO
 
-from ember import branches, choices, citations, holds, paths, prepare, tmux
+from ember import branches, choices, citations, holds, paths, prepare, sandbox, tmux
 from ember.engines import Driver
 from ember.flows import briefs, lock, plan, record, verdict
 from ember.runs import exits
@@ -255,7 +255,7 @@ class _Runner:
         self.env = {key: value for key, value in env.items() if key not in _GIT_ENV}
         self.id = flow_id
         self.folder = record.folder(flow_id, self.env)
-        self.flow = record.load(flow_id, self.env)
+        self.flow = self._load_flow()
         self.plan = plan.from_json(
             json.loads((self.folder / record.PLAN_NAME).read_text(encoding="utf-8")),
             Path(self.flow["plan"]),
@@ -274,6 +274,17 @@ class _Runner:
         """Tasks whose review started during the running wave."""
         self.retry: set[tuple[str, str]] = set()
         """`(task, role)` pairs whose start is repeated on a fallback worker."""
+
+    def _load_flow(self) -> dict[str, Any]:
+        """Load the flow and translate pending sends from older records."""
+        flow = record.load(self.id, self.env)
+        # Older records stored the pending correction's turn in a separate field.
+        for task in flow["tasks"]:
+            target = task.pop("turn_target", None)
+            if task.get("turn_pending") is True and target is not None:
+                task["turn_pending"] = target
+            task.pop("tmp_cleanup_turn", None)
+        return flow
 
     def _save(self) -> None:
         """Save while the caller holds the record mutex."""
@@ -887,6 +898,26 @@ class _Runner:
         code = core.execute(lambda: core.close(run_id))
         return stream.getvalue().strip() if code else None
 
+    def clean_writer_tmp(self, task: Mapping[str, Any]) -> None:
+        """Remove leftovers once a task with a settled Codex writer is accepted."""
+        run_id = task["writer_run"]
+        if run_id is None:
+            return
+        try:
+            run = runs.load(run_id, self.env)
+            if (
+                run.sandbox == sandbox.CODEX
+                and run.status != runs.CLOSED
+                and run.turn_state in (runs.COLLECTED, runs.COMMITTED)
+            ):
+                keep = [name for _, name, _ in sandbox.WORKER_HOME_FOLDERS]
+                paths.clean_run_tmp_dir(run_id, keep, self.env)
+        except (OSError, ValueError, runs.RecordError) as error:
+            print(
+                f"WARNING: cannot clean writer {run_id}'s temporary folder: {error}",
+                file=sys.stderr,
+            )
+
     def send(self, task: dict[str, Any], path: str, *, fresh: bool) -> bool:
         """Persist the actual branch tip and expected turn before a correction."""
         if not self.allowed(task):
@@ -899,8 +930,7 @@ class _Runner:
             fix_base=self.tip(task["branch"]),
             explicit_review=False,
             round=0 if fresh else task["round"] + 1,
-            turn_pending=True,
-            turn_target=run.turn + 1,
+            turn_pending=run.turn + 1,
             turn_file=path,
             turn_kind="send" if fresh else "fix",
             recover_review=False,
@@ -1063,6 +1093,8 @@ class _Runner:
             )
             if action == "stop":
                 self._lead(task, reason or "the review stopped")
+        if action == "accept":
+            self.clean_writer_tmp(task)
         return action
 
     def pipeline(self, task: dict[str, Any]) -> None:
@@ -1180,7 +1212,7 @@ class _Runner:
             )
             return False
         pending = task.get("turn_pending", False)
-        if pending and run.turn < task["turn_target"]:
+        if pending and run.turn < pending:
             if not self.allowed(task):
                 return False
             self.change(task, fix_base=self.tip(task["branch"]))
@@ -1409,6 +1441,7 @@ class _Runner:
                         )
                     else:
                         self.change(task, status="accepted", head=task["merge_tip"])
+                        self.clean_writer_tmp(task)
                 elif task["status"] in ("writing", "fixing"):
                     if not task["writer_run"]:
                         self.change(task, status="pending", entry="write")
@@ -1506,6 +1539,26 @@ class _Runner:
                 self.flow["preparation_halt"] = None
                 self._save()
 
+    @contextlib.contextmanager
+    def check_tmp_dir(self) -> Iterator[Path]:
+        """Give one check attempt a fresh folder for the lifetime of its process."""
+        try:
+            folder = paths.ensure_check_tmp_dir(self.id)
+        except OSError as error:
+            raise RunnerError(
+                f"cannot create check folder {paths.check_tmp_dir(self.id)}: {error}"
+            ) from error
+        try:
+            yield folder
+        finally:
+            try:
+                paths.remove_check_tmp_dir(self.id)
+            except OSError as error:
+                print(
+                    f"WARNING: cannot remove check folder {folder}: {error}",
+                    file=sys.stderr,
+                )
+
     def check(self) -> bool:
         """Run a check attempt, retain its log and clean the flow worktree."""
         with self.mutex:
@@ -1523,39 +1576,45 @@ class _Runner:
             self._save()
         fd = paths.open_private_file(log, os.O_WRONLY | os.O_EXCL)
         code = 127
-        process = None
+        reason = None
         with os.fdopen(fd, "w", encoding="utf-8") as output:
             try:
-                process = subprocess.Popen(
-                    self.flow["check"],
-                    cwd=self.flow["worktree"],
-                    env=self.env,
-                    stdout=output,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-                with self.mutex:
-                    self.flow["active_check"] = {
-                        "pid": process.pid,
-                        "start": _process_start(process.pid),
-                    }
-                    self._save()
-                deadline = time.monotonic() + self.flow["check_timeout"]
-                while process.poll() is None:
-                    if self.shutdown.is_set() or time.monotonic() >= deadline:
-                        with contextlib.suppress(ProcessLookupError):
-                            os.killpg(process.pid, signal.SIGKILL)
-                        process.wait()
-                        code = 124
-                        break
-                    self.shutdown.wait(
-                        min(self.poll, max(0, deadline - time.monotonic()))
+                with self.check_tmp_dir() as temporary:
+                    process = subprocess.Popen(
+                        self.flow["check"],
+                        cwd=self.flow["worktree"],
+                        env={**self.env, "TMPDIR": str(temporary)},
+                        stdout=output,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
                     )
-                else:
-                    code = process.returncode
+                    try:
+                        with self.mutex:
+                            self.flow["active_check"] = {
+                                "pid": process.pid,
+                                "start": _process_start(process.pid),
+                            }
+                            self._save()
+                        deadline = time.monotonic() + self.flow["check_timeout"]
+                        while process.poll() is None:
+                            if self.shutdown.is_set() or time.monotonic() >= deadline:
+                                code = 124
+                                break
+                            self.shutdown.wait(
+                                min(self.poll, max(0, deadline - time.monotonic()))
+                            )
+                        else:
+                            code = process.returncode
+                    finally:
+                        if process.returncode is None:
+                            with contextlib.suppress(ProcessLookupError):
+                                os.killpg(process.pid, signal.SIGKILL)
+                            process.wait()
             except OSError as error:
                 output.write(str(error))
-        reason = None
+            except RunnerError as error:
+                reason = str(error)
+                output.write(reason)
         try:
             self.clean()
         except RunnerError as error:
@@ -1722,6 +1781,8 @@ class _Runner:
         with record.answers_lock(self.id, self.env):
             task = self._apply_locked(index, answer, answered, ahead=ahead)
         if task is not None:
+            if task["status"] == "accepted":
+                self.clean_writer_tmp(task)
             self.answer_effect(task)
 
     def _apply_locked(
@@ -2064,7 +2125,7 @@ class _Runner:
                     begun = True
                     with contextlib.ExitStack() as startup:
                         startup.enter_context(_lifecycle_guard(self.folder))
-                        self.flow = record.load(self.id, self.env)
+                        self.flow = self._load_flow()
                         if record.cancel_request(self.id, self.env) is not None:
                             closing.enter_context(startup.pop_all())
                             self.finish("cancelled")
