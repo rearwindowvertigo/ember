@@ -48,12 +48,19 @@ The workers' cache folder,
 sandboxed run, including read-only runs, and shared between runs.
 Each sandboxed Codex run, editing or read-only, gets a temporary folder at
 `/tmp/ember-<6 hex>`, using the six-hex suffix of the run id.
-The folder has mode 700. Ember creates it before the session starts and
-exits 69 if any entry already exists there, including a symlink, or creation
-fails. The error names the folder. The Codex profile makes it writable and
-sets `TMPDIR` to it through `shell_environment_policy.set`. The shared `/tmp`
+The folder has mode 700. Ember creates it before the session starts.
+Ember exits 69 with a diagnostic and owner action naming `/tmp` if that
+volume reports fewer than 50,000 free inodes or less than 256 MiB free,
+or with a folder creation error if the path already holds an entry
+(including a symlink) or creation otherwise fails. The error names the folder.
+The Codex profile makes it writable and sets `TMPDIR` to it through
+`shell_environment_policy.set`. The shared `/tmp`
 stays writable. Codex walks `/tmp` and denies every other entry matching
-`ember-<6 hex>` by name. Ember removes the folder on close, worktree removal
+`ember-<6 hex>` by name. When a flow accepts a task, a writer whose turn is
+still running keeps its files. For an open sandboxed Codex writer whose turn
+is collected or committed, acceptance removes every top-level entry except
+`config`, `data`, `state` and entries whose names start with `codex-`.
+Ember removes the folder on close, worktree removal
 or record pruning. An unscoped prune also removes matching folders no record
 names, only when owned by the current user, not symlinks, and every record
 could be read. It also sweeps unrecorded entries in
