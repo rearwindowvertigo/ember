@@ -37,6 +37,7 @@ ICON_NAMES = (
     "x",
     "check",
     "trash-2",
+    "panel-left",
 )
 """The Lucide icons shipped in `assets/icons/`."""
 

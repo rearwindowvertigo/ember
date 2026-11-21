@@ -4986,7 +4986,8 @@ round expand button with an outline and a chevron, one of six status chips,
 the text, and the time and actions on the right. The chip column is as wide
 as the widest chip. The expand button and the chip are centred vertically
 on the text lines. The title starts with the row's type: `Run`, `Flow` or
-`Panel`. The title and second line each show one line, cut with an
+`Panel`. The title is set in `type-label` and the second line in
+`type-caption` with `text-secondary`. Each shows one line, cut with an
 ellipsis; the whole text is in the expanded details. Chips are 22 pixels tall with
 6-pixel corners. The status chips:
 
@@ -5083,8 +5084,7 @@ run's record follows the run while it is live, and collapses when the run
 ends. Overview shows no worker's screen; Open terminal does. One flow and one panel can also have
 expanded details.
 
-The subtitle uses the tray status line, counting the same top-level live
-runs, flows and panels. Above the sections, an alert names each enabled
+Overview has no subtitle. Above the sections, an alert names each enabled
 engine whose sandbox setting gives it no sandbox, with Open Engines.
 
 A notice says `A worker could not read <path>` for each reported hidden
@@ -5257,8 +5257,9 @@ engine reads "Held after <kind> until <HH:MM>" and a hold of one model
 under a hold ends that hold. Refresh list reads models from their source.
 Model switches save shortlist entries; OpenCode entries keep the full
 integration-prefixed id and any selected effort. Each shortlisted Codex
-model has a Speed picker beside its effort. Fast adds the model to
-`fast.codex` and Standard removes it. A Speed change made while another is
+model has a Speed picker beside its effort. The Speed column's heading has
+an info icon whose tooltip says what Fast and Standard do; the picker has
+no tooltip. Fast adds the model to `fast.codex` and Standard removes it. A Speed change made while another is
 being saved is added to it. Switching a model off the shortlist, or
 removing it there, also removes it from `fast.codex`.
 

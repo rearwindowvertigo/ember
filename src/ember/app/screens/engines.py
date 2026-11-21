@@ -546,6 +546,13 @@ class _EngineCard(Card):
         return order
 
 
+_SPEED_TIP = (
+    "Fast runs a model on Codex's Fast tier, which can use more of the "
+    "plan's usage. Standard turns the Fast tier off for that model."
+)
+"""The tooltip of the info icon beside the Speed column's heading."""
+
+
 class _SpeedPicker(Picker):
     """The standing Codex speed for one shortlisted model."""
 
@@ -555,10 +562,6 @@ class _SpeedPicker(Picker):
         self.model_id = model
         self.setFixedWidth(_EFFORT_WIDTH)
         self.setAccessibleName(f"Speed of {model}")
-        self.setToolTip(
-            "Fast runs this model on Codex's Fast tier, which can use more of the "
-            "plan's usage. Standard turns the Fast tier off for this model."
-        )
         for speed in choices.SPEEDS:
             self.add_option(speed.capitalize(), speed)
         self.sync()
@@ -888,8 +891,15 @@ class _ModelPanel(Card):
         effort.setFixedWidth(_EFFORT_WIDTH)
         header.addWidget(effort)
         if engine == "codex":
-            speed = label("Speed", "muted", wrap=False)
+            speed = QWidget()
             speed.setFixedWidth(_EFFORT_WIDTH)
+            heading = QHBoxLayout(speed)
+            heading.setContentsMargins(0, 0, 0, 0)
+            heading.setSpacing(INFO_SPACING)
+            heading.addWidget(label("Speed", "muted", wrap=False))
+            self.speed_info = InfoTip("Speed", _SPEED_TIP)
+            heading.addWidget(self.speed_info)
+            heading.addStretch(1)
             header.addWidget(speed)
         header.addStretch(1)
         use = QLabel("Use")
