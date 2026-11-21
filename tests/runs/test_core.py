@@ -16,12 +16,12 @@ from typing import Any
 
 import pytest
 
-from ember import choices, engines, paths, processes, prune, sandbox, tmux
+from ember import choices, engines, holds, paths, processes, prune, sandbox, tmux
 from ember.engines import Driver, LaunchSpec, models, opencode2, status
 from ember.engines.codex import CodexDriver, codex_home
 from ember.engines.opencode import OpenCodeDriver
 from ember.engines.opencode2 import DeliveryUncertainError, OpenCode2Driver
-from ember.runs import core, exits, record
+from ember.runs import core, exits, record, steps
 from ember.runs.core import Core, RunError, StartOptions
 from engines.test_opencode2 import STUB_SERVER  # pyrefly: ignore[missing-import]
 
@@ -6091,3 +6091,344 @@ def test_an_engine_that_dies_before_its_brief_reports_its_last_words(
     assert err.splitlines()[-1].startswith(close)
     assert ("outage clears" in err.splitlines()[-1]) == (code == 73)
     assert run.last_variant == "starting"
+
+
+def test_a_run_continues_the_branch_of_an_earlier_run(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first_id = _started(tmp_path, env, repo, capsys, "Task\n@write a.txt one\n")
+    first = record.load(first_id, env)
+    brief = _brief(tmp_path, "Task\n@write b.txt two\n", "again.md")
+    assert _start(_core(env), repo, brief, continue_run=first_id) == 0
+    second = record.load(_run_id(capsys.readouterr().out), env)
+    assert second.continues == first_id
+    assert second.base == first.commits[-1]
+    assert second.base_branch == first.base_branch
+    assert second.branch != first.branch
+    worktree = Path(second.worktree)
+    assert (worktree / "a.txt").read_text() == "one\n"
+    assert (worktree / "b.txt").read_text() == "two\n"
+    saved = (second.folder / record.BRIEF_NAME).read_text()
+    assert "## Work already done" in saved
+    assert f"run {first_id} ({first.engine} {first.model})" in saved
+    assert f"`git diff {first.base}..HEAD`" in saved
+    argv = _core(env)._start_argv(
+        second,
+        StartOptions(
+            engine="claude", dir=str(repo), task_file=brief, continue_run=first_id
+        ),
+    )
+    assert argv[argv.index("--continue-run") + 1] == first_id
+    third_brief = _brief(tmp_path, "Task\n@write c.txt three\n", "third.md")
+    assert _start(_core(env), repo, third_brief, continue_run=second.id) == 0
+    third = record.load(_run_id(capsys.readouterr().out), env)
+    assert (
+        f"`git diff {first.base}..HEAD`"
+        in (third.folder / record.BRIEF_NAME).read_text()
+    )
+    assert record.load(first_id, env).continues is None
+    assert "continues" not in first.to_json()
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("unknown", "--continue-run: "),
+        ("read_only_new", "--continue-run needs an editing run"),
+        ("read_only_old", "is read-only and has no branch"),
+    ],
+)
+def test_continue_run_refusals(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    case: str,
+    message: str,
+) -> None:
+    options: dict[str, Any] = {"continue_run": "codex-20260101-000000-abcdef"}
+    if case != "unknown":
+        earlier = _brief(tmp_path, "Earlier\n@reply done\n", "earlier.md")
+        assert _start(_core(env), repo, earlier, read_only=case == "read_only_old") == 0
+        options["continue_run"] = _run_id(capsys.readouterr().out)
+        options["read_only"] = case == "read_only_new"
+    assert _start(_core(env), repo, _brief(tmp_path, "Task\n"), **options) == 64
+    assert message in capsys.readouterr().err
+
+
+def _provider_failure(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> tuple[record.Run, list[str]]:
+    """Start a claude run that edits a file and then fails with an outage."""
+    brief = _brief(tmp_path, "Task\n@write work.txt w\n@provider rate limited\n")
+    assert _start(_core(env), repo, brief) == 73
+    out, err = capsys.readouterr()
+    return record.load(_run_id(out), env), err.splitlines()
+
+
+def test_a_provider_failure_holds_the_engine_and_names_the_fallback_start(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    choices.set_settings({"provider.fallback": ["codex:gpt-5"]}, env=env)
+    run, lines = _provider_failure(tmp_path, env, repo, capsys)
+    (hold,) = holds.active(env)
+    assert (hold.engine, hold.model, hold.kind, hold.run) == (
+        "claude",
+        None,
+        "outage",
+        run.id,
+    )
+    assert 14 * 60 < hold.until - hold.since <= 15 * 60
+    assert any(
+        line.startswith("WARNING: claude is held after outage until ") for line in lines
+    )
+    start = (
+        f"emb run --engine codex --model gpt-5 --effort high --dir {repo} "
+        f"--task-file {run.folder / record.BRIEF_NAME} --fallback-from {run.id} "
+        f"--continue-run {run.id}"
+    )
+    assert lines[-1] == f"next: emb run --close {run.id}, then {start}"
+    # The record keeps the failure's own variant; the lines follow the list.
+    assert run.last_variant == "outage"
+    assert steps.shown_variant(run) == ("fallback", start)
+    assert _core(env).step(run, "live")[1] == lines[-1]
+    assert exits.report(73, "fallback", run=run.id) == (
+        "report: fallback; the owner's fallback list names the worker of the "
+        "next: line; run that line without a question; tell the owner which "
+        "model failed, with which error, and which model runs now"
+    )
+    choices.set_settings({"provider.fallback": []}, env=env)
+    assert _core(env).step(run, "live")[1] == (
+        f"next: emb run --send {run.id} --message-file <file> "
+        "(after the provider's outage clears)"
+    )
+    assert steps.shown_variant(run) == ("outage", None)
+    # A list set after the failure names the fallback start as well.
+    choices.set_settings({"provider.fallback": ["codex:gpt-5"]}, env=env)
+    assert _core(env).step(run, "live")[1] == lines[-1]
+
+
+def test_a_start_on_a_held_worker_goes_to_the_fallback_entry(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    choices.set_settings({"provider.fallback": ["codex:gpt-5"]}, env=env)
+    _provider_failure(tmp_path, env, repo, capsys)
+    brief = _brief(tmp_path, "Next\n@reply done\n", "next.md")
+    assert _start(_core(env), repo, brief) == 0
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert (run.engine, run.model, run.effort) == ("codex", "gpt-5", "high")
+    assert any(
+        line.startswith("WARNING: claude is held after outage until ")
+        and line.endswith("; starting codex gpt-5 from the fallback list")
+        for line in err.splitlines()
+    )
+    # A panel member, which has a saved base, runs as named.
+    base = git(repo, "rev-parse", "HEAD", env=env)
+    assert _start(_core(env), repo, brief, read_only=True, base=base) == 0
+    member = record.load(_run_id(capsys.readouterr().out), env)
+    assert member.engine == "claude"
+
+
+def test_a_successful_turn_ends_the_hold(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _provider_failure(tmp_path, env, repo, capsys)
+    assert [hold.name() for hold in holds.active(env)] == ["claude"]
+    # With no fallback entry the held worker is started as before.
+    assert _start(_core(env), repo, _brief(tmp_path, "Next\n@reply ok\n", "n.md")) == 0
+    out, err = capsys.readouterr()
+    assert record.load(_run_id(out), env).engine == "claude"
+    assert "from the fallback list" not in err
+    assert holds.active(env) == []
+
+
+def test_no_hold_is_recorded_when_the_owner_sets_every_job(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    choices.set_settings(
+        {"provider.hold_minutes": "0", "provider.fallback": ["codex:gpt-5"]}, env=env
+    )
+    run, lines = _provider_failure(tmp_path, env, repo, capsys)
+    assert holds.active(env) == []
+    assert not any("is held after" in line for line in lines)
+    assert lines[-1].startswith(f"next: emb run --close {run.id}, then emb run ")
+
+
+def test_a_chain_of_fallback_starts_ends_when_the_list_is_used_up(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    choices.set_settings(
+        {
+            "provider.hold_minutes": "0",
+            "provider.fallback": ["codex:gpt-5", "claude:opus"],
+        },
+        env=env,
+    )
+    first, lines = _provider_failure(tmp_path, env, repo, capsys)
+    assert "--engine codex --model gpt-5" in lines[-1]
+    brief = _brief(tmp_path, "Task\n@provider rate limited\n", "again.md")
+    options = {"engine": "codex", "model": "gpt-5", "effort": "high"}
+    code = _start(
+        _core(env),
+        repo,
+        brief,
+        fallback_from=first.id,
+        continue_run=first.id,
+        **options,
+    )
+    assert code == 73
+    out, err = capsys.readouterr()
+    second = record.load(_run_id(out), env)
+    assert (second.fallback_from, second.continues) == (first.id, first.id)
+    assert "fallback_from" not in first.to_json()
+    assert [run.id for run in record.linked(second, "fallback_from")] == [first.id]
+    # Without holds, the first worker is still not named again.
+    assert err.splitlines()[-1] == (
+        f"next: emb run --send {second.id} --message-file <file> "
+        "(after the provider's outage clears)"
+    )
+    assert steps.shown_variant(second) == ("outage", None)
+    argv = _core(env)._start_argv(
+        second,
+        StartOptions(dir=str(repo), task_file=brief, fallback_from=first.id, **options),
+    )
+    assert argv[argv.index("--fallback-from") + 1] == first.id
+
+
+def test_a_run_that_only_continues_hands_its_branch_to_the_fallback_start(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first_id = _started(tmp_path, env, repo, capsys, "Task\n@write a.txt one\n")
+    first = record.load(first_id, env)
+    choices.set_settings(
+        {"provider.hold_minutes": "0", "provider.fallback": ["codex:gpt-5"]}, env=env
+    )
+    brief = _brief(tmp_path, "Task\n@provider rate limited\n", "again.md")
+    assert _start(_core(env), repo, brief, continue_run=first_id) == 73
+    out, err = capsys.readouterr()
+    second = record.load(_run_id(out), env)
+    assert second.commits == ()
+    assert record.work_tip(second) == first.commits[-1]
+    assert record.first_base(second) == first.base
+    assert err.splitlines()[-1].endswith(
+        f"--fallback-from {second.id} --continue-run {second.id}"
+    )
+
+
+def test_a_continued_run_without_a_commit_is_verified_from_the_first_base(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first_id = _started(
+        tmp_path, env, repo, capsys, "Task\n@write a.txt one\n@write b.txt two\n"
+    )
+    first = record.load(first_id, env)
+    assert record.work_tip(first) == first.commits[-1]
+    assert record.first_base(first) == first.base
+    brief = _brief(tmp_path, "Task\n@reply nothing left\n", "again.md")
+    assert _start(_core(env), repo, brief, continue_run=first_id) == 0
+    second = record.load(_run_id(capsys.readouterr().out), env)
+    assert second.commits == ()
+    step, line = _core(env).step(second, "live")
+    assert step == "merge" and line is not None
+    assert f"--branch {second.branch} " in line
+    assert " --expect-files 2, then emb merge " in line
+    third_brief = _brief(tmp_path, "Task\n@write c.txt three\n", "third.md")
+    assert _start(_core(env), repo, third_brief, continue_run=second.id) == 0
+    third = record.load(_run_id(capsys.readouterr().out), env)
+    assert record.first_base(third) == first.base
+    assert " --expect-files 3, then " in (_core(env).step(third, "live")[1] or "")
+
+
+def test_a_saved_brief_with_a_handover_note_gets_one_note(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    first_id = _started(tmp_path, env, repo, capsys, "Task\n@write a.txt one\n")
+    brief = _brief(tmp_path, "Task\n@write b.txt two\n", "again.md")
+    assert _start(_core(env), repo, brief, continue_run=first_id) == 0
+    second = record.load(_run_id(capsys.readouterr().out), env)
+    saved = str(second.folder / record.BRIEF_NAME)
+    assert _start(_core(env), repo, saved, continue_run=second.id) == 0
+    third = record.load(_run_id(capsys.readouterr().out), env)
+    text = (third.folder / record.BRIEF_NAME).read_text()
+    assert text.count("## Work already done") == 1
+    assert f"run {second.id} " in text and f"run {first_id} " not in text
+    assert text.startswith("Task\n@write b.txt two\n")
+
+
+def test_a_provider_error_on_a_later_turn_names_no_fallback_start(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    choices.set_settings({"provider.fallback": ["codex:gpt-5"]}, env=env)
+    run_id = _started(tmp_path, env, repo, capsys, "Task\n@write a.txt one\n")
+    message = _brief(tmp_path, "@provider rate limited\n", "message.md")
+    assert _core(env).execute(lambda: _core(env).send(run_id, message)) == 73
+    err = capsys.readouterr().err
+    run = record.load(run_id, env)
+    assert steps.shown_variant(run) == ("outage", None)
+    assert err.splitlines()[-1] == (
+        f"next: emb run --send {run_id} --message-file <file> "
+        "(after the provider's outage clears)"
+    )
+    # The failure still holds the engine for later starts.
+    assert [hold.name() for hold in holds.active(env)] == ["claude"]
+
+
+def test_a_start_that_cannot_reach_the_provider_is_held_and_names_the_fallback(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    choices.set_settings({"provider.fallback": ["codex:gpt-5"]}, env=env)
+    words = "Error: request timed out"
+    program = (
+        "import os, pathlib; "
+        "pathlib.Path(os.environ['STUB_PANE'], 'screen')"
+        f".write_text({words!r} + '\\nPane is dead (status 1)\\n')"
+    )
+
+    class Broken(_ExitDriver):
+        def command(self, run: record.Run, first_message: str) -> LaunchSpec:
+            return LaunchSpec(
+                argv=(sys.executable, "-I", "-c", program),
+                cwd=Path(run.worktree),
+                first_message="x",
+            )
+
+    driver = Broken("claude", script_path(env))
+    assert _start(_core(env, driver), repo, _brief(tmp_path, "T\n")) == 73
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    (hold,) = holds.active(env)
+    assert (hold.engine, hold.model, hold.kind, hold.run) == (
+        "claude",
+        None,
+        "outage",
+        run.id,
+    )
+    assert (run.turn, run.last_variant) == (0, "starting")
+    assert err.splitlines()[-1] == (
+        f"next: emb run --close {run.id}, then emb run --engine codex --model gpt-5 "
+        f"--effort high --dir {repo} --task-file {run.folder / record.BRIEF_NAME} "
+        f"--fallback-from {run.id}"
+    )
+    assert (run.folder / record.BRIEF_NAME).read_text() == "T\n"
+
+
+def test_a_held_fallback_start_does_not_return_to_a_worker_that_failed(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    choices.set_settings({"provider.fallback": ["codex:gpt-5", "claude:opus"]}, env=env)
+    first, _ = _provider_failure(tmp_path, env, repo, capsys)
+    assert holds.release("claude", None, env=env)
+    holds.start("codex", "gpt-5", "capacity", 15, env=env)
+    brief = _brief(tmp_path, "Next\n@reply done\n", "next.md")
+    options = {"engine": "codex", "model": "gpt-5", "effort": "high"}
+    assert _start(_core(env), repo, brief, fallback_from=first.id, **options) == 0
+    out, err = capsys.readouterr()
+    assert record.load(_run_id(out), env).engine == "codex"
+    assert "from the fallback list" not in err
+    # A start of another job on the held model takes the released engine.
+    holds.start("codex", "gpt-5", "capacity", 15, env=env)
+    assert _start(_core(env), repo, brief, **options) == 0
+    out, err = capsys.readouterr()
+    assert record.load(_run_id(out), env).engine == "claude"
+    assert "; starting claude opus from the fallback list" in err

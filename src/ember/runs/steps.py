@@ -34,7 +34,7 @@ def derive(
     if run.status == record.CLOSED:
         if (
             run.read_only
-            or not run.commits
+            or not record.work_tip(run)
             or _merged(run)
             or not _branch_exists(run, git)
         ):
@@ -43,9 +43,10 @@ def derive(
     if run.status == record.FAILED or (
         run.turn_state != record.SENT and run.last_exit not in (None, 0)
     ):
+        variant, fallback = shown_variant(run)
         text = exits.line(
             run.last_exit or 0,
-            exit_variant(run),
+            variant,
             run=run.id,
             worktree=run.worktree,
             engine=run.engine,
@@ -53,6 +54,7 @@ def derive(
                 str((run.preparation or {}).get("log", run.folder / "prepare.log"))
             ),
             retry=retry_start(run),
+            fallback=fallback,
         )
         if run.answered_at is not None and text and text.startswith("owner:"):
             text = "next: " + (
@@ -67,7 +69,7 @@ def derive(
         return "running", f"next: emb run --status {run.id}"
     if run.turn_state == record.SENT or needs_collection:
         return "recover", f"next: emb run --recover {run.id}"
-    if not run.read_only and run.commits and not _merged(run):
+    if not run.read_only and record.work_tip(run) and not _merged(run):
         return "merge", _verify(run, git)
     return "close", f"next: emb run --close {run.id}"
 
@@ -101,6 +103,56 @@ def retry_start(run: Run) -> str:
     return shlex.join(argv)
 
 
+def fallback_start(run: Run, kind: str) -> str | None:
+    """Return the start of the fallback worker for a run a provider error ended.
+
+    The worker is the entry of the owner's fallback list that applies now.
+    An editing run with commits is continued on its branch; any other run
+    starts again from the saved brief.
+
+    Args:
+        run: The failed run.
+        kind: The failure's provider kind.
+
+    Returns:
+        The `emb run` command, or `None` when no entry applies or the
+        settings cannot be read.
+    """
+    from ember import choices, holds
+
+    try:
+        answers = choices.read(None, env=run.env)["answers"]
+        # Every worker that failed on this job counts, so a chain of
+        # fallbacks ends when the list is used up.
+        failed = [
+            (earlier.engine, earlier.model, record.provider_kind(earlier))
+            for earlier in record.linked(run, "fallback_from")
+        ]
+        row = holds.replacement(
+            answers, [*failed, (run.engine, run.model, kind)], env=run.env
+        )
+    except Exception:  # noqa: BLE001 - an exit line never fails on the settings
+        return None
+    if row is None:
+        return None
+    argv = ["emb", "run", "--engine", row["engine"], "--model", row["model"]]
+    if row["effort"] is not None:
+        argv.extend(("--effort", row["effort"]))
+    argv.extend(("--dir", run.repo, "--task-file", str(run.folder / record.BRIEF_NAME)))
+    argv.extend(("--fallback-from", run.id))
+    if run.read_only:
+        argv.append("--read-only")
+    elif record.work_tip(run):
+        argv.extend(("--continue-run", run.id))
+    for path in run.read:
+        argv.extend(("--read", path))
+    for trailer in run.trailers:
+        argv.extend(("--trailer", trailer))
+    if run.claim is not None:
+        argv.extend(("--claim", run.claim))
+    return shlex.join(argv)
+
+
 def exit_variant(run: Run) -> str | None:
     """Return the saved variant, falling back to older records' provider kind.
 
@@ -119,16 +171,42 @@ def exit_variant(run: Run) -> str | None:
     return kind if isinstance(kind, str) else None
 
 
+def shown_variant(run: Run) -> tuple[str | None, str | None]:
+    """Return the variant of a run's exit lines and its fallback start.
+
+    A provider error on a run's first turn takes the `fallback` variant
+    while the owner's fallback list names a worker that applies, whatever
+    the list held when the run failed. An uncertain resend keeps its own
+    variant, as does a run that a flow, panel or gap check started.
+
+    Returns:
+        The variant for `exits.line` and `exits.report`, and the fallback
+        start command when the variant is `fallback`.
+    """
+    variant = exit_variant(run)
+    if (
+        run.last_exit == exits.PROVIDER_ERROR
+        and variant != "uncertain"
+        and run.turn <= 1
+        and run.parent is None
+    ):
+        fallback = fallback_start(run, record.provider_kind(run))
+        if fallback is not None:
+            return "fallback", fallback
+    return variant, None
+
+
 def _merged(run: Run) -> bool:
     from ember import branches
 
     try:
+        tip = record.work_tip(run)
         return bool(
-            run.commits
+            tip
             and run.base_branch
             and branches.is_contained(
                 run.main or run.repo,
-                run.commits[-1],
+                tip,
                 run.base_branch,
                 run.env,
                 scratch=True,
@@ -195,11 +273,11 @@ def _verify(run: Run, git: Callable[..., subprocess.CompletedProcess[str]]) -> s
         f"--base {base_branch} --branch {branch} "
         f"--worktree {shlex.quote(run.worktree)}"
     )
-    if run.turn == 1 and run.base is not None:
+    base, tip = record.first_base(run), record.work_tip(run)
+    if run.turn == 1 and base is not None and tip is not None:
         try:
-            result = git(
-                directory, "diff", "--name-only", "-z", run.base, run.commits[-1]
-            )
+            # A continued run's branch holds the earlier runs' work too.
+            result = git(directory, "diff", "--name-only", "-z", base, tip)
             if result.returncode == 0:
                 count = len([path for path in result.stdout.split("\0") if path])
                 line += f" --expect-files {count}"

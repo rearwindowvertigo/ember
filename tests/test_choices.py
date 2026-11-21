@@ -173,6 +173,8 @@ def test_defaults(env: dict[str, str]) -> None:
         "panel.members": [],
         "provider.capacity_retries": "2",
         "provider.capacity_wait": "30",
+        "provider.fallback": [],
+        "provider.hold_minutes": "15",
         "sandbox.codex": "off",
         "sandbox.opencode": "off",
         "sandbox.claude": "off",
@@ -1713,3 +1715,119 @@ def test_brief_keeps_the_layer_of_a_claimed_one_time_writer(
     assert reply["answers"]["single.reviewer"]["layer"] == "default"
     assert set(reply["answers"]) >= set(choices.BRIEF_ANSWER_KEYS)
     assert "worker.network" not in reply["answers"]
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        ("codex:gpt-5", "not a list of strings"),
+        (["bad"], "not <engine>:<model>"),
+        (["codex:gpt-5@low"], "not <engine>:<model>"),
+        (["codex:gpt-5"] * 2, "listed more than once"),
+        ([f"codex:model-{n}" for n in range(9)], "at most 8 fallback models"),
+    ],
+)
+def test_fallback_list_invalid(value: object, message: str) -> None:
+    with pytest.raises(choices.InvalidChoiceError, match=message):
+        choices.validate_value("provider.fallback", value)
+
+
+def test_fallback_list_is_a_standing_setting_of_shortlisted_models(
+    panel_env: dict[str, str],
+) -> None:
+    assert choices.read(env=panel_env)["answers"]["provider.fallback"] == {
+        "value": [],
+        "layer": "default",
+    }
+    with pytest.raises(
+        choices.InvalidChoiceError,
+        match="provider.fallback: other is not on the codex shortlist",
+    ):
+        choices.set_settings({"provider.fallback": ["codex:other"]}, env=panel_env)
+    with pytest.raises(choices.InvalidChoiceError):
+        choices.set_once({"provider.fallback": ["codex:gpt-5"]}, env=panel_env)
+    choices.set_settings({"provider.fallback": ["codex:gpt-5"]}, env=panel_env)
+    assert choices.read(env=panel_env)["answers"]["provider.fallback"] == {
+        "value": ["codex:gpt-5"],
+        "layer": "setting",
+    }
+
+
+def _fallback_answers(
+    entries: list[str], *, off: str | None = None
+) -> dict[str, dict[str, Any]]:
+    return {
+        "provider.fallback": {"value": entries},
+        "shortlist.codex": {"value": ["sol@max", "old@high", "mini@low"]},
+        "shortlist.claude": {"value": ["opus@medium"]},
+        "shortlist.opencode": {"value": ["vendor/flash@high"]},
+        **{
+            f"engine.{engine}": {"value": "off" if engine == off else "on"}
+            for engine in ("codex", "claude", "opencode")
+        },
+    }
+
+
+def test_fallback_worker_takes_the_first_usable_entry() -> None:
+    answers = _fallback_answers(
+        ["codex:sol", "codex:old", "codex:gone", "claude:opus", "opencode:vendor/flash"]
+    )
+    sol, old = ("codex", "sol"), ("codex", "old")
+    opus, flash = ("claude", "opus"), ("opencode", "vendor/flash")
+    second, third, last = (*old, "high"), (*opus, "medium"), (*flash, "high")
+
+    def failed(kind: str, *workers: tuple[str, str]) -> list[tuple[str, str, str]]:
+        return [(engine, model, kind) for engine, model in workers]
+
+    def pick(
+        failures: list[tuple[str, str, str]],
+        **kwargs: Any,  # noqa: ANN401
+    ) -> tuple[str, str, str] | None:
+        row = choices.fallback_worker(answers, failures, **kwargs)
+        return None if row is None else (row["engine"], row["model"], row["effort"])
+
+    assert pick(failed("capacity", sol)) == second
+    assert pick(failed("capacity", sol, old)) == third
+    assert pick(failed("capacity", sol), avoid=[old]) == third
+    assert pick(failed("outage", sol)) == third
+    assert pick(failed("usage_limit", sol)) == third
+    assert pick(failed("outage", sol, opus)) == last
+    assert pick(failed("outage", sol), connected={"claude": False}) == last
+    assert pick(failed("outage", opus, flash)) == ("codex", "sol", "max")
+    assert pick(failed("capacity", sol, old, opus, flash)) is None
+    # An engine is passed over for its own failure, not for a later one's kind.
+    assert pick([(*sol, "outage"), (*opus, "capacity")]) == last
+    assert pick([(*sol, "capacity"), (*opus, "outage")]) == second
+    assert (
+        choices.fallback_worker(_fallback_answers([]), failed("capacity", sol)) is None
+    )
+    without_claude = _fallback_answers(["claude:opus", "codex:old"], off="claude")
+    row = choices.fallback_worker(without_claude, failed("capacity", sol))
+    assert row is not None and (row["engine"], row["model"]) == ("codex", "old")
+
+
+def test_a_fallback_entry_that_left_its_shortlist_can_be_removed(
+    panel_env: dict[str, str],
+) -> None:
+    def save(entries: list[str]) -> None:
+        choices.set_settings({"provider.fallback": entries}, env=panel_env)
+
+    def saved() -> list[str]:
+        return choices.read(env=panel_env)["answers"]["provider.fallback"]["value"]
+
+    save(["codex:gpt-5", "claude:opus"])
+    choices.set_settings({"shortlist.codex": ["other@high"]}, env=panel_env)
+    assert saved() == ["codex:gpt-5", "claude:opus"]
+    row = choices.fallback_rows(choices.read(env=panel_env)["answers"])[0]
+    assert (row["model"], row["state"]) == ("gpt-5", "not shortlisted")
+    # The stored entry stays through a reorder; a new entry is still checked.
+    save(["claude:opus", "codex:gpt-5"])
+    assert saved() == ["claude:opus", "codex:gpt-5"]
+    with pytest.raises(
+        choices.InvalidChoiceError,
+        match="provider.fallback: gone is not on the codex shortlist",
+    ):
+        save(["claude:opus", "codex:gpt-5", "codex:gone"])
+    save(["claude:opus"])
+    with pytest.raises(choices.InvalidChoiceError, match="not on the codex shortlist"):
+        save(["claude:opus", "codex:gpt-5"])

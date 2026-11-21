@@ -1,4 +1,4 @@
-"""The Team screen: Single tasks, Work of several tasks and Panel cards.
+"""The Team screen for worker, planning and provider settings.
 
 Two rows, Writer and Reviewer, each a picker of Ask each time and the
 shortlisted models of every engine that is on, under the engine's name. While
@@ -10,7 +10,9 @@ from the snapshot's menu rows before the first read. Each change saves at
 once; choosing the value already saved saves nothing. Multi-task work chooses
 Ask each time, Flow or Claude Workflow. Panel lists up to eight members with
 Add member and Remove. Panel controls wait for a save and refresh before
-accepting another edit. One-time choices are not shown.
+accepting another edit. One-time choices are not shown. Provider capacity sets
+the retry limit, retry delay and hold duration. The Fallback models card lists
+workers in the order Ember tries them after a provider error.
 
 Planning sets the gap check: its reviewer, when it runs and which gaps reach
 the owner. Flows and Claude Workflows hold the settings of each kind of
@@ -189,19 +191,34 @@ CAPACITY = (
         "Capacity retries",
         "The limit on resends of one turn after a capacity error. "
         "Zero turns retries off. Runs keep the settings they started with.",
-        0,
-        10,
+        tuple((str(n), "Off" if n == 0 else f"Up to {n}") for n in range(11)),
     ),
     (
         "provider.capacity_wait",
         "Wait before a retry",
         "Seconds between a capacity error and its resend. "
         "The model and effort stay the same.",
-        5,
-        600,
+        tuple((str(n), f"{n}s") for n in range(5, 601)),
+    ),
+    (
+        "provider.hold_minutes",
+        "Try the first choice again after",
+        "How long Ember passes over a model or engine after a provider error "
+        "before a job tries it again. Every job records no hold.",
+        tuple(
+            (v, "Every job" if v == "0" else f"{v} min") for v in choices.HOLD_MINUTES
+        ),
     ),
 )
-"""The provider retry pickers and their inclusive ranges."""
+"""The provider capacity settings and their picker options."""
+
+FALLBACK_HELP = (
+    "After a provider error Ember starts the first model here that applies. "
+    "A capacity error takes the next model. A usage limit or an outage takes "
+    "the next model of another engine. A review never takes the model that "
+    "wrote the work."
+)
+NO_FALLBACK = "No fallback models. A provider error then stops the run for Claude."
 
 
 def when_hint(value: str) -> str:
@@ -295,7 +312,7 @@ def member_warning(row: Mapping[str, Any]) -> str | None:
 def addable(
     answers: Mapping[str, Any], members: Sequence[str]
 ) -> list[tuple[str, list[tuple[str, str | None]]]]:
-    """Return offered models excluding the panel's saved members."""
+    """Return offered models excluding the saved entries."""
     result = []
     for engine, models in offered(answers):
         remaining = [
@@ -379,6 +396,47 @@ class _Derived:
         self.picker = widgets.Picker()
         self.picker.setAccessibleName(name)
         self.warning = ToneLine("warning")
+
+
+class _ListSave:
+    """Keep a list's controls pending until its saved settings have been read."""
+
+    def __init__(self, screen: MenuScreen, key: str) -> None:
+        self.screen = screen
+        self.key = key
+        self.pending = False
+        self.refreshing = False
+        self.refresh_failed = False
+
+    def save(self, values: list[str]) -> None:
+        """Submit one edit while the list is ready."""
+        if self.pending:
+            return
+        self.pending = True
+        self.screen._redraw()
+        self.screen.context.save_settings({self.key: values}, result=self._result)
+
+    def _result(self, result: dict[str, Any] | Exception) -> None:
+        if isinstance(result, db.StaleGenerationError):
+            if self.screen._settings_read_failed:
+                self.refresh_failed = True
+            else:
+                self.done()
+        elif isinstance(result, Exception):
+            self.refresh()
+        else:
+            self.done()
+
+    def refresh(self) -> None:
+        """Read the list again after a save failure."""
+        self.refresh_failed = False
+        self.refreshing = True
+        self.screen.context.reload_settings(self.done)
+
+    def done(self) -> None:
+        """Unlock the controls after reading the settings."""
+        self.pending = self.refreshing = self.refresh_failed = False
+        self.screen._redraw()
 
 
 class MenuScreen(QWidget):
@@ -508,30 +566,35 @@ class MenuScreen(QWidget):
 
         capacity_card, capacity_column = titled_card("Provider capacity")
         self.capacity: dict[str, widgets.Picker] = {}
-        for key, name, tip, low, high in CAPACITY:
+        for key, name, tip, options in CAPACITY:
             picker = widgets.Picker()
             picker.setAccessibleName(name)
-            for number in range(low, high + 1):
-                text = (
-                    ("Off" if number == 0 else f"Up to {number}")
-                    if key == "provider.capacity_retries"
-                    else f"{number}s"
-                )
-                picker.add_option(text, str(number))
+            for value, text in options:
+                picker.add_option(text, value)
             picker.activated.connect(lambda _index, key=key: self._capacity_picked(key))
             self.capacity[key] = picker
             rows[key] = TooltipRow(name, tip, picker)
             capacity_column.addWidget(rows[key])
         layout.addWidget(capacity_card)
 
+        fallback_card, fallback_layout = titled_card("Fallback models", FALLBACK_HELP)
+        self.fallback_info = fallback_card.findChild(widgets.InfoTip)
+        self.fallback_layout = QVBoxLayout()
+        fallback_layout.addLayout(self.fallback_layout)
+        self.fallback_save = _ListSave(self, "provider.fallback")
+        self.fallback_buttons: list[QPushButton] = []
+        self.add_fallback = widgets.Picker()
+        self.add_fallback.setAccessibleName("Add fallback model")
+        self.add_fallback.activated.connect(self._add_fallback)
+        fallback_layout.addWidget(self.add_fallback, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(fallback_card)
+
         panel_card, panel_layout = titled_card("Panel", PANEL_HELP)
         self.panel_info = panel_card.findChild(widgets.InfoTip)
         self.members_layout = QVBoxLayout()
         panel_layout.addLayout(self.members_layout)
         self.member_removes: dict[str, QPushButton] = {}
-        self._panel_pending = False
-        self._panel_refresh = False
-        self._panel_refresh_failed = False
+        self.panel_save = _ListSave(self, "panel.members")
         self._settings_read_failed = False
         self._remove_blocker: str | None = None
         self.remove_warning = ToneLine("warning")
@@ -577,6 +640,7 @@ class MenuScreen(QWidget):
         multi = menu.get("multi.runs_as") or choices.runs_as_row(answers)
         panel = menu.get("panel.members") or choices.panel_row(answers)
         engines = self.context.engines()
+        connected = None
         if engines is not None:
             connected = {name: item.connected for name, item in engines.items()}
             panel = choices.panel_row(answers, connected)
@@ -602,11 +666,72 @@ class MenuScreen(QWidget):
             picker.setCurrentIndex(picker.findData(answers[key]["value"]))
             picker.blockSignals(False)
         self.whole.setChecked(answers["flow.whole_review"]["value"] == "on")
+        self._fill_fallback(answers, choices.fallback_rows(answers, connected))
         self._fill_panel(answers, panel)
         for key, row in self.tip_rows.items():
             row.set_changed(self.context.setting_changed(key))
         align_controls(self.tip_rows.values())
         self._chain_focus()
+
+    def _fill_fallback(
+        self, answers: dict[str, Any], entries: list[dict[str, Any]]
+    ) -> None:
+        """Draw the ordered fallback list, its warnings and available additions."""
+        clear_layout(self.fallback_layout)
+        self.fallback_buttons.clear()
+        values = [entry["value"] for entry in entries]
+        if not entries:
+            self.fallback_layout.addWidget(label(NO_FALLBACK, "secondary"))
+        for index, entry in enumerate(entries):
+            row = widgets.PillRow()
+            text = str(entry["value"])
+            if entry["engine"] is not None:
+                model = option_text(entry["model"], entry["effort"])
+                text = f"{engine_name(entry['engine'])} · {model}"
+            title = label(f"{index + 1}. {text}")
+            title.setTextFormat(Qt.TextFormat.PlainText)
+            row.line.addWidget(title, 1)
+            if index:
+                move = widgets.button("Move up", "secondary", size="sm")
+                move.setAccessibleName(f"Move up {text}")
+                move.clicked.connect(
+                    lambda _checked=False, index=index: self._move_fallback(index)
+                )
+                row.line.addWidget(move)
+                self.fallback_buttons.append(move)
+            remove = widgets.button("", "ghost", size="sm")
+            remove.setAccessibleName(f"Remove {text}")
+            remove.clicked.connect(
+                lambda _checked=False, index=index: self.fallback_save.save(
+                    values[:index] + values[index + 1 :]
+                )
+            )
+            row.line.addWidget(remove)
+            self.fallback_buttons.append(remove)
+            row.setEnabled(not self.fallback_save.pending)
+            self.fallback_layout.addWidget(row)
+            if entry["state"] != "set":
+                warning = ToneLine("warning")
+                self.fallback_layout.addWidget(warning)
+                warning.show_text(entry["reason"])
+        groups = addable(answers, values)
+        self._fill_add_picker(self.add_fallback, "Add fallback model", groups)
+        self.add_fallback.setEnabled(
+            bool(groups)
+            and len(values) < choices.FALLBACK_LIMIT
+            and not self.fallback_save.pending
+        )
+
+    def _move_fallback(self, index: int) -> None:
+        values = list(self.context.setting("provider.fallback"))
+        values[index - 1], values[index] = values[index], values[index - 1]
+        self.fallback_save.save(values)
+
+    def _add_fallback(self, _index: int) -> None:
+        value = self.add_fallback.value()
+        self.add_fallback.set_value(None)
+        if isinstance(value, str) and self.add_fallback.isEnabled():
+            self.fallback_save.save([*self.context.setting("provider.fallback"), value])
 
     def _fill_panel(self, answers: dict[str, Any], panel: dict[str, Any]) -> None:
         """Draw saved members and the available additions from the snapshot."""
@@ -628,7 +753,7 @@ class MenuScreen(QWidget):
             remove.clicked.connect(
                 lambda _checked=False, value=value: self._remove_member(value)
             )
-            remove.setEnabled(not self._panel_pending)
+            remove.setEnabled(not self.panel_save.pending)
             line.addWidget(remove)
             self.members_layout.addWidget(row)
             self.member_removes[value] = remove
@@ -648,7 +773,7 @@ class MenuScreen(QWidget):
             )
         self.remove_warning.show_text(warning_text)
         self.remove_all.setVisible(warning_text is not None)
-        self.remove_all.setEnabled(not self._panel_pending)
+        self.remove_all.setEnabled(not self.panel_save.pending)
         groups = addable(answers, members)
         full = len(members) >= PANEL_LIMIT
         if blocked:
@@ -659,28 +784,39 @@ class MenuScreen(QWidget):
             add_text = None
         self.add_warning.show_text(add_text)
         self.full.setVisible(full)
-        self.add_member.blockSignals(True)
-        try:
-            self.add_member.clear()
-            self.add_member.add_option(ADD_MEMBER, None)
-            for engine, models in groups:
-                self.add_member.add_header(ENGINE_LABELS[engine])
-                for model, effort in models:
-                    self.add_member.add_option(
-                        option_text(model, effort), f"{engine}:{model}"
-                    )
-        finally:
-            self.add_member.blockSignals(False)
+        self._fill_add_picker(self.add_member, ADD_MEMBER, groups)
         # A line on the card or the screen says why a member cannot be added:
         # the eight-member limit, a member to fix first, every shortlisted
         # model added, or no shortlist.
         self.add_member.setVisible(not blocked and not full and bool(groups))
-        self.add_member.setEnabled(not self._panel_pending)
+        self.add_member.setEnabled(not self.panel_save.pending)
+
+    def _fill_add_picker(
+        self,
+        picker: widgets.Picker,
+        prompt: str,
+        groups: list[tuple[str, list[tuple[str, str | None]]]],
+    ) -> None:
+        """Offer each available model under its engine heading."""
+        picker.blockSignals(True)
+        try:
+            picker.clear()
+            picker.add_option(prompt, None)
+            for engine, models in groups:
+                picker.add_header(ENGINE_LABELS[engine])
+                for model, effort in models:
+                    picker.add_option(option_text(model, effort), f"{engine}:{model}")
+        finally:
+            picker.blockSignals(False)
 
     def _draw_icons(self) -> None:
-        """Keep the member removal icons in the current theme's text colour."""
+        """Keep icon-only Remove buttons in the current theme's text colour."""
+        icon = icons.icon("x", theme.color("text-primary"), 16)
+        for button in self.fallback_buttons:
+            if not button.text():
+                button.setIcon(icon)
         for remove in self.member_removes.values():
-            remove.setIcon(icons.icon("x", theme.color("text-primary"), 16))
+            remove.setIcon(icon)
 
     def _chain_focus(self) -> None:
         """Put the controls in reading order, including rebuilt member rows."""
@@ -712,6 +848,10 @@ class MenuScreen(QWidget):
             order.extend(self.segments[key].buttons())
         for key, picker in self.capacity.items():
             order.extend((tips[key].info, picker))
+        if self.fallback_info is not None:
+            order.append(self.fallback_info)
+        order.extend(self.fallback_buttons)
+        order.append(self.add_fallback)
         if self.panel_info is not None:
             order.append(self.panel_info)
         order.extend(self.member_removes.values())
@@ -727,44 +867,20 @@ class MenuScreen(QWidget):
         chain_tab_order(order)
 
     def _settings_changed(self, *_args: object) -> None:
-        """Redraw settings, allowing a retry after the Panel refresh failed."""
+        """Redraw settings and retry any failed list refresh."""
         self._settings_read_failed = False
-        if self._panel_refresh_failed:
-            self._panel_refresh_failed = False
-            self._refresh_panel()
+        for save in (self.panel_save, self.fallback_save):
+            if save.refresh_failed:
+                save.refresh()
         self._redraw()
-
-    def _panel_done(self, *_args: object) -> None:
-        """Release Panel controls after the save and its settings refresh."""
-        self._panel_pending = self._panel_refresh = self._panel_refresh_failed = False
-        self._redraw()
-
-    def _panel_result(self, result: dict[str, Any] | Exception) -> None:
-        """Unlock after this Panel save succeeds or its error is refreshed."""
-        if isinstance(result, db.StaleGenerationError):
-            if self._settings_read_failed:
-                self._panel_refresh_failed = True
-            else:
-                self._panel_done()
-        elif isinstance(result, Exception):
-            self._refresh_panel()
-        else:
-            self._panel_done()
-
-    def _refresh_panel(self) -> None:
-        """Track the Panel's settings refresh until it succeeds or fails."""
-        self._panel_refresh = True
-        self.context.reload_settings(self._panel_done)
 
     def _settings_failed(self, *_args: object) -> None:
-        """Keep Panel disabled until a failed settings refresh succeeds.
-
-        The Panel's result callback checks the read outcome for a stale save.
-        """
+        """Keep pending lists disabled until their settings can be read."""
         self._settings_read_failed = True
-        if self._panel_refresh:
-            self._panel_refresh = False
-            self._panel_refresh_failed = True
+        for save in (self.panel_save, self.fallback_save):
+            if save.refreshing:
+                save.refreshing = False
+                save.refresh_failed = True
 
     def _fill(
         self,
@@ -869,7 +985,7 @@ class MenuScreen(QWidget):
             self._save({"gapcheck.when": value})
 
     def _capacity_picked(self, key: str) -> None:
-        """Save a provider retry setting only when it changed."""
+        """Save a provider capacity setting only when it changed."""
         value = self.capacity[key].value()
         if value is not None and value != self.context.setting(key):
             self._save({key: value})
@@ -893,7 +1009,7 @@ class MenuScreen(QWidget):
         """Append the selected member and reset the picker to its prompt."""
         value = self.add_member.value()
         self.add_member.set_value(None)
-        if self._panel_pending or value is None:
+        if self.panel_save.pending or value is None:
             return
         answers = self.context.settings()["answers"]
         members = answers["panel.members"]["value"]
@@ -909,7 +1025,7 @@ class MenuScreen(QWidget):
 
     def _remove_member(self, value: str) -> None:
         """Remove a member, or explain which remaining member blocks saving."""
-        if self._panel_pending:
+        if self.panel_save.pending:
             return
         answers = self.context.settings()["answers"]
         members = [m for m in answers["panel.members"]["value"] if m != value]
@@ -922,14 +1038,10 @@ class MenuScreen(QWidget):
 
     def _save_panel(self, members: list[str]) -> None:
         """Serialize Panel edits through the context's save and refresh."""
-        if self._panel_pending:
+        if self.panel_save.pending:
             return
-        self._panel_pending = True
         self._remove_blocker = None
-        self._redraw()
-        self.context.save_settings(
-            {"panel.members": members}, result=self._panel_result
-        )
+        self.panel_save.save(members)
 
     def _picked(self, controls: _Role) -> None:
         self._show_run_as(controls)

@@ -16,7 +16,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, TextIO
 
-from ember import branches, choices, citations, paths, prepare, tmux
+from ember import branches, choices, citations, holds, paths, prepare, tmux
 from ember.engines import Driver
 from ember.flows import briefs, lock, plan, record, verdict
 from ember.runs import exits
@@ -272,6 +272,8 @@ class _Runner:
         self.preparation_recovered = False
         self.ahead: set[str] = set()
         """Tasks whose review started during the running wave."""
+        self.retry: set[tuple[str, str]] = set()
+        """`(task, role)` pairs whose start is repeated on a fallback worker."""
 
     def _save(self) -> None:
         """Save while the caller holds the record mutex."""
@@ -505,8 +507,14 @@ class _Runner:
         action: Callable[[Core], int],
         *,
         review_failed_turn: bool = False,
+        fallback: bool = False,
     ) -> bool:
-        """Run one Core action and preserve its diagnostics on a failure."""
+        """Run one Core action and preserve its diagnostics on a failure.
+
+        With `fallback`, a provider error that the owner's fallback list
+        covers switches the task's worker and marks the pair in `self.retry`
+        in place of stopping the task.
+        """
 
         def capture(run_id: str) -> None:
             """Persist the run before its launch finishes."""
@@ -593,6 +601,14 @@ class _Runner:
                     runs.load_outcome(run, run.turn).get("provider_kind")
                     or provider_kind
                 )
+        if (
+            code == 73
+            and fallback
+            and run_id
+            and self.fall_back(task, role, run_id, provider_kind or "outage")
+        ):
+            self.retry.add((task["id"], role))
+            return False
         if code == 73 and provider_kind != "capacity":
             with self.mutex:
                 if not self.flow.get("preparation_halt"):
@@ -608,10 +624,119 @@ class _Runner:
         )
         return False
 
+    def fallback_avoid(
+        self, task: Mapping[str, Any], role: str
+    ) -> tuple[tuple[str, str], ...]:
+        """Return the workers a fallback for a role must not use.
+
+        A review does not fall back to a model that wrote the work: the
+        task's saved writer, its writer run, and every earlier writer whose
+        branch that run continues.
+        """
+        if role != "reviewer":
+            return ()
+        writer = self.worker(task, "writer")
+        avoid = [(writer["engine"], writer["model"])]
+        with contextlib.suppress(runs.RecordError, TypeError):
+            # A hold or a fallback can have sent the writing to other workers.
+            run = runs.load(task["writer_run"], self.env)
+            avoid += [
+                (item.engine, item.model)
+                for item in (run, *runs.linked(run, "continues"))
+            ]
+        return tuple(dict.fromkeys(avoid))
+
+    def fall_back(
+        self, task: dict[str, Any], role: str, run_id: str, kind: str
+    ) -> bool:
+        """Close a failed run and name the fallback worker that repeats its start.
+
+        The repeat is saved on the task as `fallback_pending`, so a runner
+        that stops before the repeat starts makes it after a resume. The
+        task's saved worker does not change: a later start of the role uses
+        the first choice again.
+
+        Args:
+            task: The task whose run a provider error ended.
+            role: `writer` or `reviewer`.
+            run_id: The failed run.
+            kind: The failure's provider kind.
+
+        Returns:
+            Whether a repeat is pending. It is not when no entry of the
+            owner's fallback list applies, when the failed run's resend is
+            uncertain, or when the failed run cannot be closed.
+        """
+        try:
+            run = runs.load(run_id, self.env)
+            if run.last_variant == "uncertain":
+                # The session may still hold the prompt; the lead inspects it.
+                return False
+            answers = choices.read(None, env=self.env)["answers"]
+            history = task.get("fallback_failed", {}).get(role, [])
+            row = holds.replacement(
+                answers,
+                [*(tuple(item) for item in history), (run.engine, run.model, kind)],
+                avoid=self.fallback_avoid(task, role),
+                env=self.env,
+            )
+        except Exception:  # noqa: BLE001 - without the settings the task stops
+            return False
+        if row is None or self.close(run_id):
+            return False
+        worker = self.freeze(
+            {
+                "engine": row["engine"],
+                "model": row["model"],
+                "effort": row["effort"],
+                "source": "fallback",
+            }
+        )
+        entry = {
+            "role": role,
+            "from": f"{run.engine}:{run.model}",
+            "to": f"{row['engine']}:{row['model']}",
+            "cause": kind,
+            "run": run_id,
+            "at": time.time(),
+        }
+        continued = role == "writer" and bool(runs.work_tip(run))
+        with self.mutex:
+            task.setdefault("fallback_failed", {}).setdefault(role, []).append(
+                [run.engine, run.model, kind]
+            )
+            task.setdefault("fallbacks", []).append(entry)
+            task["fallback_pending"] = {
+                "role": role,
+                "worker": worker,
+                "failed_run": run_id,
+                "continue_run": run_id if continued else None,
+            }
+            if (
+                role == "writer"
+                and not continued
+                and run.branch
+                and run.branch not in self.flow["abandoned"]
+            ):
+                # A continued branch lands with the task's branch.
+                self.flow["abandoned"].append(run.branch)
+            self._save()
+            self._event("fallback", task=task["id"], **entry)
+        return True
+
     def metadata(self, task: dict[str, Any]) -> runs.Run:
-        """Restore writer metadata from its durable run record."""
+        """Restore writer metadata from its durable run record.
+
+        The base of a writer that continues an earlier writer's branch is
+        the base of the first writer, so a review reads all of the work.
+        """
         run = runs.load(task["writer_run"], self.env)
-        self.change(task, branch=run.branch, worktree=run.worktree, task_base=run.base)
+        self.change(
+            task,
+            branch=run.branch,
+            worktree=run.worktree,
+            task_base=runs.first_base(run),
+        )
         return run
 
     def declarations(self, task: Mapping[str, Any]) -> dict[str, list[str]]:
@@ -677,24 +802,78 @@ class _Runner:
         return True
 
     def start(self, task: dict[str, Any], role: str, path: str) -> bool:
-        """Start an editing writer or a fresh read-only reviewer."""
-        if not self.allowed(task, write=role == "writer"):
-            return False
-        worker = self.worker(task, role)
-        options = StartOptions(
-            engine=worker["engine"],
-            model=worker["model"],
-            effort=worker["effort"],
-            dir=self.flow["worktree"] if role == "writer" else task["worktree"],
-            task_file=path,
-            read_only=role == "reviewer",
-            read=self.plan.read,
-            trailers=self.plan.trailers if role == "writer" else (),
-            claim=None,
-            window=False,
-            parent=runs.parent("flow", self.flow["id"]),
-        )
-        return self.call(task, role, lambda core: core.start(options))
+        """Start an editing writer or a fresh read-only reviewer.
+
+        A start that a provider error ends is repeated on the worker of the
+        owner's fallback list while an entry applies.
+        """
+        while True:
+            if not self.allowed(task, write=role == "writer"):
+                return False
+            pending = task.get("fallback_pending") or {}
+            if pending.get("role") != role:
+                pending = {}
+            worker = pending.get("worker") or self.worker(task, role)
+            options = StartOptions(
+                engine=worker["engine"],
+                model=worker["model"],
+                effort=worker["effort"],
+                dir=self.flow["worktree"] if role == "writer" else task["worktree"],
+                task_file=path,
+                read_only=role == "reviewer",
+                read=self.plan.read,
+                trailers=self.plan.trailers if role == "writer" else (),
+                claim=None,
+                window=False,
+                parent=runs.parent("flow", self.flow["id"]),
+                fallback_avoid=self.fallback_avoid(task, role),
+                continue_run=pending.get("continue_run"),
+            )
+            started = self.call(
+                task,
+                role,
+                lambda core, options=options: core.start(options),
+                fallback=True,
+            )
+            repeat = (task["id"], role) in self.retry
+            self.retry.discard((task["id"], role))
+            if not repeat:
+                with self.mutex:
+                    # The repeat, if any, has run; its history ends with it.
+                    if (task.get("fallback_pending") or {}).get("role") == role:
+                        task["fallback_pending"] = None
+                    task.get("fallback_failed", {}).pop(role, None)
+                    self._save()
+                if started:
+                    self.note_worker(task, role, worker)
+                return started
+
+    def note_worker(
+        self, task: dict[str, Any], role: str, worker: Mapping[str, Any]
+    ) -> None:
+        """Record a start that a provider hold sent to a fallback worker."""
+        run_id = task.get(f"{role}_run")
+        try:
+            run = runs.load(run_id, self.env) if run_id else None
+        except runs.RecordError:
+            return
+        if run is None or (run.engine, run.model) == (
+            worker["engine"],
+            worker["model"],
+        ):
+            return
+        entry = {
+            "role": role,
+            "from": f"{worker['engine']}:{worker['model']}",
+            "to": f"{run.engine}:{run.model}",
+            "cause": "held",
+            "run": run.id,
+            "at": time.time(),
+        }
+        with self.mutex:
+            task.setdefault("fallbacks", []).append(entry)
+            self._save()
+            self._event("fallback", task=task["id"], **entry)
 
     def close(self, run_id: str | None) -> str | None:
         """Close without force and return any refusal for the report."""
@@ -1174,6 +1353,22 @@ class _Runner:
             prepare_worktree(self.flow, self.env, self.shutdown)
         for task in self.flow["tasks"]:
             try:
+                pending = task.get("fallback_pending") or {}
+                role = pending.get("role")
+                if role and task.get(f"{role}_run") == pending.get("failed_run"):
+                    # The runner stopped between a failed run and its repeat
+                    # on the fallback worker; the pipeline makes the start.
+                    self.change(
+                        task,
+                        status="pending",
+                        entry=None if role == "writer" else "review",
+                        reason=None,
+                        **{f"{role}_run": None},
+                    )
+                    continue
+                if pending or task.get("fallback_failed"):
+                    # The repeat started before the runner stopped.
+                    self.change(task, fallback_pending=None, fallback_failed={})
                 if task["status"] == "merging":
                     if branches.is_contained(
                         self.flow["worktree"],
@@ -1602,6 +1797,8 @@ class _Runner:
                     )
                 fields.update(status="accepted", head=tip)
             elif kind in ("send", "review", "worker"):
+                # A lead answer starts a new attempt with a fresh history.
+                fields.update(fallback_pending=None, fallback_failed={})
                 hook_refused = False
                 if kind == "send" and task["writer_run"]:
                     run = runs.load(task["writer_run"], self.env)

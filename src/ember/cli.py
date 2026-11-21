@@ -26,7 +26,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NoReturn
 
-from ember import __version__, branches, choices, db, deps, ground, skill
+from ember import __version__, branches, choices, db, deps, ground, holds, skill
 from ember.engines import models, status
 from ember.runs import core as run_core
 from ember.runs import exits, record, steps
@@ -187,6 +187,17 @@ def _add_run(parser: argparse.ArgumentParser) -> None:
         help="a trailer line for each commit; repeatable",
     )
     start.add_argument("--claim", metavar="ID", help="read the menu with this claim id")
+    start.add_argument(
+        "--fallback-from",
+        metavar="RUN",
+        help="the run that a provider error ended and that this start replaces",
+    )
+    start.add_argument(
+        "--continue-run",
+        metavar="RUN",
+        help="start from the branch of this earlier editing run and tell the "
+        "worker about its work",
+    )
     start.add_argument(
         "--window",
         action="store_true",
@@ -885,13 +896,34 @@ def _run_engines(args: argparse.Namespace, env: Mapping[str, str] | None) -> int
             print(_model_line(model))
         return EX_OK
     result = status.read(env, refresh=args.refresh)
+    held: dict[str, list[holds.Hold]] = {}
+    for hold in holds.active(env):
+        held.setdefault(hold.engine, []).append(hold)
     if args.json:
-        reply = {name: item.to_json() for name, item in result.items()}
+        reply = {
+            name: {
+                **item.to_json(),
+                "holds": [
+                    {
+                        "model": hold.model,
+                        "kind": hold.kind,
+                        "since": hold.since,
+                        "until": hold.until,
+                        "run": hold.run,
+                    }
+                    for hold in held.get(name, [])
+                ],
+            }
+            for name, item in result.items()
+        }
         print(json.dumps(reply, indent=2))
         return EX_OK
-    for item in result.values():
+    for name, item in result.items():
         for line in _status_lines(item):
             print(line)
+        for hold in held.get(name, []):
+            until = time.strftime("%H:%M", time.localtime(hold.until))
+            print(f"  held: {hold.name()} after {hold.kind} until {until}")
     return EX_OK
 
 
@@ -913,6 +945,8 @@ def _run_mode(args: argparse.Namespace) -> str:
         "--trailer": bool(args.trailer),
         "--claim": args.claim is not None,
         "--window": args.window,
+        "--continue-run": args.continue_run is not None,
+        "--fallback-from": args.fallback_from is not None,
         "--dry-run": args.dry_run,
     }
     if mode == "start":
@@ -957,6 +991,8 @@ def _run_run(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
                 trailers=tuple(args.trailer),
                 claim=args.claim,
                 window=args.window,
+                continue_run=args.continue_run,
+                fallback_from=args.fallback_from,
                 dry_run=args.dry_run,
                 as_json=args.json,
             )
@@ -997,7 +1033,7 @@ def _run_run(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
             step, _ = core.step(run)
             if step in ("failed", "owner"):
                 text = exits.report(
-                    run.last_exit or 0, steps.exit_variant(run), **run.to_json()
+                    run.last_exit or 0, steps.shown_variant(run)[0], **run.to_json()
                 )
                 if text:
                     print(text, file=sys.stderr)

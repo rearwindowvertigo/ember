@@ -11,12 +11,13 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from ember import branches, choices, paths, prepare
+from ember import branches, choices, holds, paths, prepare
 from ember.cli import build_parser
 from ember.flows import briefs, command, lock, plan, record, runner
 from ember.runs import record as runs
@@ -3057,3 +3058,197 @@ def test_a_fix_decided_by_a_review_started_in_a_wave_waits_for_the_next_wave(
     item = flow["tasks"][0]
     assert runs.load(item["writer_run"], h.env).turn == turns + 1
     assert flow["tasks"][1]["status"] == "merged"
+
+
+def _fallback_events(h: Harness) -> list[dict[str, Any]]:
+    return [e for e in record.read_events(h.id, h.env) if e["kind"] == "fallback"]
+
+
+def test_a_review_that_a_provider_error_ends_goes_to_the_fallback_worker(
+    h: Harness,
+) -> None:
+    choices.set_settings({"provider.fallback": ["claude:opus"]}, env=h.env)
+    marker = h.tmp / "failed-once"
+    script = f"@provider-once {marker} rate limited\n@reply {PASS}"
+    h.scripts_update(**{"a read-only review;": script})
+    h.create([task("a")])
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["status"] == "merged" and flow["halted"] is None
+    (entry,) = item["fallbacks"]
+    assert (entry["role"], entry["from"], entry["to"], entry["cause"]) == (
+        "reviewer",
+        "codex:gpt-5",
+        "claude:opus",
+        "outage",
+    )
+    # The task's saved reviewer stays; the repeat alone ran on the fallback.
+    assert item["reviewer"] is None
+    assert (item["fallback_pending"], item["fallback_failed"]) == (None, {})
+    assert runs.load(item["reviews"][-1]["run"], h.env).engine == "claude"
+    failed = runs.load(entry["run"], h.env)
+    assert (failed.engine, failed.status) == ("codex", runs.CLOSED)
+    assert [(e["task"], e["to"]) for e in _fallback_events(h)] == [("a", "claude:opus")]
+    assert [hold.name() for hold in holds.active(h.env)] == ["codex"]
+    assert flow["reviewer"]["model"] == "gpt-5"
+
+
+def test_a_review_never_falls_back_to_the_model_that_wrote_the_work(
+    h: Harness,
+) -> None:
+    choices.set_settings({"provider.fallback": ["codex:gpt-5"]}, env=h.env)
+    marker = h.tmp / "failed-once"
+    script = f"@provider-once {marker} rate limited\n@reply {PASS}"
+    h.scripts_update(**{"a read-only review;": script})
+    h.create([task("a")])
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["status"] == "stopped"
+    assert "fallbacks" not in item
+    assert flow["halted"] == "provider error on codex; new runs halted"
+
+
+def test_a_writer_that_a_provider_error_ends_is_continued_by_the_fallback_worker(
+    h: Harness,
+) -> None:
+    choices.set_settings({"provider.fallback": ["claude:opus"]}, env=h.env)
+    marker = h.tmp / "failed-once"
+    text = f"@write a value\n@provider-once {marker} rate limited\n@write a2 more"
+    h.create([task("a", text=text, files=["a", "a2"])])
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["status"] == "merged", item["reason"]
+    (entry,) = [e for e in item["fallbacks"] if e["role"] == "writer"]
+    assert (entry["from"], entry["to"], entry["cause"]) == (
+        "codex:gpt-5",
+        "claude:opus",
+        "outage",
+    )
+    first = runs.load(entry["run"], h.env)
+    second = runs.load(item["writer_run"], h.env)
+    assert (first.engine, second.engine) == ("codex", "claude")
+    assert second.continues == first.id
+    assert item["task_base"] == first.base
+    assert first.branch not in flow["abandoned"]
+    assert git(h.repo, "branch", "--list", first.branch, env=h.env) == ""
+    assert first.status == runs.CLOSED
+    assert (item["writer"], item["fallback_pending"]) == (None, None)
+    assert sorted(item["changed_files"]) == ["a", "a2"]
+    assert "## Work already done" in (second.folder / "brief.md").read_text()
+    # A review does not fall back to either model that wrote the work.
+    assert h.instance().fallback_avoid(item, "reviewer") == (
+        ("codex", "gpt-5"),
+        ("claude", "opus"),
+    )
+    assert h.instance().fallback_avoid(item, "writer") == ()
+
+
+def test_a_later_start_of_the_role_uses_the_first_choice_again(h: Harness) -> None:
+    choices.set_settings(
+        {"provider.hold_minutes": "0", "provider.fallback": ["claude:opus"]}, env=h.env
+    )
+    first = f"@provider-once {h.tmp / 'failed-once'} limited\n@reply {FIX}"
+    h.scripts_update(
+        **{
+            "Review of task a, round 1,": first,
+            "Fix round 1 of task a": "@write a fixed",
+            "Review of task a, round 2,": "@reply " + PASS,
+        }
+    )
+    h.create([task("a")], rounds=1)
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["status"] == "merged", item["reason"]
+    engines = [runs.load(review["run"], h.env).engine for review in item["reviews"]]
+    assert engines == ["claude", "codex"]
+    assert len(item["fallbacks"]) == 1
+    assert (item["reviewer"], item["fallback_failed"]) == (None, {})
+
+
+def test_a_repeat_on_the_fallback_worker_is_made_after_a_resume(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    choices.set_settings({"provider.fallback": ["claude:opus"]}, env=h.env)
+    marker = h.tmp / "failed-once"
+    script = f"@provider-once {marker} rate limited\n@reply {PASS}"
+    h.scripts_update(**{"a read-only review;": script})
+    h.create([task("a")])
+    fall_back = runner._Runner.fall_back
+
+    def stop_after(self: runner._Runner, *args: Any) -> bool:  # noqa: ANN401
+        """Stop the runner between the failed run and its repeat."""
+        done = fall_back(self, *args)
+        self.shutdown.set()
+        return done
+
+    monkeypatch.setattr(runner._Runner, "fall_back", stop_after)
+    runner.run(h.id, h.env, core_factory=h.factory, poll_seconds=0.01)
+    monkeypatch.setattr(runner._Runner, "fall_back", fall_back)
+    item = h.flow()["tasks"][0]
+    pending = item["fallback_pending"]
+    assert (pending["role"], pending["failed_run"], pending["continue_run"]) == (
+        "reviewer",
+        item["reviewer_run"],
+        None,
+    )
+    assert (pending["worker"]["engine"], pending["worker"]["model"]) == (
+        "claude",
+        "opus",
+    )
+    assert runs.load(pending["failed_run"], h.env).status == runs.CLOSED
+    assert item["fallback_failed"] == {"reviewer": [["codex", "gpt-5", "outage"]]}
+    assert item["status"] != "merged" and not item["reviews"]
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["status"] == "merged", item["reason"]
+    assert runs.load(item["reviews"][-1]["run"], h.env).engine == "claude"
+    assert (item["fallback_pending"], item["fallback_failed"]) == (None, {})
+    assert len(item["fallbacks"]) == 1
+
+
+def test_a_run_is_not_repeated_when_its_resend_is_uncertain_or_it_stays_open(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    choices.set_settings({"provider.fallback": ["claude:opus"]}, env=h.env)
+    h.create([task("a")])
+    h.run()
+    instance = h.instance()
+    item = instance.flow["tasks"][0]
+    run = runs.load(item["writer_run"], h.env)
+    runs.save(replace(run, last_variant="uncertain"))
+    assert instance.fall_back(item, "writer", run.id, "outage") is False
+    runs.save(replace(run, last_variant="outage"))
+    with monkeypatch.context() as patch:
+        patch.setattr(instance, "close", lambda run_id: "refused")
+        assert instance.fall_back(item, "writer", run.id, "outage") is False
+    assert "fallback_pending" not in item and "fallbacks" not in item
+    assert instance.fall_back(item, "writer", run.id, "outage") is True
+    assert item["fallback_pending"] == {
+        "role": "writer",
+        "worker": item["fallback_pending"]["worker"],
+        "failed_run": run.id,
+        "continue_run": run.id,
+    }
+    assert h.flow()["tasks"][0]["fallback_pending"] == item["fallback_pending"]
+    # A lead answer starts a new attempt without the pending repeat.
+    assert item["fallback_failed"] == {"writer": [["codex", "gpt-5", "outage"]]}
+
+
+def test_a_start_that_a_hold_redirects_is_recorded_on_the_task(h: Harness) -> None:
+    choices.set_settings({"provider.fallback": ["claude:opus"]}, env=h.env)
+    holds.start("codex", "gpt-5", "outage", 15, env=h.env)
+    h.create([task("a")])
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["status"] == "merged"
+    assert runs.load(item["writer_run"], h.env).engine == "claude"
+    (entry,) = item["fallbacks"]
+    assert (entry["role"], entry["from"], entry["to"], entry["cause"]) == (
+        "writer",
+        "codex:gpt-5",
+        "claude:opus",
+        "held",
+    )
+    # The review does not go to the model that wrote the work.
+    assert runs.load(item["reviews"][-1]["run"], h.env).engine == "codex"
+    assert item["writer"] is None

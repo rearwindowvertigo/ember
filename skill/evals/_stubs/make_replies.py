@@ -209,7 +209,7 @@ def status_stderr(core: Core, warnings: str, run: record.Run) -> str:
         lines.append(core.status_next)
     if core.step(run, session_state="live")[0] in ("failed", "owner"):
         report = exits.report(
-            run.last_exit or 0, steps.exit_variant(run), **run.to_json()
+            run.last_exit or 0, steps.shown_variant(run)[0], **run.to_json()
         )
         if report:
             lines.append(report)
@@ -235,6 +235,14 @@ class _ProviderClock:
         self.ticks += seconds
 
 
+FALLBACK_SETTINGS: dict[str, object] = {
+    "shortlist.codex": ["gpt-6.1-sol@high", "gpt-6.1-sol-mini@medium"],
+    "provider.capacity_retries": "0",
+    "provider.fallback": ["codex:gpt-6.1-sol-mini"],
+}
+"""The settings of the `provider-fallback` case."""
+
+
 def provider_replies() -> dict[str, str]:
     """Build exit-73 streams and status replies with the run formatters."""
     replies: dict[str, str] = {}
@@ -244,9 +252,19 @@ def provider_replies() -> dict[str, str]:
         ("usage_limit", "You've hit your usage limit. Try again later."),
         ("outage", "Internal server error"),
         ("uncertain", capacity),
+        ("fallback", capacity),
     ):
         with TemporaryDirectory() as temporary:
             env = {"XDG_STATE_HOME": temporary}
+            if variant == "fallback":
+                root = Path(temporary)
+                env = {
+                    "HOME": str(root / "home"),
+                    "XDG_CONFIG_HOME": str(root / "config"),
+                    "XDG_STATE_HOME": str(root / "state"),
+                    "XDG_CACHE_HOME": str(root / "cache"),
+                }
+                choices.set_settings(FALLBACK_SETTINGS, env=env)
             run_id = "codex-20261103-120001-000001"
             run = record.Run(
                 id=run_id,
@@ -278,7 +296,7 @@ def provider_replies() -> dict[str, str]:
                 subject="Add --since to tools/report.py",
                 main="{{DIR}}",
                 common="{{DIR}}/.git",
-                capacity_retries=0 if variant == "capacity" else 2,
+                capacity_retries=0 if variant in ("capacity", "fallback") else 2,
                 folder=record.make_run_dir(run_id, env),
                 env=env,
             )
@@ -305,7 +323,8 @@ def provider_replies() -> dict[str, str]:
                 run,
                 status=record.FAILED,
                 last_exit=73,
-                last_variant=variant,
+                # A fallback start keeps the variant of the failure itself.
+                last_variant="capacity" if variant == "fallback" else variant,
                 last_reason=outcome.reason,
                 turn_state=record.SENT if variant == "uncertain" else record.COMMITTED,
             )
@@ -313,23 +332,37 @@ def provider_replies() -> dict[str, str]:
             core._say(f"run {run_id}")
             if variant != "uncertain":
                 core._print_turn(run, 73, 0, None, None, seconds, None)
+            context: dict[str, str] = {"run": run_id}
+            saved_brief = str(run.folder / record.BRIEF_NAME)
+            if variant == "fallback":
+                core._hold(run, "capacity")
+                shown, start = steps.shown_variant(run)
+                if shown != "fallback" or start is None:
+                    raise RuntimeError("the fallback list names no worker")
+                context["fallback"] = start
 
             def fail(
                 reason: str = outcome.reason or "",
                 variant: str = variant,
-                run_id: str = run_id,
+                context: dict[str, str] = context,
             ) -> int:
                 """Return the provider failure through the command handler."""
-                raise RunError(73, reason, variant, run=run_id)
+                raise RunError(73, reason, variant, **context)
+
+            def placed(text: str, saved_brief: str = saved_brief) -> str:
+                """Name the call's brief where the run's saved brief is named."""
+                return text.replace(saved_brief, "{{TASK_FILE}}")
 
             code = core.execute(fail)
             report = exits.report(code, variant, **run.to_json())
             if report:
                 core._warn(report)
             prefix = f"provider-{variant.replace('_', '-')}/files/.ember-eval/replies/"
-            replies[prefix + "run-start.out"] = out.getvalue()
-            replies[prefix + "run-start.err"] = err.getvalue()
-            replies[prefix + "run-start.code"] = f"{code}\n"
+            # The first start fails; a case's own parts answer later starts.
+            start_name = "run-start.1" if variant == "fallback" else "run-start"
+            replies[prefix + start_name + ".out"] = out.getvalue()
+            replies[prefix + start_name + ".err"] = placed(err.getvalue())
+            replies[prefix + start_name + ".code"] = f"{code}\n"
             for as_json in (False, True):
                 out.seek(0)
                 out.truncate()
@@ -337,12 +370,16 @@ def provider_replies() -> dict[str, str]:
                 err.truncate()
                 with patch.object(Core, "_session_state", return_value="live"):
                     core.status(run_id, as_json=as_json)
-                replies[prefix + "run-status" + (".json" if as_json else ".out")] = (
-                    out.getvalue()
-                )
+                text = placed(out.getvalue())
+                if as_json and variant == "fallback":
+                    # The stub derives the fallback lines from this key.
+                    document = json.loads(text)
+                    document["fallback"] = placed(context["fallback"])
+                    text = json.dumps(document, indent=2) + "\n"
+                replies[prefix + "run-status" + (".json" if as_json else ".out")] = text
                 shown = status_stderr(core, err.getvalue(), record.load(run.id, env))
                 if shown:
-                    replies[prefix + "run-status.err"] = shown
+                    replies[prefix + "run-status.err"] = placed(shown)
     return replies
 
 
@@ -630,6 +667,7 @@ def choices_replies() -> dict[str, str]:
         "_stubs": "current",
         "refuses-owner-setting": "current",
         "provider-capacity": "current",
+        "provider-fallback": "current",
         "claim-lost-then-gone": "current",
         "flow-gap-check-first": "current",
         "owner-away-named-workers": "current",
@@ -676,6 +714,8 @@ def choices_replies() -> dict[str, str]:
                 )
             if name == "provider-capacity":
                 choices.set_settings({"provider.capacity_retries": "0"}, env=env)
+            if name == "provider-fallback":
+                choices.set_settings(FALLBACK_SETTINGS, env=env)
             if name == "flow-gap-check-first":
                 choices.set_settings(
                     {"multi.runs_as": "flow", "gapcheck.ask": "all"}, env=env
@@ -697,7 +737,12 @@ def choices_replies() -> dict[str, str]:
                 "choices-claim.out": claimed,
                 "choices-read-id.out": choices.read("eval-claim", env=env),
             }
-            if name in ("_stubs", "refuses-owner-setting", "provider-capacity"):
+            if name in (
+                "_stubs",
+                "refuses-owner-setting",
+                "provider-capacity",
+                "provider-fallback",
+            ):
                 documents["choices-read.out"] = choices.read(env=env)
             if name in ("_stubs", "flow-gap-check-first", "owner-away-named-workers"):
                 documents["menu.json"] = claimed["menu"]

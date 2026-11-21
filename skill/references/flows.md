@@ -318,6 +318,13 @@ queued writers stay pending. Resume clears the halt, but the failed task
 still needs a lead answer. Report the kind. After a capacity error, name no
 other worker as an option; the capacity `report:` line gives the recommendation.
 
+When the owner's fallback list covers a provider error, the flow repeats
+the writer or reviewer start on that worker by itself and does not stop.
+The task's own worker stays: a later start of that role uses it again.
+`emb flow --status <id>` then prints a `fallback:` line under the task, and
+the JSON task has `fallbacks`. Tell the owner each such switch with its
+task, the model that failed, its cause and the model that ran.
+
 ## Denied paths
 
 Each task's status and watch report includes `denied_paths` with `path`,

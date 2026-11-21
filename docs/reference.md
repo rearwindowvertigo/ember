@@ -66,6 +66,8 @@ empty list.
 | `single.writer_as`, `single.reviewer_as` | `cli`, `subagent` | `cli` | request, one-time, standing |
 | `provider.capacity_retries` | Integer strings `0` to `10`; most resends of one turn after a capacity error; `0` turns retries off | `2` | standing |
 | `provider.capacity_wait` | Integer strings `5` to `600`; seconds before a capacity resend | `30` | standing |
+| `provider.fallback` | List of `<engine>:<model>`, in order of use, at most 8, no duplicates; a new entry's model is on its engine's shortlist when saved, and an entry the list already holds is kept | `[]` | standing |
+| `provider.hold_minutes` | `0`, `5`, `15`, `30`, `60`; minutes a model or engine is passed over after a provider error; `0` records no hold | `15` | standing |
 | `sandbox.codex` | `on`, `off` | `on` when `bwrap` is on `PATH` or the `codex` on `PATH` has a bundled `bwrap`, else `off` | standing |
 | `sandbox.opencode`, `sandbox.claude` | `on`, `off` | `on` when `bwrap` is on `PATH`, else `off` | standing |
 | `sandbox.read` | List of absolute paths, no duplicates; paths inside Ember's configuration or state folders are refused | `[]` | standing |
@@ -286,6 +288,11 @@ connected, or lists one engine's models.
 Exit codes: 0 whether or not the engines are connected and whether or not the
 model list could be read; 64 for a usage error, such as an unknown engine.
 
+Each engine's JSON object has `holds`: the active provider holds of that
+engine, each with `model` (null when the whole engine is held), `kind`,
+`since`, `until` and `run`. Text output prints
+`  held: <engine>[ <model>] after <kind> until <HH:MM>` under the engine.
+
 ### Status
 
 An engine is `connected` when its CLI is found and its sign-in check passes.
@@ -469,6 +476,8 @@ warnings described below.
 | `--trailer LINE` | With a start: a trailer line for each commit; repeatable; none by default |
 | `--claim ID` | With a start: read the menu with this claim id |
 | `--window` | With a start: also open a terminal window on the session |
+| `--continue-run RUN` | With an editing start: cut the new run from the branch of this earlier editing run of the same repository and add a note about its work to the brief |
+| `--fallback-from RUN` | With a start: the run that a provider error ended and that this start replaces; its worker, and those of the runs it replaced, are not used again |
 | `--send RUN --message-file FILE` | Send `FILE` as the next message and wait for its turn |
 | `--screen RUN` | Print the text of the session's pane |
 | `--interrupt RUN` | Interrupt the current turn, as the engine's driver does it (see Engine drivers) |
@@ -1146,6 +1155,8 @@ UTC. It is also the tmux session's name.
 | `subject` | string | The brief's first non-empty line |
 | `preparation` | object or null | Preparation command, `state` (`running`, `ok`, `failed`, `timeout`, `interrupted`, `not-started`), `log`, optional `pid` and `start`; a finished attempt also has `exit`, `seconds`, `left_behind` and `message`; omitted when no preparation ran |
 | `start_argv` | list of strings | The start command with its saved brief, used by the preparation retry line; omitted when empty |
+| `continues` | string | The earlier run whose branch this run was cut from with `--continue-run`; omitted without one |
+| `fallback_from` | string | The run that a provider error ended and that this run replaces, from `--fallback-from`; omitted without one |
 
 Paths are absolute.
 
@@ -1364,6 +1375,7 @@ have no report line. Report lines are not translated or configurable.
 | 73, `capacity` | `report: capacity; retries exhausted; offer only a retry with the same model and effort once capacity returns; offer no other model, engine, Claude subagent or Claude's own work` |
 | 73, `outage` | `report: outage; offer only a retry with the same model and effort once it clears; offer no other model, engine, Claude subagent or Claude's own work` |
 | 73, `usage_limit` | `report: usage_limit; a retry on the same worker needs no question; another worker or model needs the owner's answer; OpenCode may be offered` |
+| 73, a fallback entry applies | `report: fallback; the owner's fallback list names the worker of the next: line; run that line without a question; tell the owner which model failed, with which error, and which model runs now` |
 | 73, an engine that ended | `report: outage; the engine ended; offer only a new run with the same model and effort once it clears; offer no other model, engine, Claude subagent or Claude's own work` |
 | 73 or 74, `uncertain` | `report: retry delivery is uncertain; do not send again before inspecting the session; then offer only a retry with the same model and effort; offer no other model, engine, Claude subagent or Claude's own work` |
 | 74, default, `retry` or `complete`, editing run | `report: interrupted; partial edits may be committed on <branch>` |
@@ -1413,6 +1425,58 @@ again. `--interrupt` cancels a pending resend. Edits from earlier attempts
 stay in the worktree; the turn commits once after its last attempt.
 Uncertain delivery leaves edits uncommitted. Turn seconds include waits;
 attempt seconds do not. Both totals persist across recovery.
+
+### Provider holds and fallback models
+
+A run that ends with a provider error at exit 73 starts a hold. `capacity`
+holds the run's model. `usage_limit` and `outage` hold the run's engine. A
+hold lasts `provider.hold_minutes` minutes; `0` records none. The holds of
+the machine are in `provider-holds.json` in the state folder, replaced
+atomically under `provider-holds.lock`. The run prints
+`WARNING: <engine>[ <model>] is held after <kind> until <HH:MM>`. A
+successful turn ends the holds of its model and of its engine. An
+uncertain capacity resend starts no hold. A start that exits 73 before its
+brief was taken starts an `outage` hold on its engine.
+
+`provider.fallback` names the workers that take over, in order. The entry
+that applies is the first one whose row is `set` under the engines' cached
+connection states, that is not held, and that is not a worker that failed
+on the job. Entries on the engine of a worker that failed with
+`usage_limit` or `outage` are passed over too. The effort comes from the
+entry's shortlist. The workers that failed on the job are the failed run
+and the runs reached from it through `fallback_from`.
+
+A start whose worker is held starts on the entry that applies and prints
+`WARNING: <engine>[ <model>] is held after <kind> until <HH:MM>; starting <engine> <model> from the fallback list`.
+With no entry that applies it starts on the held worker. A panel member
+starts as named. A start with `--fallback-from` counts the workers of that
+run and of the runs it replaced as failed. When a hold's time is up, the
+next start uses the first choice again; Ember starts no run of its own to
+test it.
+
+When an entry applies at exit 73 of a run's first turn, or of a start
+whose brief was not taken, the `next:` line is
+`next: emb run --close <run>, then emb run --engine <engine> --model <model> ...`
+with the saved brief, `--fallback-from <run>`, the run's read paths,
+trailers and claim, and `--read-only` for a read-only run. An editing run
+that has commits or continues another run adds `--continue-run <run>`. The
+`report:` line tells the lead to run that line without a question and to
+tell the owner which model failed and which runs now. An uncertain resend,
+a later turn, and a run that a flow, a panel or a gap check started keep
+the lines of their own exit. The run's `last_variant` keeps the failure's
+own variant; `emb run --status` prints the fallback lines while the list
+holds an entry that applies.
+
+`--continue-run RUN` cuts the new run's branch and worktree from the tip of
+`RUN`'s branch and keeps `RUN`'s base branch. It appends a section
+`## Work already done` to the brief, which names the earlier run and the
+`git log` and `git diff` commands that show its work from the base of the
+first run of the chain. A brief that already ends with that section gets
+it replaced. It exits 64 for a read-only start, an unknown run, a
+read-only `RUN` or a run of another repository. A run that continues
+another run and made no commit is verified and merged from the tip it was
+cut from, and its `--expect-files` count starts at the base of the first
+run of the chain.
 
 ### Provider waits in an open turn
 
@@ -1959,7 +2023,7 @@ with `--previous`, and reads `  none` when nothing is settled. A nonempty
 | `previous_plan` | Plan path recorded in the earlier result, or null |
 | `next_id` | Next unused gap number; repeat checks continue from this number |
 | `dispositions` | Earlier active and settled gap ids, each with `status` and `reason` |
-| `reviewer` | `engine`, `model`, `effort` and `source`; values come from the run record, and `source` is `option` when `--engine` was given, otherwise `menu` |
+| `reviewer` | `engine`, `model`, `effort` and `source`; values come from the run record, and `source` is `fallback` when the run was on a worker of the fallback list, `option` when `--engine` was given, otherwise `menu` |
 | `run` | `id`, `reply` (absolute reply path or null), `exit` (the start's exit), `closed` and `close_error` (null or a reason) |
 | `steps` | Covered steps, each with `step`, `title` and `gaps`; each gap has `id`, `gap`, `harm`, `why`, `default`, `earlier` (an earlier gap id or null), `answer` (null until the lead records one) and `ask_owner` |
 | `settled` | Earlier gaps with a `settled` disposition, their original step and title, gap fields and answer |
@@ -1988,6 +2052,12 @@ A non-zero run exit keeps the run open. Its follow-up names
 `emb gapcheck --plan <plan> --reply <run folder>/turn-1.md --brief-file <run folder>/brief.md` only when the
 reply file exists; otherwise it names a new gap check. An unreadable
 existing reply exits 66. A successful turn with no reply file exits 81.
+
+A reviewer run that a provider error ends at exit 73 is closed, and the
+check is repeated on the entry of `provider.fallback` that applies, with
+`WARNING: the gap check reviewer <engine> <model> failed (<kind>); starting <engine> <model> from the fallback list`
+on standard error. With no entry that applies, with an uncertain resend,
+or when the run cannot be closed, the run's exit 73 is the check's exit.
 
 ### Exit codes
 
@@ -2201,7 +2271,8 @@ its plan object, then the `flow.writer` or `flow.reviewer` row in the
 choices reply, which is the `single.writer` or `single.reviewer` row while
 `same`. Options use `<engine>:<model>[@<effort>]`; model names may contain
 colons and slashes. The result records `engine`, `model`, `effort` and
-`source` (`option`, `plan`, `menu`, or `answer` for a lead answer).
+`source` (`option`, `plan`, `menu`, `answer` for a lead answer, or
+`fallback` for a worker of the fallback list).
 
 Menu resolution requires a readable settings source and a row in state
 `set`. A Claude row set to run as a subagent is refused: a flow runs CLI
@@ -2361,10 +2432,34 @@ flow with `check_pending` retained. Resume reconciles any recorded check
 process, retries cleanup, and runs the check before further work. With no
 check command the runner clears `check_pending` and returns to `running`.
 
+A writer or reviewer start that ends at exit 73 is repeated on the entry
+of `provider.fallback` that applies, as described under Provider holds and
+fallback models. A review does not take the model of the task's writer, of
+its writer run, or of an earlier writer whose branch that run continues.
+The runner closes the failed run first; a run that cannot be closed, or
+whose resend is uncertain, is not repeated and stops the task. The task's
+`fallbacks` list gains an entry with `role`, `from`, `to`, `cause` (the
+provider kind), `run` and `at`, and the flow logs a `fallback` event with
+the same fields. The task's `fallback_pending` holds the `role`, the
+`worker`, the `failed_run` and the `continue_run` of the repeat until it
+has run, and `fallback_failed` holds the `[engine, model, kind]` of each
+worker that failed on that start. A runner that stops before the repeat
+makes it after a resume. The task's saved `writer` or `reviewer` does not
+change: a later start of the role uses the first choice again. A lead
+answer `send`, `review` or `worker` clears `fallback_pending` and
+`fallback_failed`. A writer whose failed run has commits, or continues
+another run, is continued with `--continue-run`; the earlier branch
+lands with the task's branch, and the task's `task_base` stays the base of
+the first writer. The branch of a failed writer run without work is added
+to `abandoned`. A start that a hold sends to another worker is recorded in
+`fallbacks` with the cause `held`. A correction or fix sent to a running
+writer is not repeated on another worker.
+
 A task's capacity error uses its run's saved retry settings; other tasks
-keep running. A capacity exit 73 stops that task without halting new runs.
-A `usage_limit` or `outage` exit 73 stops the task and halts new runs, as
-does a provider error without a recorded kind. Active jobs finish; queued
+keep running. A capacity exit 73 that no fallback entry covers stops that
+task without halting new runs. A `usage_limit` or `outage` exit 73 that no
+entry covers stops the task and halts new runs, as does a provider error
+without a recorded kind. Active jobs finish; queued
 writers remain pending. The flow stops with
 `provider error on <engine>; new runs halted`. Resume clears that halt and
 continues pending work; the task that failed still needs a lead answer.
@@ -2791,6 +2886,7 @@ Events have `seq` starting at 1, `at` in epoch seconds, and `kind`:
 | `check` | `wave`, `exit`, `log`, `output` |
 | `check_replaced` | `at`, `old`, `new`, `reason`, matching the saved `check_changes` entry |
 | `reviewer` | `answer`, `worker`: the flow's saved reviewer changed |
+| `fallback` | `task`, `role`, `from`, `to`, `cause`, `run`, `at`: a start went to a fallback worker |
 | `end` | `status`, `reason`, `exit` |
 
 Creation writes event 1 with kind `flow` and status `starting`. Event reads
@@ -3026,6 +3122,9 @@ one indented `outside file: <path>` line per path; an empty list prints nothing.
 with `n`, `task`, `kind`, `worker` and `replaces` (the numbers of the
 answers it replaces). Text status prints one
 `queued answer <n>: <kind>[ for <task>][ <worker>]` line for each.
+Text status prints one
+`fallback: <role> <from> -> <to> (<cause>) run <run>` line under a task for
+each entry of its `fallbacks`.
 Each task has `provider_wait`: null, or the `run`, `kind`, `message` and
 `since` of the provider wait saved for the open turn of its running writer
 or reviewer run. A task with a wait and no stored reason shows
@@ -3690,6 +3789,10 @@ from the repository's main checkout, which cleanup never removes.
   configured `trailer.separators` apply. Keys starting with `Ember-` are
   excluded without regard to case. Ember writes `Ember-Verdict: TEXT` and
   `Ember-Task-Tip: <worker tip>` once with the actual verdict and tip.
+- For a run started with `--continue-run`, the squash message also holds
+  one `Ember-Task-Tip` line for the tip of each earlier run of the chain,
+  before the line of the merged branch. Those branches are then contained
+  in the target, and `emb merge` cleans them up after the merged branch.
 - The target repository's `commit-msg` hook runs on the squash message and
   may edit it. `commit.gpgsign` enables `git commit-tree -S`. A hook or
   commit-writing refusal exits 77 and moves nothing. Worker `pre-commit`
@@ -4954,8 +5057,9 @@ waits for both record models.
 
 ### Team
 
-Team shows the standing worker menu in seven cards: Single tasks, Planning,
-Work of several tasks, Flows, Claude Workflows, Provider capacity and Panel.
+Team shows the standing worker menu in eight cards: Single tasks, Planning,
+Work of several tasks, Flows, Claude Workflows, Provider capacity, Fallback
+models and Panel.
 Single tasks holds the Writer and Reviewer pickers
 (`single.writer`, `single.reviewer`). Each lists Ask each time (`ask`), then,
 for Codex, OpenCode and Claude in that order, each engine that is on and has
@@ -5006,7 +5110,19 @@ Off (`0`) or Up to 1 through Up to 10, default Up to 2; and Wait before a
 retry (`provider.capacity_wait`): 5s through 600s, default 30s. The retries
 row names the limit on resends of one turn. A change applies to runs
 started after it; existing runs keep both settings for later turns and
-recovery. The model and effort stay the same on a retry.
+recovery. The model and effort stay the same on a retry. The card also
+holds Try the first choice again after (`provider.hold_minutes`): Every job
+(`0`), 5 min, 15 min, 30 min or 60 min, default 15 min.
+
+Fallback models lists `provider.fallback` in saved order, numbered from 1.
+An entry shows its engine, model and effort, and a warning line with the
+reason when its row is not `set`. Each entry has a Remove control, and
+every entry but the first a Move up control. A picker adds one shortlisted
+model of a switched-on engine that the list does not hold; it is disabled
+at eight entries. Remove and Move up save the list while it holds entries
+whose model left its shortlist. An empty list shows "No fallback models. A provider error
+then stops the run for Claude." The card's description is the tooltip of an
+info icon after its title.
 
 The Panel card's description is the tooltip of an info icon after its
 title.
@@ -5042,7 +5158,10 @@ refreshes. A stale save reloads the settings and shows the app's stale alert.
 ### Engines
 
 Engines shows each engine's connection status, Use and Sandbox switches,
-requirements and model list. Refresh list reads models from their source.
+active provider holds, requirements and model list. A hold of the whole
+engine reads "Held after <kind> until <HH:MM>" and a hold of one model
+"<model>: held after <kind> until <HH:MM>", in local time. Try again now
+under a hold ends that hold. Refresh list reads models from their source.
 Model switches save shortlist entries; OpenCode entries keep the full
 integration-prefixed id and any selected effort.
 

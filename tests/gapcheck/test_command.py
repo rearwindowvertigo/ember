@@ -8,12 +8,13 @@ import time
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from ember import choices, paths
+from ember import choices, holds, paths
 from ember.cli import build_parser
 from ember.gapcheck import brief, command, plan, previous
 from ember.runs import record
@@ -2147,3 +2148,97 @@ def test_run_recovery_names_a_saved_brief_that_verifies(
     output, errors = io.StringIO(), io.StringIO()
     assert command.main(recovery, env, out=output, err=errors) == 0, errors.getvalue()
     assert json.loads(output.getvalue())["checked_plan"] == data["checked_plan"]
+
+
+def test_a_provider_failure_repeats_the_check_on_the_fallback_reviewer(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    driver: StubDriver,
+) -> None:
+    choices.set_settings({"provider.fallback": ["claude:opus"]}, env=env)
+    marker = tmp_path / "failed-once"
+    script = script_path(env)
+    script.write_text(
+        script.read_text().replace(
+            "lines = message.splitlines()",
+            f"lines = ['@provider-once {marker} limit']",
+        )
+    )
+    code, out, err = invoke(
+        env,
+        plan_file,
+        "--dir",
+        str(repo),
+        "--engine",
+        "codex",
+        "--model",
+        "m",
+        "--json",
+        driver=driver,
+    )
+    assert code != 73, err
+    data = json.loads(out)
+    assert data["reviewer"] == {
+        "engine": "claude",
+        "model": "opus",
+        "effort": "high",
+        "source": "fallback",
+    }
+    assert data["run"]["id"].startswith("claude-")
+    assert (
+        "WARNING: the gap check reviewer codex m failed (outage); "
+        "starting claude opus from the fallback list"
+    ) in err.splitlines()
+    first, second = sorted(
+        (record.load(path.name, env) for path in paths.runs_dir(env).iterdir()),
+        key=lambda run: run.started_at,
+    )
+    assert (first.engine, first.status) == ("codex", record.CLOSED)
+    assert second.id == data["run"]["id"]
+    # The same run is not repeated when its resend is uncertain, or when
+    # every entry of the list has failed on this check.
+    core = Core(env, load_driver=lambda name: driver, poll_seconds=0.05)
+    options = build_parser().parse_args(["gapcheck", "--plan", str(plan_file)])
+
+    def repeat(*failed: tuple[str, str, str]) -> object:
+        return command._fallback(options, first.id, failed, env, core, io.StringIO())
+
+    record.save(replace(first, last_variant="uncertain"))
+    assert repeat() is None
+    record.save(replace(first, last_variant="outage"))
+    found = repeat()
+    assert isinstance(found, tuple)
+    assert (found[0].model, found[1]) == ("opus", "claude")
+    assert found[2] == (("codex", "m", "outage"),)
+    assert repeat(("claude", "opus", "capacity")) is None
+
+
+def test_a_held_model_of_the_named_engine_is_reported_as_a_fallback(
+    env: dict[str, str], repo: Path, plan_file: Path, driver: StubDriver
+) -> None:
+    choices.set_settings(
+        {"shortlist.codex": ["gpt-5@high", "m@high"], "provider.fallback": ["codex:m"]},
+        env=env,
+    )
+    holds.start("codex", "gpt-5", "capacity", 15, env=env)
+    code, out, err = invoke(
+        env,
+        plan_file,
+        "--dir",
+        str(repo),
+        "--engine",
+        "codex",
+        "--model",
+        "gpt-5",
+        "--json",
+        driver=driver,
+    )
+    assert code == 0, err
+    assert json.loads(out)["reviewer"] == {
+        "engine": "codex",
+        "model": "m",
+        "effort": "high",
+        "source": "fallback",
+    }
