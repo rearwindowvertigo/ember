@@ -274,6 +274,16 @@ def test_command_leaves_the_brief_to_paste(setup: Setup) -> None:
     assert isinstance(state["launched"], float)
 
 
+@pytest.mark.parametrize(
+    ("speed", "option"),
+    [("standard", "features.fast_mode=false"), ("fast", 'service_tier="fast"')],
+)
+def test_command_sets_speed_after_effort(setup: Setup, speed: str, option: str) -> None:
+    spec = CodexDriver(setup.env).command(_run(setup, speed=speed), BRIEF)
+    start = spec.argv.index('model_reasoning_effort="xhigh"') + 1
+    assert spec.argv[start : start + 3] == ("-c", option, "-a")
+
+
 def test_command_without_effort_or_sandbox(setup: Setup) -> None:
     run = _run(setup, effort=None, sandbox="none", read_only=True)
     spec = CodexDriver(setup.env).command(run, BRIEF)

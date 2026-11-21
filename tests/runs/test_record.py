@@ -119,6 +119,9 @@ def test_missing_run(env: dict[str, str]) -> None:
         ({"turn": "1"}, "invalid turn"),
         ({"read": ["/a", 1]}, "invalid read"),
         ({"model": None}, "invalid model"),
+        ({"speed": "slow"}, "invalid speed"),
+        ({"speed": True}, "invalid speed"),
+        ({"engine": "opencode", "speed": "fast"}, "invalid speed"),
         ({"main": 3}, "invalid main"),
         ({"common": []}, "invalid common"),
         ({"sandbox": None}, "invalid sandbox"),
@@ -139,6 +142,14 @@ def test_invalid_records(
     (run.folder / "run.json").write_text(json.dumps(document))
     with pytest.raises(record.RecordError, match=message):
         record.load(run.id, env)
+
+
+@pytest.mark.parametrize("speed", ["standard", "fast", None])
+def test_speed_round_trip(env: dict[str, str], speed: str | None) -> None:
+    run = replace(_run(env), speed=speed)
+    record.save(run)
+    assert record.load(run.id, env).speed == speed
+    assert ("speed" in run.to_json()) == (speed is not None)
 
 
 def test_record_missing_a_field(env: dict[str, str]) -> None:

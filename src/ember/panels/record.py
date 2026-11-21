@@ -145,7 +145,7 @@ def new_panel(
         "updated_at": at,
         "ended_at": None,
         "exit": None,
-        "members": copy.deepcopy([dict(member) for member in members]),
+        "members": copy.deepcopy([{"speed": None, **member} for member in members]),
         "left_out": [dict(member) for member in left_out],
     }
     _validate(panel_id, panel)
@@ -206,6 +206,12 @@ def _validate(panel_id: str, panel: object) -> None:
             raise PanelError(panel_id, f"panel.json has an invalid {key}")
     for n, member in enumerate(panel["members"], 1):
         fields = {**_MEMBER_FIELDS}
+        if "speed" in member:
+            fields["speed"] = "str?"
+            if member["speed"] is not None and (
+                member.get("engine") != "codex" or member["speed"] not in choices.SPEEDS
+            ):
+                raise PanelError(panel_id, f"member {n} has an invalid speed")
         if "denied_paths" in member:
             fields["denied_paths"] = "[dict]"
         _fields(panel_id, member, fields, f"member {n}")
@@ -270,6 +276,8 @@ def load(panel_id: str, env: Mapping[str, str] | None = None) -> dict[str, Any]:
     if isinstance(value, dict):
         value.setdefault("base", None)
     _validate(panel_id, value)
+    for member in value["members"]:
+        member.setdefault("speed", None)
     if choices.OPENCODE_ID_FORMAT not in value:
         for member in value["members"]:
             if member["engine"] == "opencode":
@@ -372,9 +380,10 @@ def summary_text(
     for member in members:
         seconds = "-" if member["seconds"] is None else f"{round(member['seconds'])}s"
         code = "-" if member["exit"] is None else str(member["exit"])
+        speed = f" · {member['speed']}" if member.get("speed") else ""
         body = (
             f"## Member {member['n']}: {member['engine']}:{member['model']} · "
-            f"{member['effort'] if member['effort'] is not None else 'default'}\n\n"
+            f"{member['effort'] or 'default'}{speed}\n\n"
             f"Status: {member['status']} · exit {code} · {seconds} · "
             f"run {member['run'] or '-'} · {member['bytes']} bytes"
         )

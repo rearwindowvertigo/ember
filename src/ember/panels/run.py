@@ -147,9 +147,10 @@ def member_line(member: Mapping[str, Any]) -> str:
     """Format one member, preserving zero exits and unknown elapsed time."""
     seconds = "-" if member["seconds"] is None else f"{member['seconds']:.0f}s"
     code = "-" if member["exit"] is None else str(member["exit"])
+    speed = f" · {member['speed']}" if member.get("speed") else ""
     return (
         f"member {member['n']} {member['engine']}:{member['model']} · "
-        f"{member['effort'] or 'default'} · {member['status']} · {seconds} · "
+        f"{member['effort'] or 'default'}{speed} · {member['status']} · {seconds} · "
         f"exit {code} · {member['bytes']} bytes · run {member['run'] or '-'}"
     )
 
@@ -329,6 +330,8 @@ class _Coordinator:
                     if self.panel.get("admission") == "preparing"
                     else "running",
                 )
+                with contextlib.suppress(runs.RecordError):
+                    member["speed"] = runs.load(run_id, self.env).speed
                 self.persist()
 
         job = _Job(member, _RunIdStream(capture))
@@ -395,6 +398,7 @@ class _Coordinator:
         if run_id:
             try:
                 run = runs.load(run_id, self.env)
+                result["speed"] = run.speed
             except runs.RecordError as error:
                 problem = str(error)
             candidate = (
@@ -669,7 +673,7 @@ class _Coordinator:
                 self.flush(job)
                 if job.member["n"] in self.active:
                     available = self.collect(job, job.member["exit"] or 0, "")
-                    for key in ("reply", "bytes", "changed", "closed"):
+                    for key in ("reply", "bytes", "changed", "closed", "speed"):
                         if key in available:
                             job.member[key] = available[key]
                 if job.member["n"] in self.active and job.began is not None:
@@ -1028,6 +1032,7 @@ def retry(
     member.update(
         status="pending",
         run=None,
+        speed=None,
         exit=None,
         reason=None,
         reply=None,

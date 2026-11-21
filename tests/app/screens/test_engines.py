@@ -1116,12 +1116,14 @@ def test_codex_shortlist_and_effort(
     panel = _open(screen, context, qtbot, "codex")
     row = panel.rows[0]
     assert row.effort() == "medium"
+    assert row.speed_picker is None
     _save(
         context,
         qtbot,
         lambda: qtbot.mouseClick(row.switch, Qt.MouseButton.LeftButton),
     )
     assert context.setting("shortlist.codex") == ["gpt-5@medium"]
+    assert panel.rows[0].speed_picker.currentText() == "Standard"
     assert screen.cards["codex"].shortlisted_label.text() == "1 shortlisted"
     index = row.picker.findData("high")
 
@@ -1137,6 +1139,96 @@ def test_codex_shortlist_and_effort(
         lambda: qtbot.mouseClick(row.switch, Qt.MouseButton.LeftButton),
     )
     assert context.setting("shortlist.codex") == []
+    assert row.speed_picker is None
+
+
+def test_codex_speed_saves_the_whole_list(
+    env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
+) -> None:
+    choices.set_settings(
+        {"shortlist.codex": ["gpt-5@high", "older@low"], "fast.codex": ["older"]},
+        env=env,
+    )
+    stubs["lists"] = {"codex": _codex_list()}
+    screen, context = _screen(env, qtbot)
+    panel = _open(screen, context, qtbot, "codex")
+    picker = panel.rows[0].speed_picker
+    assert picker.accessibleName() == "Speed of gpt-5"
+    assert picker.toolTip() == (
+        "Fast runs this model on Codex's Fast tier, which can use more of the "
+        "plan's usage. Standard turns the Fast tier off for this model."
+    )
+    assert [picker.itemText(i) for i in range(picker.count())] == ["Standard", "Fast"]
+    assert panel.missing[0].speed_picker.currentText() == "Fast"
+    assert panel.rows[1].speed_picker is None
+
+    def choose(speed: str) -> None:
+        index = picker.findData(speed)
+        picker.setCurrentIndex(index)
+        picker.activated.emit(index)
+
+    _save(context, qtbot, lambda: choose("fast"))
+    assert context.setting("fast.codex") == ["older", "gpt-5"]
+    _save(context, qtbot, lambda: choose("standard"))
+    assert context.setting("fast.codex") == ["older"]
+
+
+def test_codex_speed_changes_made_during_a_save_are_all_kept(
+    env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
+) -> None:
+    choices.set_settings(
+        {"shortlist.codex": ["gpt-5@high", "older@low"], "fast.codex": ["older"]},
+        env=env,
+    )
+    stubs["lists"] = {"codex": _codex_list()}
+    screen, context = _screen(env, qtbot)
+    panel = _open(screen, context, qtbot, "codex")
+    listed, missing = panel.rows[0].speed_picker, panel.missing[0].speed_picker
+
+    def choose(picker: Any, speed: str) -> None:  # noqa: ANN401
+        index = picker.findData(speed)
+        picker.setCurrentIndex(index)
+        picker.activated.emit(index)
+
+    def settle() -> None:
+        qtbot.waitUntil(lambda: screen.fast_saves == 0, timeout=5000)
+        context.tasks.wait(5000)
+
+    # Two models changed before the first save returns: both changes stay.
+    choose(listed, "fast")
+    choose(missing, "standard")
+    assert screen.fast_wanted == ["gpt-5"]
+    settle()
+    assert context.setting("fast.codex") == ["gpt-5"]
+    assert screen.fast_wanted is None
+    assert (listed.currentText(), missing.currentText()) == ("Fast", "Standard")
+    # One model changed and changed back before the first save returns.
+    choose(listed, "standard")
+    choose(listed, "fast")
+    settle()
+    assert context.setting("fast.codex") == ["gpt-5"]
+    assert listed.currentText() == "Fast"
+    # A change made on a panel that was closed and opened again is kept too.
+    choose(missing, "fast")
+    qtbot.mouseClick(screen.cards["codex"].models_button, Qt.MouseButton.LeftButton)
+    assert screen.panel is None
+    panel = _open(screen, context, qtbot, "codex")
+    choose(panel.rows[0].speed_picker, "standard")
+    settle()
+    assert context.setting("fast.codex") == ["older"]
+    choose(panel.rows[0].speed_picker, "fast")
+    settle()
+    # A model that leaves the shortlist keeps no Fast setting, in one save.
+    generation = context.settings()["generation"]
+    _save(
+        context,
+        qtbot,
+        lambda: qtbot.mouseClick(panel.rows[0].switch, Qt.MouseButton.LeftButton),
+    )
+    settle()
+    assert context.setting("shortlist.codex") == ["older@low"]
+    assert context.setting("fast.codex") == ["older"]
+    assert context.settings()["generation"] == generation + 1
 
 
 def test_effort_change_off_the_shortlist_saves_nothing(
@@ -1193,6 +1285,7 @@ def test_claude_shortlist_entry(
         lambda: qtbot.mouseClick(row.switch, Qt.MouseButton.LeftButton),
     )
     assert context.setting("shortlist.claude") == ["opus@low"]
+    assert row.speed_picker is None
 
 
 def test_opencode_entries_with_and_without_effort(

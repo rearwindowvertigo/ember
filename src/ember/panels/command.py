@@ -159,15 +159,25 @@ def _left_out(
 
 
 def _dry_run(
-    top: str, selection: members.Selection, as_json: bool, out: TextIO
+    top: str,
+    selection: members.Selection,
+    as_json: bool,
+    out: TextIO,
+    answers: Mapping[str, Mapping[str, Any]],
 ) -> None:
-    """Print resolved members without allocating records or checking launch tools."""
+    """Print resolved members without allocating records or checking launch tools.
+
+    A Codex member's `speed` is the one a start gets from the settings now.
+    """
     entries = [
         {
             "n": n,
             "engine": m.engine,
             "model": m.model,
             "effort": m.effort,
+            "speed": choices.codex_speed(answers, m.model)
+            if m.engine == "codex"
+            else None,
             "source": m.source,
         }
         for n, m in enumerate(selection.members, 1)
@@ -183,9 +193,10 @@ def _dry_run(
         return
     print(f"checkout {top}", file=out)
     for item in entries:
+        speed = f" · {item['speed']}" if item["speed"] else ""
         print(
             f"member {item['n']} {item['engine']}:{item['model']} · "
-            f"{item['effort'] or 'default'} · {item['source']}",
+            f"{item['effort'] or 'default'}{speed} · {item['source']}",
             file=out,
         )
     _left_out(selection.left_out, out)
@@ -350,9 +361,9 @@ def _progress(panel: dict[str, Any], env: Mapping[str, str]) -> None:
         member["last_screen_change_at"] = None
         if member["run"]:
             with contextlib.suppress(runs.RecordError):
-                member["last_screen_change_at"] = runs.load(
-                    member["run"], env
-                ).last_screen_change_at
+                saved = runs.load(member["run"], env)
+                member["last_screen_change_at"] = saved.last_screen_change_at
+                member["speed"] = saved.speed
         if panel["status"] != "running" or member["status"] not in (
             "starting",
             "running",
@@ -458,7 +469,7 @@ def _prepare(
     env: Mapping[str, str],
     core_factory: run.CoreFactory,
     err: TextIO,
-) -> tuple[Path, str, str, list[str], members.Selection]:
+) -> tuple[Path, str, str, list[str], members.Selection, dict[str, Any]]:
     """Validate inputs and resolve members before allocating a panel."""
     question_path = Path(args.question_file).expanduser().absolute()
     try:
@@ -482,7 +493,7 @@ def _prepare(
     core = core_factory(env, quiet=True)
     selection = members.select(args.member, settings, env, core.load_driver)
     _left_out(selection.left_out, err, "emb panel: ")
-    return question_path, question, top, read, selection
+    return question_path, question, top, read, selection, settings
 
 
 def main(
@@ -517,11 +528,11 @@ def main(
         stall = args.stall if args.stall is not None else STALL_MINUTES
         timeout = args.timeout if args.timeout is not None else TIMEOUT_MINUTES
         if mode == "question_file":
-            question_path, question, top, read, selection = _prepare(
+            question_path, question, top, read, selection, settings = _prepare(
                 args, environment, core_factory, err
             )
             if args.dry_run:
-                _dry_run(top, selection, args.json, out)
+                _dry_run(top, selection, args.json, out, settings["answers"])
                 return exits.OK
             if shutil.which("tmux", path=environment.get("PATH", os.defpath)) is None:
                 raise CommandError(69, "tmux is not on PATH", "owner: install tmux")

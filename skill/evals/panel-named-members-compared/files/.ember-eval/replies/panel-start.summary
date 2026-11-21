@@ -8,7 +8,7 @@ Members: 3; answered: 2; status: incomplete
 
 Is tools/report.py's rounding of totals right for money, and what should change?
 
-## Member 1: codex:gpt-6-astra · default
+## Member 1: codex:gpt-6-astra · default · standard
 
 Status: answered · exit 0 · 31s · run codex-{{STAMP}}-aaaaa1 · 246 bytes
 

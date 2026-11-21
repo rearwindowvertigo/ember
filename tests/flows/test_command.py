@@ -209,20 +209,22 @@ def test_dry_run(
             "model": "gpt-5",
             "effort": "high",
             "source": "plan",
+            "speed": "standard",
         }
         assert result["reviewer"] == {
             "engine": "codex",
             "model": "gpt-5",
             "effort": "low",
             "source": "plan",
+            "speed": "standard",
         }
         assert result["same_model"] is True
         assert result["check"] == []
         gapcheck = result["gapcheck"]
     else:
         assert out.splitlines()[:3] == [
-            "plan, writer: codex gpt-5 · high (plan)",
-            "plan, reviewer: codex gpt-5 · low (plan)",
+            "plan, writer: codex gpt-5 · high · standard (plan)",
+            "plan, reviewer: codex gpt-5 · low · standard (plan)",
             "same model: writer and reviewer both resolve to codex gpt-5",
         ]
         assert out.count("same model:") == 1
@@ -434,8 +436,8 @@ def test_start(
     assert launch[launch.index("-s") + 1] == flow_id
     assert f"EMBER_FLOW_RUNNER={flow_id}" in launch and launch[-1] == "true"
     assert err.splitlines() == [
-        "plan, writer: codex gpt-5 · high (plan)",
-        "plan, reviewer: codex gpt-5 · low (plan)",
+        "plan, writer: codex gpt-5 · high · standard (plan)",
+        "plan, reviewer: codex gpt-5 · low · standard (plan)",
         "same model: writer and reviewer both resolve to codex gpt-5",
         f"next: emb flow --watch {flow_id} --json",
     ]
@@ -457,8 +459,9 @@ def test_different_workers(
     else:
         engine, model = reviewer.removesuffix("@low").split(":")
         lines = [
-            "plan, writer: codex gpt-5 · high (plan)",
-            f"option, reviewer: {engine} {model} · low (option)",
+            "plan, writer: codex gpt-5 · high · standard (plan)",
+            f"option, reviewer: {engine} {model} · low"
+            f"{' · standard' if engine == 'codex' else ''} (option)",
         ]
         if mode == "start":
             flow_id = out.splitlines()[0].split()[1]
@@ -2224,9 +2227,23 @@ def test_dry_run_reads_the_flow_settings(env: dict[str, str], plan_file: Path) -
     code, out, err = invoke(env, "--plan", str(plan_file), "--dry-run")
     assert code == 0, err
     assert out.splitlines()[:2] == [
-        "Team, Single tasks Writer: codex gpt-5 · high (single.writer)",
-        "Team, Flow reviewer: codex gpt-5-mini · low (flow.reviewer)",
+        "Team, Single tasks Writer: codex gpt-5 · high · standard (single.writer)",
+        "Team, Flow reviewer: codex gpt-5-mini · low · standard (flow.reviewer)",
     ]
+    # A model the owner set to Fast is announced as fast, in text and JSON.
+    choices.set_settings({"fast.codex": ["gpt-5-mini"]}, env=env)
+    code, out, err = invoke(env, "--plan", str(plan_file), "--dry-run")
+    assert code == 0, err
+    assert out.splitlines()[1] == (
+        "Team, Flow reviewer: codex gpt-5-mini · low · fast (flow.reviewer)"
+    )
+    code, out, err = invoke(env, "--plan", str(plan_file), "--dry-run", "--json")
+    assert code == 0, err
+    result = json.loads(out)
+    assert (result["writer"]["speed"], result["reviewer"]["speed"]) == (
+        "standard",
+        "fast",
+    )
     assert "Team," not in err
 
 
@@ -2262,17 +2279,20 @@ def test_dry_run_announces_worker_options(
             "model": "opus",
             "effort": "high",
             "source": "option",
+            "speed": None,
         }
         assert result["reviewer"] == {
             "engine": "codex",
             "model": "other",
             "effort": default_effort,
             "source": "option",
+            "speed": "standard",
         }
     else:
         assert out.splitlines()[:2] == [
             "option, writer: claude opus · high (option)",
-            f"option, reviewer: codex other · {default_effort or 'default'} (option)",
+            "option, reviewer: codex other · "
+            f"{default_effort or 'default'} · standard (option)",
         ]
     assert "option, writer:" not in err
     assert "option, reviewer:" not in err
@@ -2304,7 +2324,8 @@ def test_dry_run_announces_separate_effort_source(
     assert code == 0, err
     row = "single" if same else "flow"
     assert out.splitlines()[:2] == [
-        f"{source}, {role}: codex gpt-5 · high (model: {source}, effort: {row}.{role})"
+        f"{source}, {role}: codex gpt-5 · high · standard "
+        f"(model: {source}, effort: {row}.{role})"
         for role in plan.ROLES
     ]
 

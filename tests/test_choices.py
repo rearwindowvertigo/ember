@@ -91,6 +91,9 @@ INVALID = [
     ("shortlist.codex", ["-gpt@high"]),
     ("shortlist.codex", ["gpt@high\n"]),
     ("shortlist.codex", [""]),
+    ("fast.codex", ["gpt", "gpt"]),
+    ("fast.codex", ["gpt@high"]),
+    ("fast.codex", "gpt"),
     ("shortlist.opencode", ["qwen@high"]),
     ("shortlist.opencode", ["a/b@x", "a/b"]),
     ("shortlist.opencode", ["a/:b"]),
@@ -153,6 +156,7 @@ def test_defaults(env: dict[str, str]) -> None:
         "engine.opencode": "on",
         "shortlist.claude": [],
         "shortlist.codex": [],
+        "fast.codex": [],
         "shortlist.opencode": [],
         "single.writer": "ask",
         "single.writer_as": "cli",
@@ -1751,6 +1755,22 @@ def test_fallback_list_is_a_standing_setting_of_shortlisted_models(
         "value": ["codex:gpt-5"],
         "layer": "setting",
     }
+
+
+def test_fast_codex_uses_standing_shortlisted_model_names(env: dict[str, str]) -> None:
+    assert choices.codex_speed(choices.read(env=env)["answers"], "gpt") == "standard"
+    with pytest.raises(choices.InvalidChoiceError, match="one-time"):
+        choices.set_once({"fast.codex": ["gpt"]}, env=env)
+    choices.set_settings(
+        {"fast.codex": ["gpt"], "shortlist.codex": ["gpt@high", "mini@low"]}, env=env
+    )
+    choices.set_settings({"shortlist.codex": ["mini@low"]}, env=env)
+    with pytest.raises(choices.InvalidChoiceError, match="not on the codex shortlist"):
+        choices.set_settings({"fast.codex": ["gpt", "other"]}, env=env)
+    choices.set_settings({"fast.codex": ["gpt", "mini"]}, env=env)
+    assert choices.codex_speed(choices.read(env=env)["answers"], "gpt") == "fast"
+    choices.set_settings({"fast.codex": []}, env=env)
+    assert choices.codex_speed(choices.read(env=env)["answers"], "mini") == "standard"
 
 
 def _fallback_answers(

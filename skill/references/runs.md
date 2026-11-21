@@ -37,7 +37,10 @@ trailer with an apostrophe, join single-quoted pieces with `'\''`.
   shortlist entry `gpt-6.1-sol@high`.
 
 The dry-run line (SKILL.md step 3) reads like
-`Team, Single tasks Writer: codex gpt-6.1-sol · high (single.writer)`. With
+`Team, Single tasks Writer: codex gpt-6.1-sol · high · standard (single.writer)`.
+A Codex worker's lines name its speed after the effort: `standard`, or
+`fast` for a model the owner set to Codex's Fast tier on the Engines
+screen. The speed is the owner's setting: report it as printed. With
 `--read-only`, the row is `Single tasks Reviewer`. Sources are the
 Team row key, `--model` or `--effort`. When they differ, the suffix is
 `(model: single.writer, effort: --effort)`, for example. A driver's default
@@ -142,7 +145,7 @@ session takes no typed messages.
 Each turn prints:
 
 ```text
-<engine> <model> · <effort> · <secs>s · exit <code> · <n> files · turn <n>
+<engine> <model> · <effort>[ · <speed>] · <secs>s · exit <code> · <n> files · turn <n>
 run <id>
 worktree <path>
 branch <branch>

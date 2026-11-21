@@ -278,15 +278,17 @@ class WorkerSelection:
     effort_source: str
     row: str
     screen: str = "Team"
+    speed: str | None = None
 
     def line(self) -> str:
         """Return the worker's announce line."""
         source = self.model_source
         if self.effort_source != self.model_source:
             source = f"model: {self.model_source}, effort: {self.effort_source}"
+        speed = f" · {self.speed}" if self.speed else ""
         return (
             f"{self.screen}, {self.row}: {self.engine} {self.model} · "
-            f"{self.effort or 'default'} ({source})"
+            f"{self.effort or 'default'}{speed} ({source})"
         )
 
 
@@ -779,6 +781,7 @@ class Core:
             model=model,
             effort=effort,
             model_source=model_source,
+            speed=choices.codex_speed(answers, model) if engine == "codex" else None,
             effort_source=effort_source,
             row="Single tasks Reviewer" if options.read_only else "Single tasks Writer",
         )
@@ -1141,6 +1144,7 @@ class Core:
                 capacity_wait=int(answers["provider.capacity_wait"]["value"]),
                 model=worker.model,
                 effort=worker.effort,
+                speed=worker.speed,
                 read_only=options.read_only,
                 detached=options.read_only,
                 scoped=scopes.available(self.env),
@@ -2760,8 +2764,9 @@ class Core:
         window: str | None,
     ) -> None:
         effort = run.effort or "default"
+        speed = f" · {run.speed}" if run.speed else ""
         self._say(
-            f"{run.engine} {run.model} · {effort} · {round(seconds)}s · "
+            f"{run.engine} {run.model} · {effort}{speed} · {round(seconds)}s · "
             f"exit {code} · {files} files · turn {run.turn}"
         )
         if self.quiet:

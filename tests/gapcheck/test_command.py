@@ -141,6 +141,7 @@ def test_full_check_explicit_options_with_ask_rows(
         "engine": "codex",
         "model": "unlisted-model",
         "effort": "low",
+        "speed": "standard",
         "source": "option",
     }
     assert data["run"]["closed"] is True
@@ -2184,6 +2185,7 @@ def test_a_provider_failure_repeats_the_check_on_the_fallback_reviewer(
         "engine": "claude",
         "model": "opus",
         "effort": "high",
+        "speed": None,
         "source": "fallback",
     }
     assert data["run"]["id"].startswith("claude-")
@@ -2240,5 +2242,6 @@ def test_a_held_model_of_the_named_engine_is_reported_as_a_fallback(
         "engine": "codex",
         "model": "m",
         "effort": "high",
+        "speed": "standard",
         "source": "fallback",
     }

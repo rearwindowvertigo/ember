@@ -677,6 +677,7 @@ def _run(
             "engine": run.engine,
             "model": run.model,
             "effort": run.effort,
+            "speed": run.speed,
             "source": "fallback"
             if failed
             or run.engine != engine

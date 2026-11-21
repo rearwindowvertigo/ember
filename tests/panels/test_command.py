@@ -291,13 +291,25 @@ def test_dry_run_validates_without_launch_or_storage(h: Harness, as_json: bool) 
                     "engine": "codex",
                     "model": "x",
                     "effort": "low",
+                    "speed": "standard",
                     "source": "option",
                 }
             ],
             "left_out": [],
         }
     else:
-        assert out == f"checkout {h.repo}\nmember 1 codex:x · low · option\n"
+        assert out == f"checkout {h.repo}\nmember 1 codex:x · low · standard · option\n"
+        choices.set_settings(
+            {"shortlist.codex": ["x@low"], "fast.codex": ["x"]}, env=h.env
+        )
+        code, out, err = h.start(
+            "--member", "codex:x@low", "--member", "claude:opus", "--dry-run"
+        )
+        assert code == 0 and not err
+        assert out.splitlines()[1:] == [
+            "member 1 codex:x · low · fast · option",
+            "member 2 claude:opus · medium · option",
+        ]
     h.no_runs()
 
 
@@ -359,7 +371,7 @@ def test_start_output_and_run_options(h: Harness, as_json: bool) -> None:
     else:
         assert out.splitlines()[0].startswith("panel panel-")
         panel_id = out.splitlines()[0].split()[1]
-        assert "member 1 codex:x · low · answered" in err
+        assert "member 1 codex:x · low · standard · answered" in err
         assert " · exit 0 · " in err
         assert "member " not in out
         assert out.splitlines()[-1].startswith("summary ")
@@ -835,7 +847,7 @@ def test_progress_before_panel_ends(h: Harness, as_json: bool) -> None:
     class ProgressStream(io.StringIO):
         def flush(self) -> None:
             super().flush()
-            if "member 1 codex:x · medium · answered" in self.getvalue():
+            if "member 1 codex:x · medium · standard · answered" in self.getvalue():
                 finished.set()
 
     out, err = io.StringIO(), ProgressStream()
@@ -866,6 +878,8 @@ def test_progress_before_panel_ends(h: Harness, as_json: bool) -> None:
                 assert time.monotonic() < deadline
                 time.sleep(0.02)
             assert running["seconds"] > 0
+            assert first["members"][0]["speed"] == "standard"
+            assert running["speed"] is None
             assert running["last_screen_change_at"] > 0
             before = h.invoke("--status", panel_id)[1]
             time.sleep(1.1)
@@ -880,6 +894,7 @@ def test_progress_before_panel_ends(h: Harness, as_json: bool) -> None:
             assert len(listed["running_members"]) == 1
             progress = listed["running_members"][0]
             assert progress["n"] == 2
+            assert set(progress) == {"n", "seconds", "last_screen_change_at"}
             assert progress["seconds"] >= running["seconds"]
             saved = runs.load(running["run"], h.env)
             assert progress["last_screen_change_at"] == saved.last_screen_change_at

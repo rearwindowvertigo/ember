@@ -159,7 +159,7 @@ once the brief is written, run `emb run --dry-run` with the start's exact
 options, including its claim, model, effort and read-only options when
 given. On success, copy its standard-output line as the visible announce
 line right before the start, for example:
-`Team, Single tasks Writer: codex gpt-6.1-sol · high (single.writer)`.
+`Team, Single tasks Writer: codex gpt-6.1-sol · high · standard (single.writer)`.
 A dry-run refusal starts no worker. For a Claude subagent, name the row,
 model and effort yourself.
 
@@ -396,7 +396,7 @@ the unchanged turn is not itself a blocker.
 ### 8. Report and park
 
 For each `emb run`, copy its summary line exactly
-(`<engine> <model> · <effort> · <secs>s · exit <code> · <n> files · turn <n>`),
+(`<engine> <model> · <effort>[ · <speed>] · <secs>s · exit <code> · <n> files · turn <n>`),
 then the verified numstat, then one verdict: `Keep`, `Keep, with <fix>`,
 or `Discard, because <reason>`. While a correction you sent is still to be
 checked, say the branch is under correction instead. When the owner typed

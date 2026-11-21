@@ -216,6 +216,7 @@ def test_summary_golden(left_out: list[dict[str, str]]) -> None:
                 bytes=3,
                 run="codex-000001",
                 effort=None,
+                speed="fast",
             ),
             member(2, status="failed", exit=71, reason="failed turn"),
             member(
@@ -228,7 +229,7 @@ def test_summary_golden(left_out: list[dict[str, str]]) -> None:
         "# Panel panel-20260101-120000-abcdef\n\nCheckout: /checkout\n"
         f"Started: {stamp}\nMembers: 3; answered: 2; status: done\n\n"
         "## Question\n\nWhat?\n\n"
-        "## Member 1: codex:model · default\n\n"
+        "## Member 1: codex:model · default · fast\n\n"
         "Status: answered · exit 0 · 2s · run codex-000001 · 3 bytes\n\nOne\n\n"
         "## Member 2: codex:model · low\n\n"
         "Status: failed · exit 71 · - · run - · 0 bytes\nReason: failed turn\n\n"
@@ -291,8 +292,10 @@ def test_saved_commit_and_legacy_panel(tmp_path: Path) -> None:
     directory = record.create(data, "q", "b", env)
     assert record.load(data["id"], env)["base"] == "a" * 40
     del data["base"]
+    del data["members"][0]["speed"]
     (directory / "panel.json").write_text(json.dumps(data))
     assert record.load(data["id"], env)["base"] is None
+    assert record.load(data["id"], env)["members"][0]["speed"] is None
 
 
 @pytest.mark.parametrize(

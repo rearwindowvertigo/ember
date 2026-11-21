@@ -13,6 +13,7 @@ on. A card whose sandbox is off shows its sandbox check as not run.
 Every read, check and save runs in a task.
 """
 
+import contextlib
 import html
 from collections import Counter
 from collections.abc import Callable, Sequence
@@ -544,8 +545,35 @@ class _EngineCard(Card):
         return order
 
 
+class _SpeedPicker(Picker):
+    """The standing Codex speed for one shortlisted model."""
+
+    def __init__(self, panel: _ModelPanel, model: str) -> None:
+        super().__init__()
+        self.panel = panel
+        self.model_id = model
+        self.setFixedWidth(_EFFORT_WIDTH)
+        self.setAccessibleName(f"Speed of {model}")
+        self.setToolTip(
+            "Fast runs this model on Codex's Fast tier, which can use more of the "
+            "plan's usage. Standard turns the Fast tier off for this model."
+        )
+        for speed in choices.SPEEDS:
+            self.add_option(speed.capitalize(), speed)
+        self.sync()
+        self.activated.connect(self._save)
+
+    def sync(self) -> None:
+        """Show the saved tier, or the one a pending save asked for."""
+        fast = self.model_id in self.panel.owner.fast_models()
+        self.set_value("fast" if fast else "standard")
+
+    def _save(self) -> None:
+        self.panel.owner.save_speed(self.model_id, self.value() == "fast")
+
+
 class _ModelRow(QWidget):
-    """One model in a model list: its columns, effort and Use switch."""
+    """One model's columns, worker settings and Use switch."""
 
     def __init__(
         self,
@@ -621,6 +649,14 @@ class _ModelRow(QWidget):
             none.setFixedWidth(_EFFORT_WIDTH)
             self.effort_cell = none
         layout.addWidget(self.effort_cell, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.speed_picker: _SpeedPicker | None = None
+        self.speed_layout: QHBoxLayout | None = None
+        if engine == "codex":
+            speed_cell = QWidget()
+            speed_cell.setFixedWidth(_EFFORT_WIDTH)
+            self.speed_layout = QHBoxLayout(speed_cell)
+            self.speed_layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(speed_cell)
         layout.addStretch(1)
         self.switch = Switch()
         self.switch.setAccessibleName(f"Shortlist {model.id}")
@@ -634,6 +670,22 @@ class _ModelRow(QWidget):
         self.note = label(role="secondary")
         self.note.hide()
         outer.addWidget(self.note)
+
+    def sync_speed(self, shortlisted: bool) -> None:
+        """Show the speed control while this Codex model is shortlisted."""
+        if self.speed_layout is None:
+            return
+        if shortlisted:
+            if self.speed_picker is None:
+                self.speed_picker = _SpeedPicker(self.panel, self.model.id)
+                self.speed_layout.addWidget(self.speed_picker)
+            else:
+                self.speed_picker.sync()
+        elif self.speed_picker is not None:
+            self.speed_picker.hide()
+            self.speed_layout.removeWidget(self.speed_picker)
+            self.speed_picker.deleteLater()
+            self.speed_picker = None
 
     def effort(self) -> str | None:
         """Return the effort the row shows, or `None`."""
@@ -649,7 +701,8 @@ class _ModelRow(QWidget):
 
     def focus_order(self) -> list[QWidget]:
         """Return the row's controls in reading order."""
-        return [w for w in (self.picker, self.switch) if w is not None]
+        controls = (self.picker, self.speed_picker, self.switch)
+        return [w for w in controls if w is not None]
 
 
 class _MissingRow(QWidget):
@@ -673,6 +726,10 @@ class _MissingRow(QWidget):
         self.info.setProperty("role", "secondary")
         self.info.setFixedWidth(panel.figures_width() + _EFFORT_WIDTH)
         layout.addWidget(self.info, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.speed_picker = None
+        if panel.engine == "codex":
+            self.speed_picker = _SpeedPicker(panel, model)
+            layout.addWidget(self.speed_picker)
         layout.addStretch(1)
         self.remove_button = button("Remove", "secondary", size="sm")
         self.remove_button.setAccessibleName(f"Remove {model} from the shortlist")
@@ -818,6 +875,10 @@ class _ModelPanel(Card):
         effort.setProperty("role", "muted")
         effort.setFixedWidth(_EFFORT_WIDTH)
         header.addWidget(effort)
+        if engine == "codex":
+            speed = label("Speed", "muted", wrap=False)
+            speed.setFixedWidth(_EFFORT_WIDTH)
+            header.addWidget(speed)
         header.addStretch(1)
         use = QLabel("Use")
         use.setProperty("role", "muted")
@@ -1000,6 +1061,7 @@ class _ModelPanel(Card):
             effort = initial_effort(self.engine, model, saved.get(model.id))
             row = _ModelRow(self, model, effort, self.columns)
             row.switch.setChecked(model.id in saved)
+            row.sync_speed(model.id in saved)
             self.rows_area.addWidget(row)
             self.rows.append(row)
         self.header.setVisible(bool(result.models))
@@ -1133,6 +1195,8 @@ class _ModelPanel(Card):
         inside its own area.
         """
         rest = 12 + self.figures_width() + _EFFORT_WIDTH + 12 + self.use_width
+        if self.engine == "codex":
+            rest += _EFFORT_WIDTH + 12
         room = self.table_area.viewport().width() - rest
         fitted = min(self.measured_name, max(_NAME_MIN, room))
         if fitted == self.name_width:
@@ -1150,13 +1214,17 @@ class _ModelPanel(Card):
         for row in self.rows:
             on = row.model.id in saved
             row.switch.setChecked(on)
+            row.sync_speed(on)
             if on and row.picker is not None:
                 effort = initial_effort(self.engine, row.model, saved[row.model.id])
                 row.picker.set_value(effort)
         missing = {row.model_id for row in self.missing}
         if missing != {m for m, _e in self._absent(saved)}:
             self._draw_missing(saved)
-            self.owner.chain_focus()
+        for missing_row in self.missing:
+            if missing_row.speed_picker is not None:
+                missing_row.speed_picker.sync()
+        self.owner.chain_focus()
 
     def apply_filters(self) -> None:
         """Show the rows that pass the OpenCode search and filters."""
@@ -1216,7 +1284,21 @@ class _ModelPanel(Card):
         entries = self.owner.setting(f"shortlist.{self.engine}", [])
         current = entries if isinstance(entries, list) else []
         updated = shortlist_with(self.engine, current, model, effort, on)
-        self.owner.save_shortlist(self.engine, updated)
+        if not on and self.engine == "codex" and model in self.owner.fast_models():
+            # A model without a Speed picker keeps no Fast setting; the two
+            # lists are saved together.
+            self.owner.save_speed(model, False, {"shortlist.codex": updated})
+        else:
+            self.owner.save_shortlist(self.engine, updated)
+
+    def sync_speeds(self) -> None:
+        """Show each Speed picker's saved or pending tier."""
+        for row in self.rows:
+            if row.speed_picker is not None:
+                row.speed_picker.sync()
+        for missing_row in self.missing:
+            if missing_row.speed_picker is not None:
+                missing_row.speed_picker.sync()
 
     def focus_order(self) -> list[QWidget]:
         """Return the panel's controls in reading order."""
@@ -1237,7 +1319,10 @@ class _ModelPanel(Card):
         ]
         for row in self.rows:
             order += row.focus_order()
-        order += [row.remove_button for row in self.missing]
+        for missing_row in self.missing:
+            if missing_row.speed_picker is not None:
+                order.append(missing_row.speed_picker)
+            order.append(missing_row.remove_button)
         order.append(self.state.retry_button)
         return order
 
@@ -1259,6 +1344,9 @@ class EnginesScreen(QWidget):
         self.checking: set[str] = set()
         self.open_engine: str | None = None
         self.panel: _ModelPanel | None = None
+        self.fast_wanted: list[str] | None = None
+        """The `fast.codex` list the Speed changes still being saved asked for."""
+        self.fast_saves = 0
         self._check_tokens: dict[str, int] = {}
         self._reading_engines = False
         self._hold_read = 0
@@ -1546,6 +1634,49 @@ class EnginesScreen(QWidget):
             entries: The whole new shortlist.
         """
         self.context.save_settings({f"shortlist.{engine}": entries})
+
+    def fast_models(self) -> list[str]:
+        """Return the Fast models: those a pending save asked for, else the saved."""
+        if self.fast_wanted is not None:
+            return self.fast_wanted
+        saved = self.setting("fast.codex", [])
+        return list(saved) if isinstance(saved, list) else []
+
+    def save_speed(
+        self, model: str, fast: bool, extra: dict[str, object] | None = None
+    ) -> None:
+        """Save a Codex model's speed on top of every Speed change being saved.
+
+        The pending list is kept here, so it outlives a model panel that is
+        closed and opened again while a save runs.
+
+        Args:
+            model: The Codex model.
+            fast: Whether it runs on the Fast tier.
+            extra: Other settings to save in the same write.
+        """
+        current = self.fast_models()
+        wanted = [name for name in current if name != model]
+        if fast:
+            wanted.append(model)
+        if wanted == current and not extra:
+            return
+        self.fast_wanted = wanted
+        self.fast_saves += 1
+        self.context.save_settings(
+            {**(extra or {}), "fast.codex": wanted}, result=self._speed_saved
+        )
+
+    def _speed_saved(self, outcome: dict[str, Any] | Exception) -> None:
+        """Show the saved speeds once no Speed save is pending."""
+        self.fast_saves -= 1
+        if self.fast_saves:
+            return
+        self.fast_wanted = None
+        # The panel can have been closed while the save ran.
+        if self.panel is not None:
+            with contextlib.suppress(RuntimeError):
+                self.panel.sync_speeds()
 
     def run_command(self, engine: str, command: str) -> None:
         """Ask to run a setup command; on Run in terminal, ask to check again.

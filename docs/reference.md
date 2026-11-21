@@ -50,6 +50,7 @@ empty list.
 | `worktree.prepare` | JSON object mapping absolute main-checkout paths to shell command strings; empty string means no preparation | `{}` | standing |
 | `engine.claude`, `engine.codex`, `engine.opencode` | `on`, `off` | `on` | standing |
 | `shortlist.claude`, `shortlist.codex` | List of `<model>@<effort>`; model `[A-Za-z0-9][A-Za-z0-9._-]*`, effort `[a-z]+` | `[]` | standing |
+| `fast.codex` | List of distinct Codex model names that use Fast. New entries must be on `shortlist.codex` when saved. Existing entries may stay after leaving the shortlist. All other Codex models use Standard. | `[]` | standing |
 | `shortlist.opencode` | List of full `<integration>/<model>` ids, with optional `@<effort>`; integration `~?[A-Za-z0-9][A-Za-z0-9._-]*`, model one or more `/`-separated parts matching `~?[A-Za-z0-9][A-Za-z0-9._:-]*` | `[]` | standing |
 | `single.writer`, `single.reviewer` | `ask`, or `<engine>:<model>` with the model on that engine's shortlist when saved | `ask` | request, one-time, standing |
 | `multi.runs_as` | `ask`, `flow`, `workflow` | `ask` | request, one-time, standing |
@@ -436,12 +437,16 @@ does not report them. Catalogue prices per million tokens are converted
 to per-token values in JSON. `provider` is the integration id,
 `provider_name` its display name, and `login` is `oauth`, `api`, or `null`
 when unknown. These three fields are `null` for other engines, whose
-`integrations` list is empty.
+`integrations` list is empty. Each Codex model also has `speed`, either
+`standard` or `fast`, from the current `fast.codex` setting.
 
 Text output starts with `<engine> models from <source>, read <age> ago` (or
 `never read`), then one line per model: its id, label, efforts, context
 length, prices in US dollars per million tokens and `tools` when it takes tool
-calls. `reason` goes to standard error as `emb engines: <reason>`.
+calls. A Codex model line includes ` · <speed>` after its efforts, or after
+its name when it has no reported efforts. When the settings cannot be
+read, the error goes to standard error and the models are listed without
+`speed`. `reason` goes to standard error as `emb engines: <reason>`.
 
 ## `emb run`
 
@@ -557,7 +562,7 @@ record or session and runs no sandbox probe. It exits 0 on success, or with
 the exit code of the failed check. It prints one line on standard output:
 
 ```text
-Team, Single tasks Writer: codex gpt-6.1-sol · high (single.writer)
+Team, Single tasks Writer: codex gpt-6.1-sol · high · standard (single.writer)
 ```
 
 The row is `Single tasks Reviewer` with `--read-only`. Model and effort
@@ -566,7 +571,7 @@ the driver's default has the model's source; an unset effort prints as
 `default`. When sources differ, the line names each:
 
 ```text
-Team, Single tasks Writer: codex gpt-6.1-sol · low (model: single.writer, effort: --effort)
+Team, Single tasks Writer: codex gpt-6.1-sol · low · standard (model: single.writer, effort: --effort)
 ```
 
 With `--json`, the dry run prints one object instead:
@@ -578,13 +583,15 @@ With `--json`, the dry run prints one object instead:
   "engine": "codex",
   "model": "gpt-6.1-sol",
   "effort": "high",
+  "speed": "standard",
   "model_source": "single.writer",
   "effort_source": "single.writer"
 }
 ```
 
-An unset effort is `null` in JSON. A dry run reads the settings when it
-runs; a later start resolves them again.
+An unset effort is `null` in JSON. The announce line places the Codex speed
+after the effort. For other engines, the JSON `speed` is `null`. A dry run
+reads the settings when it runs. A later start resolves them again.
 
 An editing run gets the branch `ember/<engine>/<id>`, cut from the named
 checkout's `HEAD`, in a worktree at `worktrees/<id>` in Ember's data folder,
@@ -963,7 +970,7 @@ worktree.
 Each turn prints:
 
 ```text
-<engine> <model> · <effort> · <secs>s · exit <code> · <n> files · turn <n>
+<engine> <model> · <effort>[ · <speed>] · <secs>s · exit <code> · <n> files · turn <n>
 run <id>
 worktree <path>
 branch <branch>
@@ -974,6 +981,7 @@ reply <path>
 <reply text>
 ```
 
+The summary includes speed when the run record has one.
 A missing value prints as `-`, and an effort that is not set as `default`.
 `window` is the terminal's process id of a start. `--quiet` prints the summary
 line only.
@@ -1114,6 +1122,7 @@ UTC. It is also the tmux session's name.
 | `engine` | string | `codex`, `opencode` or `claude` |
 | `model` | string | The model |
 | `effort` | string or null | The effort; null when the engine's default applies |
+| `speed` | string, optional | Codex tier at start, `standard` or `fast`. Absent for other engines and in older records. Send, recovery and capacity retries use the recorded tier. |
 | `read_only` | boolean | Whether the run reviews without a branch or Ember commits |
 | `detached` | boolean | Whether Ember owns a detached review worktree; false for a record without this field |
 | `scoped` | boolean | Whether the worker session uses its own systemd user scope, `ember-run-<id>.scope`; false for fallback runs and records without this field |
@@ -1173,7 +1182,9 @@ standard error. Without `--json`, `--status RUN`
 prints one `<field>: <value>` line per field except `next`, including
 `step: <step>`. The `next` text goes to standard error when non-null.
 `--status` prints one line per run:
-`<id>  <status>  <session_state>  turn <n>  <subject>`.
+`<id>  <status>  <session_state>  turn <n>  <subject>`. The line names no
+speed; each object of `--status --json` holds its run's record fields,
+`speed` among them.
 
 `step` and `next` are derived from the existing run and claim records,
 session and git history, and are not stored in `run.json`. `next` is the
@@ -1532,7 +1543,7 @@ that was killed stays until the next command that waits for the turn.
 
 | | Codex | OpenCode | Claude |
 |---|---|---|---|
-| Starts | Codex's interactive session in the pane: `codex -C <worktree> -m <model> -c check_for_update_on_startup=false [-c model_reasoning_effort=<effort>] -a never --search`, with Ember's permission profile in `-c` options, or `--sandbox danger-full-access` when the sandbox is off | OpenCode's interactive view in the pane, with its built-in server on a free port of `127.0.0.1` protected by a password, the stored model id passed unchanged to `--model` and the agent `ember-worker`, inside `bwrap` when the sandbox is on | A program of Ember's in the pane that runs one `claude -p --output-format stream-json` per turn in the worktree, inside `bwrap` when the sandbox is on, and shows its progress; the program itself runs outside the sandbox |
+| Starts | Codex's interactive session in the pane: `codex -C <worktree> -m <model> -c check_for_update_on_startup=false [-c model_reasoning_effort=<effort>] [tier option] -a never --search`, with Ember's permission profile in `-c` options, or `--sandbox danger-full-access` when the sandbox is off | OpenCode's interactive view in the pane, with its built-in server on a free port of `127.0.0.1` protected by a password, the stored model id passed unchanged to `--model` and the agent `ember-worker`, inside `bwrap` when the sandbox is on | A program of Ember's in the pane that runs one `claude -p --output-format stream-json` per turn in the worktree, inside `bwrap` when the sandbox is on, and shows its progress; the program itself runs outside the sandbox |
 | Brief | Pasted once Codex's composer shows `? for shortcuts` | Sent through the server's session API once the server answers and the view has drawn its screen | Written as turn 1's request before the pane starts; given to the CLI on standard input |
 | Turn end and reply | Read from Codex's rollout file: `task_complete` with its last message, or `turn_aborted`; an `error` event during the turn fails it; a retry inside the open turn is read from the screen as a provider wait | Read from the session status and messages: the turn's last assistant message, once the session is idle; its text parts are the reply | The CLI's exit; the reply is the assistant text after the turn's last tool result |
 | Later messages | Pasted | Sent through the session API | A new `claude -p` that resumes the previous turn's CLI session |
@@ -1540,6 +1551,10 @@ that was killed stays until the next command that waits for the turn.
 | Sandbox provider | `codex` | `bubblewrap` | `bubblewrap` |
 | `--interrupt` | Presses Escape in the session | Aborts the turn through the session API | Sends `SIGINT` to the process group of the turn's CLI, as Ctrl+C in the pane does; the program takes the next turn |
 | Messages Ember did not send | Each `user_message` in the rollout that does not match, in order, a message Ember pasted | Each user message whose id Ember did not send | None; the pane takes no typed messages |
+
+Codex receives `-c features.fast_mode=false` for Standard and
+`-c service_tier="fast"` for Fast. A run record without `speed` supplies
+neither option.
 
 OpenCode requests zero data retention through OpenRouter's provider options
 only for `openrouter/` models. Other integrations receive no OpenRouter
@@ -2023,7 +2038,7 @@ with `--previous`, and reads `  none` when nothing is settled. A nonempty
 | `previous_plan` | Plan path recorded in the earlier result, or null |
 | `next_id` | Next unused gap number; repeat checks continue from this number |
 | `dispositions` | Earlier active and settled gap ids, each with `status` and `reason` |
-| `reviewer` | `engine`, `model`, `effort` and `source`; values come from the run record, and `source` is `fallback` when the run was on a worker of the fallback list, `option` when `--engine` was given, otherwise `menu` |
+| `reviewer` | `engine`, `model`, `effort`, `speed` (null when absent from the run) and `source`; values come from the run record, and `source` is `fallback` when the run was on a worker of the fallback list, `option` when `--engine` was given, otherwise `menu` |
 | `run` | `id`, `reply` (absolute reply path or null), `exit` (the start's exit), `closed` and `close_error` (null or a reason) |
 | `steps` | Covered steps, each with `step`, `title` and `gaps`; each gap has `id`, `gap`, `harm`, `why`, `default`, `earlier` (an earlier gap id or null), `answer` (null until the lead records one) and `ask_owner` |
 | `settled` | Earlier gaps with a `settled` disposition, their original step and title, gap fields and answer |
@@ -2921,9 +2936,13 @@ for the reviewer on standard output; `--start` prints the same lines on
 standard error, in the `emb run --dry-run` form:
 
 ```text
-Team, Flow writer: codex gpt-6.1-sol · high (flow.writer)
+Team, Flow writer: codex gpt-6.1-sol · high · standard (flow.writer)
 Team, Flow reviewer: claude opus · high (flow.reviewer)
 ```
+
+A Codex worker's line names the speed that a start of its model gets from
+`fast.codex` when the line is printed. In the dry run's JSON, `writer` and
+`reviewer` each have `speed`, null for another engine.
 
 A flow row set to Same as names `Single tasks Writer` or `Single tasks
 Reviewer` and the corresponding `single.writer` or `single.reviewer`
@@ -3405,6 +3424,7 @@ updates `updated_at` and atomically replaces `panel.json`.
 | `engine`, `model`, `effort`, `source` | Selected member; effort may be null for the engine default |
 | `status` | One of the member statuses above |
 | `run` | Run id, saved when Core prints it, or null |
+| `speed` | Speed from the member's run record, or null when absent or before the run starts. Panel status JSON includes this field. |
 | `exit`, `reason` | Last attempt's exit and failure reason, or null |
 | `reply`, `bytes` | Reply path or null, and its UTF-8 byte count, initially 0 |
 | `changed` | Changed paths without duplicates, initially empty |
@@ -3423,8 +3443,9 @@ Ember writes the summary; it does not ask another model to summarize. The
 header contains the panel id, checkout, local ISO 8601 start time to the
 second, member count, answered count and panel status. The question comes
 next. Each member section contains its number, engine, model and effort
-(`default` for null), then status, exit, elapsed seconds rounded to the
-nearest integer, run id and byte count. Null exit, elapsed time and run id
+(`default` for null), followed by ` · <speed>` when recorded, then status,
+exit, elapsed seconds rounded to the nearest integer, run id and byte
+count. Null exit, elapsed time and run id
 are shown as `-`. Changed paths and a reason appear when present, followed
 by the whole reply or `(no answer)`. An unreadable reply is shown as
 `(the reply file cannot be read: <error>)`. A final `Left out` section
@@ -3559,7 +3580,7 @@ flushes it. In both text and JSON modes, each member's line is printed and
 flushed on standard error when that member ends:
 
 ```text
-member <n> <engine>:<model> · <effort or default> · <status> · <seconds>s · exit <exit or -> · <bytes> bytes · run <run or ->
+member <n> <engine>:<model> · <effort or default>[ · <speed>] · <status> · <seconds>s · exit <exit or -> · <bytes> bytes · run <run or ->
 ```
 
 Seconds are rounded to the nearest integer. Unknown elapsed time is `-`
@@ -3590,9 +3611,11 @@ the empty list above stands for those dictionaries. `left_out` contains
 line printed on standard error.
 
 A text dry run prints `checkout <dir>`, then
-`member <n> <engine>:<model> · <effort or default> · <source>` per member,
-then the left-out lines. Its JSON object has `dir`, `members` and
-`left_out`. Each member has `n`, `engine`, `model`, `effort` and `source`.
+`member <n> <engine>:<model> · <effort or default>[ · <speed>] · <source>`
+per member, then the left-out lines. Its JSON object has `dir`, `members`
+and `left_out`. Each member has `n`, `engine`, `model`, `effort`, `speed`
+and `source`. `speed` is the one a start of a Codex member gets from
+`fast.codex` when the dry run is made, and null for another engine.
 A dry run prints no next action.
 
 `--status PANEL` prints each top-level record field except `members` and
@@ -4962,10 +4985,12 @@ Buttons pass a file URL to `QDesktopServices.openUrl` for the desktop's
 default viewer. If it returns false, the line under the buttons reads
 `No viewer opened <path>.`
 
-A run's title, after `Run`, shows its subject on one line, or engine, model
-and effort for a run without one. Its second line shows engine, model and
-effort when the title holds the subject, then the repository folder, the
-result and the times:
+A run's worker text reads `<Engine> · <model>`, followed by its effort and
+speed, each separated by ` · ` when recorded. A panel member's line also
+shows its recorded speed after the effort. A run's title, after `Run`,
+shows its subject on one line, or its worker text for a run without a
+subject. The second line shows the worker text when the title holds the
+subject, then the repository folder, the result and the times:
 
 - live: `turn <n>` and the commits so far (`1 commit`, `<n> commits`), or
   `read-only`; then `started <start> · <elapsed>`, the elapsed time to the
@@ -5163,7 +5188,11 @@ engine reads "Held after <kind> until <HH:MM>" and a hold of one model
 "<model>: held after <kind> until <HH:MM>", in local time. Try again now
 under a hold ends that hold. Refresh list reads models from their source.
 Model switches save shortlist entries; OpenCode entries keep the full
-integration-prefixed id and any selected effort.
+integration-prefixed id and any selected effort. Each shortlisted Codex
+model has a Speed picker beside its effort. Fast adds the model to
+`fast.codex` and Standard removes it. A Speed change made while another is
+being saved is added to it. Switching a model off the shortlist, or
+removing it there, also removes it from `fast.codex`.
 
 The OpenCode table has Model, Provider, Context, Input $/M and Output $/M
 columns, alongside effort and shortlist controls. Provider is the serving

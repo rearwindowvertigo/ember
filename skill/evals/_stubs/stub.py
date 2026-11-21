@@ -760,7 +760,8 @@ def turn_block(run: dict[str, Any], files: int, commit: str | None) -> str:
     """
     reply = Path(run["reply"]).read_text(encoding="utf-8") if run.get("reply") else ""
     lines = [
-        f"{run['engine']} {run['model']} · {run['effort'] or 'default'} · "
+        f"{run['engine']} {run['model']} · {run['effort'] or 'default'}"
+        f"{' · ' + run['speed'] if run.get('speed') else ''} · "
         f"{SECONDS}s · exit 0 · {files} files · turn {run['turn']}",
         f"run {run['id']}",
         f"worktree {run['worktree']}",
@@ -1080,6 +1081,24 @@ def add_next(reply: Reply, run: dict[str, Any], state: dict[str, Any]) -> Reply:
     return reply
 
 
+def codex_speed(engine: str, model: str) -> str | None:
+    """Return a worker's speed as a start resolves it from the settings reply.
+
+    Args:
+        engine: The engine.
+        model: The model.
+
+    Returns:
+        `fast` for a Codex model in the reply's `fast.codex` list, `standard`
+        for any other Codex model, and `None` for another engine.
+    """
+    if engine != "codex":
+        return None
+    settings = json.loads(read_part(reply_base("choices-read", 1), ".out", {}) or "{}")
+    fast = settings.get("answers", {}).get("fast.codex", {}).get("value", [])
+    return "fast" if model in fast else "standard"
+
+
 def run_start(
     args: list[str], state: dict[str, Any], base: Path | None, variables: dict[str, str]
 ) -> Reply:
@@ -1167,6 +1186,7 @@ def run_start(
         model_source=model_source,
         effort_source=effort_source,
         row="Single tasks Reviewer" if read_only else "Single tasks Writer",
+        speed=codex_speed(engine, model),
     )
     head = out(directory, "rev-parse", "HEAD")
     if has(args, "--dry-run"):
@@ -1192,6 +1212,7 @@ def run_start(
         "engine": engine,
         "model": model,
         "effort": effort,
+        **({"speed": worker.speed} if worker.speed else {}),
         "read_only": read_only,
         "detached": read_only,
         "repo": str(repo),
@@ -1458,7 +1479,8 @@ def flow_start(
         "merge_commits": merge_commits,
     }
     errors = io.StringIO()
-    flows._worker_lines(writer, reviewer, errors)
+    # The announce lines use the settings the workers were resolved with.
+    flows._worker_lines(writer, reviewer, errors, settings.get("answers", {}))
     return Reply(
         0,
         f"flow {flow_id}\nbranch {branch}\nworktree {worktree}\n",

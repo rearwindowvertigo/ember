@@ -1,4 +1,4 @@
 checkout {{DIR}}
-member 1 codex:gpt-6-astra · default · option
+member 1 codex:gpt-6-astra · default · standard · option
 member 2 claude:opus · default · option
 member 3 opencode:openrouter/deepseek/deepseek-v4.1-flash-1017 · default · option

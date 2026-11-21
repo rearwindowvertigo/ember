@@ -221,9 +221,10 @@ def newest_check_log(folder: Path) -> Path | None:
 def member_line(member: Mapping[str, Any]) -> str:
     """Return a member's worker, status and rounded duration."""
     seconds = "-" if member["seconds"] is None else str(round(member["seconds"]))
+    speed = f" · {member['speed']}" if member.get("speed") else ""
     return (
         f"{member['n']}. {engine_name(member['engine'])} · {member['model']} · "
-        f"{member['effort'] or 'default'} · "
+        f"{member['effort'] or 'default'}{speed} · "
         f"{member['status'].capitalize()} · {seconds}s"
     )
 
@@ -279,10 +280,12 @@ def end_text(started: float, ended: float | None) -> str:
 
 
 def worker_line(run: Run) -> str:
-    """Return "<Engine> · <model> · <effort>", leaving out a missing effort."""
+    """Return the engine and model followed by the recorded effort and speed."""
     parts = [engine_name(run.engine), run.model]
     if run.effort:
         parts.append(run.effort)
+    if run.speed:
+        parts.append(run.speed)
     return " · ".join(parts)
 
 
