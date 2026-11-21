@@ -12,7 +12,6 @@ from PySide6.QtCore import QCoreApplication, QEvent, QObject, QThreadPool
 from PySide6.QtGui import QFont, QFontInfo, QPalette
 from PySide6.QtWidgets import QApplication, QWidget
 
-from ember import paths
 from ember.app import main, theme
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -81,16 +80,6 @@ def _restore_appearance(qapp: QApplication) -> Iterator[None]:
         qapp.setStyle(style)
     qapp.setPalette(palette)
     qapp.setFont(font)
-
-
-@pytest.fixture(autouse=True)
-def _healthy_tmp_volume() -> Iterator[None]:
-    """Supply stable capacity for background reads in app tests."""
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(
-            paths, "run_tmp_volume", lambda: paths.RunTmpVolume(100_000, 1024**3, False)
-        )
-        yield
 
 
 @pytest.fixture(autouse=True)

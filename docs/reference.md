@@ -2469,7 +2469,11 @@ any stale check folder with an empty one before the attempt. A stale
 folder is a real directory of that name owned by the current user. Any
 other entry of that name stays, and the attempt fails with a reason that
 names the path. When the check passes, fails, times out or is cancelled,
-the runner removes the folder and keeps the log. If the removal fails, the
+the runner removes the folder and keeps the log. When a directory inside
+the folder denies the removal, each removal gives the current user read,
+write and search permission on the directories that user owns in the
+folder, without following symlinks, and tries once more. If the removal
+fails, the
 runner prints `WARNING: cannot remove check folder <path>: <error>` on
 standard error and the check's result stays. `emb prune` of a flow record
 removes that flow's check folder. Each attempt writes a private

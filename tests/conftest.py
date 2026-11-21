@@ -26,6 +26,25 @@ def no_user_scopes(
     monkeypatch.setattr(scopes, "available", lambda env=None: False)
 
 
+@pytest.fixture
+def run_tmp_volume_reader() -> Callable[..., paths.RunTmpVolume | None]:
+    """Expose the real volume reader to tests that set a reading of their own."""
+    return paths.run_tmp_volume
+
+
+@pytest.fixture(autouse=True)
+def healthy_run_tmp_volume(
+    monkeypatch: pytest.MonkeyPatch,
+    run_tmp_volume_reader: Callable[..., paths.RunTmpVolume | None],
+) -> None:
+    """Supply a fixed reading above both minimums unless a test sets its own."""
+    monkeypatch.setattr(
+        paths,
+        "run_tmp_volume",
+        lambda base=None: paths.RunTmpVolume(100_000, 1024**3, False),
+    )
+
+
 @pytest.fixture(autouse=True)
 def private_run_tmp_root(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
