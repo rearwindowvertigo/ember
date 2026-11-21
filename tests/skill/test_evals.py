@@ -3850,6 +3850,17 @@ def test_the_fixture_clock_follows_the_time_the_fixtures_are_made(
     texts = [path.read_text() for path in replies.iterdir() if path.is_file()]
     assert any(f"panel-{stamp}-aaaaa0" in text for text in texts)
     assert not any("20261102" in text for text in texts)
+    # The generated run records are dated from the same clock.
+    run_id = "codex-" + time.strftime("%Y%m%d-%H%M%S", time.gmtime(began + 1))
+    started = tmp_path / "made/provider-outage/files/.ember-eval/replies/run-start.out"
+    assert started.read_text().startswith(f"run {run_id}-000001\n")
+    state = json.loads(
+        (
+            tmp_path / "made/turn-results-counted/files/.ember-eval/state.json"
+        ).read_text()
+    )
+    assert state["runs"][f"{run_id}-000001"]["started_at"] == began + 1
+    assert all(name.startswith(f"codex-{stamp[:9]}") for name in state["runs"])
 
 
 def test_templates_take_the_fixture_clock(tmp_path: Path, env: dict[str, str]) -> None:

@@ -166,7 +166,7 @@ def turn_results_state() -> dict[str, Any]:
             "XDG_STATE_HOME": str(root / "state"),
         }
         for index, turns in enumerate(outcomes, start=1):
-            run_id = f"codex-20261103-12000{index}-00000{index}"
+            run_id = f"codex-{fixture_stamp(index)}-00000{index}"
             unfinished = index == 3
             run = record.Run(
                 id=run_id,
@@ -189,8 +189,8 @@ def turn_results_state() -> dict[str, Any]:
                 turn_state=record.SENT if unfinished else record.COLLECTED,
                 reply=None,
                 expected_head=None,
-                started_at=float(index),
-                updated_at=float(index + 1),
+                started_at=fixture_began() + index,
+                updated_at=fixture_began() + index + 1,
                 ended_at=None,
                 last_exit=124 if unfinished else 0,
                 last_reason="stalled" if unfinished else None,
@@ -281,7 +281,7 @@ def provider_replies() -> dict[str, str]:
     ):
         with TemporaryDirectory() as temporary:
             env = {"XDG_STATE_HOME": temporary}
-            run_id = "codex-20261103-120001-000001"
+            run_id = f"codex-{fixture_stamp(1)}-000001"
             run = record.Run(
                 id=run_id,
                 engine="codex",
@@ -303,8 +303,8 @@ def provider_replies() -> dict[str, str]:
                 turn_state=record.SENT,
                 reply=None,
                 expected_head="a" * 40,
-                started_at=1.0,
-                updated_at=2.0,
+                started_at=fixture_began() + 1,
+                updated_at=fixture_began() + 2,
                 ended_at=None,
                 last_exit=None,
                 last_reason=None,
