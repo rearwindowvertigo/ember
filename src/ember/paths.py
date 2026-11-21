@@ -19,6 +19,7 @@ import stat
 import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
+from typing import NamedTuple
 
 APP_NAME = "ember"
 """The name of Ember's folder inside each base directory."""
@@ -39,6 +40,9 @@ RUNTIME_FALLBACK_ROOT = Path("/run/user")
 RUN_TMP_ROOT = Path("/tmp")
 """The base for Codex run and flow check temporary folders."""
 
+RUN_TMP_MIN_FREE_INODES = 50_000
+RUN_TMP_MIN_FREE_BYTES = 256 * 1024**2
+
 RUN_TMP_PATTERN = re.compile(r"ember-[0-9a-f]{6}\Z")
 """The exact names reserved for Codex run temporary folders."""
 
@@ -56,6 +60,14 @@ class RuntimeDirError(RuntimeError):
 
 class WorktreeDirError(ValueError):
     """The worktree folder is inside a Git working tree or repository folder."""
+
+
+class RunTmpVolume(NamedTuple):
+    """Available capacity on the volume holding the run temporary root."""
+
+    free_inodes: int | None
+    free_bytes: int
+    low: bool
 
 
 def _env(env: Mapping[str, str] | None) -> Mapping[str, str]:
@@ -197,6 +209,25 @@ def run_tmp_dir(
     if "/" in run_id or "\0" in run_id or not re.fullmatch(r"[0-9a-f]{6}", suffix):
         raise ValueError(f"{run_id!r} is not a run id")
     return (RUN_TMP_ROOT if base is None else base) / f"ember-{suffix}"
+
+
+def run_tmp_volume(base: Path | None = None) -> RunTmpVolume | None:
+    """Return free inodes, free bytes and whether the run temporary volume is low.
+
+    Read RUN_TMP_ROOT unless a base is given. If the filesystem reports no
+    inode count, free_inodes is None and only free space determines the result.
+    Return None if the volume cannot be read.
+    """
+    try:
+        volume = os.statvfs(RUN_TMP_ROOT if base is None else base)
+    except OSError:
+        return None
+    free_inodes = volume.f_favail if volume.f_files else None
+    free_bytes = volume.f_bavail * volume.f_frsize
+    low = (free_inodes is not None and free_inodes < RUN_TMP_MIN_FREE_INODES) or (
+        free_bytes < RUN_TMP_MIN_FREE_BYTES
+    )
+    return RunTmpVolume(free_inodes, free_bytes, low)
 
 
 def ensure_run_tmp_dir(

@@ -506,6 +506,44 @@ def test_run_tmp_dir_refuses_invalid_ids(home: Path, ident: str) -> None:
         paths.run_tmp_dir(ident, {"HOME": str(home)})
 
 
+@pytest.mark.parametrize(
+    ("files", "free_inodes", "free_blocks", "low"),
+    [
+        (100_000, 49_999, 65_536, True),
+        (100_000, 50_000, 65_535, True),
+        (100_000, 50_000, 65_536, False),
+        (0, 0, 65_536, False),
+        (0, 0, 65_535, True),
+    ],
+)
+def test_run_tmp_volume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    files: int,
+    free_inodes: int,
+    free_blocks: int,
+    low: bool,
+) -> None:
+    volume = Mock(
+        f_files=files, f_favail=free_inodes, f_bavail=free_blocks, f_frsize=4096
+    )
+    statvfs = Mock(return_value=volume)
+    monkeypatch.setattr(os, "statvfs", statvfs)
+    assert paths.run_tmp_volume(tmp_path) == (
+        free_inodes if files else None,
+        free_blocks * 4096,
+        low,
+    )
+    statvfs.assert_called_once_with(tmp_path)
+
+
+def test_run_tmp_volume_handles_statvfs_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    statvfs = Mock(side_effect=OSError("volume unavailable"))
+    monkeypatch.setattr(os, "statvfs", statvfs)
+    assert paths.run_tmp_volume() is None
+    statvfs.assert_called_once_with(paths.RUN_TMP_ROOT)
+
+
 def test_ensure_run_tmp_dir_sets_private_modes(home: Path) -> None:
     env = {"HOME": str(home)}
     parent = paths.RUN_TMP_ROOT
