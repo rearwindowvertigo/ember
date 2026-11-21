@@ -4743,8 +4743,8 @@ last input: a key press shows it, a mouse press does not.
 Tooltips draw in `fill-primary` with `on-primary`, 6-pixel corners and
 12-pixel text. A tooltip wider than 320 pixels wraps at 320 pixels, keeps
 its line breaks and may break a path after each `/`; a shorter one shows on
-one line. An info icon sits 8 pixels after its label, including setting
-names and card titles. Every setting row on Team and Settings has an info
+one line. An info icon is a 20-pixel button that sits 8 pixels after its
+label, including setting names and card titles. Every setting row on Team and Settings has an info
 icon and no line under the name. The icon's tooltip describes what the
 setting does. Hovering the icon, focusing it from the keyboard or
 clicking it shows the tooltip under it, in Ember's own window with 6-pixel

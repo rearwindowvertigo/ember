@@ -248,8 +248,13 @@ class TipPopup(QWidget):
 
     def __init__(self) -> None:
         """Create the hidden window."""
-        super().__init__(None, Qt.WindowType.ToolTip)
-        _set_translucent_popup(self)
+        super().__init__(
+            None,
+            Qt.WindowType.ToolTip
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.NoDropShadowWindowHint,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(*self.PADDING, *self.PADDING)
