@@ -191,7 +191,8 @@ line. Report each orphaned or waiting run to the owner; follow `next:`
 only when this session started its parent command.
 
 The run record's `last_screen_change_at` is the epoch time when a wait
-loop last observed a changed screen. `emb run --status <run> --json`
+loop last observed a changed screen, not counting the timer of a provider
+wait. `emb run --status <run> --json`
 exposes it for standalone runs, flow workers and panel members. Null means
 no recorded activity, including an older record without the field; zero
 is a recorded value.
@@ -249,6 +250,13 @@ runs. Never change these settings to clear an error.
 
 Quote every `WARNING: <engine> <model> at capacity; retry <n> of <max> in
 <secs>s` to the owner, including when the turn succeeds.
+
+An engine can keep a turn open while it retries a refused or dropped
+request. Ember then prints `WARNING: <engine> <model> waits for the
+provider (<kind>): <message>`, and `emb run --status` shows the wait as
+`waiting` in the open turn. Quote that line to the owner too. Ember ends
+a `capacity` wait at once and retries as above; any other wait ends at
+exit 73 once it has lasted the stall time.
 
 Exhausted or disabled retries end at exit 73. `usage_limit` and `outage`
 exit 73 without retrying. Codex recognizes capacity and usage-limit

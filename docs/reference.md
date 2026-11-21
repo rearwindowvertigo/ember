@@ -900,7 +900,10 @@ and retry rules are described under those commands.
 A command that waits for a turn observes it every second. It stops with exit
 124 when the session's screen has not changed for `--stall` minutes and the
 turn has not ended; the session keeps running. Each command, including each
-`--recover`, starts its own count. Ctrl+C stops the waiting command with exit
+`--recover`, starts its own count. The screen is compared without the timer
+an engine shows while it waits for the provider, as described under
+Provider waits in an open turn. The same comparison is used while a run
+starts. Ctrl+C stops the waiting command with exit
 74; the turn keeps running. During a capacity wait, Ctrl+C cancels the
 pending resend; recovery collects the saved turn. Ctrl+C while a turn is
 being collected or committed exits 74 with `next: emb run --recover <run> (finishes the saved
@@ -1115,7 +1118,7 @@ UTC. It is also the tmux session's name.
 | `updated_at` | number | Seconds since the epoch |
 | `ended_at` | number or null | When the session ended |
 | `parent` | object or null | The Ember command that started the run: `command` (`gapcheck`, `panel` or `flow`), `id` (the panel or flow id, null for a gap check), and `pid` and `start` (the process id and its start time in clock ticks since boot); null for `emb run` and for an older record without the field |
-| `last_screen_change_at` | number or null | Epoch seconds when a wait loop last observed a changed screen; null before recorded activity or when absent from an older record |
+| `last_screen_change_at` | number or null | Epoch seconds when a wait loop last observed a changed screen, not counting the timer of a provider wait; null before recorded activity or when absent from an older record |
 | `last_exit` | integer or null | The exit code of the last turn or failure |
 | `last_variant` | string or null | The exit variant used for action and report lines; null when absent from an older record |
 | `last_start_failure` | boolean | Whether the last exit happened before the start completed; false when absent from an older record |
@@ -1280,6 +1283,7 @@ from `turn-<n>.outcome.json`:
 | `provider_kind` | string or null | `capacity`, `usage_limit` or `outage`; null without a provider failure; omitted when absent from an older outcome |
 | `attempts` | list of objects | Ordered attempts with delivery state, provider kind, result and seconds; omitted when absent from an older outcome |
 | `retry_at`, `retry_clock` | number or null | Pending resend deadline and elapsed-time checkpoint in epoch seconds; omitted when absent from an older outcome |
+| `waiting` | object | The provider wait of an open turn: `kind` (`capacity`, `usage_limit` or `outage`), `message` (the engine's words), `since` (epoch seconds) and `interrupted` (true once Ember has interrupted the turn for the wait, otherwise absent); present only while the wait is recorded |
 | `signed_out` | boolean or null | Whether the engine reported a sign-in failure |
 | `incomplete` | string or null | `provider error`, `sign-in failure`, `engine failure` or `no reply`; null for a complete reply |
 | `seconds` | number or null | Elapsed seconds accumulated across collection and recovery; null when absent from an older record |
@@ -1327,7 +1331,7 @@ evidence that no provider error occurred.
 | 79 | Worktree preparation failed before a worker session started | Diagnostic names the log; `next:` gives a new start with the original options and saved brief |
 | 80 | The turn ended with no reply | `next: emb run --screen <run>, then emb run --send <run> ...` |
 | 84 | A start, `--send` or `--recover` otherwise succeeded but ends with a pending owner wait | Each pending `owner:` line on standard error, once per invocation |
-| 124 | Stall; the turn may still be running | `next: emb run --recover <run>` |
+| 124 | Stall, or a turn that did not end within 30 seconds of the interrupt of its provider wait; the turn may still be running | `next: emb run --recover <run>` |
 
 Exit 84 (`OWNER_WAIT`) also applies to `--recover` with nothing left to
 collect when an owner wait remains. Other nonzero exits keep their codes
@@ -1394,13 +1398,63 @@ stay in the worktree; the turn commits once after its last attempt.
 Uncertain delivery leaves edits uncommitted. Turn seconds include waits;
 attempt seconds do not. Both totals persist across recovery.
 
+### Provider waits in an open turn
+
+An engine can keep a turn open while it retries a request the provider
+refused or dropped. The turn's record then holds no error. A driver reports
+such a wait from the session's screen, with a `provider_kind` and the
+engine's message. The Codex driver reads Codex's status line
+`Reconnecting... <n>/<m> (<time> • esc to interrupt)`. The line counts only
+directly above the live composer, the pane's last line that starts with
+`›`, with one mark in its first column. The driver classifies the message
+on the line under it by the same texts as a provider error; a status line
+without a message is `outage`. The Claude
+and OpenCode drivers report no wait.
+
+While a command waits for a turn, it applies these rules to a wait:
+
+- At each new wait or new message it prints
+  `WARNING: <engine> <model> waits for the provider (<kind>): <message>`
+  on standard error and saves the wait as `waiting` in the turn outcome,
+  with the kind as the open attempt's `provider_kind`. When the wait ends
+  and the turn goes on, both are cleared. A command that starts to wait
+  for a turn clears a wait that an earlier command saved and that the
+  screen no longer shows.
+- A `capacity` wait ends the turn at once. Ember interrupts the turn and
+  treats it as a `capacity` error: it resends within the limits above, or
+  ends at exit 73.
+- Any other wait ends the turn once it has lasted the `--stall` minutes
+  without a break. Ember interrupts the turn, and it ends at exit 73 with
+  the wait's kind.
+- The reason of a turn ended this way is
+  `<engine> waited for the provider: <message>`. A turn that fails by
+  itself or replies before the interrupt reaches it keeps its own result.
+- A turn that has not ended 30 seconds after the interrupt stops the
+  command with exit 124 and
+  `turn <n> of <run> did not end when interrupted during a provider wait; the session is left running`.
+- The interrupt is saved with the wait before it is sent, and the saved
+  wait stays until the resend is recorded or the turn is completed. When
+  the command stops in between, `--recover` ends the turn by the same rule
+  if the turn ends within 30 seconds of its start; otherwise it takes up a
+  wait the screen still shows as a new one.
+- `emb run --interrupt` during a saved `capacity` wait also cancels the
+  resend.
+
+The screen that the stall count compares has the timer of this status line
+removed, so the time of a wait is not a screen change.
+
+`emb run --status` prints
+`WARNING: run <run> waits for the provider (<kind>): <message>` for each
+running run whose open turn has a saved wait. The saved wait of a command
+that was killed stays until the next command that waits for the turn.
+
 ### Engine drivers
 
 | | Codex | OpenCode | Claude |
 |---|---|---|---|
 | Starts | Codex's interactive session in the pane: `codex -C <worktree> -m <model> -c check_for_update_on_startup=false [-c model_reasoning_effort=<effort>] -a never --search`, with Ember's permission profile in `-c` options, or `--sandbox danger-full-access` when the sandbox is off | OpenCode's interactive view in the pane, with its built-in server on a free port of `127.0.0.1` protected by a password, the stored model id passed unchanged to `--model` and the agent `ember-worker`, inside `bwrap` when the sandbox is on | A program of Ember's in the pane that runs one `claude -p --output-format stream-json` per turn in the worktree, inside `bwrap` when the sandbox is on, and shows its progress; the program itself runs outside the sandbox |
 | Brief | Pasted once Codex's composer shows `? for shortcuts` | Sent through the server's session API once the server answers and the view has drawn its screen | Written as turn 1's request before the pane starts; given to the CLI on standard input |
-| Turn end and reply | Read from Codex's rollout file: `task_complete` with its last message, or `turn_aborted`; an `error` event during the turn fails it | Read from the session status and messages: the turn's last assistant message, once the session is idle; its text parts are the reply | The CLI's exit; the reply is the assistant text after the turn's last tool result |
+| Turn end and reply | Read from Codex's rollout file: `task_complete` with its last message, or `turn_aborted`; an `error` event during the turn fails it; a retry inside the open turn is read from the screen as a provider wait | Read from the session status and messages: the turn's last assistant message, once the session is idle; its text parts are the reply | The CLI's exit; the reply is the assistant text after the turn's last tool result |
 | Later messages | Pasted | Sent through the session API | A new `claude -p` that resumes the previous turn's CLI session |
 | Read-only run | Ember's profile extends Codex's `:workspace` profile for the writable detached worktree; legacy source checkouts use `:read-only` | The agent may not edit, write or patch files or reach folders outside the checkout other than the folders of its read paths; the detached worktree is mounted writable | The tools are `Read`, `Glob` and `Grep`, plus limited `Bash` for detached runs inside `bubblewrap` as described below; the detached worktree is mounted writable |
 | Sandbox provider | `codex` | `bubblewrap` | `bubblewrap` |
@@ -2913,6 +2967,10 @@ when present, and omits it otherwise. Each task has
 latest review's counts separately and each finding with its round and run.
 Each task's non-empty `outside_files` prints directly under its task line,
 one indented `outside file: <path>` line per path; an empty list prints nothing.
+Each task has `provider_wait`: null, or the `run`, `kind`, `message` and
+`since` of the provider wait saved for the open turn of its running writer
+or reviewer run. A task with a wait and no stored reason shows
+`<run> waits for the provider (<kind>): <message>` as its `reason`.
 Each task's `denied_paths` combines retained and current writer and reviewer
 denials, with the run and turn for each entry. Top-level `denied_paths` is their
 union with a `task` id on each entry; flow listings include this union too.
@@ -4686,6 +4744,7 @@ ellipsis; the whole text is in the expanded details. Chips are 22 pixels tall wi
 | Running | `running`, a flow's `checking` | Blue |
 | Waiting for Claude | A run's `waiting`, a flow's `stopped`, or a starting, running or waiting run whose parent state is `lead` or `resume` | Amber |
 | Orphaned | A run whose parent state is `orphaned` in `emb run --status` | Amber |
+| At capacity, At usage limit, Waiting for provider | A running run whose sent turn has a saved provider wait of kind `capacity`, `usage_limit` or `outage` | Amber |
 | Done | A run's `closed`, a flow or panel's `done` | Green |
 | Incomplete | A panel's `incomplete`, a flow's `cancelled` | Purple |
 | Failed | `failed`, a gone flow runner or panel process | Red |

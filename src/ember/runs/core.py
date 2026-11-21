@@ -58,6 +58,9 @@ STALL_MINUTES = 10.0
 """Minutes without a change on the session's screen before a waiting command
 stops with exit 124."""
 
+WAIT_END_SECONDS = 30.0
+"""Seconds a turn has to end after the core interrupts its provider wait."""
+
 SUBJECT_LIMIT = 72
 """The longest commit subject taken from the brief, before ` (turn <n>)`."""
 
@@ -1541,6 +1544,7 @@ class Core:
 
     def _wait_ready(self, run: Run, driver: Driver) -> None:
         last_screen: str | None = None
+        last_stable: str | None = None
         last_change = time.monotonic()
         while True:
             try:
@@ -1559,9 +1563,10 @@ class Core:
                     "starting",
                     run=run.id,
                 )
-            screen = self._screen_text(run.id, last_screen)
-            if screen != last_screen:
-                last_screen, last_change = screen, time.monotonic()
+            last_screen = self._screen_text(run.id, last_screen)
+            stable = self._stable_screen(driver, last_screen)
+            if stable != last_stable:
+                last_stable, last_change = stable, time.monotonic()
                 run = self._update(run, last_screen_change_at=time.time())
             elif time.monotonic() - last_change >= self.stall_seconds:
                 raise RunError(
@@ -1577,6 +1582,10 @@ class Core:
             return tmux.capture(run_id, env=self.env)
         except tmux.TmuxError, paths.RuntimeDirError:
             return previous
+
+    def _stable_screen(self, driver: Driver, screen: str | None) -> str | None:
+        """Return the screen text that the wait loops compare for changes."""
+        return None if screen is None else driver.stable_screen(screen)
 
     # Turns
 
@@ -1793,6 +1802,8 @@ class Core:
             finally:
                 attempt["seconds"] = time.monotonic() - attempt_started
                 saved = self._saved_outcome(run)
+                # A provider wait saved for the open attempt stays with it.
+                attempt["provider_kind"] = (saved.get("waiting") or {}).get("kind")
                 self._write_outcome(run, {**saved, "attempts": attempts})
             attempt.update(
                 result=outcome.state,
@@ -1812,10 +1823,12 @@ class Core:
             if not (run.folder / f"turn-{run.turn}.prompt.md").is_file():
                 return outcome
             attempts.append(self._attempt(False))
+            journaled = self._saved_outcome(run)
+            journaled.pop("waiting", None)
             self._write_outcome(
                 run,
                 {
-                    **self._saved_outcome(run),
+                    **journaled,
                     "attempts": attempts,
                     "retry_at": time.time() + run.capacity_wait,
                     "retry_clock": time.time(),
@@ -1874,9 +1887,29 @@ class Core:
             raise
 
     def _wait_turn(self, run: Run, driver: Driver) -> TurnOutcome:
+        """Wait for the current turn to end, by itself or by a provider wait.
+
+        A `capacity` wait that the driver reads from the screen ends the turn
+        at once; any other wait ends it once it has lasted the stall time.
+        The core interrupts the turn and returns it as a provider failure.
+        """
         last_screen: str | None = None
+        last_stable: str | None = None
         last_change = time.monotonic()
         checkpoint = time.monotonic()
+        waiting: engines.ProviderWait | None = None
+        wait_started = wait_since = 0.0
+        # An earlier command can have saved a wait and stopped. A wait it
+        # interrupted the turn for still ends this turn when the turn ends
+        # within the time an interrupt is given. Any other saved wait is
+        # cleared unless the screen still shows it.
+        leftover = self._saved_outcome(run).get("waiting")
+        ended: engines.ProviderWait | None = None
+        end_deadline = 0.0
+        earlier_interrupt = bool(leftover and leftover.get("interrupted"))
+        if leftover and earlier_interrupt:
+            ended = engines.ProviderWait(leftover["kind"], leftover["message"])
+            end_deadline = time.monotonic() + WAIT_END_SECONDS
         while True:
             now = time.monotonic()
             elapsed, checkpoint = now - checkpoint, now
@@ -1887,7 +1920,7 @@ class Core:
                 self._write_outcome(run, saved)
             outcome = self._observe(run, driver)
             if outcome.state != engines.RUNNING:
-                return outcome
+                return self._wait_outcome(run, outcome, ended)
             stored = self._load(run.id)
             if stored.status == record.CLOSED:
                 raise RunError(exits.SESSION_GONE, f"{run.id} was closed", run=run.id)
@@ -1896,7 +1929,7 @@ class Core:
                 self._stop_if_closed(run)
                 outcome = self._observe(run, driver)
                 if outcome.state != engines.RUNNING:
-                    return outcome
+                    return self._wait_outcome(run, outcome, ended)
                 if state == DEAD:
                     # A failed turn: its edits are collected and committed.
                     message = f"the engine of {run.id} exited before the turn ended"
@@ -1917,11 +1950,55 @@ class Core:
                     ended_at=time.time(),
                 )
                 raise RunError(exits.SESSION_GONE, message, run=run.id)
-            screen = self._screen_text(run.id, last_screen)
-            if screen != last_screen:
-                last_screen, last_change = screen, time.monotonic()
+            last_screen = self._screen_text(run.id, last_screen)
+            stable = self._stable_screen(driver, last_screen)
+            wait = None if last_screen is None else driver.provider_wait(last_screen)
+            if ended is not None and earlier_interrupt:
+                if time.monotonic() >= end_deadline:
+                    # The earlier interrupt did not end the turn; a wait
+                    # the screen still shows is taken up as a new one.
+                    ended, earlier_interrupt = None, False
+            elif ended is not None:
+                if time.monotonic() >= end_deadline:
+                    message = (
+                        f"turn {run.turn} of {run.id} did not end when interrupted "
+                        "during a provider wait; the session is left running"
+                    )
+                    self._record_exit(run, exits.STALLED, message)
+                    raise RunError(exits.STALLED, message, run=run.id)
+            elif wait is None:
+                if waiting is not None or leftover:
+                    waiting = leftover = None
+                    self._note_wait(run, None, 0.0)
+            else:
+                leftover = None
+                if waiting is None:
+                    wait_started, wait_since = time.monotonic(), time.time()
+                if wait != waiting:
+                    waiting = wait
+                    self._note_wait(run, wait, wait_since)
+                if (
+                    wait.kind == "capacity"
+                    or time.monotonic() - wait_started >= self.stall_seconds
+                ):
+                    self._note_wait(run, wait, wait_since, interrupted=True)
+                    try:
+                        # Interrupt and delivery share the record lock.
+                        with record.record_lock(run), self._engine_calls(run):
+                            driver.interrupt(run)
+                    except RunError:
+                        if self._session_state(run.id) == LIVE:
+                            raise
+                        # The session ended; the next pass records how.
+                        continue
+                    ended, earlier_interrupt = wait, False
+                    end_deadline = time.monotonic() + WAIT_END_SECONDS
+            if stable != last_stable:
+                last_stable, last_change = stable, time.monotonic()
                 run = self._update(run, last_screen_change_at=time.time())
-            elif time.monotonic() - last_change >= self.stall_seconds:
+            elif ended is None and (
+                time.monotonic() - last_change >= self.stall_seconds
+            ):
                 minutes = f"{self.stall_seconds / 60:g}"
                 message = (
                     f"the screen of {run.id} did not change for {minutes} min; "
@@ -1930,6 +2007,56 @@ class Core:
                 self._record_exit(run, exits.STALLED, message)
                 raise RunError(exits.STALLED, message, run=run.id)
             time.sleep(self.poll_seconds)
+
+    def _wait_outcome(
+        self, run: Run, outcome: TurnOutcome, ended: engines.ProviderWait | None
+    ) -> TurnOutcome:
+        """Return an ended turn's outcome, failed when a provider wait ended it.
+
+        A turn that failed by itself, or that replied before the interrupt
+        reached it, keeps its own outcome.
+        """
+        if ended is None or outcome.state == engines.FAILED or outcome.reply:
+            return outcome
+        return TurnOutcome(
+            engines.FAILED,
+            reason=f"{run.engine} waited for the provider: {ended.message}",
+            provider_error=True,
+            provider_kind=ended.kind,
+        )
+
+    def _note_wait(
+        self,
+        run: Run,
+        wait: engines.ProviderWait | None,
+        since: float,
+        *,
+        interrupted: bool = False,
+    ) -> None:
+        """Save the open turn's provider wait, or its end, and warn of a new one.
+
+        `interrupted` marks a saved wait that the core is about to interrupt
+        the turn for, so a later command still ends the turn by it.
+        """
+        saved = self._saved_outcome(run)
+        if saved:
+            attempts = saved.get("attempts")
+            if attempts:
+                attempts[-1]["provider_kind"] = None if wait is None else wait.kind
+            saved.pop("waiting", None)
+            if wait is not None:
+                saved["waiting"] = {
+                    "kind": wait.kind,
+                    "message": wait.message,
+                    "since": since,
+                    **({"interrupted": True} if interrupted else {}),
+                }
+            self._write_outcome(run, saved)
+        if wait is not None and not interrupted:
+            self._warn(
+                f"WARNING: {run.engine} {run.model} waits for the provider "
+                f"({wait.kind}): {wait.message}"
+            )
 
     def _complete(
         self,
@@ -2008,6 +2135,7 @@ class Core:
             answered_at=None,
         )
         saved = self._saved_outcome(run)
+        saved.pop("waiting", None)
         seconds = time.monotonic() - started
         self._write_outcome(
             run,
@@ -2110,6 +2238,11 @@ class Core:
             "incomplete": incomplete_reason(outcome),
             "seconds": seconds,
         }
+        if not (saved.get("waiting") or {}).get("interrupted"):
+            # A wait the turn was interrupted for stays until the retry is
+            # journaled or the turn is completed, so recovery ends the
+            # turn the same way.
+            data.pop("waiting", None)
         self._write_outcome(run, data)
 
     def _supplied_texts(self, run: Run) -> Iterator[str]:
@@ -2677,6 +2810,10 @@ class Core:
                 raise RunError(
                     exits.SESSION_GONE, f"{run_id} has no live session", run=run_id
                 )
+            if (saved.get("waiting") or {}).get("kind") == "capacity":
+                # The waiting command ends this turn for the capacity wait;
+                # the lead's interrupt also cancels its resend.
+                record.write_private(self._retry_cancel_path(run), "cancelled")
             with self._engine_calls(run):
                 self._optional_driver(run.engine).interrupt(run)
         self._warn(f"emb run: interrupted turn {run.turn} of {run_id}")
@@ -2925,6 +3062,7 @@ class Core:
                 self._warn(f"WARNING: {error}")
             self.status_next = document["next"]
             self._warn_parent([document])
+            self._warn_waits([document])
             if document["step"] == "owner":
                 self.status_owner.extend(document["owner_wait"])
             if as_json:
@@ -2955,6 +3093,7 @@ class Core:
                 "emb run --status <run> names the file"
             )
         self._warn_parent(documents)
+        self._warn_waits(documents)
         for document in documents:
             if document["step"] == "owner":
                 self.status_owner.extend(document["owner_wait"])
@@ -3015,6 +3154,23 @@ class Core:
             needs_collection,
             self._git,
         )
+
+    def _warn_waits(self, documents: list[dict[str, Any]]) -> None:
+        """Name each run whose open turn waits for the provider."""
+        for document in documents:
+            turns = document["turns"]
+            if (
+                not turns
+                or document["status"] != record.RUNNING
+                or document["turn_state"] != record.SENT
+            ):
+                continue
+            wait = turns[-1].get("waiting")
+            if wait:
+                self._warn(
+                    f"WARNING: run {document['id']} waits for the provider "
+                    f"({wait['kind']}): {wait['message']}"
+                )
 
     def _warn_parent(self, documents: list[dict[str, Any]]) -> None:
         """Name parent waits, unreadable parents and orphaned runs.

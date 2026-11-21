@@ -2602,3 +2602,35 @@ def test_screen_fits_width(context: AppContext, qtbot: QtBot, width: int) -> Non
         row.show_details(True)
     qtbot.wait(30)
     assert_screen_fits(screen)
+
+
+@pytest.mark.parametrize(
+    ("kind", "word"),
+    [
+        ("capacity", "At capacity"),
+        ("usage_limit", "At usage limit"),
+        ("outage", "Waiting for provider"),
+    ],
+)
+def test_provider_wait_badge(
+    env: dict[str, str], context: AppContext, qtbot: QtBot, kind: str, word: str
+) -> None:
+    run = write_run(make_run(env, LIVE_A))
+    outcome = {
+        **dict.fromkeys(
+            ("state", "reason", "provider_error", "signed_out", "incomplete", "exit")
+        ),
+        "seconds": 1.0,
+        "waiting": {"kind": kind, "message": "the provider's words", "since": 1.0},
+    }
+    record.outcome_path(run, 1).write_text(json.dumps(outcome))
+    context.runs.reload()
+    qtbot.waitUntil(lambda: len(context.runs.live()) == 1)
+    row = screen_for(context, qtbot).live_rows[LIVE_A]
+    assert (row.badge.text(), row.badge.tone()) == (word, "warning")
+    collected = replace(run, turn_state=record.COLLECTED)
+    assert overview.run_badge(collected) == ("Running", "info")
+    assert overview.run_badge(replace(run, status=record.FAILED)) == (
+        "Failed",
+        "danger",
+    )

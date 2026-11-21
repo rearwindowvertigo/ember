@@ -2981,3 +2981,52 @@ def test_check_replacement_survives_launch_failure(
     code, _, err = invoke(env, "--resume", flow["id"])
     assert code == 0, err
     assert record.load(flow["id"], env)["check_changes"] == saved["check_changes"]
+
+
+def test_status_names_a_task_whose_run_waits_for_the_provider(
+    tmp_path: Path,
+    env: dict[str, str],
+    flow: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "codex-20260101-000000-abcdef"
+    waiting = {
+        "kind": "capacity",
+        "message": "Selected model is at capacity.",
+        "since": 5,
+    }
+    outcome = {
+        **dict.fromkeys(
+            ("state", "reason", "provider_error", "signed_out", "incomplete", "exit")
+        ),
+        "seconds": 1.0,
+        "waiting": waiting,
+    }
+    (tmp_path / "turn-1.outcome.json").write_text(json.dumps(outcome))
+    loaded = SimpleNamespace(
+        id=run_id, turn=1, folder=tmp_path, status="running", turn_state="sent"
+    )
+    monkeypatch.setattr(command.run_record, "load", lambda name, env: loaded)
+    flow["tasks"][0].update(status="reviewing", reviewer_run=run_id)
+    record.save(flow, env)
+    code, out, _ = invoke(env, "--status", flow["id"], "--json")
+    assert code == 0
+    first, second = json.loads(out)["tasks"]
+    assert first["provider_wait"] == {"run": run_id, **waiting}
+    assert first["reason"] == (
+        f"{run_id} waits for the provider (capacity): Selected model is at capacity."
+    )
+    assert second["provider_wait"] is None and second["reason"] is None
+    code, out, _ = invoke(env, "--status", flow["id"])
+    assert code == 0
+    assert f"a reviewing: {run_id} waits for the provider (capacity)" in out
+    flow["tasks"][0].update(status="stopped", reason="stalled")
+    record.save(flow, env)
+    stopped_task = json.loads(invoke(env, "--status", flow["id"], "--json")[1])[
+        "tasks"
+    ][0]
+    assert stopped_task["reason"] == "stalled"
+    assert stopped_task["provider_wait"] == {"run": run_id, **waiting}
+    loaded.status = "failed"
+    gone = json.loads(invoke(env, "--status", flow["id"], "--json")[1])["tasks"][0]
+    assert gone["provider_wait"] is None
