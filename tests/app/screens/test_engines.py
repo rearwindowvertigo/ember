@@ -1154,9 +1154,11 @@ def test_codex_speed_saves_the_whole_list(
     panel = _open(screen, context, qtbot, "codex")
     picker = panel.rows[0].speed_picker
     assert picker.accessibleName() == "Speed of gpt-5"
-    assert picker.toolTip() == (
-        "Fast runs this model on Codex's Fast tier, which can use more of the "
-        "plan's usage. Standard turns the Fast tier off for this model."
+    assert picker.toolTip() == ""
+    assert panel.speed_info.accessibleName() == "About Speed"
+    assert panel.speed_info.toolTip() == (
+        "Fast runs a model on Codex's Fast tier, which can use more of the "
+        "plan's usage. Standard turns the Fast tier off for that model."
     )
     assert [picker.itemText(i) for i in range(picker.count())] == ["Standard", "Fast"]
     assert panel.missing[0].speed_picker.currentText() == "Fast"

@@ -4716,6 +4716,10 @@ inside its own frame.
 At window widths of 960 pixels and above, the sidebar is 220 pixels wide
 and shows the Ember mark and name, one row per screen (Overview, Team,
 Engines, Dependencies, Settings) and `Ember <version>` at the bottom.
+The mark is three interlocking rings without a tile, drawn at 24 pixels:
+`#ededed` in dark mode and `#0d0d0d` in light mode. The window's icon is
+the same rings on a charcoal tile; a bolder drawing serves 16, 24 and 32
+pixels.
 A row's count appears as a pill in `type-caption` with `on-accent` text
 (`#ffffff` in both themes) on `accent`. The pill is 18 pixels tall and at
 least 18 pixels wide; a wider count makes it wider. A 2-pixel ring matches
@@ -4986,7 +4990,8 @@ round expand button with an outline and a chevron, one of six status chips,
 the text, and the time and actions on the right. The chip column is as wide
 as the widest chip. The expand button and the chip are centred vertically
 on the text lines. The title starts with the row's type: `Run`, `Flow` or
-`Panel`. The title and second line each show one line, cut with an
+`Panel`. The title is set in `type-label` and the second line in
+`type-caption` with `text-secondary`. Each shows one line, cut with an
 ellipsis; the whole text is in the expanded details. Chips are 22 pixels tall with
 6-pixel corners. The status chips:
 
@@ -5083,8 +5088,7 @@ run's record follows the run while it is live, and collapses when the run
 ends. Overview shows no worker's screen; Open terminal does. One flow and one panel can also have
 expanded details.
 
-The subtitle uses the tray status line, counting the same top-level live
-runs, flows and panels. Above the sections, an alert names each enabled
+Overview has no subtitle. Above the sections, an alert names each enabled
 engine whose sandbox setting gives it no sandbox, with Open Engines.
 
 A notice says `A worker could not read <path>` for each reported hidden
@@ -5257,8 +5261,9 @@ engine reads "Held after <kind> until <HH:MM>" and a hold of one model
 under a hold ends that hold. Refresh list reads models from their source.
 Model switches save shortlist entries; OpenCode entries keep the full
 integration-prefixed id and any selected effort. Each shortlisted Codex
-model has a Speed picker beside its effort. Fast adds the model to
-`fast.codex` and Standard removes it. A Speed change made while another is
+model has a Speed picker beside its effort. The Speed column's heading has
+an info icon whose tooltip says what Fast and Standard do; the picker has
+no tooltip. Fast adds the model to `fast.codex` and Standard removes it. A Speed change made while another is
 being saved is added to it. Switching a model off the shortlist, or
 removing it there, also removes it from `fast.codex`.
 
@@ -5376,7 +5381,7 @@ has no maintainer scripts:
 | `/usr/lib/ember/lib/python3.14/site-packages/ember/` | Ember |
 | `/usr/share/ember/skill/` | The `ember` skill, without its eval cases |
 | `/usr/share/applications/io.github.rearwindowvertigo.Ember.desktop` | The desktop entry: `Exec=emb app` |
-| `/usr/share/icons/hicolor/scalable/apps/io.github.rearwindowvertigo.Ember.svg` | The icon |
+| `/usr/share/icons/hicolor/scalable/apps/io.github.rearwindowvertigo.Ember.svg` | The icon, drawn as filled outlines without SVG masks or clip paths |
 | `/usr/share/doc/ember/copyright` | The copyright file |
 | `/usr/share/doc/ember/icu-LICENSE` | The licence of the ICU libraries Qt bundles |
 | `/usr/share/doc/ember/changelog.gz` | The changelog, when the build had `CHANGELOG.md` |

@@ -456,9 +456,8 @@ class MainWindow(QMainWindow):
         brand.setSpacing(10)
         mark = QLabel()
         self.mark = mark
-        mark.setFixedSize(24, 24)
+        mark.setFixedSize(icons.MARK_SIZE, icons.MARK_SIZE)
         mark.setProperty("show-tooltip", True)
-        mark.setPixmap(icons.ember_icon().pixmap(24, 24))
         mark.setAccessibleName("Ember mark")
         name = QLabel("Ember")
         self.brand_name = name
@@ -696,6 +695,7 @@ class MainWindow(QMainWindow):
     # Theme
 
     def _theme_changed(self, *_args: object) -> None:
+        self.mark.setPixmap(icons.mark())
         self.sidebar.setStyleSheet(
             _NAV_STYLE.format(
                 radius=theme.RADIUS["sm"],

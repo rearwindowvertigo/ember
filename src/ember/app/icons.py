@@ -37,6 +37,7 @@ ICON_NAMES = (
     "x",
     "check",
     "trash-2",
+    "panel-left",
 )
 """The Lucide icons shipped in `assets/icons/`."""
 
@@ -46,8 +47,20 @@ LOGOS = ("codex", "opencode", "claude")
 APP_ICON = "io.github.rearwindowvertigo.Ember.svg"
 """The scalable app icon in `assets/ember/`."""
 
+APP_ICON_PLAIN = "io.github.rearwindowvertigo.Ember-plain.svg"
+"""The app icon drawn as filled outlines, without SVG masks or clip paths.
+
+The `.deb` installs it as the desktop's scalable icon.
+"""
+
 APP_ICON_SMALL = "ember-app-small.svg"
-"""The simpler app drawing for 32 pixels and below, in `assets/ember/`."""
+"""The bolder app drawing for 32 pixels and below, in `assets/ember/`."""
+
+MARKS = {"dark": "ember-mark-on-dark.svg", "light": "ember-mark-on-light.svg"}
+"""The mark without its tile for each theme mode, drawn for 24 pixels."""
+
+MARK_SIZE = 24
+"""The size the mark without its tile is drawn at, in pixels."""
 
 TRAY_ICONS = {False: "ember-tray-idle-on-dark.svg", True: "ember-tray-live-on-dark.svg"}
 """The tray drawings for idle and a run live, both for a dark top bar."""
@@ -153,6 +166,13 @@ def ember_icon() -> QIcon:
     _drawing(APP_ICON_SMALL, _SMALL_SIZES, result)
     _drawing(APP_ICON, _LARGE_SIZES, result)
     return result
+
+
+def mark() -> QPixmap:
+    """Return the mark without its tile, for the current theme mode."""
+    file = MARKS[theme.current_mode()]
+    path = assets() / "ember" / file
+    return _cached((f"ember:{file}", "", MARK_SIZE, _ratio()), path, None)
 
 
 def tray_icon(live: bool) -> QIcon:

@@ -226,6 +226,8 @@ def test_rows_and_badges(
     )
     assert first.title_label.text() == f"Run · {first.run.subject}"
     assert second.title_label.text() == f"Run · {second.run.subject}"
+    assert first.title_label.font() == theme.font("label")
+    assert first.detail_label.font() == theme.font("caption")
     assert first.detail_label.text().startswith(
         "Codex · gpt-5 · high · project · turn 1 · 0 commits · started "
     )

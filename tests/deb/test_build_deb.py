@@ -246,3 +246,13 @@ def test_missing_command_exits_69(
     monkeypatch.setenv("PATH", str(tmp_path / "empty"))
     assert build_deb.main(["--out", str(tmp_path / "dist")]) == 69
     assert "uv is missing" in capsys.readouterr().err
+
+
+def test_installed_icon_is_the_app_icon_without_masks(tmp_path: Path) -> None:
+    build_deb._write_files(tmp_path)
+    icon = (
+        tmp_path / "usr/share/icons/hicolor/scalable/apps" / f"{build_deb.APP_ID}.svg"
+    )
+    text = icon.read_text()
+    assert text.startswith("<svg")
+    assert "<mask" not in text and "clip-path" not in text

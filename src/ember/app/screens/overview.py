@@ -647,6 +647,7 @@ class _ExpandableRow(QWidget):
         self.title_label = ElidedLabel()
         self.title_label.setFont(theme.font("label"))
         self.detail_label = ElidedLabel()
+        self.detail_label.setFont(theme.font("caption"))
         self.detail_label.setProperty("role", "secondary")
         lines.addWidget(self.title_label)
         lines.addWidget(self.detail_label)

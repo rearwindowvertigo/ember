@@ -338,7 +338,7 @@ def _write_files(stage: Path) -> None:
     _install(stage / "usr/bin/emb", wrapper().encode(), 0o755)
     share = stage / "usr/share"
     _install(share / "applications" / f"{APP_ID}.desktop", desktop_entry().encode())
-    icon = REPO / "src/ember/app/assets/ember" / f"{APP_ID}.svg"
+    icon = REPO / "src/ember/app/assets/ember" / f"{APP_ID}-plain.svg"
     _install(share / "icons/hicolor/scalable/apps" / f"{APP_ID}.svg", icon.read_bytes())
     skill = REPO / "skill"
     for relative in skill_files(skill):
