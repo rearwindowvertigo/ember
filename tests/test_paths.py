@@ -519,6 +519,7 @@ def test_run_tmp_dir_refuses_invalid_ids(home: Path, ident: str) -> None:
 def test_run_tmp_volume(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    run_tmp_volume_reader: Callable[..., paths.RunTmpVolume | None],
     files: int,
     free_inodes: int,
     free_blocks: int,
@@ -529,7 +530,7 @@ def test_run_tmp_volume(
     )
     statvfs = Mock(return_value=volume)
     monkeypatch.setattr(os, "statvfs", statvfs)
-    assert paths.run_tmp_volume(tmp_path) == (
+    assert run_tmp_volume_reader(tmp_path) == (
         free_inodes if files else None,
         free_blocks * 4096,
         low,
@@ -537,10 +538,13 @@ def test_run_tmp_volume(
     statvfs.assert_called_once_with(tmp_path)
 
 
-def test_run_tmp_volume_handles_statvfs_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_tmp_volume_handles_statvfs_error(
+    monkeypatch: pytest.MonkeyPatch,
+    run_tmp_volume_reader: Callable[..., paths.RunTmpVolume | None],
+) -> None:
     statvfs = Mock(side_effect=OSError("volume unavailable"))
     monkeypatch.setattr(os, "statvfs", statvfs)
-    assert paths.run_tmp_volume() is None
+    assert run_tmp_volume_reader() is None
     statvfs.assert_called_once_with(paths.RUN_TMP_ROOT)
 
 

@@ -5239,9 +5239,11 @@ def test_codex_runs_create_distinct_temporary_folders_before_launch(
     repo: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
+    run_tmp_volume_reader: Callable[..., paths.RunTmpVolume | None],
     statvfs_error: bool,
 ) -> None:
     choices.set_settings({"sandbox.codex": "on"}, env=env)
+    monkeypatch.setattr(paths, "run_tmp_volume", run_tmp_volume_reader)
     statvfs = Mock(
         return_value=Mock(
             f_files=100_000, f_favail=50_000, f_bavail=65_536, f_frsize=4096
@@ -5333,12 +5335,14 @@ def test_codex_low_temporary_volume_refuses_start_before_setup(
     repo: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
+    run_tmp_volume_reader: Callable[..., paths.RunTmpVolume | None],
     files: int,
     free_inodes: int,
     free_mib: int,
     inode_message: str,
 ) -> None:
     choices.set_settings({"sandbox.codex": "on"}, env=env)
+    monkeypatch.setattr(paths, "run_tmp_volume", run_tmp_volume_reader)
     volume = Mock(
         f_files=files, f_favail=free_inodes, f_bavail=free_mib * 256, f_frsize=4096
     )
