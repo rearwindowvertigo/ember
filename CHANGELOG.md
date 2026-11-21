@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.29.0](https://github.com/rearwindowvertigo/ember/compare/v0.28.0...v0.29.0) (2026-11-21)
+
+
+### Added
+
+* **app:** draw the mark as three interlocking rings ([d8a6f98](https://github.com/rearwindowvertigo/ember/commit/d8a6f98e31b27ad4216bc43d17fc4afa65a97460)), closes [#335](https://github.com/rearwindowvertigo/ember/issues/335)
+
+
+### Fixed
+
+* **app:** set Overview detail lines in the caption size ([89f760d](https://github.com/rearwindowvertigo/ember/commit/89f760dd118b3b34975e9bc21ebb06904cf32514)), closes [#336](https://github.com/rearwindowvertigo/ember/issues/336)
+* **flows:** remove a check folder that holds read-only directories ([e3f1272](https://github.com/rearwindowvertigo/ember/commit/e3f1272957541149a3d07fd6b046cf747930365c)), closes [#332](https://github.com/rearwindowvertigo/ember/issues/332)
+
 ## [0.28.0](https://github.com/rearwindowvertigo/ember/compare/v0.27.0...v0.28.0) (2026-11-21)
 
 
