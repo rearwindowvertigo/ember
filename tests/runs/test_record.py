@@ -340,6 +340,85 @@ def test_broken_outcome_preserves_other_turns(
     assert str(broken) in str(errors[0])
 
 
+def _open_outcome(**fields: object) -> dict[str, object]:
+    return {
+        **dict.fromkeys(_outcome()),
+        "exit": None,
+        "seconds": 1.0,
+        "denied_paths": [],
+        **fields,
+    }
+
+
+def test_an_open_turn_reports_its_provider_wait(env: dict[str, str]) -> None:
+    run = replace(_run(env), turn=1, status=record.RUNNING, turn_state=record.SENT)
+    waiting = {"kind": "capacity", "message": "at capacity", "since": 12.5}
+    path = record.outcome_path(run, 1)
+    path.write_text(json.dumps(_open_outcome(waiting={**waiting, "other": 1})))
+    assert record.load_outcome(run, 1)["waiting"] == waiting
+    assert record.provider_wait(run) == waiting
+    turns, errors = record.turn_results(run)
+    assert errors == []
+    assert turns[0]["waiting"] == waiting
+    path.write_text(json.dumps(_open_outcome()))
+    assert "waiting" not in record.load_outcome(run, 1)
+    assert "waiting" not in record.turn_results(run)[0][0]
+    assert record.provider_wait(run) is None
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"turn": 0},
+        {"status": record.FAILED},
+        {"status": record.CLOSED},
+        {"status": record.WAITING},
+        {"turn_state": record.COLLECTED},
+        {"turn_state": record.COMMITTED},
+    ],
+)
+def test_a_run_without_an_open_turn_reports_no_provider_wait(
+    env: dict[str, str], changes: dict[str, Any]
+) -> None:
+    run = replace(_run(env), turn=1, status=record.RUNNING, turn_state=record.SENT)
+    assert record.provider_wait(run) is None
+    waiting = {"kind": "outage", "message": "Reconnecting...", "since": 1}
+    record.outcome_path(run, 1).write_text(json.dumps(_open_outcome(waiting=waiting)))
+    assert record.provider_wait(run) == waiting
+    assert record.provider_wait(replace(run, **changes)) is None
+
+
+def test_a_resent_attempt_reports_its_provider_wait(env: dict[str, str]) -> None:
+    run = replace(_run(env), turn=1, status=record.RUNNING, turn_state=record.SENT)
+    waiting = {"kind": "capacity", "message": "m", "since": 1, "interrupted": True}
+    earlier = {**_outcome(), "state": "failed", "provider_error": True}
+    record.outcome_path(run, 1).write_text(
+        json.dumps({**earlier, "exit": None, "seconds": 1.0, "waiting": waiting})
+    )
+    assert record.provider_wait(run) == waiting
+
+
+@pytest.mark.parametrize(
+    "waiting",
+    [
+        [],
+        "capacity",
+        {"kind": "busy", "message": "m", "since": 1},
+        {"kind": "capacity", "message": None, "since": 1},
+        {"kind": "capacity", "message": "m", "since": -1},
+        {"kind": "capacity", "message": "m"},
+    ],
+)
+def test_an_invalid_provider_wait_is_a_broken_outcome(
+    env: dict[str, str], waiting: object
+) -> None:
+    run = replace(_run(env), turn=1)
+    record.outcome_path(run, 1).write_text(json.dumps(_open_outcome(waiting=waiting)))
+    with pytest.raises(record.RecordError, match="invalid waiting"):
+        record.load_outcome(run, 1)
+    assert record.provider_wait(run) is None
+
+
 def test_unreadable_outcome(env: dict[str, str]) -> None:
     run = replace(_run(env), turn=1)
     record.outcome_path(run, 1).mkdir()

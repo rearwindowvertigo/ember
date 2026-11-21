@@ -411,7 +411,41 @@ def load_outcome(run: Run, turn: int) -> dict[str, Any]:
         item = result.get(key)
         if item is not None and not _nonnegative_number(item):
             raise RecordError(run.id, f"{path} has invalid {key}")
+    waiting = value.get("waiting")
+    if waiting is not None:
+        if not (
+            isinstance(waiting, dict)
+            and waiting.get("kind") in engines.PROVIDER_KINDS
+            and isinstance(waiting.get("message"), str)
+            and _nonnegative_number(waiting.get("since"))
+        ):
+            raise RecordError(run.id, f"{path} has an invalid waiting")
+        result["waiting"] = {key: waiting[key] for key in ("kind", "message", "since")}
+        if waiting.get("interrupted") is True:
+            result["waiting"]["interrupted"] = True
     return result
+
+
+def provider_wait(run: Run) -> dict[str, Any] | None:
+    """Return the provider wait of a run's open turn.
+
+    Args:
+        run: The run.
+
+    Returns:
+        The saved wait's `kind`, `message` and `since`, the epoch time it
+        began, with `interrupted` once Ember has interrupted the turn for
+        it; `None` when the run is not running, its turn is not open, no
+        wait is saved or the outcome cannot be read. During a capacity
+        resend the outcome holds the earlier attempt's state, so the run's
+        status and turn state decide, not the outcome's.
+    """
+    if run.status != RUNNING or run.turn_state != SENT or run.turn < 1:
+        return None
+    try:
+        return load_outcome(run, run.turn).get("waiting")
+    except RecordError:
+        return None
 
 
 def turn_results(run: Run) -> tuple[list[dict[str, Any]], list[RecordError]]:

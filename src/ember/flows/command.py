@@ -1461,6 +1461,28 @@ def _denial_status(flow: dict[str, Any], env: Mapping[str, str]) -> None:
     ]
 
 
+def _wait_status(flow: dict[str, Any], env: Mapping[str, str]) -> None:
+    """Add each task's provider wait, read from its runs' open turns.
+
+    A task with a wait and no stored reason shows the wait as its reason.
+    """
+    for task in flow["tasks"]:
+        task["provider_wait"] = None
+        for run_id in (task.get("writer_run"), task.get("reviewer_run")):
+            if not run_id:
+                continue
+            with contextlib.suppress(run_record.RecordError):
+                wait = run_record.provider_wait(run_record.load(run_id, env))
+                if wait is not None:
+                    task["provider_wait"] = {"run": run_id, **wait}
+        wait = task["provider_wait"]
+        if wait is not None and not task["reason"]:
+            task["reason"] = (
+                f"{wait['run']} waits for the provider "
+                f"({wait['kind']}): {wait['message']}"
+            )
+
+
 def _status(
     flow_id: str, as_json: bool, env: Mapping[str, str], out: TextIO, err: TextIO
 ) -> None:
@@ -1471,6 +1493,7 @@ def _status(
         flow["check_output"] = _check_output(flow_id, env)
         flow["reports"] = _done_reports(flow)
         _denial_status(flow, env)
+        _wait_status(flow, env)
         for task in flow["tasks"]:
             task["findings"] = _finding_details(task)
             task["latest_review"] = _latest_review(task)

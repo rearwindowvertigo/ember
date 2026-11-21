@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from ember import choices, engines, paths, processes, prune, sandbox
+from ember import choices, engines, paths, processes, prune, sandbox, tmux
 from ember.engines import Driver, LaunchSpec, models, opencode2, status
 from ember.engines.codex import CodexDriver, codex_home
 from ember.engines.opencode import OpenCodeDriver
@@ -5519,3 +5519,481 @@ def test_scope_survivors_use_existing_close_report(
     assert capsys.readouterr().err == (
         f"emb run: {run_id}: processes still running after SIGKILL: 123, 456\n"
     )
+
+
+class _WaitingDriver(_ProviderDriver):
+    """Each attempt kind `wait:<kind>` holds its turn open in a provider wait."""
+
+    message = "Selected model is at capacity. Please try a different model."
+
+    def __init__(
+        self,
+        env: dict[str, str],
+        kinds: list[str | None],
+        *,
+        clears_after: int | None = None,
+        obeys: bool = True,
+    ) -> None:
+        super().__init__(env, kinds)
+        self.clears_after = clears_after
+        self.obeys = obeys
+        self.interrupted: list[int] = []
+        self.observed = 0
+        self.seen: list[dict[str, Any]] = []
+
+    def _kind(self) -> str | None:
+        return self.kinds[min(len(self.messages) - 1, len(self.kinds) - 1)]
+
+    def _waits(self) -> bool:
+        kind = self._kind()
+        return (
+            kind is not None
+            and kind.startswith("wait:")
+            and len(self.messages) not in self.interrupted
+            and (self.clears_after is None or self.observed <= self.clears_after)
+        )
+
+    def wait(self, run: record.Run) -> engines.TurnOutcome:
+        kind = self._kind()
+        if kind is None or not kind.startswith("wait:"):
+            return super().wait(run)
+        self.observed += 1
+        if self._waits() or (not self.obeys and self.clears_after is None):
+            return engines.TurnOutcome(engines.RUNNING)
+        if self.clears_after is not None:
+            return engines.TurnOutcome(engines.DONE, reply="done")
+        return engines.TurnOutcome(engines.DONE)
+
+    def provider_wait(self, screen: str) -> engines.ProviderWait | None:
+        if not self.messages or not self._waits():
+            return None
+        return engines.ProviderWait(
+            (self._kind() or "").removeprefix("wait:"), self.message
+        )
+
+    def interrupt(self, run: record.Run) -> None:
+        self.seen.append(record.load_outcome(run, run.turn))
+        assert record.provider_wait(run) == self.seen[-1]["waiting"]
+        self.interrupted.append(len(self.messages))
+
+
+def _waiting_start(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    driver: _WaitingDriver,
+    retries: str = "2",
+) -> int:
+    choices.set_settings(
+        {"provider.capacity_retries": retries, "provider.capacity_wait": "5"}, env=env
+    )
+    monkeypatch.setattr(core, "time", _RetryClock(driver))
+    return _start(
+        _core(env, driver), repo, _brief(tmp_path, "Task"), engine="codex", model="m"
+    )
+
+
+def test_a_capacity_wait_in_an_open_turn_is_interrupted_and_resent(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    driver = _WaitingDriver(env, ["wait:capacity", "done"])
+    assert _waiting_start(tmp_path, env, repo, monkeypatch, driver) == 0
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert driver.interrupted == [1]
+    assert len(driver.messages) == 2
+    assert err.count("WARNING: codex m waits for the provider (capacity): ") == 1
+    assert err.count("WARNING: codex m at capacity; retry 1 of 2 in 5s") == 1
+    during = driver.seen[0]
+    assert during["waiting"]["kind"] == "capacity"
+    assert during["waiting"]["message"] == driver.message
+    assert during["waiting"]["since"] > 0
+    assert during["attempts"][-1]["provider_kind"] == "capacity"
+    assert during["state"] is None
+    saved = record.load_outcome(run, 1)
+    assert "waiting" not in saved
+    assert record.provider_wait(run) is None
+    assert [a["result"] for a in saved["attempts"]] == ["failed", "done"]
+    assert [a["provider_kind"] for a in saved["attempts"]] == ["capacity", None]
+    turns, errors = record.turn_results(run)
+    assert errors == []
+    assert "waiting" not in turns[0]
+    assert turns[0]["exit"] == 0
+
+
+def test_a_capacity_wait_without_retries_ends_at_73(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    driver = _WaitingDriver(env, ["wait:capacity"])
+    assert _waiting_start(tmp_path, env, repo, monkeypatch, driver, "0") == 73
+    out, err = capsys.readouterr()
+    saved = record.load_outcome(record.load(_run_id(out), env), 1)
+    assert driver.interrupted == [1]
+    assert len(driver.messages) == 1
+    assert saved["provider_kind"] == "capacity"
+    assert saved["reason"] == f"codex waited for the provider: {driver.message}"
+    assert "waiting" not in saved
+    assert "capacity" in err.splitlines()[-1]
+
+
+def test_another_provider_wait_ends_the_turn_after_the_stall_time(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    driver = _WaitingDriver(env, ["wait:outage"])
+    assert _waiting_start(tmp_path, env, repo, monkeypatch, driver) == 73
+    out, err = capsys.readouterr()
+    saved = record.load_outcome(record.load(_run_id(out), env), 1)
+    assert driver.interrupted == [1]
+    assert len(driver.messages) == 1
+    assert saved["provider_kind"] == "outage"
+    assert saved["seconds"] >= 6
+    assert err.count("WARNING: codex m waits for the provider (outage): ") == 1
+    assert "did not change" not in err
+
+
+def test_a_provider_wait_that_clears_leaves_the_turn_running(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    driver = _WaitingDriver(env, ["wait:outage"], clears_after=5)
+    assert _waiting_start(tmp_path, env, repo, monkeypatch, driver) == 0
+    out, err = capsys.readouterr()
+    saved = record.load_outcome(record.load(_run_id(out), env), 1)
+    assert driver.interrupted == []
+    assert len(driver.messages) == 1
+    assert err.count("waits for the provider") == 1
+    assert "waiting" not in saved
+    assert saved["provider_kind"] is None
+    assert [a["provider_kind"] for a in saved["attempts"]] == [None]
+
+
+def test_a_turn_that_ignores_the_wait_interrupt_stops_with_124(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    driver = _WaitingDriver(env, ["wait:capacity"], obeys=False)
+    assert _waiting_start(tmp_path, env, repo, monkeypatch, driver) == 124
+    out, err = capsys.readouterr()
+    run = record.load(_run_id(out), env)
+    assert driver.interrupted == [1]
+    assert len(driver.messages) == 1
+    assert "did not end when interrupted during a provider wait" in err
+    wait = record.provider_wait(run)
+    assert wait is not None and wait["kind"] == "capacity"
+    assert wait["interrupted"] is True
+    assert run.status == record.RUNNING
+    attempts = record.load_outcome(run, 1)["attempts"]
+    assert [a["provider_kind"] for a in attempts] == ["capacity"]
+
+
+@pytest.mark.parametrize("waiting_ready", [True, False])
+def test_a_provider_wait_timer_is_not_a_screen_change(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    waiting_ready: bool,
+) -> None:
+    core_ = _core(env, stall=1)
+    assert _start(core_, repo, _brief(tmp_path, "Task\n@reply done\n")) == 0
+    run_id = _run_id(capsys.readouterr().out)
+    saved = record.update(record.load(run_id, env), {"last_screen_change_at": None})
+    now = 100.0
+
+    class TimerDriver(StubDriver):
+        def ready(self, run: record.Run) -> bool:
+            return False
+
+        def wait(self, run: record.Run) -> engines.TurnOutcome:
+            return engines.TurnOutcome(engines.RUNNING)
+
+        def stable_screen(self, screen: str) -> str:
+            return screen.partition(" (")[0]
+
+    def capture(run_id: str, previous: str | None) -> str | None:
+        return f"Reconnecting... 1/5 ({now:g}s)"
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += 10
+
+    monkeypatch.setattr(core_, "_screen_text", capture)
+    monkeypatch.setattr(core_, "_session_state", lambda run_id: core.LIVE)
+    monkeypatch.setattr(core.time, "time", lambda: now)
+    monkeypatch.setattr(core.time, "monotonic", lambda: now)
+    monkeypatch.setattr(core.time, "sleep", sleep)
+    driver = TimerDriver("claude", script_path(env))
+    with pytest.raises(RunError) as raised:
+        if waiting_ready:
+            core_._wait_ready(saved, driver)
+        else:
+            core_._wait_turn(saved, driver)
+    assert raised.value.code == (71 if waiting_ready else 124)
+    assert now == 160.0
+    assert record.load(run_id, env).last_screen_change_at == 100.0
+
+
+def test_status_warns_of_an_open_turn_that_waits_for_the_provider(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_id = _started(tmp_path, env, repo, capsys)
+    run = record.load(run_id, env)
+    waiting = {"kind": "outage", "message": "Reconnecting... 2/5", "since": 7.0}
+    saved = record.load_outcome(run, 1)
+    opened = {**saved, "state": None, "exit": None, "waiting": waiting}
+    record.outcome_path(run, 1).write_text(json.dumps(opened))
+    settled = {"status": run.status, "turn_state": run.turn_state}
+    record.update(run, {"status": record.RUNNING, "turn_state": record.SENT})
+    core_ = _core(env)
+    for target in (run_id, None):
+        assert core_.execute(lambda: core_.status(target, as_json=True)) == 0  # noqa: B023
+        out, err = capsys.readouterr()
+        document = json.loads(out)
+        turn = (document if target else document[0])["turns"][0]
+        assert turn["waiting"] == waiting
+        assert (
+            f"WARNING: run {run_id} waits for the provider (outage): "
+            "Reconnecting... 2/5"
+        ) in err.splitlines()
+    record.update(record.load(run_id, env), settled)
+    assert core_.execute(lambda: core_.status(run_id, as_json=True)) == 0
+    assert "waits for the provider" not in capsys.readouterr().err
+
+
+class _LeftoverDriver(StubDriver):
+    """Shows the screens and turn states that a test lists, one per poll."""
+
+    def __init__(self, env: dict[str, str], states: list[str]) -> None:
+        super().__init__("codex", script_path(env))
+        self.states = states
+        self.polls = 0
+        self.interrupts = 0
+        self.saved: list[dict[str, Any]] = []
+
+    def wait(self, run: record.Run) -> engines.TurnOutcome:
+        self.saved.append(record.load_outcome(run, run.turn))
+        state = self.states[min(self.polls, len(self.states) - 1)]
+        self.polls += 1
+        if state == "aborted":
+            return engines.TurnOutcome(engines.DONE)
+        if state == "done":
+            return engines.TurnOutcome(engines.DONE, reply="done")
+        return engines.TurnOutcome(engines.RUNNING)
+
+    def provider_wait(self, screen: str) -> engines.ProviderWait | None:
+        state = self.states[min(self.polls - 1, len(self.states) - 1)]
+        return engines.ProviderWait("capacity", "full") if state == "wait" else None
+
+    def interrupt(self, run: record.Run) -> None:
+        self.interrupts += 1
+
+
+def _leftover(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    states: list[str],
+    *,
+    interrupted: bool,
+) -> tuple[Core, record.Run, _LeftoverDriver]:
+    """Return a run whose open turn holds a wait an earlier command saved."""
+    run_id = _started(tmp_path, env, repo, capsys)
+    run = record.load(run_id, env)
+    waiting = {"kind": "capacity", "message": "full", "since": 5.0}
+    saved = record.load_outcome(run, 1)
+    record.outcome_path(run, 1).write_text(
+        json.dumps(
+            {
+                **saved,
+                "state": None,
+                "exit": None,
+                "waiting": {
+                    **waiting,
+                    **({"interrupted": True} if interrupted else {}),
+                },
+            }
+        )
+    )
+    run = record.update(run, {"status": record.RUNNING, "turn_state": record.SENT})
+    core_ = _core(env)
+    monkeypatch.setattr(core_, "_screen_text", lambda run_id, previous: "screen")
+    monkeypatch.setattr(core_, "_session_state", lambda run_id: core.LIVE)
+    return core_, run, _LeftoverDriver(env, states)
+
+
+def test_a_wait_left_by_an_earlier_command_is_cleared_when_the_screen_shows_none(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core_, run, driver = _leftover(
+        tmp_path, env, repo, capsys, monkeypatch, ["running", "done"], interrupted=False
+    )
+    assert record.provider_wait(run) is not None
+    outcome = core_._wait_turn(run, driver)
+    assert outcome == engines.TurnOutcome(engines.DONE, reply="done")
+    assert "waiting" in driver.saved[0] and "waiting" not in driver.saved[1]
+    assert driver.saved[1]["attempts"][-1]["provider_kind"] is None
+    assert driver.interrupts == 0
+    assert "waits for the provider" not in capsys.readouterr().err
+
+
+def test_recovery_ends_a_turn_that_an_earlier_command_interrupted_for_a_wait(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core_, run, driver = _leftover(
+        tmp_path, env, repo, capsys, monkeypatch, ["aborted"], interrupted=True
+    )
+    assert core_._wait_turn(run, driver) == engines.TurnOutcome(
+        engines.FAILED,
+        reason=f"{run.engine} waited for the provider: full",
+        provider_error=True,
+        provider_kind="capacity",
+    )
+    assert driver.interrupts == 0
+
+
+def test_an_earlier_interrupt_still_counts_when_the_turn_ends_a_moment_later(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core_, run, driver = _leftover(
+        tmp_path,
+        env,
+        repo,
+        capsys,
+        monkeypatch,
+        ["running", "running", "aborted"],
+        interrupted=True,
+    )
+    outcome = core_._wait_turn(run, driver)
+    assert (outcome.state, outcome.provider_kind) == (engines.FAILED, "capacity")
+    assert driver.saved[2]["waiting"]["interrupted"] is True
+    assert driver.interrupts == 0
+
+
+def test_an_earlier_interrupt_that_did_not_end_the_turn_is_forgotten(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core_, run, driver = _leftover(
+        tmp_path,
+        env,
+        repo,
+        capsys,
+        monkeypatch,
+        ["running", "running", "running", "aborted"],
+        interrupted=True,
+    )
+    core_.stall_seconds = 3600
+    now = 1000.0
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += core.WAIT_END_SECONDS
+
+    monkeypatch.setattr(core.time, "monotonic", lambda: now)
+    monkeypatch.setattr(core.time, "sleep", sleep)
+    assert core_._wait_turn(run, driver) == engines.TurnOutcome(engines.DONE)
+    assert "waiting" in driver.saved[1] and "waiting" not in driver.saved[3]
+    assert driver.interrupts == 0
+
+
+def test_recovery_after_the_failure_was_saved_ends_the_turn_the_same_way(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core_, run, driver = _leftover(
+        tmp_path, env, repo, capsys, monkeypatch, ["aborted"], interrupted=True
+    )
+    failed = engines.TurnOutcome(
+        engines.FAILED,
+        reason=f"{run.engine} waited for the provider: full",
+        provider_error=True,
+        provider_kind="capacity",
+    )
+    # The command stopped after it saved the failure and before the retry.
+    core_._save_outcome(run, failed, 1.0)
+    saved = record.load_outcome(run, 1)
+    assert saved["state"] == engines.FAILED
+    assert saved["waiting"]["interrupted"] is True
+    assert core_._wait_turn(run, driver) == failed
+
+
+def test_the_lead_interrupt_during_a_capacity_wait_cancels_the_resend(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core_, run, _ = _leftover(
+        tmp_path, env, repo, capsys, monkeypatch, ["wait"], interrupted=True
+    )
+    marker = run.folder / "turn-1.retry-cancelled"
+    assert not marker.exists()
+    assert core_.interrupt(run.id) == 0
+    assert marker.exists()
+
+
+def test_a_session_that_ends_at_the_wait_interrupt_is_handled_as_a_dead_engine(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core_, run, driver = _leftover(
+        tmp_path, env, repo, capsys, monkeypatch, ["wait"], interrupted=False
+    )
+    state = core.LIVE
+
+    def interrupt(run: record.Run) -> None:
+        nonlocal state
+        state = core.DEAD
+        raise tmux.TmuxError("no session")
+
+    monkeypatch.setattr(driver, "interrupt", interrupt)
+    monkeypatch.setattr(core_, "_session_state", lambda run_id: state)
+    outcome = core_._wait_turn(run, driver)
+    assert outcome.state == engines.FAILED
+    assert outcome.reason is not None
+    assert outcome.reason.startswith(f"the engine of {run.id} exited")
+    assert record.load(run.id, env).status == record.FAILED
