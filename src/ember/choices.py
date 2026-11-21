@@ -263,6 +263,28 @@ def _panel_members(value: object) -> None:
         _fail("at most 8 members")
 
 
+FALLBACK_LIMIT = 8
+"""The most entries of `provider.fallback`."""
+
+HOLD_MINUTES = ("0", "5", "15", "30", "60")
+"""The values of `provider.hold_minutes`: how long a failed model or engine
+is passed over before a job tries it again; `0` records no hold."""
+
+
+def _fallback_models(value: object) -> None:
+    """Validate the saved fallback list's syntax, count and uniqueness."""
+    entries = _string_list(value)
+    seen: set[str] = set()
+    for entry in entries:
+        if _split_menu(entry) is None:
+            _fail(f"{entry!r} is not <engine>:<model>")
+        if entry in seen:
+            _fail(f"{entry!r} is listed more than once")
+        seen.add(entry)
+    if len(entries) > FALLBACK_LIMIT:
+        _fail(f"at most {FALLBACK_LIMIT} fallback models")
+
+
 def _absolute_paths(value: object) -> None:
     items = _string_list(value)
     for item in items:
@@ -481,6 +503,28 @@ def _keys() -> dict[str, Key]:
         keys.append(
             Key(name, _STANDING, _enum(*values), _constant(default), allowed=values)
         )
+    keys.append(
+        Key(
+            "provider.hold_minutes",
+            _STANDING,
+            _enum(*HOLD_MINUTES),
+            _constant("15"),
+            allowed=HOLD_MINUTES,
+        )
+    )
+    keys.append(
+        Key(
+            "provider.fallback",
+            _STANDING,
+            _fallback_models,
+            _constant([]),
+            is_list=True,
+            pattern=(
+                "<engine>:<model> from that engine's shortlist, "
+                f"comma-separated, in order of use; at most {FALLBACK_LIMIT}"
+            ),
+        )
+    )
     for engine in SANDBOXED:
         keys.append(
             Key(
@@ -889,6 +933,61 @@ def _member_row(
     return row
 
 
+ENGINE_WIDE_KINDS = ("usage_limit", "outage")
+"""The provider failures that another model of the same engine does not avoid."""
+
+
+def fallback_rows(
+    answers: Mapping[str, Mapping[str, Any]],
+    connected: Mapping[str, bool] | None = None,
+) -> list[dict[str, Any]]:
+    """Describe each entry of the fallback list, in order of use."""
+    return [
+        _member_row(answers, value, connected)
+        for value in answers["provider.fallback"]["value"]
+    ]
+
+
+def fallback_worker(
+    answers: Mapping[str, Mapping[str, Any]],
+    failed: Iterable[tuple[str, str, str]],
+    *,
+    avoid: Iterable[tuple[str, str]] = (),
+    connected: Mapping[str, bool] | None = None,
+) -> dict[str, Any] | None:
+    """Return the fallback list entry that replaces a worker after a provider error.
+
+    It is the first entry whose row is `set` and that is neither a failed
+    worker nor one to avoid. An entry on the engine of a worker that failed
+    with `usage_limit` or `outage` is passed over too, because another
+    model of that engine would fail the same way.
+
+    Args:
+        answers: The resolved answers, with `provider.fallback`, the
+            shortlists and the engine switches.
+        failed: The `(engine, model, kind)` of each worker that failed on
+            this job, with the provider kind of its failure.
+        avoid: Other `(engine, model)` pairs not to use, such as the model
+            that wrote the work a review reads.
+        connected: Each engine's connection state, when known.
+
+    Returns:
+        The entry's row with `engine`, `model` and `effort`, or `None` when
+        the list holds no usable entry.
+    """
+    failures = list(failed)
+    engines = {engine for engine, _, kind in failures if kind in ENGINE_WIDE_KINDS}
+    skipped = {(engine, model) for engine, model, _ in failures} | set(avoid)
+    for row in fallback_rows(answers, connected):
+        if (
+            row["state"] == "set"
+            and (row["engine"], row["model"]) not in skipped
+            and row["engine"] not in engines
+        ):
+            return row
+    return None
+
+
 def panel_row(
     answers: Mapping[str, Mapping[str, Any]],
     connected: Mapping[str, bool] | None = None,
@@ -1214,13 +1313,27 @@ def _stored_settings(conn: sqlite3.Connection) -> dict[str, object]:
 
 
 def _check_shortlisted(
-    values: Mapping[str, object], settings: Mapping[str, object]
+    values: Mapping[str, object],
+    settings: Mapping[str, object],
+    stored: Mapping[str, object] | None = None,
 ) -> None:
-    """Refuse a menu value whose model is not on its engine's shortlist."""
+    """Refuse a menu value whose model is not on its engine's shortlist.
+
+    `stored` holds the settings before this write.
+    """
+    stored = stored or {}
     entries = [(name, values.get(name)) for name in (*MENU_KEYS, *DERIVED_KEYS)]
     entries.extend(
         ("panel.members", value)
         for value in _string_list(values.get("panel.members", []))
+    )
+    # An entry the list already holds stays, so the owner can remove or
+    # reorder entries one at a time after a model left its shortlist.
+    kept = set(_string_list(stored.get("provider.fallback", [])))
+    entries.extend(
+        ("provider.fallback", value)
+        for value in _string_list(values.get("provider.fallback", []))
+        if value not in kept
     )
     for name, value in entries:
         if not isinstance(value, str) or value in ("ask", SAME):
@@ -1282,7 +1395,8 @@ def set_settings(
                 _fail(problem)
 
     def change(conn: sqlite3.Connection) -> bool:
-        _check_shortlisted(values, {**_stored_settings(conn), **values})
+        stored = _stored_settings(conn)
+        _check_shortlisted(values, {**stored, **values}, stored)
         before = conn.total_changes
         for name, value in values.items():
             conn.execute(

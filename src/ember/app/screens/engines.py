@@ -2,8 +2,8 @@
 
 One card per engine, side by side: the maker's logo, the version, a status
 badge, the Use and Sandbox switches, the sandbox provider, `bwrap` and the
-last sandbox check, known blocking causes and, while the engine is not
-connected, its setup steps with the commands that fix them. Models opens
+last sandbox check, active provider holds and known blocking causes. While an
+engine is disconnected its card shows setup steps and commands. Models opens
 one engine's model list below the cards, where models are put on the
 shortlist with an effort.
 
@@ -16,6 +16,7 @@ Every read, check and save runs in a task.
 import html
 from collections import Counter
 from collections.abc import Callable, Sequence
+from datetime import datetime
 from decimal import Decimal
 from math import ceil
 from typing import TYPE_CHECKING, Any
@@ -28,13 +29,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
-from ember import choices, sandbox
+from ember import choices, holds, sandbox
 from ember.app import icons, theme
 from ember.app.screens.common import (
     CARD_MARGIN,
@@ -327,6 +329,14 @@ class _EngineCard(Card):
         layout.addLayout(self.cause_area)
         self.cause_alert: Alert | None = None
 
+        self.holds_widget = QWidget()
+        self.holds_area = QVBoxLayout(self.holds_widget)
+        self.holds_area.setContentsMargins(0, 0, 0, 0)
+        self.holds_widget.hide()
+        layout.addWidget(self.holds_widget)
+        self._holds: list[holds.Hold] = []
+        self.retry_buttons: list[QPushButton] = []
+
         self.setup_widget = QWidget()
         self.setup_area = QVBoxLayout(self.setup_widget)
         self.setup_area.setContentsMargins(0, 0, 0, 0)
@@ -413,6 +423,28 @@ class _EngineCard(Card):
         self.shortlisted_label.setText(f"{count} shortlisted")
         self.models_button.setChecked(screen.open_engine == engine)
         self._draw_setup(engine_status)
+
+    def show_holds(self, active: list[holds.Hold]) -> None:
+        """Show each active hold with a control to release it."""
+        if active == self._holds:
+            return
+        self._holds = active
+        clear_layout(self.holds_area)
+        self.retry_buttons.clear()
+        for hold in active:
+            until = datetime.fromtimestamp(hold.until).strftime("%H:%M")
+            prefix = "Held" if hold.model is None else f"{hold.model}: held"
+            line = label(f"{prefix} after {hold.kind} until {until}")
+            line.setTextFormat(Qt.TextFormat.PlainText)
+            self.holds_area.addWidget(line)
+            retry = button("Try again now", "secondary", size="sm")
+            retry.setAccessibleName(f"Try again now: {hold.name()}")
+            retry.clicked.connect(
+                lambda _checked=False, hold=hold: self.owner.release_hold(hold)
+            )
+            self.holds_area.addWidget(retry, 0, Qt.AlignmentFlag.AlignLeft)
+            self.retry_buttons.append(retry)
+        self.holds_widget.setVisible(bool(active))
 
     def _draw_check(
         self, check: sandbox.SandboxCheck | None, checking: bool, switched_on: bool
@@ -505,6 +537,7 @@ class _EngineCard(Card):
         order: list[QWidget] = [self.use_switch, self.sandbox_switch]
         if self.cause_alert is not None:
             order += self.cause_alert.buttons
+        order.extend(self.retry_buttons)
         for line in self.commands:
             order += [line.copy_button, line.run_button]
         order += [self.again_button, self.models_button]
@@ -1228,6 +1261,7 @@ class EnginesScreen(QWidget):
         self.panel: _ModelPanel | None = None
         self._check_tokens: dict[str, int] = {}
         self._reading_engines = False
+        self._hold_read = 0
 
         layout = scrolled(self)
         self.content_layout = layout
@@ -1384,6 +1418,18 @@ class EnginesScreen(QWidget):
         for card in self.cards.values():
             card.update_view()
         self.chain_focus()
+        self._hold_read += 1
+        token = self._hold_read
+        env = self.context.env
+
+        def loaded(active: list[holds.Hold]) -> None:
+            if token != self._hold_read:
+                return
+            for engine, card in self.cards.items():
+                card.show_holds([hold for hold in active if hold.engine == engine])
+            self.chain_focus()
+
+        self.context.tasks.run(lambda: holds.active(env), loaded, lambda _error: None)
 
     def chain_focus(self) -> None:
         """Set the Tab order of every control in reading order."""
@@ -1450,6 +1496,17 @@ class EnginesScreen(QWidget):
 
         self.context.tasks.run(check, done, failed)
         self._redraw()
+
+    def release_hold(self, hold: holds.Hold) -> None:
+        """End the selected provider hold and reread the cards."""
+        env = self.context.env
+        self.context.tasks.run(
+            lambda: holds.release(hold.engine, hold.model, env=env),
+            lambda _released: self._redraw(),
+            lambda error: self.context.error.emit(
+                f"Ember could not release the hold on {hold.name()}: {error}"
+            ),
+        )
 
     def save_switch(self, key: str, on: bool) -> None:
         """Save an on or off setting.

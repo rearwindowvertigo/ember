@@ -1034,3 +1034,174 @@ def test_turn_output_selects_tool_responses_for_current_attempt(setup: Setup) ->
     assert "old denial" not in output
     assert "later denial" not in output
     path.unlink()
+
+
+WAIT_SCREEN = (
+    "• Ran git status\n"
+    "\n"
+    "• Reconnecting... 1/5 (22m 56s • esc to interrupt)\n"
+    f"  └ {CAPACITY_MESSAGE}\n"
+    "\n"
+    "› Ask Codex to do anything\n"
+    "\n"
+    "  ? for shortcuts\n"
+)
+
+
+def test_the_retry_status_line_is_a_capacity_wait(setup: Setup) -> None:
+    driver = CodexDriver(setup.env)
+    assert driver.provider_wait(WAIT_SCREEN) == engines.ProviderWait(
+        "capacity", CAPACITY_MESSAGE
+    )
+
+
+@pytest.mark.parametrize(
+    ("detail", "kind", "message"),
+    [
+        (
+            "  └ You’ve hit your usage limit. Try again later.\n",
+            "usage_limit",
+            "You’ve hit your usage limit. Try again later.",
+        ),
+        (
+            "  └ stream disconnected before completion: failed to lookup\n"
+            "    address information: Try again\n",
+            "outage",
+            "stream disconnected before completion: failed to lookup "
+            "address information: Try again",
+        ),
+        ("", "outage", "Reconnecting..."),
+    ],
+)
+def test_a_retry_status_line_is_classified_by_its_message(
+    detail: str, kind: str, message: str
+) -> None:
+    screen = (
+        f"• Reconnecting... 2/5 (1m 02s • esc to interrupt)\n{detail}\n› \n\n  footer\n"
+    )
+    assert codex.screen_wait(screen) == engines.ProviderWait(kind, message)
+
+
+def test_a_status_line_counts_only_directly_above_the_live_composer() -> None:
+    line = "• Reconnecting... waiting for network (5s • esc to interrupt)\n"
+    assert codex.screen_wait(f"{line}\n› \n") == engines.ProviderWait(
+        "outage", "Reconnecting... waiting for network"
+    )
+    assert codex.screen_wait(f"{line}\n") is None
+    # The same lines above an earlier message, with the live status below.
+    earlier = (
+        "• Reconnecting... 1/5 (22m 56s • esc to interrupt)\n"
+        f"  └ {CAPACITY_MESSAGE}\n"
+        "\n"
+        "› Continue with the review\n"
+        "\n"
+        "• Working (3s • esc to interrupt)\n"
+        "\n"
+        "› Ask Codex to do anything\n"
+    )
+    assert codex.screen_wait(earlier) is None
+    assert codex.screen_without_wait_timer(earlier) == earlier
+
+
+@pytest.mark.parametrize(
+    "screen",
+    [
+        "",
+        "• Working (12s • esc to interrupt)\n\n› \n",
+        "• Reconnecting... 1/5\n\n› \n",
+        # The same text inside a tool's output, with the live status line below.
+        WAIT_SCREEN.replace("\n› Ask", "\n• Working (3s • esc to interrupt)\n\n› Ask"),
+        WAIT_SCREEN.replace("\n› Ask", "\nmore output\n\n› Ask"),
+    ],
+)
+def test_other_screens_show_no_provider_wait(screen: str) -> None:
+    assert codex.screen_wait(screen) is None
+    assert codex.screen_without_wait_timer(screen) == screen
+
+
+def test_the_stable_screen_drops_only_the_retry_timer(setup: Setup) -> None:
+    driver = CodexDriver(setup.env)
+    later = WAIT_SCREEN.replace("22m 56s", "22m 57s")
+    assert later != WAIT_SCREEN
+    stable = driver.stable_screen(WAIT_SCREEN)
+    assert stable == driver.stable_screen(later)
+    assert "Reconnecting... 1/5\n" in stable
+    assert "esc to interrupt" not in stable
+    assert CAPACITY_MESSAGE in stable
+    assert driver.stable_screen(WAIT_SCREEN.replace("1/5", "2/5")) != stable
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "  • Reconnecting... 1/5 (22m 56s • esc to interrupt)",
+        "  └ • Reconnecting... (3s • esc to interrupt)",
+        "    Reconnecting... 1/5 (1m • esc to interrupt)",
+        "Reconnecting... 1/5 (1m • esc to interrupt)",
+    ],
+)
+def test_an_indented_or_unmarked_line_is_not_the_status_line(line: str) -> None:
+    screen = f"{line}\n  └ {CAPACITY_MESSAGE}\n\n› \n"
+    assert codex.screen_wait(screen) is None
+
+
+def test_a_status_line_without_a_message_is_the_same_wait_at_every_count() -> None:
+    waits = {
+        codex.screen_wait(f"• Reconnecting... {n}/5 (1m • esc to interrupt)\n\n› \n")
+        for n in (1, 2, 5)
+    }
+    assert waits == {engines.ProviderWait("outage", "Reconnecting...")}
+
+
+EXIT_ERROR = (
+    "Error: account/read failed: account/read failed: workspace routing "
+    "discovery timed out (code -32603)"
+)
+
+
+def test_the_exit_words_are_codex_error_line(setup: Setup) -> None:
+    driver = CodexDriver(setup.env)
+    dead = "Pane is dead (status 1, Fri Nov 20 20:06:13 2026)\n"
+    assert driver.exit_words(f"the brief's last line\n{EXIT_ERROR}\n{dead}") == (
+        EXIT_ERROR
+    )
+    assert driver.exit_words(f"the brief's last line\n{dead}") is None
+    assert driver.exit_words(f"{EXIT_ERROR}\na later line\n{dead}") is None
+    assert driver.exit_words("") is None
+    # Tool output is indented, and a live pane holds no exit.
+    assert driver.exit_words(f"    Error: request timed out\n{dead}") is None
+    assert driver.exit_words(f"{EXIT_ERROR}\n") is None
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        EXIT_ERROR,
+        "Error: failed to refresh available models: request timed out",
+        "Error: failed to lookup address information: Try again",
+        "Error: IO error: Connection reset by peer (os error 104)",
+        "Error: Connection failed: error sending request",
+        "Error: failed to connect to Responses WebSocket",
+        "Error: account/read failed: HTTP 503 Service Unavailable",
+        "Error: account/rateLimits/read failed: connection closed",
+    ],
+)
+def test_an_exit_error_about_the_network_is_an_outage(setup: Setup, words: str) -> None:
+    assert CodexDriver(setup.env).exit_outcome(words) == engines.TurnOutcome(
+        engines.FAILED, reason=words, provider_error=True, provider_kind="outage"
+    )
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        "Error: unknown variant `bogus` in config.toml",
+        "the request timed out",
+        "Run the tests; note that some timed out last week",
+        "Error: failed to connect to MCP server `local`",
+        "Error: MCP server `local` timed out during startup",
+        "Error: account/read failed: 401 Unauthorized",
+    ],
+)
+def test_other_last_words_are_not_classified(setup: Setup, words: str) -> None:
+    assert CodexDriver(setup.env).exit_outcome(words) is None

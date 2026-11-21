@@ -196,6 +196,18 @@ assumed list:
 | `--review [--reviewer W]` | Collect a running turn, then start fresh reviews and a fix budget. |
 | `--worker W` | Keep the old branch and start a new writer from the flow tip. |
 | `--drop` | Keep the branch and drop the task; its dependants stay blocked. Also accepted for a pending or blocked task. |
+| `--withdraw` | Remove the task's answer that the runner has not applied yet. |
+
+The runner reads answers at every poll. It starts a `--review` answer at
+once when a job slot is free and no running task holds the task's files;
+every other answer waits until the running jobs of the wave end. Until the
+runner applies an answer, a new answer for the same task replaces it and
+`--withdraw` removes it; `emb flow --status <id>` lists the queued answers.
+A fix that a review started this way decides waits for the next wave.
+`emb flow --lead <id> --reviewer W`, with no task, queues a change of the
+flow's saved reviewer; the runner applies it before the next review it
+starts, and with no live runner it waits for the next runner. Use it only
+on the owner's word for a new reviewer.
 
 In the stop message, name each choice you offer by its printed option and
 say in words what it does. For
@@ -305,6 +317,13 @@ or a provider error without a recorded kind, halts new runs with
 queued writers stay pending. Resume clears the halt, but the failed task
 still needs a lead answer. Report the kind. After a capacity error, name no
 other worker as an option; the capacity `report:` line gives the recommendation.
+
+When the owner's fallback list covers a provider error, the flow repeats
+the writer or reviewer start on that worker by itself and does not stop.
+The task's own worker stays: a later start of that role uses it again.
+`emb flow --status <id>` then prints a `fallback:` line under the task, and
+the JSON task has `fallbacks`. Tell the owner each such switch with its
+task, the model that failed, its cause and the model that ran.
 
 ## Denied paths
 

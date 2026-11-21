@@ -214,6 +214,12 @@ class Run:
     start_argv: tuple[str, ...] = ()
     """The start command with its saved brief, for a preparation retry."""
 
+    continues: str | None = None
+    """The earlier run whose branch this run was cut from, or None."""
+
+    fallback_from: str | None = None
+    """The run that a provider error ended and that this run replaces, or None."""
+
     scoped: bool = False
     """Whether the worker session runs in its own systemd user scope."""
 
@@ -235,7 +241,10 @@ class Run:
             if item.name in ("folder", "env"):
                 continue
             value = getattr(self, item.name)
-            if item.name in ("preparation", "start_argv") and not value:
+            if (
+                item.name in ("preparation", "start_argv", "continues", "fallback_from")
+                and not value
+            ):
                 continue
             result[item.name] = list(value) if isinstance(value, tuple) else value
         result[choices.OPENCODE_ID_FORMAT] = 1
@@ -264,6 +273,8 @@ _TYPES: dict[str, tuple[tuple[type, ...], bool]] = {
     "parent": ((dict,), True),
     "preparation": ((dict,), True),
     "start_argv": ((list,), False),
+    "continues": (_STR, True),
+    "fallback_from": (_STR, True),
     "sandbox": (_STR, False),
     "sandbox_paths": ((dict,), False),
     "network": ((bool,), False),
@@ -411,7 +422,100 @@ def load_outcome(run: Run, turn: int) -> dict[str, Any]:
         item = result.get(key)
         if item is not None and not _nonnegative_number(item):
             raise RecordError(run.id, f"{path} has invalid {key}")
+    waiting = value.get("waiting")
+    if waiting is not None:
+        if not (
+            isinstance(waiting, dict)
+            and waiting.get("kind") in engines.PROVIDER_KINDS
+            and isinstance(waiting.get("message"), str)
+            and _nonnegative_number(waiting.get("since"))
+        ):
+            raise RecordError(run.id, f"{path} has an invalid waiting")
+        result["waiting"] = {key: waiting[key] for key in ("kind", "message", "since")}
+        if waiting.get("interrupted") is True:
+            result["waiting"]["interrupted"] = True
     return result
+
+
+def provider_wait(run: Run) -> dict[str, Any] | None:
+    """Return the provider wait of a run's open turn.
+
+    Args:
+        run: The run.
+
+    Returns:
+        The saved wait's `kind`, `message` and `since`, the epoch time it
+        began, with `interrupted` once Ember has interrupted the turn for
+        it; `None` when the run is not running, its turn is not open, no
+        wait is saved or the outcome cannot be read. During a capacity
+        resend the outcome holds the earlier attempt's state, so the run's
+        status and turn state decide, not the outcome's.
+    """
+    if run.status != RUNNING or run.turn_state != SENT or run.turn < 1:
+        return None
+    try:
+        return load_outcome(run, run.turn).get("waiting")
+    except RecordError:
+        return None
+
+
+CHAIN_LIMIT = 16
+"""The most earlier runs followed from one run through a link field."""
+
+
+def linked(run: Run, field_name: str) -> list[Run]:
+    """Return the earlier runs a run points back to, the nearest first.
+
+    Args:
+        run: The run.
+        field_name: `continues` or `fallback_from`.
+
+    Returns:
+        The runs reached by following the field, up to `CHAIN_LIMIT`; a run
+        whose record cannot be read ends the chain.
+    """
+    found: list[Run] = []
+    seen = {run.id}
+    current = run
+    while len(found) < CHAIN_LIMIT:
+        name = getattr(current, field_name)
+        if name is None or name in seen:
+            break
+        try:
+            current = load(name, run.env)
+        except RecordError:
+            break
+        seen.add(current.id)
+        found.append(current)
+    return found
+
+
+def first_base(run: Run) -> str | None:
+    """Return the base of the first run of a chain of continued runs."""
+    earlier = linked(run, "continues")
+    return earlier[-1].base if earlier else run.base
+
+
+def work_tip(run: Run) -> str | None:
+    """Return the tip of the work on a run's branch, its own or inherited.
+
+    Returns:
+        The run's last commit; for a run that continues another run's
+        branch and made no commit, the tip it was cut from; otherwise None.
+    """
+    if run.commits:
+        return run.commits[-1]
+    return run.base if run.continues else None
+
+
+def provider_kind(run: Run) -> str:
+    """Return the provider kind of a run's last turn, `outage` when unknown."""
+    try:
+        turns, _ = turn_results(run)
+    except OSError, RecordError:
+        return "outage"
+    kind = turns[-1].get("provider_kind") if turns else None
+    return kind if isinstance(kind, str) else "outage"
 
 
 def turn_results(run: Run) -> tuple[list[dict[str, Any]], list[RecordError]]:
@@ -563,6 +667,8 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
         "parent": None,
         "preparation": None,
         "start_argv": [],
+        "continues": None,
+        "fallback_from": None,
         **value,
     }
     values: dict[str, Any] = {}

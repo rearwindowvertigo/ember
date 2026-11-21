@@ -23,7 +23,8 @@ and the number of earlier calls on that route: the first of
 Templates replace `{{ID}}`, `{{RUN}}`, `{{BRANCH}}`, `{{WORKTREE}}`,
 `{{WORKTREES}}`, `{{TIP}}`, `{{HEAD}}`, `{{SHORT_HEAD}}`,
 `{{TARGET}}`, `{{EVAL}}`, `{{FLOW}}`, `{{PANEL}}`, `{{PLAN}}`, `{{DIR}}`
-`{{SUMMARY}}` and `{{SKILL_VERSION}}` (the claim's `--skill` value), and the
+`{{SUMMARY}}`, `{{TASK_FILE}}` (the call's `--task-file`, absolute) and
+`{{SKILL_VERSION}}` (the claim's `--skill` value), and the
 fixture clock's `{{BEGAN}}` (epoch seconds), `{{STAMP}}` (its id time in
 UTC), `{{STARTED}}` (its local ISO time), and `{{BEGAN_LATER}}` and
 `{{STAMP_LATER}}` one minute after it. `"{{BEGAN}}"` and `"{{BEGAN_LATER}}"`
@@ -75,6 +76,9 @@ whose claim is `gone` derives `done` with no next line.
 Stored `step` and `next` keys in a state document are
 ignored. Canned starts with a status JSON retain that record with the call's
 claim, subject and trailers; later status calls derive their output from it.
+A record's `fallback` key holds the fallback start of a first turn that
+exited 73; the run's lines then take the `fallback` variant, and status
+output leaves the key out.
 Owner actions suppress carry-on next lines and leave the run on the `owner`
 step. An otherwise successful start, send or recovery exits 84 with every
 pending owner line; the recorded turn exit stays unchanged. Merge prints
@@ -1014,6 +1018,12 @@ def derive_next(run: dict[str, Any], state: dict[str, Any]) -> tuple[str, str | 
 
 def run_variant(run: dict[str, Any]) -> str | None:
     """Read the stored variant or an older record's final provider kind."""
+    if (
+        run.get("last_exit") == 73
+        and run.get("fallback")
+        and run.get("last_variant") != "uncertain"
+    ):
+        return "fallback"
     if run.get("last_variant") is not None:
         return run["last_variant"]
     turns = run.get("turns", [])
@@ -1049,7 +1059,8 @@ def with_step(run: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
         or `next` is replaced.
     """
     step, line = derive_next(run, state)
-    return {**run, "session_state": "live", "step": step, "next": line}
+    shown = {key: value for key, value in run.items() if key != "fallback"}
+    return {**shown, "session_state": "live", "step": step, "next": line}
 
 
 def add_next(reply: Reply, run: dict[str, Any], state: dict[str, Any]) -> Reply:
@@ -2597,7 +2608,9 @@ def command_reports(
                 variant,
             )
         if run and (run.get("last_exit") == reply.code or run.get("owner_wait")):
-            run.update(last_exit=reply.code, last_variant=variant, status="failed")
+            # A record keeps the variant of the failure, not of its fallback.
+            saved = run.get("last_variant") if variant == "fallback" else variant
+            run.update(last_exit=reply.code, last_variant=saved, status="failed")
         report = exits.report(reply.code, variant, **context)
         if report and report not in reply.err.splitlines():
             reply.err += report + "\n"
@@ -2639,6 +2652,9 @@ def main(argv: list[str]) -> int:
         **record_variables(argv, state),
         "EVAL": str(EVAL),
         "SKILL_VERSION": option(argv, "--skill") or "",
+        "TASK_FILE": str(Path(task).expanduser().resolve())
+        if (task := option(argv, "--task-file"))
+        else "",
         "ID": option(argv, "--id")
         or option(argv, "--finish")
         or option(argv, "--claim")

@@ -105,6 +105,26 @@ class TurnOutcome:
 
 
 @dataclass(frozen=True)
+class ProviderWait:
+    """An open turn in which the engine waits for the provider."""
+
+    kind: str
+    """`capacity`, `usage_limit` or `outage`."""
+
+    message: str
+    """The engine's words for the wait."""
+
+    def __post_init__(self) -> None:
+        """Check the provider kind.
+
+        Raises:
+            ValueError: The provider kind is unknown.
+        """
+        if self.kind not in PROVIDER_KINDS:
+            raise ValueError(f"unknown provider kind {self.kind!r}")
+
+
+@dataclass(frozen=True)
 class IdleState:
     """Whether a run's session can take a message now."""
 
@@ -267,6 +287,66 @@ class Driver(ABC):
             The visible pane.
         """
         return tmux.capture(run.id, env=run.env)
+
+    def provider_wait(self, screen: str) -> ProviderWait | None:
+        """Return the provider wait that the pane of an open turn shows.
+
+        An engine can keep a turn open while it retries a request the
+        provider refused or dropped. The turn's record then holds no error,
+        and the pane is the signal. The core ends a `capacity` wait at once
+        and any other wait once it has lasted the stall time. The default,
+        for an engine whose waits Ember cannot read, is `None`.
+
+        Args:
+            screen: The text of the session's pane.
+
+        Returns:
+            The wait, or `None` when the pane shows none.
+        """
+        return None
+
+    def stable_screen(self, screen: str) -> str:
+        """Return a pane's text without what changes during a provider wait.
+
+        The core compares this text to find screen changes, so a timer that
+        runs while the engine waits for the provider does not count as one.
+        The default returns the text unchanged.
+
+        Args:
+            screen: The text of the session's pane.
+
+        Returns:
+            The text to compare.
+        """
+        return screen
+
+    def exit_words(self, screen: str) -> str | None:
+        """Return what the engine printed last before its process ended.
+
+        The core adds the text to the reason of a turn or a start whose
+        engine ended. The default is the pane's last line.
+
+        Args:
+            screen: The text of the dead session's pane.
+
+        Returns:
+            The engine's last words, or `None` when the pane holds none.
+        """
+        return tmux.last_words(screen)
+
+    def exit_outcome(self, words: str) -> TurnOutcome | None:
+        """Classify the last words of an engine whose process ended.
+
+        Args:
+            words: The text `exit_words` returned.
+
+        Returns:
+            A `failed` outcome with `provider_error` and a `provider_kind`
+            when the words name a failure to reach the provider; `None`
+            for any other end, which the core reports as an engine failure.
+            The default is `None`.
+        """
+        return None
 
     def close(self, run: Run) -> None:  # noqa: B027
         """Clean up the engine's own state before the core kills the session.

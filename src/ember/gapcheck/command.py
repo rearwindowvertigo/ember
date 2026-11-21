@@ -27,7 +27,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any, TextIO
 
-from ember import choices, citations, db, paths
+from ember import choices, citations, db, holds, paths
 from ember.gapcheck import brief, plan, policy, previous, reply
 from ember.runs import exits, record
 from ember.runs.core import STALL_MINUTES, Core, StartOptions
@@ -530,6 +530,44 @@ def _stop_signals_interrupt() -> Iterator[None]:
             signal.signal(signum, handler)
 
 
+def _fallback(
+    args: argparse.Namespace,
+    run_id: str,
+    failed: tuple[tuple[str, str, str], ...],
+    env: Mapping[str, str],
+    core: Core,
+    err: TextIO,
+) -> tuple[argparse.Namespace, str, tuple[tuple[str, str, str], ...]] | None:
+    """Close a run a provider error ended and name the fallback reviewer.
+
+    Returns:
+        The options and engine of the next run and the workers that failed
+        so far, or `None` when the owner's fallback list has no entry that
+        applies, the run's resend is uncertain, the run cannot be closed or
+        the records cannot be read.
+    """
+    try:
+        run = record.load(run_id, env)
+        if run.last_variant == "uncertain":
+            return None
+        kind = record.provider_kind(run)
+        tried = (*failed, (run.engine, run.model, kind))
+        row = holds.replacement(choices.read(None, env=env)["answers"], tried, env=env)
+    except Exception:  # noqa: BLE001 - without the settings the check stops
+        return None
+    if row is None or core.execute(lambda: core.close(run_id)) != 0:
+        return None
+    print(
+        f"WARNING: the gap check reviewer {run.engine} {run.model} failed "
+        f"({kind}); starting {row['engine']} {row['model']} from the fallback list",
+        file=err,
+    )
+    options = argparse.Namespace(
+        **{**vars(args), "model": row["model"], "effort": row["effort"]}
+    )
+    return options, row["engine"], tried
+
+
 def _run(
     args: argparse.Namespace,
     document: plan.Plan,
@@ -541,10 +579,14 @@ def _run(
     err: TextIO,
     read: Sequence[str],
     sources: Sequence[Path] = (),
+    failed: tuple[tuple[str, str, str], ...] = (),
 ) -> tuple[dict[str, Any] | None, int, CommandError | None]:
     """Start, collect and close one run, forwarding every run diagnostic.
 
-    `sources` are the read files listed in the brief.
+    `sources` are the read files listed in the brief. A run that a provider
+    error ends at exit 73 is closed and repeated on the worker of the
+    owner's fallback list while an entry applies; `failed` holds the workers
+    that failed before.
     """
     output, errors = io.StringIO(), io.StringIO()
     temporary: Path | None = None
@@ -603,6 +645,22 @@ def _run(
     if match is None:
         return None, code, None
     run_id = match.group(1)
+    if code == exits.PROVIDER_ERROR:
+        retry = _fallback(args, run_id, failed, env, core, err)
+        if retry is not None:
+            return _run(
+                retry[0],
+                document,
+                earlier,
+                top,
+                retry[1],
+                env,
+                core_factory,
+                err,
+                read,
+                sources,
+                retry[2],
+            )
     result = _result(document, earlier)
     details: dict[str, Any] = {
         "id": run_id,
@@ -619,7 +677,13 @@ def _run(
             "engine": run.engine,
             "model": run.model,
             "effort": run.effort,
-            "source": "option" if args.engine is not None else "menu",
+            "source": "fallback"
+            if failed
+            or run.engine != engine
+            or (args.model is not None and run.model != args.model)
+            else "option"
+            if args.engine is not None
+            else "menu",
         }
         candidate = Path(run.reply) if run.reply else run.folder / "turn-1.md"
         # A missing reply differs from an existing reply that cannot be read.

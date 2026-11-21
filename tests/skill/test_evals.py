@@ -42,6 +42,7 @@ CASES = (
     "provider-usage-limit",
     "provider-outage",
     "provider-uncertain",
+    "provider-fallback",
     "flow-gap-check-first",
     "flow-shared-document-task",
     "owner-away-named-workers",
@@ -1887,6 +1888,44 @@ def test_provider_error_case_streams_and_status(
         assert "retry 1 of 2 in 30s" in result.stderr
         assert turn["seconds"] == 40
         assert sum(a["seconds"] for a in attempts) == 10
+
+
+def test_provider_fallback_case_names_and_takes_the_fallback_start(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    work = case("provider-fallback", tmp_path, env)
+    brief = work.brief()
+    result = work.emb("run", "--engine", "codex", "--dir", ".", "--task-file", brief)
+    assert result.returncode == 73
+    run_id = result.stdout.splitlines()[0].removeprefix("run ")
+    lines = result.stderr.splitlines()
+    assert lines[-1] == exits.report(73, "fallback")
+    start = lines[-2]
+    assert start.startswith(
+        f"next: emb run --close {run_id}, then emb run --engine codex "
+        "--model gpt-6.1-sol-mini --effort medium --dir "
+    )
+    assert start.endswith(
+        f" --task-file {Path(brief).resolve()} --fallback-from {run_id}"
+    )
+    held = "WARNING: codex gpt-6.1-sol is held after capacity until "
+    assert sum(line.startswith(held) for line in lines) == 1
+    status = work.emb("run", "--status", run_id, "--json")
+    assert status.stderr == f"{start}\n{exits.report(73, 'fallback')}\n"
+    document = json.loads(status.stdout)
+    assert (document["step"], document["next"]) == ("failed", start)
+    assert document["last_variant"] == "capacity" and "fallback" not in document
+    assert document["capacity_retries"] == 0
+    answers = json.loads(work.emb("choices", "--json").stdout)["answers"]
+    assert answers["provider.fallback"]["value"] == ["codex:gpt-6.1-sol-mini"]
+    assert work.emb("run", "--close", run_id).returncode == 0
+    second = work.emb(*shlex.split(start.split(", then emb ", 1)[1]))
+    assert second.returncode == 0, second.stderr
+    second_id = second.stdout.splitlines()[0].removeprefix("run ")
+    assert second_id != run_id
+    document = json.loads(work.emb("run", "--status", second_id, "--json").stdout)
+    assert (document["model"], document["effort"]) == ("gpt-6.1-sol-mini", "medium")
+    assert document["step"] == "merge" and len(document["commits"]) == 1
 
 
 @pytest.mark.parametrize("variant", ["capacity", "usage-limit", "outage", "uncertain"])

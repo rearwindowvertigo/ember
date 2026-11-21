@@ -400,3 +400,33 @@ def test_control_argv_without_tmux_raises(env: dict[str, str], tmp_path: Path) -
     empty.mkdir()
     with pytest.raises(tmux.TmuxError, match="not installed"):
         tmux.control_argv("s", env={**env, "PATH": str(empty)})
+
+
+@pytest.mark.parametrize(
+    ("screen", "words"),
+    [
+        ("", None),
+        ("\n  \n", None),
+        ("Pane is dead (status 1, Fri Nov 20 20:06:13 2026)\n", None),
+        # A pane that is not dead holds no last words.
+        ("first\n  Error: request timed out  \n\n", None),
+        ("Pane is dead (status 1)\nError: later text\n", None),
+        (
+            "first\n  Error: request timed out  \n\nPane is dead (status 1)\n",
+            "Error: request timed out",
+        ),
+        (
+            "text\nError: x failed\nPane is dead (status 1, Fri Nov 20 2026)\n\n",
+            "Error: x failed",
+        ),
+        ("a" * 400 + "\nPane is dead (status 0)\n", "a" * tmux.LAST_WORDS_LIMIT),
+    ],
+)
+def test_last_words(screen: str, words: str | None) -> None:
+    assert tmux.last_words(screen) == words
+
+
+def test_last_line_keeps_the_indentation() -> None:
+    screen = "text\n    Error: request timed out  \nPane is dead (status 1)\n"
+    assert tmux.last_line(screen) == "    Error: request timed out"
+    assert tmux.last_line("text\n") is None

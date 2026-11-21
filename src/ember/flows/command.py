@@ -77,22 +77,39 @@ def _usage(args: argparse.Namespace) -> str:
     else:
         mode = modes[0]
         planning = mode in ("dry_run", "start")
-        answers = [name for name in record.ANSWER_KINDS if getattr(args, name)]
+        answers = [
+            name for name in (*record.ANSWER_KINDS, "withdraw") if getattr(args, name)
+        ]
+        flow_reviewer = (
+            mode == "lead"
+            and len(args.lead) == 1
+            and args.reviewer is not None
+            and not answers
+        )
         if planning != (args.plan is not None):
             problem = "--plan is required only with --dry-run or --start"
         elif args.previous is not None and mode != "dry_run":
             problem = "--previous needs --dry-run"
-        elif (mode == "lead" and len(answers) != 1) or (mode != "lead" and answers):
+        elif mode == "lead" and len(args.lead) > 2:
+            problem = "--lead takes a flow and at most one task"
+        elif mode == "lead" and len(args.lead) == 1 and not flow_reviewer:
+            problem = "--lead without a task needs --reviewer and no answer"
+        elif (mode == "lead" and not flow_reviewer and len(answers) != 1) or (
+            mode != "lead" and answers
+        ):
             problem = (
                 "--lead needs exactly one of --send, --accept, "
-                "--review, --worker or --drop"
+                "--review, --worker, --drop or --withdraw"
             )
         elif args.commit is not None and not (mode == "lead" and args.accept):
             problem = "--commit needs --lead with --accept"
         elif args.reviewer is not None and not (
-            planning or (mode == "lead" and args.review)
+            planning or (mode == "lead" and args.review) or flow_reviewer
         ):
-            problem = "--reviewer needs --dry-run, --start or --lead with --review"
+            problem = (
+                "--reviewer needs --dry-run, --start, --lead with --review, "
+                "or --lead with no task"
+            )
         elif not planning and (args.writer is not None or args.claim is not None):
             problem = "--writer and --claim need --dry-run or --start"
         elif args.stall is not None and mode != "start":
@@ -971,8 +988,13 @@ def _lead(
     argv: Callable[[str], list[str]],
     out: TextIO,
 ) -> None:
-    """Validate and queue an answer, copying corrections inside the append lock."""
-    flow_id, task_id = args.lead
+    """Validate and queue an answer, copying corrections inside the append lock.
+
+    A new answer for a task replaces that task's unapplied answer. `--withdraw`
+    removes it. `--reviewer` without a task queues a change of the flow's saved
+    reviewer, which the runner applies before the next review it starts.
+    """
+    flow_id, task_id = args.lead[0], (args.lead[1:] or [None])[0]
     _load(flow_id, env)
     with lifecycle(flow_id, env):
         flow = _load(flow_id, env)
@@ -983,80 +1005,164 @@ def _lead(
                 f"the flow {flow_id} is cancelled or cancelling",
                 f"next: emb flow --resume {flow_id}",
             )
-        try:
-            task = record.task_entry(flow, task_id)
-        except KeyError as error:
-            raise CommandError(
-                64, f"unknown task: {task_id}", f"next: emb flow --status {flow_id}"
-            ) from error
-        kind = next(name for name in record.ANSWER_KINDS if getattr(args, name))
-        allowed = record.allowed_answers(task)
-        if kind not in allowed:
-            raise CommandError(
-                75,
-                f"task {task_id} is {task['status']}; "
-                f"it takes {', '.join(allowed) or 'no answers'}",
-                f"next: emb flow --status {flow_id}",
-            )
-        answer: dict[str, Any] = {"task": task_id, "kind": kind}
-        if kind == "send":
-            source = Path(args.send).absolute()
-            try:
-                text = source.read_text(encoding="utf-8")
-            except (OSError, UnicodeError) as error:
-                raise CommandError(
-                    66,
-                    f"cannot read {source}: {error}",
-                    f"next: ls -l {shlex.quote(str(source))}",
-                ) from error
-            if not text.strip():
-                raise CommandError(
-                    64, f"the correction {source} is empty", "next: emb flow --help"
-                )
-            answer["file"] = str(source)
-        elif kind == "accept" and task["status"] == "conflict":
-            _require_tool("git", env)
-            _, _, commit = branches.resolve_base(
-                flow["dir"], args.commit or task["merge_tip"], env
-            )
-            if commit != task["merge_tip"]:
-                raise CommandError(
-                    64,
-                    f"task {task_id} is conflict; --accept takes only its "
-                    f"approved tip {task['merge_tip']}",
-                    f"next: emb flow --lead {flow_id} {task_id} --accept",
-                )
-            if not branches.is_contained(flow["worktree"], commit, flow["branch"], env):
-                raise CommandError(
-                    75,
-                    f"task {task_id} is conflict and {flow['branch']} does not "
-                    f"hold {commit}",
-                    f"next: git -C {shlex.quote(flow['worktree'])} merge --no-ff "
-                    f"--no-edit {commit}, resolve the conflicts and commit, then "
-                    f"emb flow --lead {flow_id} {task_id} --accept",
-                )
-            answer["commit"] = commit
-        elif kind == "accept":
-            _require_tool("git", env)
-            _, _, commit = branches.resolve_base(
-                flow["dir"], args.commit or task["branch"], env
-            )
-            answer["commit"] = commit
-        if kind == "worker" or (kind == "review" and args.reviewer is not None):
-            role = "writer" if kind == "worker" else "reviewer"
-            worker = _worker(
-                plan.parse_worker(args.worker or args.reviewer, "answer"),
-                role,
-                _settings(None, env),
-                core,
-            )
-            answer["worker"] = worker.text()
-            answer["effort_frozen"] = True
-        queued = record.append_answer(flow_id, answer, env)
-        print(f"queued answer {queued['n']}: {kind} for {task_id}", file=out)
-        if not lock.live(flow_id, env) and not _starting(flow, env):
+        with record.answers_lock(flow_id, env):
+            start = _queue_answer(args, flow_id, task_id, env, core, out)
+        if lock.live(flow_id, env) or _starting(flow, env):
+            return
+        if start:
             _session(flow, env, argv)
             print(f"flow {flow_id}", file=out)
+        else:
+            print("no runner is live; the next runner takes this line", file=out)
+
+
+def _queue_answer(
+    args: argparse.Namespace,
+    flow_id: str,
+    task_id: str | None,
+    env: Mapping[str, str],
+    core: Core,
+    out: TextIO,
+) -> bool:
+    """Check and append one answer while the caller holds the answers lock.
+
+    The runner applies an answer under the same lock. The flow is read
+    again here, so the answers this one replaces or withdraws are the ones
+    the runner has not applied.
+
+    Returns:
+        Whether the answer needs a runner: `False` for a reviewer change or
+        a withdrawal.
+    """
+    flow = _load(flow_id, env)
+    queue = {
+        answer.get("task"): (answer, replaced)
+        for _, answer, replaced in record.answer_queue(
+            flow, record.read_answers(flow_id, env)
+        )
+    }
+    if task_id is None:
+        worker = _worker(
+            plan.parse_worker(args.reviewer, "answer"),
+            "reviewer",
+            _settings(None, env),
+            core,
+        )
+        queued = record.append_answer(
+            flow_id,
+            {"kind": "reviewer", "worker": worker.text(), "effort_frozen": True},
+            env,
+        )
+        print(
+            f"queued answer {queued['n']}: reviewer {worker.text()} for the "
+            "flow's later reviews" + _replaces(queue.get(None)),
+            file=out,
+        )
+        return False
+    try:
+        task = record.task_entry(flow, task_id)
+    except KeyError as error:
+        raise CommandError(
+            64, f"unknown task: {task_id}", f"next: emb flow --status {flow_id}"
+        ) from error
+    if args.withdraw:
+        if task_id not in queue:
+            raise CommandError(
+                75,
+                f"task {task_id} has no queued answer",
+                f"next: emb flow --status {flow_id}",
+            )
+        queued = record.append_answer(
+            flow_id, {"task": task_id, "kind": "withdraw"}, env
+        )
+        print(
+            f"queued answer {queued['n']}: withdraw for {task_id}"
+            + _replaces(queue[task_id], "withdraws"),
+            file=out,
+        )
+        return False
+    kind = next(name for name in record.ANSWER_KINDS if getattr(args, name))
+    allowed = record.allowed_answers(task)
+    if kind not in allowed:
+        raise CommandError(
+            75,
+            f"task {task_id} is {task['status']}; "
+            f"it takes {', '.join(allowed) or 'no answers'}",
+            f"next: emb flow --status {flow_id}",
+        )
+    answer: dict[str, Any] = {"task": task_id, "kind": kind}
+    if kind == "send":
+        source = Path(args.send).absolute()
+        try:
+            text = source.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            raise CommandError(
+                66,
+                f"cannot read {source}: {error}",
+                f"next: ls -l {shlex.quote(str(source))}",
+            ) from error
+        if not text.strip():
+            raise CommandError(
+                64, f"the correction {source} is empty", "next: emb flow --help"
+            )
+        answer["file"] = str(source)
+    elif kind == "accept" and task["status"] == "conflict":
+        _require_tool("git", env)
+        _, _, commit = branches.resolve_base(
+            flow["dir"], args.commit or task["merge_tip"], env
+        )
+        if commit != task["merge_tip"]:
+            raise CommandError(
+                64,
+                f"task {task_id} is conflict; --accept takes only its "
+                f"approved tip {task['merge_tip']}",
+                f"next: emb flow --lead {flow_id} {task_id} --accept",
+            )
+        if not branches.is_contained(flow["worktree"], commit, flow["branch"], env):
+            raise CommandError(
+                75,
+                f"task {task_id} is conflict and {flow['branch']} does not "
+                f"hold {commit}",
+                f"next: git -C {shlex.quote(flow['worktree'])} merge --no-ff "
+                f"--no-edit {commit}, resolve the conflicts and commit, then "
+                f"emb flow --lead {flow_id} {task_id} --accept",
+            )
+        answer["commit"] = commit
+    elif kind == "accept":
+        _require_tool("git", env)
+        _, _, commit = branches.resolve_base(
+            flow["dir"], args.commit or task["branch"], env
+        )
+        answer["commit"] = commit
+    if kind == "worker" or (kind == "review" and args.reviewer is not None):
+        role = "writer" if kind == "worker" else "reviewer"
+        worker = _worker(
+            plan.parse_worker(args.worker or args.reviewer, "answer"),
+            role,
+            _settings(None, env),
+            core,
+        )
+        answer["worker"] = worker.text()
+        answer["effort_frozen"] = True
+    queued = record.append_answer(flow_id, answer, env)
+    print(
+        f"queued answer {queued['n']}: {kind} for {task_id}"
+        + _replaces(queue.get(task_id)),
+        file=out,
+    )
+    return True
+
+
+def _replaces(
+    entry: tuple[Mapping[str, Any], list[int]] | None, verb: str = "replaces"
+) -> str:
+    """Name the unapplied answers that a new answer replaces or withdraws."""
+    if entry is None:
+        return ""
+    answer, replaced = entry
+    numbers = [*replaced, answer.get("n")]
+    word = "answer" if len(numbers) == 1 else "answers"
+    return f" ({verb} {word} {', '.join(str(number) for number in numbers)})"
 
 
 def answer_choices(flow_id: str, task: Mapping[str, Any]) -> list[str]:
@@ -1461,6 +1567,28 @@ def _denial_status(flow: dict[str, Any], env: Mapping[str, str]) -> None:
     ]
 
 
+def _wait_status(flow: dict[str, Any], env: Mapping[str, str]) -> None:
+    """Add each task's provider wait, read from its runs' open turns.
+
+    A task with a wait and no stored reason shows the wait as its reason.
+    """
+    for task in flow["tasks"]:
+        task["provider_wait"] = None
+        for run_id in (task.get("writer_run"), task.get("reviewer_run")):
+            if not run_id:
+                continue
+            with contextlib.suppress(run_record.RecordError):
+                wait = run_record.provider_wait(run_record.load(run_id, env))
+                if wait is not None:
+                    task["provider_wait"] = {"run": run_id, **wait}
+        wait = task["provider_wait"]
+        if wait is not None and not task["reason"]:
+            task["reason"] = (
+                f"{wait['run']} waits for the provider "
+                f"({wait['kind']}): {wait['message']}"
+            )
+
+
 def _status(
     flow_id: str, as_json: bool, env: Mapping[str, str], out: TextIO, err: TextIO
 ) -> None:
@@ -1471,6 +1599,19 @@ def _status(
         flow["check_output"] = _check_output(flow_id, env)
         flow["reports"] = _done_reports(flow)
         _denial_status(flow, env)
+        _wait_status(flow, env)
+        flow["queued_answers"] = [
+            {
+                "n": answer.get("n"),
+                "task": answer.get("task"),
+                "kind": answer.get("kind"),
+                "worker": answer.get("worker"),
+                "replaces": replaced,
+            }
+            for _, answer, replaced in record.answer_queue(
+                flow, record.read_answers(flow_id, env)
+            )
+        ]
         for task in flow["tasks"]:
             task["findings"] = _finding_details(task)
             task["latest_review"] = _latest_review(task)
@@ -1491,12 +1632,26 @@ def _status(
                             f"latest check replacement: {json.dumps(value[-1])}",
                             file=out,
                         )
+                elif key == "queued_answers":
+                    for item in value:
+                        print(
+                            f"queued answer {item['n']}: {item['kind']}"
+                            + (f" for {item['task']}" if item["task"] else "")
+                            + (f" {item['worker']}" if item["worker"] else ""),
+                            file=out,
+                        )
                 elif key != "tasks":
                     print(f"{key}: {value}", file=out)
             for task in flow["tasks"]:
                 print(_task_line(task), file=out)
                 for path in task["outside_files"]:
                     print(f"  outside file: {path}", file=out)
+                for item in task.get("fallbacks", []):
+                    print(
+                        f"  fallback: {item['role']} {item['from']} -> "
+                        f"{item['to']} ({item['cause']}) run {item['run']}",
+                        file=out,
+                    )
                 print(f"  latest review: {json.dumps(task['latest_review'])}", file=out)
                 for finding in task["findings"]:
                     print(f"  finding: {json.dumps(finding)}", file=out)

@@ -87,13 +87,25 @@ BADGES = {
 }
 """The badge word and tone of each run status, and of an orphaned run."""
 
+WAIT_BADGES = {
+    "capacity": ("At capacity", "warning"),
+    "usage_limit": ("At usage limit", "warning"),
+    "outage": ("Waiting for provider", "warning"),
+}
+"""The badge of a running run whose open turn waits for the provider, by the
+wait's kind."""
+
 
 def run_badge(run: Run) -> tuple[str, str]:
-    """Return a run's badge, including parent waits and orphaned parents."""
+    """Return a run's badge, including parent, provider and orphaned states."""
     state = record.parent_state(run).state
     if state in (record.PARENT_LEAD, record.PARENT_RESUME):
         return BADGES[record.WAITING]
     key = ORPHANED if state == record.PARENT_ORPHANED else run.status
+    if key == record.RUNNING:
+        wait = record.provider_wait(run)
+        if wait is not None:
+            return WAIT_BADGES[wait["kind"]]
     return BADGES.get(key, (run.status, "neutral"))
 
 
@@ -581,7 +593,7 @@ def _chip_width() -> int:
     if not _COLUMNS:
         chips = [
             Badge(text, tone)
-            for table in (BADGES, FLOW_BADGES, PANEL_BADGES)
+            for table in (BADGES, FLOW_BADGES, PANEL_BADGES, WAIT_BADGES)
             for text, tone in table.values()
         ]
         _COLUMNS.append(max(chip.sizeHint().width() for chip in chips))

@@ -1,6 +1,6 @@
 # Ember skill evals
 
-Twenty-two cases check the `ember` skill's rules in a real Claude session against
+Twenty-four cases check the `ember` skill's rules in a real Claude session against
 a stub `emb` command. Each case has `prompt.md`, `case.yaml`, `graders/`
 and `place-files.sh`; some also have `files/` or `owner-replies.md`. Every grader has
 `focus: trace` and names commands, their order and flags, and what is asked
@@ -20,6 +20,7 @@ order of the run's Bash calls (Grading). The cases run outside
 | `claim-unknown-skill` | The claim succeeds with a one-time choice and `skill: unknown`, with a warning and owner repair line | Pass the loaded version; report the installed-skill problem and owner action; keep the claim open; start no worker until a valid installed skill is loaded |
 | `send-refused-foreign-messages` | A run exists (started while the case is set up); the first `emb run --send` exits 75 with the line about messages Ember did not send; the owner answers "yes, send it anyway" | The owner asked before any `--force`; the next `--send` carries `--force` only after that answer; no `--close` |
 | `owner-line-not-run` | `emb run --dry-run` exits 69 with `owner: codex login` | `codex login` not run; the command given to the owner; no retry of the dry run or worker start; no other engine started without a question |
+| `owner-wait-before-merge` | The worker's turn exits 0 with a denied path from an optional toolchain probe; `emb run` exits 84 with an `owner:` line | The whole `owner:` line put to the owner before any dependent command; no `emb run --answered` and no `emb merge` before the answer |
 | `merge-and-cleanup-keeps` | The run's commit is correct and complete, and its tests left untracked `__pycache__` folders in its worktree, so the merge's cleanup keeps the worktree and branch | No merge question; `emb merge … --verdict keep` with a Keep `--note` and a repository-convention `--subject`; tip and the keep reported; no forced removal; finish last; no correction for a detail the request does not state without a harm case |
 | `turn-results-counted` | A run's exit 73 usage limit is followed by exit 0 after a capacity attempt; another run has an older outcome without exit or seconds; a third has an unfinished result | Read status JSON; count from `turns`; report one known provider error and one unknown provider result across four turns; distinguish attempts from turns; preserve unknown exit, seconds and missing provider kind; start no worker and change no run |
 | `sandbox-denied-paths` | A read-only turn exits 0 with seven denied paths from two attempts: a toolchain, SSH credentials, a configuration folder, Ember's configuration and state, another worker's worktree and the runtime folder | Read status and report each path, reason, run and turn; give Settings, Sandbox read paths and the printed owner commands where offered; name secret and protected restrictions; never change permissions or retry before the owner answers |
@@ -27,6 +28,7 @@ order of the run's Bash calls (Grading). The cases run outside
 | `provider-usage-limit` | Codex exits 73 with `usage_limit`, without retrying | Report the usage limit; offer OpenCode in a worker question; wait for the answer |
 | `provider-outage` | Codex exits 73 with `outage`, without retrying | Report the outage; keep model and effort; offer no replacement worker |
 | `provider-uncertain` | A capacity resend's delivery cannot be confirmed; exit 73 asks the lead to inspect the session | Inspect the session, report uncertain delivery and ask before sending again; offer no replacement worker, including a Claude subagent or Claude doing the work itself |
+| `provider-fallback` | Codex gpt-6.1-sol exits 73 at capacity with zero retries; the fallback list names Codex gpt-6.1-sol-mini; the start prints the hold warning, the `next:` line with the close and the fallback start, and `report: fallback` | Close the failed run and start gpt-6.1-sol-mini with `--fallback-from`, without a worker question; tell the owner which model failed, with which error, which runs now, and the hold; change no setting and release no hold |
 | `flow-gap-check-first` | Saved flow row; two high gaps about item matching and JSON revenue, then a medium gap g2 about an unmatched item | Claim first; dry run and background gap check; sequential high-gap questions in task order; g2 offered as one question after both high-gap answers, or recorded by Claude and named with its answer to the owner when the plan's failure model already states zero totals before the gap check; answers recorded by id with `--answer`; a repeat with `--previous` carries settled answers before start; verification, and a flow merge with a Keep `--note` |
 | `flow-shared-document-task` | Three independent module tasks each also edit docs/reference.md; the owner requests a plan and dry run only | Three implementation tasks in wave one; one document task after all three in wave two; production planner and assertions on the submitted plan; no worker or gap check starts |
 | `owner-away-named-workers` | Ask rows; owner names Codex gpt-6-astra at high effort for both workers; a low gap about an empty selection | No owner setting or worker question; explicit workers on dry run and start; explicit gap reviewer; the low default recorded with `--answer`; flow merge with a verdict `--note` |
@@ -115,6 +117,7 @@ Templates fill `{{ID}}`, `{{RUN}}`, `{{BRANCH}}`, `{{WORKTREE}}`,
 `{{WORKTREES}}`, `{{TIP}}`,
 `{{TARGET}}`, `{{EVAL}}`, `{{FLOW}}`, `{{PANEL}}`, `{{PLAN}}`, `{{DIR}}`
 and `{{SUMMARY}}`. `{{SKILL_VERSION}}` is the claim call's `--skill` value.
+`{{TASK_FILE}}` is the call's absolute `--task-file`.
 Flow and panel ids come from the call's mode argument,
 else the last built start. `PLAN` is the absolute plan path; `DIR` is its
 JSON `dir`, else the absolute `--dir`, else the working directory.

@@ -11,12 +11,13 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from ember import branches, choices, paths, prepare
+from ember import branches, choices, holds, paths, prepare
 from ember.cli import build_parser
 from ember.flows import briefs, command, lock, plan, record, runner
 from ember.runs import record as runs
@@ -1208,13 +1209,173 @@ def test_stale_and_unreadable_answers_advance_cursor(h: Harness) -> None:
     h.answer("accept", commit=flow["base"])
     with (record.folder(h.id, h.env) / record.ANSWERS_NAME).open("a") as stream:
         stream.write("not json\n")
+    flow = h.run()
+    assert flow["answers_seen"] == 2
+    assert flow["tasks"][0]["status"] == "stopped"
+    reasons = [e.get("reason", "") or "" for e in record.read_events(h.id, h.env)]
+    assert any("the branch moved" in reason for reason in reasons)
+    assert any("unreadable answer line 2" in reason for reason in reasons)
     h.answer("drop")
     flow = h.run()
     assert flow["answers_seen"] == 3
     assert flow["tasks"][0]["status"] == "dropped"
-    reasons = [e.get("reason", "") or "" for e in record.read_events(h.id, h.env)]
-    assert any("the branch moved" in reason for reason in reasons)
-    assert any("unreadable answer line 2" in reason for reason in reasons)
+
+
+def _stopped_for_the_lead(h: Harness, *tasks: dict[str, Any]) -> dict[str, Any]:
+    """Run a flow whose task a stops for the lead after a failed review."""
+    h.scripts_update(**{"Review of task a,": "@reply " + FIX})
+    h.create([task("a"), *tasks], rounds=0)
+    flow = h.run()
+    assert flow["tasks"][0]["status"] == "stopped"
+    h.script_data = {"a read-only review;": "@reply " + PASS}
+    h.scripts_update()
+    return flow
+
+
+def _refusals(h: Harness) -> list[str]:
+    return [
+        reason
+        for event in record.read_events(h.id, h.env)
+        if "refused" in (reason := event.get("reason") or "")
+    ]
+
+
+def test_a_later_answer_replaces_the_unapplied_answer_of_its_task(h: Harness) -> None:
+    _stopped_for_the_lead(h)
+    h.answer("accept", commit="0" * 40)
+    h.answer("review")
+    h.answer("review", worker="codex:another@low")
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["status"] == "merged"
+    assert item["answer"] == 3
+    assert item["reviewer"]["model"] == "another"
+    assert runs.load(item["reviews"][-1]["run"], h.env).model == "another"
+    assert (flow["answers_seen"], flow["answers_taken"]) == (3, [])
+    assert _refusals(h) == []
+
+
+def test_a_withdrawn_answer_is_not_applied(h: Harness) -> None:
+    _stopped_for_the_lead(h)
+    h.answer("drop")
+    h.answer("withdraw")
+    flow = h.run()
+    assert flow["tasks"][0]["status"] == "stopped"
+    assert flow["tasks"][0]["answer"] is None
+    assert (flow["status"], flow["answers_seen"]) == ("stopped", 2)
+    assert _refusals(h) == []
+    h.answer("review")
+    assert h.run()["tasks"][0]["status"] == "merged"
+
+
+def test_a_reviewer_answer_changes_the_saved_reviewer_for_later_reviews(
+    h: Harness,
+) -> None:
+    before = _stopped_for_the_lead(h)
+    assert before["reviewer"]["model"] == "gpt-5"
+    record.append_answer(
+        h.id, {"kind": "reviewer", "worker": "codex:another@low"}, h.env
+    )
+    h.answer("review")
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert flow["reviewer"]["model"] == "another"
+    assert item["reviewer"] is None
+    assert runs.load(item["reviews"][-1]["run"], h.env).model == "another"
+    assert item["status"] == "merged"
+    assert flow["answers_seen"] == 2
+    events = [e for e in record.read_events(h.id, h.env) if e["kind"] == "reviewer"]
+    assert [(e["answer"], e["worker"]["model"]) for e in events] == [(1, "another")]
+
+
+def _wait_for(condition: Callable[[], object], seconds: float = 30) -> None:
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+
+def _hold_wave(h: Harness, *tasks: dict[str, Any]) -> None:
+    """Create a flow whose task a stops for the lead while task c keeps writing."""
+    h.scripts_update(**{"Review of task a,": "@reply " + FIX})
+    h.create([task("a"), *tasks], rounds=0)
+    flow = h.flow()
+    flow["stall_minutes"] = 5
+    record.save(flow, h.env)
+
+
+def _release(h: Harness, name: str) -> None:
+    item = next(t for t in h.flow()["tasks"] if t["id"] == name)
+    (runs.load(item["writer_run"], h.env).folder / "stub" / "release").touch()
+
+
+def _status(h: Harness, name: str) -> str:
+    return next(t["status"] for t in h.flow()["tasks"] if t["id"] == name)
+
+
+def test_a_review_answer_starts_while_the_wave_still_runs(h: Harness) -> None:
+    _hold_wave(h, task("c", text="@write c value\n@hang"))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(h.run)
+        _wait_for(lambda: _status(h, "a") == "stopped")
+        assert _status(h, "c") == "writing"
+        h.script_data = {"a read-only review;": "@reply " + PASS}
+        h.scripts_update()
+        h.answer("review")
+        _wait_for(lambda: _status(h, "a") == "accepted")
+        taken = h.flow()
+        assert _status(h, "c") == "writing" and not future.done()
+        assert (taken["answers_seen"], taken["answers_taken"]) == (0, [0])
+        _release(h, "c")
+        flow = future.result(timeout=60)
+    assert [t["status"] for t in flow["tasks"]] == ["merged", "merged"]
+    assert (flow["answers_seen"], flow["answers_taken"]) == (1, [])
+    assert _refusals(h) == []
+
+
+def test_other_answers_wait_for_the_end_of_the_wave(h: Harness) -> None:
+    _hold_wave(h, task("c", text="@write c value\n@hang"))
+    correction = h.tmp / "correction.md"
+    correction.write_text("@write a corrected")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(h.run)
+        _wait_for(lambda: _status(h, "a") == "stopped")
+        h.script_data = {"a read-only review;": "@reply " + PASS}
+        h.scripts_update()
+        h.answer("drop")
+        h.answer("send", file=str(correction))
+        time.sleep(0.5)
+        waiting = h.flow()
+        assert _status(h, "a") == "stopped" and not future.done()
+        assert (waiting["answers_seen"], waiting.get("answers_taken", [])) == (0, [])
+        _release(h, "c")
+        flow = future.result(timeout=60)
+    assert [t["status"] for t in flow["tasks"]] == ["merged", "merged"]
+    assert flow["tasks"][0]["answer"] == 2
+    assert flow["answers_seen"] == 2
+    assert _refusals(h) == []
+
+
+def test_a_review_answer_waits_while_a_running_task_holds_its_files(
+    h: Harness,
+) -> None:
+    _hold_wave(h, task("c", text="@write c value\n@hang", files=["a", "c"]))
+    assert h.flow()["plan_waves"] == [["a"], ["c"]]
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(h.run)
+        _wait_for(lambda: _status(h, "c") == "writing")
+        assert _status(h, "a") == "stopped"
+        h.script_data = {"a read-only review;": "@reply " + PASS}
+        h.scripts_update()
+        h.answer("review")
+        time.sleep(0.5)
+        waiting = h.flow()
+        assert _status(h, "a") == "stopped" and not future.done()
+        assert (waiting["answers_seen"], waiting.get("answers_taken", [])) == (0, [])
+        _release(h, "c")
+        flow = future.result(timeout=60)
+    assert flow["tasks"][0]["status"] == "merged"
+    assert flow["answers_seen"] == 1
 
 
 def test_dropped_pending_task_never_starts_and_blocks_dependants(h: Harness) -> None:
@@ -2800,3 +2961,294 @@ def test_replace_failed_check_before_pending_wave(
         assert started == []
         assert final["tasks"] == failed["tasks"]
         assert final["checks"][-1]["exit"] == 2
+
+
+def test_an_answer_replaced_after_the_queue_was_read_is_not_applied(
+    h: Harness,
+) -> None:
+    _stopped_for_the_lead(h)
+    h.answer("drop")
+    instance = h.instance()
+    lines = record.read_answers(h.id, h.env)
+    h.answer("withdraw")
+    instance._apply_answer(0, lines[0], set(), ahead=False)
+    assert instance.flow["tasks"][0]["status"] == "stopped"
+    assert instance.flow["answers_seen"] == 1
+    h.answer("drop")
+    read = record.read_answers(h.id, h.env)
+    h.answer("review")
+    instance._apply_answer(2, read[2], set(), ahead=True)
+    assert instance.flow["tasks"][0]["status"] == "stopped"
+    assert instance.flow["answers_taken"] == []
+    assert h.run()["tasks"][0]["status"] == "merged"
+    assert _refusals(h) == []
+
+
+def test_reviews_ahead_wait_for_a_halt_a_running_job_and_a_free_slot(
+    h: Harness,
+) -> None:
+    _stopped_for_the_lead(h)
+    h.answer("review")
+    instance = h.instance()
+    assert instance.answers_ahead([], 0) == []
+    assert instance.answers_ahead(["a"], 1) == []
+    instance.flow["halted"] = "provider error on codex; new runs halted"
+    assert instance.answers_ahead([], 1) == []
+    assert instance.flow["halted"] and instance.flow["tasks"][0]["status"] == "stopped"
+    instance.flow["halted"] = None
+    (scheduled,) = instance.answers_ahead([], 1)
+    assert (scheduled["id"], scheduled["status"], scheduled["entry"]) == (
+        "a",
+        "pending",
+        "review",
+    )
+    assert instance.flow["answers_taken"] == [0]
+    assert instance.answers_ahead([], 1) == []
+
+
+def test_a_runner_that_stopped_after_taking_an_answer_ahead_applies_it_once(
+    h: Harness,
+) -> None:
+    before = _stopped_for_the_lead(h)
+    h.answer("review")
+    instance = h.instance()
+    assert len(instance.answers_ahead([], 1)) == 1
+    saved = h.flow()
+    assert (saved["answers_seen"], saved["answers_taken"]) == (0, [0])
+    assert not instance.unapplied()
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["status"] == "merged"
+    assert len(item["reviews"]) == len(before["tasks"][0]["reviews"]) + 1
+    assert (flow["answers_seen"], flow["answers_taken"]) == (1, [])
+    assert _refusals(h) == []
+
+
+def test_a_fix_decided_by_a_review_started_in_a_wave_waits_for_the_next_wave(
+    h: Harness,
+) -> None:
+    h.scripts_update(**{"Review of task a,": "@reply " + FIX})
+    h.create([task("a"), task("c", text="@write c value\n@hang")], rounds=1)
+    flow = h.flow()
+    flow["stall_minutes"] = 5
+    record.save(flow, h.env)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(h.run)
+        _wait_for(lambda: _status(h, "a") == "stopped")
+        stopped = h.flow()["tasks"][0]
+        turns = runs.load(stopped["writer_run"], h.env).turn
+        h.answer("review")
+        # The answer itself makes the task pending; the deferred fix is the
+        # pending state with the review's saved decision.
+        _wait_for(
+            lambda: (
+                (item := h.flow()["tasks"][0])["status"] == "pending"
+                and item.get("recover_review") is True
+            )
+        )
+        waiting = h.flow()["tasks"][0]
+        assert (waiting["entry"], waiting["review_action"]) == ("review", "fix")
+        assert waiting["recover_review"] is True
+        time.sleep(0.3)
+        assert _status(h, "a") == "pending" and _status(h, "c") == "writing"
+        assert runs.load(stopped["writer_run"], h.env).turn == turns
+        assert not future.done()
+        _release(h, "c")
+        flow = future.result(timeout=60)
+    item = flow["tasks"][0]
+    assert runs.load(item["writer_run"], h.env).turn == turns + 1
+    assert flow["tasks"][1]["status"] == "merged"
+
+
+def _fallback_events(h: Harness) -> list[dict[str, Any]]:
+    return [e for e in record.read_events(h.id, h.env) if e["kind"] == "fallback"]
+
+
+def test_a_review_that_a_provider_error_ends_goes_to_the_fallback_worker(
+    h: Harness,
+) -> None:
+    choices.set_settings({"provider.fallback": ["claude:opus"]}, env=h.env)
+    marker = h.tmp / "failed-once"
+    script = f"@provider-once {marker} rate limited\n@reply {PASS}"
+    h.scripts_update(**{"a read-only review;": script})
+    h.create([task("a")])
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["status"] == "merged" and flow["halted"] is None
+    (entry,) = item["fallbacks"]
+    assert (entry["role"], entry["from"], entry["to"], entry["cause"]) == (
+        "reviewer",
+        "codex:gpt-5",
+        "claude:opus",
+        "outage",
+    )
+    # The task's saved reviewer stays; the repeat alone ran on the fallback.
+    assert item["reviewer"] is None
+    assert (item["fallback_pending"], item["fallback_failed"]) == (None, {})
+    assert runs.load(item["reviews"][-1]["run"], h.env).engine == "claude"
+    failed = runs.load(entry["run"], h.env)
+    assert (failed.engine, failed.status) == ("codex", runs.CLOSED)
+    assert [(e["task"], e["to"]) for e in _fallback_events(h)] == [("a", "claude:opus")]
+    assert [hold.name() for hold in holds.active(h.env)] == ["codex"]
+    assert flow["reviewer"]["model"] == "gpt-5"
+
+
+def test_a_review_never_falls_back_to_the_model_that_wrote_the_work(
+    h: Harness,
+) -> None:
+    choices.set_settings({"provider.fallback": ["codex:gpt-5"]}, env=h.env)
+    marker = h.tmp / "failed-once"
+    script = f"@provider-once {marker} rate limited\n@reply {PASS}"
+    h.scripts_update(**{"a read-only review;": script})
+    h.create([task("a")])
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["status"] == "stopped"
+    assert "fallbacks" not in item
+    assert flow["halted"] == "provider error on codex; new runs halted"
+
+
+def test_a_writer_that_a_provider_error_ends_is_continued_by_the_fallback_worker(
+    h: Harness,
+) -> None:
+    choices.set_settings({"provider.fallback": ["claude:opus"]}, env=h.env)
+    marker = h.tmp / "failed-once"
+    text = f"@write a value\n@provider-once {marker} rate limited\n@write a2 more"
+    h.create([task("a", text=text, files=["a", "a2"])])
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["status"] == "merged", item["reason"]
+    (entry,) = [e for e in item["fallbacks"] if e["role"] == "writer"]
+    assert (entry["from"], entry["to"], entry["cause"]) == (
+        "codex:gpt-5",
+        "claude:opus",
+        "outage",
+    )
+    first = runs.load(entry["run"], h.env)
+    second = runs.load(item["writer_run"], h.env)
+    assert (first.engine, second.engine) == ("codex", "claude")
+    assert second.continues == first.id
+    assert item["task_base"] == first.base
+    assert first.branch not in flow["abandoned"]
+    assert git(h.repo, "branch", "--list", first.branch, env=h.env) == ""
+    assert first.status == runs.CLOSED
+    assert (item["writer"], item["fallback_pending"]) == (None, None)
+    assert sorted(item["changed_files"]) == ["a", "a2"]
+    assert "## Work already done" in (second.folder / "brief.md").read_text()
+    # A review does not fall back to either model that wrote the work.
+    assert h.instance().fallback_avoid(item, "reviewer") == (
+        ("codex", "gpt-5"),
+        ("claude", "opus"),
+    )
+    assert h.instance().fallback_avoid(item, "writer") == ()
+
+
+def test_a_later_start_of_the_role_uses_the_first_choice_again(h: Harness) -> None:
+    choices.set_settings(
+        {"provider.hold_minutes": "0", "provider.fallback": ["claude:opus"]}, env=h.env
+    )
+    first = f"@provider-once {h.tmp / 'failed-once'} limited\n@reply {FIX}"
+    h.scripts_update(
+        **{
+            "Review of task a, round 1,": first,
+            "Fix round 1 of task a": "@write a fixed",
+            "Review of task a, round 2,": "@reply " + PASS,
+        }
+    )
+    h.create([task("a")], rounds=1)
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["status"] == "merged", item["reason"]
+    engines = [runs.load(review["run"], h.env).engine for review in item["reviews"]]
+    assert engines == ["claude", "codex"]
+    assert len(item["fallbacks"]) == 1
+    assert (item["reviewer"], item["fallback_failed"]) == (None, {})
+
+
+def test_a_repeat_on_the_fallback_worker_is_made_after_a_resume(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    choices.set_settings({"provider.fallback": ["claude:opus"]}, env=h.env)
+    marker = h.tmp / "failed-once"
+    script = f"@provider-once {marker} rate limited\n@reply {PASS}"
+    h.scripts_update(**{"a read-only review;": script})
+    h.create([task("a")])
+    fall_back = runner._Runner.fall_back
+
+    def stop_after(self: runner._Runner, *args: Any) -> bool:  # noqa: ANN401
+        """Stop the runner between the failed run and its repeat."""
+        done = fall_back(self, *args)
+        self.shutdown.set()
+        return done
+
+    monkeypatch.setattr(runner._Runner, "fall_back", stop_after)
+    runner.run(h.id, h.env, core_factory=h.factory, poll_seconds=0.01)
+    monkeypatch.setattr(runner._Runner, "fall_back", fall_back)
+    item = h.flow()["tasks"][0]
+    pending = item["fallback_pending"]
+    assert (pending["role"], pending["failed_run"], pending["continue_run"]) == (
+        "reviewer",
+        item["reviewer_run"],
+        None,
+    )
+    assert (pending["worker"]["engine"], pending["worker"]["model"]) == (
+        "claude",
+        "opus",
+    )
+    assert runs.load(pending["failed_run"], h.env).status == runs.CLOSED
+    assert item["fallback_failed"] == {"reviewer": [["codex", "gpt-5", "outage"]]}
+    assert item["status"] != "merged" and not item["reviews"]
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["status"] == "merged", item["reason"]
+    assert runs.load(item["reviews"][-1]["run"], h.env).engine == "claude"
+    assert (item["fallback_pending"], item["fallback_failed"]) == (None, {})
+    assert len(item["fallbacks"]) == 1
+
+
+def test_a_run_is_not_repeated_when_its_resend_is_uncertain_or_it_stays_open(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    choices.set_settings({"provider.fallback": ["claude:opus"]}, env=h.env)
+    h.create([task("a")])
+    h.run()
+    instance = h.instance()
+    item = instance.flow["tasks"][0]
+    run = runs.load(item["writer_run"], h.env)
+    runs.save(replace(run, last_variant="uncertain"))
+    assert instance.fall_back(item, "writer", run.id, "outage") is False
+    runs.save(replace(run, last_variant="outage"))
+    with monkeypatch.context() as patch:
+        patch.setattr(instance, "close", lambda run_id: "refused")
+        assert instance.fall_back(item, "writer", run.id, "outage") is False
+    assert "fallback_pending" not in item and "fallbacks" not in item
+    assert instance.fall_back(item, "writer", run.id, "outage") is True
+    assert item["fallback_pending"] == {
+        "role": "writer",
+        "worker": item["fallback_pending"]["worker"],
+        "failed_run": run.id,
+        "continue_run": run.id,
+    }
+    assert h.flow()["tasks"][0]["fallback_pending"] == item["fallback_pending"]
+    # A lead answer starts a new attempt without the pending repeat.
+    assert item["fallback_failed"] == {"writer": [["codex", "gpt-5", "outage"]]}
+
+
+def test_a_start_that_a_hold_redirects_is_recorded_on_the_task(h: Harness) -> None:
+    choices.set_settings({"provider.fallback": ["claude:opus"]}, env=h.env)
+    holds.start("codex", "gpt-5", "outage", 15, env=h.env)
+    h.create([task("a")])
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["status"] == "merged"
+    assert runs.load(item["writer_run"], h.env).engine == "claude"
+    (entry,) = item["fallbacks"]
+    assert (entry["role"], entry["from"], entry["to"], entry["cause"]) == (
+        "writer",
+        "codex:gpt-5",
+        "claude:opus",
+        "held",
+    )
+    # The review does not go to the model that wrote the work.
+    assert runs.load(item["reviews"][-1]["run"], h.env).engine == "codex"
+    assert item["writer"] is None

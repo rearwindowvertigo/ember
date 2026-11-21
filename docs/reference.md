@@ -66,6 +66,8 @@ empty list.
 | `single.writer_as`, `single.reviewer_as` | `cli`, `subagent` | `cli` | request, one-time, standing |
 | `provider.capacity_retries` | Integer strings `0` to `10`; most resends of one turn after a capacity error; `0` turns retries off | `2` | standing |
 | `provider.capacity_wait` | Integer strings `5` to `600`; seconds before a capacity resend | `30` | standing |
+| `provider.fallback` | List of `<engine>:<model>`, in order of use, at most 8, no duplicates; a new entry's model is on its engine's shortlist when saved, and an entry the list already holds is kept | `[]` | standing |
+| `provider.hold_minutes` | `0`, `5`, `15`, `30`, `60`; minutes a model or engine is passed over after a provider error; `0` records no hold | `15` | standing |
 | `sandbox.codex` | `on`, `off` | `on` when `bwrap` is on `PATH` or the `codex` on `PATH` has a bundled `bwrap`, else `off` | standing |
 | `sandbox.opencode`, `sandbox.claude` | `on`, `off` | `on` when `bwrap` is on `PATH`, else `off` | standing |
 | `sandbox.read` | List of absolute paths, no duplicates; paths inside Ember's configuration or state folders are refused | `[]` | standing |
@@ -286,6 +288,11 @@ connected, or lists one engine's models.
 Exit codes: 0 whether or not the engines are connected and whether or not the
 model list could be read; 64 for a usage error, such as an unknown engine.
 
+Each engine's JSON object has `holds`: the active provider holds of that
+engine, each with `model` (null when the whole engine is held), `kind`,
+`since`, `until` and `run`. Text output prints
+`  held: <engine>[ <model>] after <kind> until <HH:MM>` under the engine.
+
 ### Status
 
 An engine is `connected` when its CLI is found and its sign-in check passes.
@@ -469,6 +476,8 @@ warnings described below.
 | `--trailer LINE` | With a start: a trailer line for each commit; repeatable; none by default |
 | `--claim ID` | With a start: read the menu with this claim id |
 | `--window` | With a start: also open a terminal window on the session |
+| `--continue-run RUN` | With an editing start: cut the new run from the branch of this earlier editing run of the same repository and add a note about its work to the brief |
+| `--fallback-from RUN` | With a start: the run that a provider error ended and that this start replaces; its worker, and those of the runs it replaced, are not used again |
 | `--send RUN --message-file FILE` | Send `FILE` as the next message and wait for its turn |
 | `--screen RUN` | Print the text of the session's pane |
 | `--interrupt RUN` | Interrupt the current turn, as the engine's driver does it (see Engine drivers) |
@@ -900,7 +909,10 @@ and retry rules are described under those commands.
 A command that waits for a turn observes it every second. It stops with exit
 124 when the session's screen has not changed for `--stall` minutes and the
 turn has not ended; the session keeps running. Each command, including each
-`--recover`, starts its own count. Ctrl+C stops the waiting command with exit
+`--recover`, starts its own count. The screen is compared without the timer
+an engine shows while it waits for the provider, as described under
+Provider waits in an open turn. The same comparison is used while a run
+starts. Ctrl+C stops the waiting command with exit
 74; the turn keeps running. During a capacity wait, Ctrl+C cancels the
 pending resend; recovery collects the saved turn. Ctrl+C while a turn is
 being collected or committed exits 74 with `next: emb run --recover <run> (finishes the saved
@@ -911,6 +923,21 @@ run, every change in the worktree is committed as one commit (`git add -A`).
 The subject is the brief's first non-empty line, cut to 72 characters, with
 ` (turn <n>)` after turn 1, followed by the trailer lines. A turn with no
 changes makes no commit.
+
+When the engine's process ends during a turn or before it takes its brief,
+Ember reads the dead pane and adds what the engine printed last to the
+reason: `the engine of <run> exited before the turn ended: <words>`. The
+words are the pane's last line above tmux's `Pane is dead` notice, cut to
+300 characters, and none when a fresh capture of the pane holds no such
+notice. For Codex they are its `Error:` line in the first column, and none
+when the last line is not one. The driver classifies the words. A Codex
+error is a provider `outage` when it names a failed request to the account
+service (`account/... failed`), `request timed out`,
+`failed to lookup address information`, `connection reset by peer`,
+`error sending request` or `failed to connect to Responses`, and does not
+match a sign-in failure. The turn or the start then ends at exit 73. Any
+other end is exit 71. A turn whose engine reported a `capacity` or
+`usage_limit` error before its pane died keeps that kind's lines.
 
 A turn that fails (69, 71, 73), including an engine that exits during the
 turn, or that ends with no reply (80) is committed the same way when the
@@ -1115,7 +1142,7 @@ UTC. It is also the tmux session's name.
 | `updated_at` | number | Seconds since the epoch |
 | `ended_at` | number or null | When the session ended |
 | `parent` | object or null | The Ember command that started the run: `command` (`gapcheck`, `panel` or `flow`), `id` (the panel or flow id, null for a gap check), and `pid` and `start` (the process id and its start time in clock ticks since boot); null for `emb run` and for an older record without the field |
-| `last_screen_change_at` | number or null | Epoch seconds when a wait loop last observed a changed screen; null before recorded activity or when absent from an older record |
+| `last_screen_change_at` | number or null | Epoch seconds when a wait loop last observed a changed screen, not counting the timer of a provider wait; null before recorded activity or when absent from an older record |
 | `last_exit` | integer or null | The exit code of the last turn or failure |
 | `last_variant` | string or null | The exit variant used for action and report lines; null when absent from an older record |
 | `last_start_failure` | boolean | Whether the last exit happened before the start completed; false when absent from an older record |
@@ -1128,6 +1155,8 @@ UTC. It is also the tmux session's name.
 | `subject` | string | The brief's first non-empty line |
 | `preparation` | object or null | Preparation command, `state` (`running`, `ok`, `failed`, `timeout`, `interrupted`, `not-started`), `log`, optional `pid` and `start`; a finished attempt also has `exit`, `seconds`, `left_behind` and `message`; omitted when no preparation ran |
 | `start_argv` | list of strings | The start command with its saved brief, used by the preparation retry line; omitted when empty |
+| `continues` | string | The earlier run whose branch this run was cut from with `--continue-run`; omitted without one |
+| `fallback_from` | string | The run that a provider error ended and that this run replaces, from `--fallback-from`; omitted without one |
 
 Paths are absolute.
 
@@ -1280,6 +1309,7 @@ from `turn-<n>.outcome.json`:
 | `provider_kind` | string or null | `capacity`, `usage_limit` or `outage`; null without a provider failure; omitted when absent from an older outcome |
 | `attempts` | list of objects | Ordered attempts with delivery state, provider kind, result and seconds; omitted when absent from an older outcome |
 | `retry_at`, `retry_clock` | number or null | Pending resend deadline and elapsed-time checkpoint in epoch seconds; omitted when absent from an older outcome |
+| `waiting` | object | The provider wait of an open turn: `kind` (`capacity`, `usage_limit` or `outage`), `message` (the engine's words), `since` (epoch seconds) and `interrupted` (true once Ember has interrupted the turn for the wait, otherwise absent); present only while the wait is recorded |
 | `signed_out` | boolean or null | Whether the engine reported a sign-in failure |
 | `incomplete` | string or null | `provider error`, `sign-in failure`, `engine failure` or `no reply`; null for a complete reply |
 | `seconds` | number or null | Elapsed seconds accumulated across collection and recovery; null when absent from an older record |
@@ -1319,7 +1349,7 @@ evidence that no provider error occurred.
 | 70 | Worktree creation failed, or no main checkout or commit | `next: git -C <dir> worktree prune, then ...` |
 | 71 | Engine or session failed, or OpenCode 2 message delivery is uncertain | `next: emb run --status <run>`, including an uncertain follow-up whose new turn stays `sent`; for other failed sends, `next: emb run --send <run> ...` |
 | 72 | Session or window unavailable, or the run was closed | `next: emb run --status <run>`, or a new start |
-| 73 | Capacity retries exhausted or disabled, usage limit or outage | `next: emb run --send <run> ...` naming the kind; uncertain resend delivery asks the lead to inspect the session before sending again |
+| 73 | Capacity retries exhausted or disabled, usage limit or outage, including an engine that ended because it could not reach its provider | `next: emb run --send <run> ...` naming the kind; uncertain resend delivery asks the lead to inspect the session before sending again; for an engine that ended, `next: emb run --close <run>, then` a new start |
 | 74 | Interrupted | `next: emb run --recover <run>`; a cancelled capacity resend collects the saved turn; uncertain delivery asks the lead to inspect the session before sending again; an interrupted send uses `next: emb run --send <run> ...` |
 | 75 | Close refused while a turn runs or is collected but not committed, a busy session, another command on the run, or a session holding messages Ember did not send | `next: emb run --recover <run>` or `--status`; for messages Ember did not send, `next: ask the owner ...` |
 | 76 | Branch or `HEAD` moved; nothing committed | `next: git -C <worktree> log --oneline -3` |
@@ -1327,7 +1357,7 @@ evidence that no provider error occurred.
 | 79 | Worktree preparation failed before a worker session started | Diagnostic names the log; `next:` gives a new start with the original options and saved brief |
 | 80 | The turn ended with no reply | `next: emb run --screen <run>, then emb run --send <run> ...` |
 | 84 | A start, `--send` or `--recover` otherwise succeeded but ends with a pending owner wait | Each pending `owner:` line on standard error, once per invocation |
-| 124 | Stall; the turn may still be running | `next: emb run --recover <run>` |
+| 124 | Stall, or a turn that did not end within 30 seconds of the interrupt of its provider wait; the turn may still be running | `next: emb run --recover <run>` |
 
 Exit 84 (`OWNER_WAIT`) also applies to `--recover` with nothing left to
 collect when an owner wait remains. Other nonzero exits keep their codes
@@ -1345,6 +1375,8 @@ have no report line. Report lines are not translated or configurable.
 | 73, `capacity` | `report: capacity; retries exhausted; offer only a retry with the same model and effort once capacity returns; offer no other model, engine, Claude subagent or Claude's own work` |
 | 73, `outage` | `report: outage; offer only a retry with the same model and effort once it clears; offer no other model, engine, Claude subagent or Claude's own work` |
 | 73, `usage_limit` | `report: usage_limit; a retry on the same worker needs no question; another worker or model needs the owner's answer; OpenCode may be offered` |
+| 73, a fallback entry applies | `report: fallback; the owner's fallback list names the worker of the next: line; run that line without a question; tell the owner which model failed, with which error, and which model runs now` |
+| 73, an engine that ended | `report: outage; the engine ended; offer only a new run with the same model and effort once it clears; offer no other model, engine, Claude subagent or Claude's own work` |
 | 73 or 74, `uncertain` | `report: retry delivery is uncertain; do not send again before inspecting the session; then offer only a retry with the same model and effort; offer no other model, engine, Claude subagent or Claude's own work` |
 | 74, default, `retry` or `complete`, editing run | `report: interrupted; partial edits may be committed on <branch>` |
 | 76 | `report: branch or HEAD moved; nothing committed; recover only when the branch and HEAD are as recorded, otherwise leave the work to the owner` |
@@ -1394,13 +1426,115 @@ stay in the worktree; the turn commits once after its last attempt.
 Uncertain delivery leaves edits uncommitted. Turn seconds include waits;
 attempt seconds do not. Both totals persist across recovery.
 
+### Provider holds and fallback models
+
+A run that ends with a provider error at exit 73 starts a hold. `capacity`
+holds the run's model. `usage_limit` and `outage` hold the run's engine. A
+hold lasts `provider.hold_minutes` minutes; `0` records none. The holds of
+the machine are in `provider-holds.json` in the state folder, replaced
+atomically under `provider-holds.lock`. The run prints
+`WARNING: <engine>[ <model>] is held after <kind> until <HH:MM>`. A
+successful turn ends the holds of its model and of its engine. An
+uncertain capacity resend starts no hold. A start that exits 73 before its
+brief was taken starts an `outage` hold on its engine.
+
+`provider.fallback` names the workers that take over, in order. The entry
+that applies is the first one whose row is `set` under the engines' cached
+connection states, that is not held, and that is not a worker that failed
+on the job. Entries on the engine of a worker that failed with
+`usage_limit` or `outage` are passed over too. The effort comes from the
+entry's shortlist. The workers that failed on the job are the failed run
+and the runs reached from it through `fallback_from`.
+
+A start whose worker is held starts on the entry that applies and prints
+`WARNING: <engine>[ <model>] is held after <kind> until <HH:MM>; starting <engine> <model> from the fallback list`.
+With no entry that applies it starts on the held worker. A panel member
+starts as named. A start with `--fallback-from` counts the workers of that
+run and of the runs it replaced as failed. When a hold's time is up, the
+next start uses the first choice again; Ember starts no run of its own to
+test it.
+
+When an entry applies at exit 73 of a run's first turn, or of a start
+whose brief was not taken, the `next:` line is
+`next: emb run --close <run>, then emb run --engine <engine> --model <model> ...`
+with the saved brief, `--fallback-from <run>`, the run's read paths,
+trailers and claim, and `--read-only` for a read-only run. An editing run
+that has commits or continues another run adds `--continue-run <run>`. The
+`report:` line tells the lead to run that line without a question and to
+tell the owner which model failed and which runs now. An uncertain resend,
+a later turn, and a run that a flow, a panel or a gap check started keep
+the lines of their own exit. The run's `last_variant` keeps the failure's
+own variant; `emb run --status` prints the fallback lines while the list
+holds an entry that applies.
+
+`--continue-run RUN` cuts the new run's branch and worktree from the tip of
+`RUN`'s branch and keeps `RUN`'s base branch. It appends a section
+`## Work already done` to the brief, which names the earlier run and the
+`git log` and `git diff` commands that show its work from the base of the
+first run of the chain. A brief that already ends with that section gets
+it replaced. It exits 64 for a read-only start, an unknown run, a
+read-only `RUN` or a run of another repository. A run that continues
+another run and made no commit is verified and merged from the tip it was
+cut from, and its `--expect-files` count starts at the base of the first
+run of the chain.
+
+### Provider waits in an open turn
+
+An engine can keep a turn open while it retries a request the provider
+refused or dropped. The turn's record then holds no error. A driver reports
+such a wait from the session's screen, with a `provider_kind` and the
+engine's message. The Codex driver reads Codex's status line
+`Reconnecting... <n>/<m> (<time> • esc to interrupt)`. The line counts only
+directly above the live composer, the pane's last line that starts with
+`›`, with one mark in its first column. The driver classifies the message
+on the line under it by the same texts as a provider error; a status line
+without a message is `outage`. The Claude
+and OpenCode drivers report no wait.
+
+While a command waits for a turn, it applies these rules to a wait:
+
+- At each new wait or new message it prints
+  `WARNING: <engine> <model> waits for the provider (<kind>): <message>`
+  on standard error and saves the wait as `waiting` in the turn outcome,
+  with the kind as the open attempt's `provider_kind`. When the wait ends
+  and the turn goes on, both are cleared. A command that starts to wait
+  for a turn clears a wait that an earlier command saved and that the
+  screen no longer shows.
+- A `capacity` wait ends the turn at once. Ember interrupts the turn and
+  treats it as a `capacity` error: it resends within the limits above, or
+  ends at exit 73.
+- Any other wait ends the turn once it has lasted the `--stall` minutes
+  without a break. Ember interrupts the turn, and it ends at exit 73 with
+  the wait's kind.
+- The reason of a turn ended this way is
+  `<engine> waited for the provider: <message>`. A turn that fails by
+  itself or replies before the interrupt reaches it keeps its own result.
+- A turn that has not ended 30 seconds after the interrupt stops the
+  command with exit 124 and
+  `turn <n> of <run> did not end when interrupted during a provider wait; the session is left running`.
+- The interrupt is saved with the wait before it is sent, and the saved
+  wait stays until the resend is recorded or the turn is completed. When
+  the command stops in between, `--recover` ends the turn by the same rule
+  if the turn ends within 30 seconds of its start; otherwise it takes up a
+  wait the screen still shows as a new one.
+- `emb run --interrupt` during a saved `capacity` wait also cancels the
+  resend.
+
+The screen that the stall count compares has the timer of this status line
+removed, so the time of a wait is not a screen change.
+
+`emb run --status` prints
+`WARNING: run <run> waits for the provider (<kind>): <message>` for each
+running run whose open turn has a saved wait. The saved wait of a command
+that was killed stays until the next command that waits for the turn.
+
 ### Engine drivers
 
 | | Codex | OpenCode | Claude |
 |---|---|---|---|
 | Starts | Codex's interactive session in the pane: `codex -C <worktree> -m <model> -c check_for_update_on_startup=false [-c model_reasoning_effort=<effort>] -a never --search`, with Ember's permission profile in `-c` options, or `--sandbox danger-full-access` when the sandbox is off | OpenCode's interactive view in the pane, with its built-in server on a free port of `127.0.0.1` protected by a password, the stored model id passed unchanged to `--model` and the agent `ember-worker`, inside `bwrap` when the sandbox is on | A program of Ember's in the pane that runs one `claude -p --output-format stream-json` per turn in the worktree, inside `bwrap` when the sandbox is on, and shows its progress; the program itself runs outside the sandbox |
 | Brief | Pasted once Codex's composer shows `? for shortcuts` | Sent through the server's session API once the server answers and the view has drawn its screen | Written as turn 1's request before the pane starts; given to the CLI on standard input |
-| Turn end and reply | Read from Codex's rollout file: `task_complete` with its last message, or `turn_aborted`; an `error` event during the turn fails it | Read from the session status and messages: the turn's last assistant message, once the session is idle; its text parts are the reply | The CLI's exit; the reply is the assistant text after the turn's last tool result |
+| Turn end and reply | Read from Codex's rollout file: `task_complete` with its last message, or `turn_aborted`; an `error` event during the turn fails it; a retry inside the open turn is read from the screen as a provider wait | Read from the session status and messages: the turn's last assistant message, once the session is idle; its text parts are the reply | The CLI's exit; the reply is the assistant text after the turn's last tool result |
 | Later messages | Pasted | Sent through the session API | A new `claude -p` that resumes the previous turn's CLI session |
 | Read-only run | Ember's profile extends Codex's `:workspace` profile for the writable detached worktree; legacy source checkouts use `:read-only` | The agent may not edit, write or patch files or reach folders outside the checkout other than the folders of its read paths; the detached worktree is mounted writable | The tools are `Read`, `Glob` and `Grep`, plus limited `Bash` for detached runs inside `bubblewrap` as described below; the detached worktree is mounted writable |
 | Sandbox provider | `codex` | `bubblewrap` | `bubblewrap` |
@@ -1889,7 +2023,7 @@ with `--previous`, and reads `  none` when nothing is settled. A nonempty
 | `previous_plan` | Plan path recorded in the earlier result, or null |
 | `next_id` | Next unused gap number; repeat checks continue from this number |
 | `dispositions` | Earlier active and settled gap ids, each with `status` and `reason` |
-| `reviewer` | `engine`, `model`, `effort` and `source`; values come from the run record, and `source` is `option` when `--engine` was given, otherwise `menu` |
+| `reviewer` | `engine`, `model`, `effort` and `source`; values come from the run record, and `source` is `fallback` when the run was on a worker of the fallback list, `option` when `--engine` was given, otherwise `menu` |
 | `run` | `id`, `reply` (absolute reply path or null), `exit` (the start's exit), `closed` and `close_error` (null or a reason) |
 | `steps` | Covered steps, each with `step`, `title` and `gaps`; each gap has `id`, `gap`, `harm`, `why`, `default`, `earlier` (an earlier gap id or null), `answer` (null until the lead records one) and `ask_owner` |
 | `settled` | Earlier gaps with a `settled` disposition, their original step and title, gap fields and answer |
@@ -1918,6 +2052,12 @@ A non-zero run exit keeps the run open. Its follow-up names
 `emb gapcheck --plan <plan> --reply <run folder>/turn-1.md --brief-file <run folder>/brief.md` only when the
 reply file exists; otherwise it names a new gap check. An unreadable
 existing reply exits 66. A successful turn with no reply file exits 81.
+
+A reviewer run that a provider error ends at exit 73 is closed, and the
+check is repeated on the entry of `provider.fallback` that applies, with
+`WARNING: the gap check reviewer <engine> <model> failed (<kind>); starting <engine> <model> from the fallback list`
+on standard error. With no entry that applies, with an uncertain resend,
+or when the run cannot be closed, the run's exit 73 is the check's exit.
 
 ### Exit codes
 
@@ -1949,7 +2089,8 @@ emb flow --plan FILE --dry-run [--previous FILE] [--writer W] [--reviewer W] [--
 emb flow --plan FILE --start [--check-base] [--writer W] [--reviewer W] [--claim ID] [--stall MINUTES]
 emb flow --watch FLOW [--json]
 emb flow --status [FLOW] [--json]
-emb flow --lead FLOW TASK (--send FILE | --accept [--commit SHA] | --review [--reviewer W] | --worker W | --drop)
+emb flow --lead FLOW TASK (--send FILE | --accept [--commit SHA] | --review [--reviewer W] | --worker W | --drop | --withdraw)
+emb flow --lead FLOW --reviewer W
 emb flow --resume FLOW [--check '<JSON argv list>' --reason TEXT]
 emb flow --cancel FLOW [--reason TEXT] [--json]
 ```
@@ -1966,14 +2107,16 @@ emb flow --cancel FLOW [--reason TEXT] [--json]
 | `--stall MINUTES` | With `--start`: minutes without screen changes before a task stops waiting; default 10 |
 | `--watch FLOW` | Wait for a lead stop or terminal outcome, using the shared watch cursor |
 | `--status [FLOW]` | Read one full record, or summaries of every flow, oldest first |
-| `--lead FLOW TASK` | Queue exactly one answer for a task |
+| `--lead FLOW TASK` | Queue exactly one answer for a task; it replaces the task's unapplied answer |
+| `--lead FLOW` | With `--reviewer W` and no answer: queue a change of the flow's saved reviewer |
 | `--send FILE` | Copy a nonblank UTF-8 correction for the existing writer |
 | `--accept` | Accept the current task branch tip without another review |
 | `--commit SHA` | With `--accept`: use this commit instead; resolve it to a full commit hash before queueing |
 | `--review` | Collect a running writer turn and request fresh reviews with a new fix budget |
-| `--reviewer W` | Also accepted with `--lead ... --review`; change this task's reviewer |
+| `--reviewer W` | Also accepted with `--lead ... --review`; change this task's reviewer. With `--lead FLOW` and no task, change the flow's saved reviewer for reviews that start later |
 | `--worker W` | Replace this task's writer and run its pipeline from the flow tip |
 | `--drop` | Drop the task; its dependants remain blocked |
+| `--withdraw` | Remove the task's unapplied answer |
 | `--resume FLOW` | Start another runner attempt for an idle, unfinished flow |
 | `--check JSON` | With `--resume`: replace the check of a failed flow with a pending check |
 | `--reason TEXT` | Required nonblank reason with `--resume --check`; also accepted with `--cancel` |
@@ -1983,7 +2126,8 @@ emb flow --cancel FLOW [--reason TEXT] [--json]
 Exactly one mode is required. `--plan`, `--writer` and `--claim` are
 accepted only with `--dry-run` or `--start`. Answer options require
 `--lead`, which accepts exactly one of `--send`, `--accept`, `--review`,
-`--worker` and `--drop`. `--previous` without `--dry-run` exits 64 with
+`--worker`, `--drop` and `--withdraw` with a flow and a task, or
+`--reviewer` alone with a flow and no task. `--previous` without `--dry-run` exits 64 with
 `next: emb flow --help`. Other combinations exit 64 before reading files.
 
 Validation reads the plan, checks its read files for empty text, then
@@ -2127,7 +2271,8 @@ its plan object, then the `flow.writer` or `flow.reviewer` row in the
 choices reply, which is the `single.writer` or `single.reviewer` row while
 `same`. Options use `<engine>:<model>[@<effort>]`; model names may contain
 colons and slashes. The result records `engine`, `model`, `effort` and
-`source` (`option`, `plan`, `menu`, or `answer` for a lead answer).
+`source` (`option`, `plan`, `menu`, `answer` for a lead answer, or
+`fallback` for a worker of the fallback list).
 
 Menu resolution requires a readable settings source and a row in state
 `set`. A Claude row set to run as a subagent is refused: a flow runs CLI
@@ -2203,7 +2348,15 @@ stored model and effort, the plan's read paths, and no claim.
 
 Between waves the runner takes queued answers, recomputes dependency
 blocking, merges accepted tasks in plan order and runs the check when a
-merge is pending. It then selects the next wave of pending tasks with
+merge is pending. During a wave it reads the answer queue at every poll.
+It then applies a `reviewer` answer at once, and a `review` answer when a
+job slot is free, new runs are not halted, the task has no running job and
+its declared files overlap no running task's files; that review starts in
+the running wave. Every other answer waits for the end of the wave. A fix
+that such a review decides is a writer turn and waits for the next wave:
+the task becomes `pending` with the fix decision saved.
+
+The runner then selects the next wave of pending tasks with
 merged dependencies or an operation scheduled by a lead answer. File
 declarations select disjoint tasks in plan order. At most `parallel` jobs
 run at once; each job has its own Core and output streams. Every task
@@ -2279,10 +2432,34 @@ flow with `check_pending` retained. Resume reconciles any recorded check
 process, retries cleanup, and runs the check before further work. With no
 check command the runner clears `check_pending` and returns to `running`.
 
+A writer or reviewer start that ends at exit 73 is repeated on the entry
+of `provider.fallback` that applies, as described under Provider holds and
+fallback models. A review does not take the model of the task's writer, of
+its writer run, or of an earlier writer whose branch that run continues.
+The runner closes the failed run first; a run that cannot be closed, or
+whose resend is uncertain, is not repeated and stops the task. The task's
+`fallbacks` list gains an entry with `role`, `from`, `to`, `cause` (the
+provider kind), `run` and `at`, and the flow logs a `fallback` event with
+the same fields. The task's `fallback_pending` holds the `role`, the
+`worker`, the `failed_run` and the `continue_run` of the repeat until it
+has run, and `fallback_failed` holds the `[engine, model, kind]` of each
+worker that failed on that start. A runner that stops before the repeat
+makes it after a resume. The task's saved `writer` or `reviewer` does not
+change: a later start of the role uses the first choice again. A lead
+answer `send`, `review` or `worker` clears `fallback_pending` and
+`fallback_failed`. A writer whose failed run has commits, or continues
+another run, is continued with `--continue-run`; the earlier branch
+lands with the task's branch, and the task's `task_base` stays the base of
+the first writer. The branch of a failed writer run without work is added
+to `abandoned`. A start that a hold sends to another worker is recorded in
+`fallbacks` with the cause `held`. A correction or fix sent to a running
+writer is not repeated on another worker.
+
 A task's capacity error uses its run's saved retry settings; other tasks
-keep running. A capacity exit 73 stops that task without halting new runs.
-A `usage_limit` or `outage` exit 73 stops the task and halts new runs, as
-does a provider error without a recorded kind. Active jobs finish; queued
+keep running. A capacity exit 73 that no fallback entry covers stops that
+task without halting new runs. A `usage_limit` or `outage` exit 73 that no
+entry covers stops the task and halts new runs, as does a provider error
+without a recorded kind. Active jobs finish; queued
 writers remain pending. The flow stops with
 `provider error on <engine>; new runs halted`. Resume clears that halt and
 continues pending work; the task that failed still needs a lead answer.
@@ -2488,6 +2665,20 @@ to the owner with its findings and every available choice.
 | `pending`, `blocked` | `drop` |
 | Other | None |
 
+An answer is unapplied until the runner takes it. A new answer for a task
+replaces that task's unapplied answer, and the command prints
+`(replaces answer <n>)`, with every replaced number. `--withdraw` queues a
+`withdraw` line that removes the task's unapplied answer; it exits 75 with
+`task <task> has no queued answer` when there is none. The command checks
+an answer against the task's saved status; the runner checks it again when
+it takes it and refuses it with a lead stop when the status has changed.
+
+`--lead FLOW --reviewer W` queues a `reviewer` line with no task. The
+runner sets the flow's saved reviewer when it takes the line; reviews that
+start later use it, and a task's own reviewer stays. A later `reviewer`
+line replaces an unapplied one. The command starts no runner for a
+`reviewer` or `withdraw` line.
+
 `--send` copies the correction to `answers/<n>.md` under the same lock
 that allocates its number and appends its answer. Intentional commands in
 the correction remain as written. The writer receives it, then gets a
@@ -2525,12 +2716,19 @@ branch. A pending task that has not started is dropped without starting a
 writer. Dropped tasks leave their dependants blocked. Retained branches
 are listed in the flow's `abandoned` field.
 
-Answers are queued, then taken between waves. The runner checks each
-answer again against the task's current state. A refused answer produces
-a lead stop naming its number and reason. An answer refused at queue time
-exits 75 and lists the allowed answers. Unknown flows or tasks exit 64;
-completed flows refuse answers with 75. With no live runner or pending
-startup, `--lead` starts a runner after queueing the answer. A launch
+Answers are queued, then taken between waves, except for the `reviewer`
+and `review` answers the runner takes during a wave. The command and the
+runner hold the flow's `answers.lock` while one reads the queue and
+appends and the other checks that an answer is still in effect and saves
+its marker, so an answer reported as replaced or withdrawn is not applied
+afterwards. The runner checks each answer again against the task's current
+state. A refused answer produces a lead stop naming its number and reason.
+An answer refused at queue time exits 75 and lists the allowed answers.
+Unknown flows or tasks exit 64; completed flows refuse answers with 75.
+With no live runner or pending startup, `--lead` starts a runner after
+queueing a task answer other than `--withdraw`; for a `withdraw` or
+`reviewer` line it prints
+`no runner is live; the next runner takes this line`. A launch
 failure leaves the queued answer available for `--resume`.
 
 ### Cancellation
@@ -2643,7 +2841,8 @@ refused. `save` updates `updated_at` and atomically replaces `flow.json`.
 | `check_pending` | Whether a base or wave check is owed; set at wave 0 by `--check-base` and after merges; cleared after saving a passing check |
 | `check_base` | Whether start requested the base check; defaults to false when absent; only `check_pending` controls whether a check runs |
 | `checks` | Entries with `wave`, `exit`, `log`, `at`; one per attempt; wave 0 is the base |
-| `answers_seen` | Complete answer lines already consumed; initially 0 |
+| `answers_seen` | Complete answer lines already consumed in order; initially 0 |
+| `answers_taken` | Indexes of answer lines at or after `answers_seen` that the runner applied during a wave; absent in a record written before 0.27.0 |
 | `halted` | Reason new runs are halted, or null |
 | `abandoned` | Retained branches from dropped or replaced writers |
 | `runner` | Last runner's `pid`, `started_at`, process start ticks (`start`) and `exiting` flag, or null; older records may omit the latter two fields |
@@ -2686,13 +2885,16 @@ Events have `seq` starting at 1, `at` in epoch seconds, and `kind`:
 | `denied_paths` | `task`, `role`, `denied_paths`; each new denial includes `path`, `reason`, `allow_path`, `run` and `turn` |
 | `check` | `wave`, `exit`, `log`, `output` |
 | `check_replaced` | `at`, `old`, `new`, `reason`, matching the saved `check_changes` entry |
+| `reviewer` | `answer`, `worker`: the flow's saved reviewer changed |
+| `fallback` | `task`, `role`, `from`, `to`, `cause`, `run`, `at`: a start went to a fallback worker |
 | `end` | `status`, `reason`, `exit` |
 
 Creation writes event 1 with kind `flow` and status `starting`. Event reads
 can start after a sequence number and skip unreadable complete lines.
 
 An answer has `n`, `at`, `task`, `kind`, `file`, `commit`, `worker`. Kinds are
-`send`, `accept`, `review`, `worker`, `drop`; optional values are null.
+`send`, `accept`, `review`, `worker`, `drop`, `withdraw` and `reviewer`;
+optional values are null. A `reviewer` answer has a null `task`.
 `worker` uses the worker option syntax. The answer append function takes
 `flock` on `answers.jsonl`, allocates the number, copies a send source file
 to `answers/<n>.md`, and appends the object with that path, all under the
@@ -2799,8 +3001,11 @@ worktree <path>
 
 The resolved worker lines and any same-model line follow on standard
 error. Its action line is `next: emb flow --watch <id> --json`. `--resume` prints
-`flow <id>`. `--lead` prints `queued answer <n>: <kind> for <task>`, then
-`flow <id>` when it starts a runner. Both end with the same watch action.
+`flow <id>`. `--lead` prints `queued answer <n>: <kind> for <task>`, with
+` (replaces answer <m>)` or ` (withdraws answer <m>)` when an unapplied
+answer is replaced or withdrawn, then `flow <id>` when it starts a runner.
+A reviewer change prints
+`queued answer <n>: reviewer <worker> for the flow's later reviews`. Both end with the same watch action.
 
 `--watch` polls files once a second. It returns on an unread lead stop or
 the current attempt's terminal outcome. A missing runner in a nonterminal
@@ -2913,6 +3118,17 @@ when present, and omits it otherwise. Each task has
 latest review's counts separately and each finding with its round and run.
 Each task's non-empty `outside_files` prints directly under its task line,
 one indented `outside file: <path>` line per path; an empty list prints nothing.
+`queued_answers` lists the unapplied answers in effect, oldest first, each
+with `n`, `task`, `kind`, `worker` and `replaces` (the numbers of the
+answers it replaces). Text status prints one
+`queued answer <n>: <kind>[ for <task>][ <worker>]` line for each.
+Text status prints one
+`fallback: <role> <from> -> <to> (<cause>) run <run>` line under a task for
+each entry of its `fallbacks`.
+Each task has `provider_wait`: null, or the `run`, `kind`, `message` and
+`since` of the provider wait saved for the open turn of its running writer
+or reviewer run. A task with a wait and no stored reason shows
+`<run> waits for the provider (<kind>): <message>` as its `reason`.
 Each task's `denied_paths` combines retained and current writer and reviewer
 denials, with the run and turn for each entry. Top-level `denied_paths` is their
 union with a `task` id on each entry; flow listings include this union too.
@@ -3573,6 +3789,10 @@ from the repository's main checkout, which cleanup never removes.
   configured `trailer.separators` apply. Keys starting with `Ember-` are
   excluded without regard to case. Ember writes `Ember-Verdict: TEXT` and
   `Ember-Task-Tip: <worker tip>` once with the actual verdict and tip.
+- For a run started with `--continue-run`, the squash message also holds
+  one `Ember-Task-Tip` line for the tip of each earlier run of the chain,
+  before the line of the merged branch. Those branches are then contained
+  in the target, and `emb merge` cleans them up after the merged branch.
 - The target repository's `commit-msg` hook runs on the squash message and
   may edit it. `commit.gpgsign` enables `git commit-tree -S`. A hook or
   commit-writing refusal exits 77 and moves nothing. Worker `pre-commit`
@@ -4686,6 +4906,7 @@ ellipsis; the whole text is in the expanded details. Chips are 22 pixels tall wi
 | Running | `running`, a flow's `checking` | Blue |
 | Waiting for Claude | A run's `waiting`, a flow's `stopped`, or a starting, running or waiting run whose parent state is `lead` or `resume` | Amber |
 | Orphaned | A run whose parent state is `orphaned` in `emb run --status` | Amber |
+| At capacity, At usage limit, Waiting for provider | A running run whose sent turn has a saved provider wait of kind `capacity`, `usage_limit` or `outage` | Amber |
 | Done | A run's `closed`, a flow or panel's `done` | Green |
 | Incomplete | A panel's `incomplete`, a flow's `cancelled` | Purple |
 | Failed | `failed`, a gone flow runner or panel process | Red |
@@ -4836,8 +5057,9 @@ waits for both record models.
 
 ### Team
 
-Team shows the standing worker menu in seven cards: Single tasks, Planning,
-Work of several tasks, Flows, Claude Workflows, Provider capacity and Panel.
+Team shows the standing worker menu in eight cards: Single tasks, Planning,
+Work of several tasks, Flows, Claude Workflows, Provider capacity, Fallback
+models and Panel.
 Single tasks holds the Writer and Reviewer pickers
 (`single.writer`, `single.reviewer`). Each lists Ask each time (`ask`), then,
 for Codex, OpenCode and Claude in that order, each engine that is on and has
@@ -4888,7 +5110,19 @@ Off (`0`) or Up to 1 through Up to 10, default Up to 2; and Wait before a
 retry (`provider.capacity_wait`): 5s through 600s, default 30s. The retries
 row names the limit on resends of one turn. A change applies to runs
 started after it; existing runs keep both settings for later turns and
-recovery. The model and effort stay the same on a retry.
+recovery. The model and effort stay the same on a retry. The card also
+holds Try the first choice again after (`provider.hold_minutes`): Every job
+(`0`), 5 min, 15 min, 30 min or 60 min, default 15 min.
+
+Fallback models lists `provider.fallback` in saved order, numbered from 1.
+An entry shows its engine, model and effort, and a warning line with the
+reason when its row is not `set`. Each entry has a Remove control, and
+every entry but the first a Move up control. A picker adds one shortlisted
+model of a switched-on engine that the list does not hold; it is disabled
+at eight entries. Remove and Move up save the list while it holds entries
+whose model left its shortlist. An empty list shows "No fallback models. A provider error
+then stops the run for Claude." The card's description is the tooltip of an
+info icon after its title.
 
 The Panel card's description is the tooltip of an info icon after its
 title.
@@ -4924,7 +5158,10 @@ refreshes. A stale save reloads the settings and shows the app's stale alert.
 ### Engines
 
 Engines shows each engine's connection status, Use and Sandbox switches,
-requirements and model list. Refresh list reads models from their source.
+active provider holds, requirements and model list. A hold of the whole
+engine reads "Held after <kind> until <HH:MM>" and a hold of one model
+"<model>: held after <kind> until <HH:MM>", in local time. Try again now
+under a hold ends that hold. Refresh list reads models from their source.
 Model switches save shortlist entries; OpenCode entries keep the full
 integration-prefixed id and any selected effort.
 

@@ -75,6 +75,7 @@ def _start(
     *,
     read_only: bool = False,
     trailers: tuple[str, ...] = (),
+    continue_run: str | None = None,
 ) -> record.Run:
     brief = tmp_path / f"brief-{len(list(tmp_path.glob('brief-*')))}.md"
     brief.write_text(text)
@@ -97,6 +98,7 @@ def _start(
                 task_file=str(brief),
                 read_only=read_only,
                 trailers=trailers,
+                continue_run=continue_run,
             )
         )
     )
@@ -310,6 +312,46 @@ def test_merge_with_keep_merges_and_cleans_up(
     assert record.load(run.id, env).status == record.CLOSED
     assert driver.closed == [run.id]
     assert git(repo, "worktree", "list", "--porcelain", env=env).count("worktree ") == 1
+
+
+def test_merge_lands_the_branches_its_branch_continues(
+    tmp_path: Path, env: dict[str, str], repo: Path, driver: StubDriver
+) -> None:
+    first = _start(tmp_path, env, repo, driver, "Task\n@write a.txt one\n")
+    second = _start(
+        tmp_path,
+        env,
+        repo,
+        driver,
+        "Task\n@write a.txt changed\n@write b.txt two\n",
+        continue_run=first.id,
+    )
+    third = _start(
+        tmp_path, env, repo, driver, "Task\n@reply done\n", continue_run=second.id
+    )
+    assert first.branch and second.branch and third.branch
+    assert third.commits == ()
+    streams = Streams()
+    assert _merge(env, driver, streams, third.branch, repo) == 0
+    out, err = streams.take()
+    lines = out.splitlines()
+    assert lines[0].startswith(f"merged {third.branch} at ")
+    removed = [line.split(":")[0] for line in lines[1:]]
+    assert removed == [f"removed {run.branch}" for run in (third, second, first)]
+    assert "next:" not in err
+    tips = git(
+        repo, "log", "-1", "--format=%(trailers:key=Ember-Task-Tip,valueonly)", env=env
+    ).split()
+    assert tips == [first.commits[-1], second.commits[-1]]
+    assert (repo / "a.txt").read_text() == "changed\n"
+    for run in (first, second, third):
+        assert run.branch is not None
+        assert not _branch_exists(repo, run.branch, env)
+        assert record.load(run.id, env).status == record.CLOSED
+    step, line = Core(env, load_driver=lambda name: driver).step(
+        record.load(first.id, env), "live"
+    )
+    assert (step, line) == ("finish", None)
 
 
 def test_merge_json(

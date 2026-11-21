@@ -20,6 +20,12 @@ input. The driver reads every turn from Codex's own files in its home folder
   locks from the database and its write-ahead log, so reading it never
   creates or changes a file.
 
+One state of a turn is read from the pane and not from a file. Codex retries
+a request the provider refused or dropped inside the open turn. It shows the
+retry on its status line, `Reconnecting... <n>/<m> (<time> • esc to
+interrupt)`, with the provider's message on the line under it, and writes
+neither to the rollout. `provider_wait` reads that line.
+
 The driver's own state is `codex.json` in the run's folder: the rollout, the
 session id, each message Ember pasted, in order, and, for each turn after
 the first, the rollout's counts of ended turns and errors when its message
@@ -51,6 +57,7 @@ from ember.engines import (
     DriverError,
     IdleState,
     LaunchSpec,
+    ProviderWait,
     TurnOutcome,
     models,
 )
@@ -87,7 +94,36 @@ DISCOVERY_SLACK = 5.0
 ENDED = ("task_complete", "turn_aborted")
 """The rollout events that end a turn."""
 
+COMPOSER_MARK = "›"
+"""The first character of the composer's line in Codex's pane."""
+
 _EFFORT_WORD = re.compile(r"[a-z][a-z0-9]*")
+
+_WAIT_LINE = re.compile(
+    r"^[^\w\s]\s+(?P<text>Reconnecting\.\.\.[^()]*?)\s*"
+    r"\([^()]*esc to interrupt\)\s*$"
+)
+"""Codex's status line while it retries a request inside an open turn: one
+mark in the first column, then the text. Text of a reply or of a tool's
+output is indented and does not match."""
+
+_WAIT_COUNT = re.compile(r"\s+\d+/\d+$")
+"""The retry count at the end of the status line's text."""
+
+_EXIT_ERROR = re.compile(r"^Error: \S")
+"""The line Codex prints when it ends with an error."""
+
+_EXIT_OUTAGE = re.compile(
+    r"\baccount/[\w/]+ failed|request timed out"
+    r"|failed to lookup address information|connection reset by peer"
+    r"|error sending request|failed to connect to responses",
+    re.IGNORECASE,
+)
+"""Texts of Codex's exit error when it could not reach its provider: a
+failed request to the account service, a timed-out request, a failed name
+lookup, a reset connection, a request that could not be sent, or a failed
+connection to the Responses endpoint. A timeout or a failed connection with
+other wording, such as one to a local server, is not among them."""
 
 _SIGNED_OUT = re.compile(
     r"\b401\b|unauthori[sz]ed|(?:log|sign)\s?(?:in|out) again"
@@ -261,6 +297,85 @@ def provider_kind(message: str) -> str:
     if "you've hit your usage limit" in message:
         return "usage_limit"
     return "outage"
+
+
+def _wait_line(lines: list[str]) -> tuple[int, str, list[str]] | None:
+    """Find Codex's retry status line in a pane.
+
+    The status line sits directly above the live composer, the last line
+    of the pane that starts with `COMPOSER_MARK`. Only the status line's
+    detail lines and blank lines lie between the two. The same text higher
+    in the pane, in a reply, a tool's output or above an earlier message,
+    is not taken for it.
+
+    Args:
+        lines: The pane's lines.
+
+    Returns:
+        The line's index, its text without the timer, and its detail lines;
+        `None` when the pane shows no composer or no retry above it.
+    """
+    composer = next(
+        (
+            index
+            for index in range(len(lines) - 1, -1, -1)
+            if lines[index].startswith(COMPOSER_MARK)
+        ),
+        None,
+    )
+    if composer is None:
+        return None
+    index = composer - 1
+    while index >= 0 and not lines[index].strip():
+        index -= 1
+    details: list[str] = []
+    while index >= 0 and lines[index][:1].isspace() and lines[index].strip():
+        details.insert(0, lines[index].strip().lstrip("└").strip())
+        index -= 1
+    if index < 0:
+        return None
+    match = _WAIT_LINE.match(lines[index])
+    if match is None:
+        return None
+    return index, match["text"], details
+
+
+def screen_wait(screen: str) -> ProviderWait | None:
+    """Return the provider wait that Codex's pane shows.
+
+    Args:
+        screen: The pane's text.
+
+    Returns:
+        The wait, classified from the message under the status line; a
+        status line without a message is an `outage`. `None` when the pane
+        shows no retry.
+    """
+    found = _wait_line(screen.splitlines())
+    if found is None:
+        return None
+    _, text, details = found
+    # Without a message the count would make each retry a new wait.
+    message = " ".join(details) or _WAIT_COUNT.sub("", text)
+    return ProviderWait(provider_kind(message), message)
+
+
+def screen_without_wait_timer(screen: str) -> str:
+    """Return Codex's pane with the timer of its retry status line removed.
+
+    Args:
+        screen: The pane's text.
+
+    Returns:
+        The text, unchanged when the pane shows no retry.
+    """
+    lines = screen.splitlines()
+    found = _wait_line(lines)
+    if found is None:
+        return screen
+    index, text, _ = found
+    lines[index] = text
+    return "\n".join(lines)
 
 
 def error_outcome(message: str) -> TurnOutcome:
@@ -1075,6 +1190,66 @@ class CodexDriver(Driver):
             run: The run.
         """
         tmux.send_keys(run.id, "Escape", env=run.env)
+
+    def exit_words(self, screen: str) -> str | None:
+        """Return Codex's `Error:` line when it is the pane's last line.
+
+        Args:
+            screen: The dead pane's text.
+
+        Returns:
+            The line, or `None`: without it the pane's last line is text of
+            the session, not a word about the exit.
+        """
+        line = tmux.last_line(screen)
+        # Codex prints its error in the first column; an indented line is
+        # text of the session.
+        if line is None or _EXIT_ERROR.match(line) is None:
+            return None
+        return line[: tmux.LAST_WORDS_LIMIT]
+
+    def exit_outcome(self, words: str) -> TurnOutcome | None:
+        """Classify Codex's exit error.
+
+        Args:
+            words: Codex's `Error:` line.
+
+        Returns:
+            An `outage` when the error says a request timed out or a
+            connection or name lookup failed; otherwise `None`.
+        """
+        if (
+            _EXIT_ERROR.match(words) is None
+            or _EXIT_OUTAGE.search(words) is None
+            or _SIGNED_OUT.search(words) is not None
+        ):
+            return None
+        return TurnOutcome(
+            FAILED, reason=words, provider_error=True, provider_kind="outage"
+        )
+
+    def provider_wait(self, screen: str) -> ProviderWait | None:
+        """Read Codex's retry status line.
+
+        Args:
+            screen: The pane's text.
+
+        Returns:
+            The wait Codex shows while it retries inside an open turn, or
+            `None`.
+        """
+        return screen_wait(screen)
+
+    def stable_screen(self, screen: str) -> str:
+        """Drop the timer of Codex's retry status line.
+
+        Args:
+            screen: The pane's text.
+
+        Returns:
+            The text the core compares for screen changes.
+        """
+        return screen_without_wait_timer(screen)
 
     # Efforts
 
