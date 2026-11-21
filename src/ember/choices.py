@@ -75,6 +75,22 @@ _MENU_MODEL = {
 OPENCODE_ID_FORMAT = "opencode_id_format"
 """Marker stored as 1 when OpenCode model ids include their integration."""
 
+CAPACITY_WAITS = ("5", "15", "30", "60", "120", "300", "600")
+"""Seconds before a capacity retry, in ascending order."""
+
+CAPACITY_WAIT_PRESETS = "capacity_wait_presets"
+"""Marker stored as 1 when a legacy capacity wait has been converted."""
+
+
+def _nearest_capacity_wait(value: object) -> object:
+    """Round a legacy wait to the nearest preset, preferring the longer tie."""
+    if not isinstance(value, str) or re.fullmatch(r"[1-9][0-9]{0,2}", value) is None:
+        return value
+    seconds = int(value)
+    if not 5 <= seconds <= 600:
+        return value
+    return min(reversed(CAPACITY_WAITS), key=lambda wait: abs(int(wait) - seconds))
+
 
 def full_opencode_id(model: str) -> str:
     """Convert a legacy stored OpenRouter id, retaining an existing prefix."""
@@ -104,18 +120,15 @@ def _convert_stored_object(value: object) -> object:
     return {name: _convert_stored_choice(name, item) for name, item in value.items()}
 
 
-def _legacy_ids(conn: sqlite3.Connection) -> bool:
+def _unmarked(conn: sqlite3.Connection, marker: str) -> bool:
     return (
-        conn.execute(
-            "SELECT 1 FROM meta WHERE key = ?", (OPENCODE_ID_FORMAT,)
-        ).fetchone()
-        is None
+        conn.execute("SELECT 1 FROM meta WHERE key = ?", (marker,)).fetchone() is None
     )
 
 
 def _migrate_ids(conn: sqlite3.Connection) -> bool:
     """Convert every settings layer and its marker within the caller's transaction."""
-    if not _legacy_ids(conn):
+    if not _unmarked(conn, OPENCODE_ID_FORMAT):
         return False
     for name, text in conn.execute("SELECT key, value FROM settings").fetchall():
         try:
@@ -138,6 +151,32 @@ def _migrate_ids(conn: sqlite3.Connection) -> bool:
                 (_canonical(value), ident),
             )
     conn.execute("INSERT INTO meta (key, value) VALUES (?, '1')", (OPENCODE_ID_FORMAT,))
+    return True
+
+
+def _migrate_capacity_wait(conn: sqlite3.Connection) -> bool:
+    """Store a converted standing wait and its marker in the caller's transaction."""
+    row = conn.execute(
+        "SELECT value FROM settings WHERE key = 'provider.capacity_wait'"
+    ).fetchone()
+    if row is None:
+        return False
+    try:
+        value = json.loads(row[0])
+    except ValueError:
+        return False
+    preset = _nearest_capacity_wait(value)
+    if not isinstance(preset, str) or preset == value:
+        return False
+    conn.execute(
+        "UPDATE settings SET value = ? WHERE key = 'provider.capacity_wait'",
+        (_canonical(preset),),
+    )
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?, '1') "
+        "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        (CAPACITY_WAIT_PRESETS,),
+    )
     return True
 
 
@@ -524,14 +563,9 @@ def _keys() -> dict[str, Key]:
             ),
         )
     )
-    for name, low, high, default in (
-        ("provider.capacity_retries", 0, 10, "2"),
-        ("provider.capacity_wait", 5, 600, "30"),
-    ):
-        values = tuple(str(value) for value in range(low, high + 1))
-        keys.append(
-            Key(name, _STANDING, _enum(*values), _constant(default), allowed=values)
-        )
+    retries = tuple(str(n) for n in range(11))
+    keys.append(_key("provider.capacity_retries", retries, "2"))
+    keys.append(_key("provider.capacity_wait", CAPACITY_WAITS, "30"))
     keys.append(
         Key(
             "provider.hold_minutes",
@@ -780,12 +814,14 @@ def _load(
         if run_id is not None:
             state.claim_status = "unknown"
         return state
-    legacy = _legacy_ids(conn)
+    legacy = _unmarked(conn, OPENCODE_ID_FORMAT)
     for name, text in conn.execute("SELECT key, value FROM settings ORDER BY key"):
         try:
             value = json.loads(text)
             if legacy:
                 value = _convert_stored_choice(name, value)
+            if name == "provider.capacity_wait":
+                value = _nearest_capacity_wait(value)
             validate_value(name, value, SETTING)
         except ValueError as error:
             errors = state.panel_errors if name == "panel.members" else state.errors
@@ -1162,11 +1198,9 @@ def _write(
 ) -> dict[str, Any]:
     """Run `change` in one write transaction and build the reply.
 
-    The transaction checks `expect_generation`, migrates legacy model ids,
-    stores expiry, runs `change` and raises the generation by one when
-    `change` reports a settings or
-    pending one-time choice write. Claim-table writes and expiry do not
-    raise the generation. A model-id migration shares the same increment.
+    The transaction checks `expect_generation`, migrates legacy model ids and
+    capacity waits, stores expiry and runs `change`. Migrations, settings and
+    pending one-time choice writes share one generation increment.
     """
     expect = _check_expect(expect_generation)
     with db.translate_errors(), db.open_write(env) as conn, db.transaction(conn):
@@ -1175,7 +1209,8 @@ def _write(
             raise db.StaleGenerationError(
                 f"generation is {generation}, not {expect}; reload and try again"
             )
-        migrated = _migrate_ids(conn)
+        migrated_ids = _migrate_ids(conn)
+        migrated_wait = _migrate_capacity_wait(conn)
         conn.execute("DELETE FROM once WHERE set_at + ? <= ?", (ONCE_TTL, now))
         conn.execute(
             "UPDATE claims SET status = 'gone', copy = NULL "
@@ -1183,7 +1218,7 @@ def _write(
             (CLAIM_TTL, now),
         )
         changed = change(conn)
-        if changed or migrated:
+        if changed or migrated_ids or migrated_wait:
             generation = db.bump_generation(conn)
         return reply(conn, generation)
 
