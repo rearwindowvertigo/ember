@@ -425,6 +425,10 @@ def test_preparation_dialog_layout(qapp: QApplication, qtbot: QtBot, mode: str) 
     assert dialog.command.text() == "npm ci"
     assert dialog.command.accessibleName() == "Command"
     assert dialog.command.placeholderText() == "npm ci"
+    heading = next(
+        line for line in dialog.findChildren(QLabel) if line.text() == "Command"
+    )
+    assert dialog.info.x() - heading.x() - heading.width() == 8
     assert dialog.info.toolTip() == (
         "Runs in each new worktree outside the worker sandbox, before any "
         "worker or check starts. Leave empty for no preparation."

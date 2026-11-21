@@ -198,7 +198,10 @@ CAPACITY = (
         "Wait before a retry",
         "Seconds between a capacity error and its resend. "
         "The model and effort stay the same.",
-        tuple((str(n), f"{n}s") for n in range(5, 601)),
+        tuple(
+            (wait, f"{wait}s" if int(wait) <= 60 else f"{int(wait) // 60} min")
+            for wait in choices.CAPACITY_WAITS
+        ),
     ),
     (
         "provider.hold_minutes",

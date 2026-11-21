@@ -4,6 +4,7 @@ import pytest
 from PySide6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
 from pytestqt.qtbot import QtBot
 
+from ember.app import widgets
 from ember.app.screens import common
 
 
@@ -97,12 +98,25 @@ def test_tooltip_row_is_a_name_with_an_info_icon(qtbot: QtBot) -> None:
     control = QPushButton("Always")
     row = common.TooltipRow("Run the gap check", "Full.", control)
     qtbot.addWidget(row)
+    row.resize(480, row.sizeHint().height())
+    row.show()
+    assert row.info.x() - row.heading.x() - row.heading.width() == 8
     assert row.info.toolTip() == "Full."
     assert row.info.accessibleName() == "About Run the gap check"
     assert row.heading.toolTip() == ""
     assert control.toolTip() == ""
     labels = [label.text() for label in row.findChildren(QLabel)]
     assert labels == ["Run the gap check"]
+
+
+def test_card_title_info_spacing(qtbot: QtBot) -> None:
+    card, _layout = common.titled_card("Panel", "Full.")
+    qtbot.addWidget(card)
+    card.show()
+    heading = card.findChild(QLabel)
+    info = card.findChild(widgets.InfoTip)
+    assert heading is not None and info is not None
+    assert info.x() - heading.x() - heading.width() == 8
 
 
 def test_align_controls_gives_rows_one_column(qtbot: QtBot) -> None:

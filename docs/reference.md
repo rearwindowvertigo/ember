@@ -66,7 +66,7 @@ empty list.
 | `panel.members` | List of `<engine>:<model>` with each model on its engine's shortlist when saved, at most 8, no duplicates | `[]` | request, one-time, standing |
 | `single.writer_as`, `single.reviewer_as` | `cli`, `subagent` | `cli` | request, one-time, standing |
 | `provider.capacity_retries` | Integer strings `0` to `10`; most resends of one turn after a capacity error; `0` turns retries off | `2` | standing |
-| `provider.capacity_wait` | Integer strings `5` to `600`; seconds before a capacity resend | `30` | standing |
+| `provider.capacity_wait` | Integer strings `5`, `15`, `30`, `60`, `120`, `300`, `600` (seconds before a capacity resend) | `30` | standing |
 | `provider.fallback` | List of `<engine>:<model>`, in order of use, at most 8, no duplicates; a new entry's model is on its engine's shortlist when saved, and an entry the list already holds is kept | `[]` | standing |
 | `provider.hold_minutes` | `0`, `5`, `15`, `30`, `60`; minutes a model or engine is passed over after a provider error; `0` records no hold | `15` | standing |
 | `sandbox.codex` | `on`, `off` | `on` when `bwrap` is on `PATH` or the `codex` on `PATH` has a bundled `bwrap`, else `off` | standing |
@@ -119,6 +119,10 @@ writing. The next settings change writes the conversion and marker in its
 transaction, with the generation check and one generation increment.
 Run, flow and panel records without the marker use the same conversion
 on load and save with the marker. New records carry `opencode_id_format: 1`.
+
+When a stored `provider.capacity_wait` falls between two presets,
+`emb choices` reads it as the nearer preset, using the longer wait if
+both are equally close. The next choices write transaction stores that preset.
 
 `gapcheck.reviewer`, `flow.writer` and `flow.reviewer` follow their
 single-task row (`single.reviewer`, `single.writer`, `single.reviewer`)
@@ -4739,9 +4743,10 @@ last input: a key press shows it, a mouse press does not.
 Tooltips draw in `fill-primary` with `on-primary`, 6-pixel corners and
 12-pixel text. A tooltip wider than 320 pixels wraps at 320 pixels, keeps
 its line breaks and may break a path after each `/`; a shorter one shows on
-one line. Every setting row on Team and Settings is its name with an info
-icon after it, and no line under the name; the icon's tooltip holds what
-the setting does. Hovering the icon, focusing it from the keyboard or
+one line. An info icon sits 8 pixels after its label, including setting
+names and card titles. Every setting row on Team and Settings has an info
+icon and no line under the name. The icon's tooltip describes what the
+setting does. Hovering the icon, focusing it from the keyboard or
 clicking it shows the tooltip under it, in Ember's own window with 6-pixel
 rounded corners; it hides when the pointer leaves an unfocused icon, focus
 moves on, or Escape is pressed. The collapsed sidebar's rows, mark and
@@ -4762,6 +4767,12 @@ the name and info icon on the first line, the control 8 pixels below at the
 left edge. A stacked picker keeps the column's last width, limited to the
 available width inside its card. The rows return to one shared column when
 the window widens enough.
+
+A picker's list opens with the chosen row in view. It shows at most 10
+rows, including group headers, and scrolls for the rest. The list can
+extend past the Ember window and stays on screen. The open list has
+transparent rounded corners, as does the Copy menu opened by right-clicking
+the command in the “Run this command?” dialog.
 
 ### Tray
 
@@ -5131,9 +5142,10 @@ same time; and When an agent runs late
 when no engine offers a model.
 
 Provider capacity holds Capacity retries (`provider.capacity_retries`):
-Off (`0`) or Up to 1 through Up to 10, default Up to 2; and Wait before a
-retry (`provider.capacity_wait`): 5s through 600s, default 30s. The retries
-row names the limit on resends of one turn. A change applies to runs
+Off (`0`) or Up to 1 through Up to 10, default Up to 2. Wait before a
+retry (`provider.capacity_wait`) offers 5s, 15s, 30s, 60s, 2 min, 5 min
+and 10 min, with 30s as the default. The retries row names the limit on
+resends of one turn. A change applies to runs
 started after it; existing runs keep both settings for later turns and
 recovery. The model and effort stay the same on a retry. The card also
 holds Try the first choice again after (`provider.hold_minutes`): Every job

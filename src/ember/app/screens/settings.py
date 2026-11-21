@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from ember import choices, sandbox, terminals
 from ember.app import icons, state, theme, widgets
 from ember.app.screens.common import (
+    INFO_SPACING,
     ToneLine,
     TooltipRow,
     align_controls,
@@ -128,7 +129,7 @@ class PreparationCommandDialog(QDialog):
         )
         layout.addWidget(self.repository)
         heading = QHBoxLayout()
-        heading.setSpacing(4)
+        heading.setSpacing(INFO_SPACING)
         heading.addWidget(QLabel("Command"))
         self.info = widgets.InfoTip("Command", self.EXPLANATION)
         self.info.setAutoDefault(False)

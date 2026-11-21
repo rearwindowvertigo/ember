@@ -455,6 +455,9 @@ QLineEdit, QComboBox {
     selection-background-color: @accent;
     selection-color: #ffffff;
 }
+QComboBox {
+    combobox-popup: 0;
+}
 QComboBox[changed="true"] {
     border: 1px solid @accent;
 }
@@ -495,6 +498,10 @@ QComboBox QAbstractItemView {
     outline: none;
     selection-background-color: @bg-selected;
     selection-color: @text-primary;
+}
+QComboBox QAbstractItemView[empty="true"] {
+    /* Only the two padded borders are visible in an empty list. */
+    border-radius: 9px;
 }
 QMenu {
     background: @bg-raised;

@@ -52,6 +52,9 @@ SCREEN_SPACING = 16
 CARD_MARGIN = 20
 """The padding inside a card, in pixels."""
 
+INFO_SPACING = 8
+"""The gap between a label and its info button, in pixels."""
+
 
 # Text
 
@@ -375,7 +378,7 @@ class TooltipRow(QWidget):
         self.name = QWidget()
         names = QHBoxLayout(self.name)
         names.setContentsMargins(0, 0, 0, 0)
-        names.setSpacing(16)
+        names.setSpacing(INFO_SPACING)
         self.heading = QLabel(name)
         self.heading.setFont(theme.font("label"))
         self.info = widgets.InfoTip(name, tooltip)
@@ -606,7 +609,7 @@ def titled_card(
         layout.addWidget(heading)
         return card, layout
     line = QHBoxLayout()
-    line.setSpacing(4)
+    line.setSpacing(INFO_SPACING)
     line.addWidget(heading)
     info = widgets.InfoTip(title, tooltip)
     line.addWidget(info, 0, Qt.AlignmentFlag.AlignVCenter)

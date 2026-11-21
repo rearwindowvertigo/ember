@@ -1200,7 +1200,7 @@ def test_add_member_says_why_when_every_shortlisted_model_is_a_member(
     assert not screen.empty.isVisibleTo(screen)
 
 
-def test_capacity_rows_show_ranges_and_save(env: dict[str, str], qtbot: QtBot) -> None:
+def test_capacity_rows_show_options_and_save(env: dict[str, str], qtbot: QtBot) -> None:
     context, screen = _screen(env, qtbot)
     retries = screen.capacity["provider.capacity_retries"]
     wait = screen.capacity["provider.capacity_wait"]
@@ -1209,7 +1209,15 @@ def test_capacity_rows_show_ranges_and_save(env: dict[str, str], qtbot: QtBot) -
     assert retries.value() == "2"
     assert wait.value() == "30"
     assert {str(n) for n in range(11)} == {item[1] for item in _items(retries)}
-    assert {str(n) for n in range(5, 601)} == {item[1] for item in _items(wait)}
+    assert _items(wait) == [
+        ("5s", "5", False),
+        ("15s", "15", False),
+        ("30s", "30", False),
+        ("60s", "60", False),
+        ("2 min", "120", False),
+        ("5 min", "300", False),
+        ("10 min", "600", False),
+    ]
     assert "limit" in screen.tip_rows["provider.capacity_retries"].info.toolTip()
     _pick(context, retries, "0", qtbot)
     _pick(context, wait, "600", qtbot)
@@ -1219,6 +1227,22 @@ def test_capacity_rows_show_ranges_and_save(env: dict[str, str], qtbot: QtBot) -
     qtbot.addWidget(other)
     assert other.capacity["provider.capacity_retries"].value() == "0"
     assert other.capacity["provider.capacity_wait"].value() == "600"
+
+
+def test_capacity_wait_shows_converted_value_and_saves_pick(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    key = "provider.capacity_wait"
+    with db.open_write(env) as conn, db.transaction(conn):
+        db.ensure_schema(conn)
+        conn.execute("INSERT INTO settings VALUES (?, ?)", (key, '"90"'))
+    context, screen = _screen(env, qtbot)
+    wait = screen.capacity[key]
+    assert wait.value() == "120"
+    assert wait.currentText() == "2 min"
+    _pick(context, wait, "15", qtbot)
+    assert _stored(env, key) == "15"
+    assert choices.snapshot(env=env)["generation"] == 1
 
 
 def test_hold_minutes_choices_and_save(env: dict[str, str], qtbot: QtBot) -> None:

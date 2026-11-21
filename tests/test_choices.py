@@ -1476,38 +1476,132 @@ def test_derived_rows_refuse_a_model_off_the_shortlist(env: dict[str, str]) -> N
     choices.set_settings({"flow.writer": "same"}, env=env)
 
 
-@pytest.mark.parametrize(
-    ("key", "value"),
-    [
-        ("provider.capacity_retries", "0"),
-        ("provider.capacity_retries", "10"),
-        ("provider.capacity_wait", "5"),
-        ("provider.capacity_wait", "600"),
-    ],
-)
-def test_provider_settings_bounds(env: dict[str, str], key: str, value: str) -> None:
+@pytest.mark.parametrize("value", ["0", "10"])
+def test_capacity_retries_bounds(env: dict[str, str], value: str) -> None:
+    key = "provider.capacity_retries"
     choices.set_settings({key: value}, env=env)
     assert choices.read(env=env)["answers"][key]["value"] == value
 
 
+@pytest.mark.parametrize("value", ["-1", "11", "", 0])
+def test_invalid_capacity_retries(env: dict[str, str], value: object) -> None:
+    with pytest.raises(choices.InvalidChoiceError):
+        choices.set_settings({"provider.capacity_retries": value}, env=env)
+
+
+@pytest.mark.parametrize("value", ["5", "15", "30", "60", "120", "300", "600"])
+def test_capacity_wait_presets(env: dict[str, str], value: str) -> None:
+    key = "provider.capacity_wait"
+    choices.set_settings({key: value}, env=env)
+    assert _answer(choices.read(env=env), key) == (value, choices.SETTING)
+
+
+@pytest.mark.parametrize("value", ["4", "6", "45", "601", "30.5", True, 30])
+def test_invalid_capacity_wait(env: dict[str, str], value: object) -> None:
+    with pytest.raises(choices.InvalidChoiceError) as error:
+        choices.set_settings({"provider.capacity_wait": value}, env=env)
+    assert error.value.exit_code == 64
+    assert "5, 15, 30, 60, 120, 300, 600" in str(error.value)
+
+
+def _legacy_capacity_wait(env: dict[str, str], value: object) -> None:
+    with db.open_write(env) as conn, db.transaction(conn):
+        db.ensure_schema(conn)
+        conn.execute(
+            "INSERT INTO settings VALUES ('provider.capacity_wait', ?)",
+            (json.dumps(value),),
+        )
+
+
+def _wait_storage(env: dict[str, str]) -> tuple[str, str | None, int]:
+    with sqlite3.connect(_db_path(env)) as conn:
+        (value,) = conn.execute(
+            "SELECT value FROM settings WHERE key = 'provider.capacity_wait'"
+        ).fetchone()
+        meta = dict(conn.execute("SELECT key, value FROM meta"))
+    return value, meta.get(choices.CAPACITY_WAIT_PRESETS), int(meta["generation"])
+
+
 @pytest.mark.parametrize(
-    ("key", "value"),
+    ("old", "preset"),
     [
-        ("provider.capacity_retries", "-1"),
-        ("provider.capacity_retries", "11"),
-        ("provider.capacity_retries", ""),
-        ("provider.capacity_retries", 0),
-        ("provider.capacity_wait", "4"),
-        ("provider.capacity_wait", "601"),
-        ("provider.capacity_wait", "30.5"),
-        ("provider.capacity_wait", True),
+        ("10", "15"),
+        ("45", "60"),
+        ("90", "120"),
+        ("210", "300"),
+        ("450", "600"),
+        ("44", "30"),
+        ("23", "30"),
     ],
 )
-def test_invalid_provider_settings(
-    env: dict[str, str], key: str, value: object
+def test_legacy_capacity_wait_reads_then_migrates_once(
+    env: dict[str, str], old: str, preset: str
 ) -> None:
-    with pytest.raises(choices.InvalidChoiceError):
-        choices.set_settings({key: value}, env=env)
+    key = "provider.capacity_wait"
+    _legacy_capacity_wait(env, old)
+    assert _answer(choices.read(env=env), key) == (preset, choices.SETTING)
+    assert choices.snapshot(env=env)["settings"][key] == preset
+    assert _wait_storage(env) == (json.dumps(old), None, 0)
+    reply = choices.set_settings({}, expect_generation=0, env=env)
+    assert reply["settings"][key] == preset
+    assert reply["generation"] == 1
+    assert _wait_storage(env) == (json.dumps(preset), "1", 1)
+    assert choices.set_settings({}, env=env)["generation"] == 1
+    assert _wait_storage(env) == (json.dumps(preset), "1", 1)
+
+
+def test_older_app_saves_a_legacy_wait_after_migration(env: dict[str, str]) -> None:
+    key = "provider.capacity_wait"
+    _legacy_capacity_wait(env, "90")
+    choices.set_settings({"app.theme": "dark"}, env=env)
+    assert _wait_storage(env) == ('"120"', "1", 1)
+
+    with db.open_write(env) as conn, db.transaction(conn):
+        conn.execute("UPDATE settings SET value = ? WHERE key = ?", ('"45"', key))
+        db.bump_generation(conn)
+
+    reply = choices.read(env=env)
+    assert reply["errors"] == []
+    assert _answer(reply, key) == ("60", choices.SETTING)
+    assert _answer(reply, "app.theme") == ("dark", choices.SETTING)
+    assert _wait_storage(env) == ('"45"', "1", 2)
+
+    choices.set_settings({"worker.network": "on"}, expect_generation=2, env=env)
+    assert _wait_storage(env) == ('"60"', "1", 3)
+    assert choices.set_settings({}, env=env)["generation"] == 3
+
+
+def test_stored_capacity_wait_preset_needs_no_migration(env: dict[str, str]) -> None:
+    _legacy_capacity_wait(env, "120")
+    before = _wait_storage(env)
+    assert _answer(choices.read(env=env), "provider.capacity_wait") == (
+        "120",
+        "setting",
+    )
+    choices.set_settings({}, env=env)
+    assert _wait_storage(env) == before
+
+
+def test_capacity_wait_and_model_id_migrations_share_a_generation(
+    env: dict[str, str],
+) -> None:
+    _legacy_capacity_wait(env, "45")
+    _raw(env, "DELETE FROM meta WHERE key = ?", choices.OPENCODE_ID_FORMAT)
+    _raw(env, "INSERT INTO settings VALUES ('shortlist.opencode', ?)", '["qwen/test"]')
+    reply = choices.set_settings({}, env=env)
+    assert reply["settings"]["shortlist.opencode"] == ["openrouter/qwen/test"]
+    assert _wait_storage(env) == ('"60"', "1", 1)
+
+
+@pytest.mark.parametrize("value", ["4", "601", "30.5", "030", "+45", 45, True])
+def test_invalid_stored_wait_stays_invalid(env: dict[str, str], value: object) -> None:
+    _legacy_capacity_wait(env, value)
+    before = _wait_storage(env)
+    reply = choices.read(env=env)
+    assert reply["source_error"]
+    assert "provider.capacity_wait" in reply["errors"][0]
+    choices.set_settings({}, env=env)
+    assert _wait_storage(env) == before
 
 
 @pytest.mark.parametrize("folder", ["config", "state"])
