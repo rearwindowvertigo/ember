@@ -2465,9 +2465,14 @@ without
 `GIT_OBJECT_DIRECTORY`, `GIT_NAMESPACE`, `GIT_PREFIX` or
 `EMBER_FLOW_RUNNER`. For each base or wave check, the runner sets
 `TMPDIR` to `/tmp/ember-<flow id>`, using the full flow id. It replaces
-any stale check folder with an empty one before the attempt. When the
-check passes, fails, times out or is cancelled, the runner removes the
-folder and keeps the log. Each attempt writes a private
+any stale check folder with an empty one before the attempt. A stale
+folder is a real directory of that name owned by the current user. Any
+other entry of that name stays, and the attempt fails with a reason that
+names the path. When the check passes, fails, times out or is cancelled,
+the runner removes the folder and keeps the log. If the removal fails, the
+runner prints `WARNING: cannot remove check folder <path>: <error>` on
+standard error and the check's result stays. `emb prune` of a flow record
+removes that flow's check folder. Each attempt writes a private
 `check-<wave>-<attempt>.log`; its check entry names that file, and its event
 contains the last 4000 characters. A timeout kills the process group and
 records exit 124; failure to start records 127. After a check, the runner
@@ -3931,7 +3936,9 @@ cleanup checks allow removal. An empty `emb cleanup` afterwards is expected.
 | `branch` | `BRANCH` |
 | `target` | `TARGET` |
 | `note` | `TEXT` from `--note` |
+| `tip` | The worker branch's tip commit |
 | `merge_commit` | The squash or merge commit; null when the branch was already contained |
+| `landed_commit` | The commit that already holds the branch's changes; present only when `merge_commit` is null |
 | `warnings` | List of warning strings, also printed on standard error |
 | `contained_before` | Whether the branch was already contained |
 | `cleanup` | The cleanup's list, as `emb cleanup --json` prints it |

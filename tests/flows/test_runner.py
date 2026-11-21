@@ -1900,11 +1900,8 @@ def test_check_cleanup_failure_retains_pending(
     assert h.run()["status"] == "done"
 
 
-@pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("delivered", [False, True])
-def test_recover_scheduled_correction_once(
-    h: Harness, delivered: bool, legacy: bool
-) -> None:
+def test_recover_scheduled_correction_once(h: Harness, delivered: bool) -> None:
     h.create()
     flow, writer = started_writer(h)
     path = h.tmp / "send.md"
@@ -1921,14 +1918,13 @@ def test_recover_scheduled_correction_once(
         task_base=writer.base,
         head=writer.expected_head,
         fix_base=writer.expected_head,
-        turn_pending=2,
+        turn_target=2,
+        turn_pending=True,
         turn_file=str(path),
         turn_kind="send",
         answer=1,
         wave=1,
     )
-    if legacy:
-        flow["tasks"][0].update(turn_pending=True, turn_target=2)
     record.save(flow, h.env)
     item = h.run()["tasks"][0]
     assert item["status"] == "merged"

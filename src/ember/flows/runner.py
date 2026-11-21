@@ -255,7 +255,7 @@ class _Runner:
         self.env = {key: value for key, value in env.items() if key not in _GIT_ENV}
         self.id = flow_id
         self.folder = record.folder(flow_id, self.env)
-        self.flow = self._load_flow()
+        self.flow = record.load(flow_id, self.env)
         self.plan = plan.from_json(
             json.loads((self.folder / record.PLAN_NAME).read_text(encoding="utf-8")),
             Path(self.flow["plan"]),
@@ -274,17 +274,6 @@ class _Runner:
         """Tasks whose review started during the running wave."""
         self.retry: set[tuple[str, str]] = set()
         """`(task, role)` pairs whose start is repeated on a fallback worker."""
-
-    def _load_flow(self) -> dict[str, Any]:
-        """Load the flow and translate pending sends from older records."""
-        flow = record.load(self.id, self.env)
-        # Older records stored the pending correction's turn in a separate field.
-        for task in flow["tasks"]:
-            target = task.pop("turn_target", None)
-            if task.get("turn_pending") is True and target is not None:
-                task["turn_pending"] = target
-            task.pop("tmp_cleanup_turn", None)
-        return flow
 
     def _save(self) -> None:
         """Save while the caller holds the record mutex."""
@@ -930,7 +919,8 @@ class _Runner:
             fix_base=self.tip(task["branch"]),
             explicit_review=False,
             round=0 if fresh else task["round"] + 1,
-            turn_pending=run.turn + 1,
+            turn_pending=True,
+            turn_target=run.turn + 1,
             turn_file=path,
             turn_kind="send" if fresh else "fix",
             recover_review=False,
@@ -1212,7 +1202,7 @@ class _Runner:
             )
             return False
         pending = task.get("turn_pending", False)
-        if pending and run.turn < pending:
+        if pending and run.turn < task["turn_target"]:
             if not self.allowed(task):
                 return False
             self.change(task, fix_base=self.tip(task["branch"]))
@@ -2125,7 +2115,7 @@ class _Runner:
                     begun = True
                     with contextlib.ExitStack() as startup:
                         startup.enter_context(_lifecycle_guard(self.folder))
-                        self.flow = self._load_flow()
+                        self.flow = record.load(self.id, self.env)
                         if record.cancel_request(self.id, self.env) is not None:
                             closing.enter_context(startup.pop_all())
                             self.finish("cancelled")
