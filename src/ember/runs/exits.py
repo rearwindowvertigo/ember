@@ -80,6 +80,13 @@ LINES: dict[int, str | Mapping[str, str]] = {
     },
     PROVIDER_ERROR: {
         "*": "next: " + SEND + " (after the provider's outage clears)",
+        "starting": "next: emb run --close {run}, then "
+        + START
+        + " (after the provider's outage clears)",
+        "ended": "next: emb run --close {run}, then "
+        + START
+        + " (a new run after the provider's outage clears; "
+        "the engine of this run ended)",
         "capacity": "next: " + SEND + " (after provider capacity is available)",
         "usage_limit": "next: " + SEND + " (after the provider usage_limit resets)",
         "uncertain": "next: inspect the session of {run}; retry delivery is uncertain; "
@@ -211,6 +218,12 @@ def report(code: int, variant: str | None = None, **context: object) -> str | No
             "usage_limit": "usage_limit; a retry on the same worker needs no "
             "question; another worker or model needs the owner's answer; "
             "OpenCode may be offered",
+            **dict.fromkeys(
+                ("starting", "ended"),
+                "outage; the engine ended; offer only a new run with the same "
+                "model and effort once it clears; offer no other model, engine, "
+                "Claude subagent or Claude's own work",
+            ),
         }.get(variant or "outage")
     elif (
         code == INTERRUPTED

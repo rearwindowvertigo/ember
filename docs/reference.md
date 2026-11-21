@@ -915,6 +915,21 @@ The subject is the brief's first non-empty line, cut to 72 characters, with
 ` (turn <n>)` after turn 1, followed by the trailer lines. A turn with no
 changes makes no commit.
 
+When the engine's process ends during a turn or before it takes its brief,
+Ember reads the dead pane and adds what the engine printed last to the
+reason: `the engine of <run> exited before the turn ended: <words>`. The
+words are the pane's last line above tmux's `Pane is dead` notice, cut to
+300 characters, and none when a fresh capture of the pane holds no such
+notice. For Codex they are its `Error:` line in the first column, and none
+when the last line is not one. The driver classifies the words. A Codex
+error is a provider `outage` when it names a failed request to the account
+service (`account/... failed`), `request timed out`,
+`failed to lookup address information`, `connection reset by peer`,
+`error sending request` or `failed to connect to Responses`, and does not
+match a sign-in failure. The turn or the start then ends at exit 73. Any
+other end is exit 71. A turn whose engine reported a `capacity` or
+`usage_limit` error before its pane died keeps that kind's lines.
+
 A turn that fails (69, 71, 73), including an engine that exits during the
 turn, or that ends with no reply (80) is committed the same way when the
 worker changed files, with the subject
@@ -1323,7 +1338,7 @@ evidence that no provider error occurred.
 | 70 | Worktree creation failed, or no main checkout or commit | `next: git -C <dir> worktree prune, then ...` |
 | 71 | Engine or session failed, or OpenCode 2 message delivery is uncertain | `next: emb run --status <run>`, including an uncertain follow-up whose new turn stays `sent`; for other failed sends, `next: emb run --send <run> ...` |
 | 72 | Session or window unavailable, or the run was closed | `next: emb run --status <run>`, or a new start |
-| 73 | Capacity retries exhausted or disabled, usage limit or outage | `next: emb run --send <run> ...` naming the kind; uncertain resend delivery asks the lead to inspect the session before sending again |
+| 73 | Capacity retries exhausted or disabled, usage limit or outage, including an engine that ended because it could not reach its provider | `next: emb run --send <run> ...` naming the kind; uncertain resend delivery asks the lead to inspect the session before sending again; for an engine that ended, `next: emb run --close <run>, then` a new start |
 | 74 | Interrupted | `next: emb run --recover <run>`; a cancelled capacity resend collects the saved turn; uncertain delivery asks the lead to inspect the session before sending again; an interrupted send uses `next: emb run --send <run> ...` |
 | 75 | Close refused while a turn runs or is collected but not committed, a busy session, another command on the run, or a session holding messages Ember did not send | `next: emb run --recover <run>` or `--status`; for messages Ember did not send, `next: ask the owner ...` |
 | 76 | Branch or `HEAD` moved; nothing committed | `next: git -C <worktree> log --oneline -3` |
@@ -1349,6 +1364,7 @@ have no report line. Report lines are not translated or configurable.
 | 73, `capacity` | `report: capacity; retries exhausted; offer only a retry with the same model and effort once capacity returns; offer no other model, engine, Claude subagent or Claude's own work` |
 | 73, `outage` | `report: outage; offer only a retry with the same model and effort once it clears; offer no other model, engine, Claude subagent or Claude's own work` |
 | 73, `usage_limit` | `report: usage_limit; a retry on the same worker needs no question; another worker or model needs the owner's answer; OpenCode may be offered` |
+| 73, an engine that ended | `report: outage; the engine ended; offer only a new run with the same model and effort once it clears; offer no other model, engine, Claude subagent or Claude's own work` |
 | 73 or 74, `uncertain` | `report: retry delivery is uncertain; do not send again before inspecting the session; then offer only a retry with the same model and effort; offer no other model, engine, Claude subagent or Claude's own work` |
 | 74, default, `retry` or `complete`, editing run | `report: interrupted; partial edits may be committed on <branch>` |
 | 76 | `report: branch or HEAD moved; nothing committed; recover only when the branch and HEAD are as recorded, otherwise leave the work to the owner` |
@@ -2003,7 +2019,8 @@ emb flow --plan FILE --dry-run [--previous FILE] [--writer W] [--reviewer W] [--
 emb flow --plan FILE --start [--check-base] [--writer W] [--reviewer W] [--claim ID] [--stall MINUTES]
 emb flow --watch FLOW [--json]
 emb flow --status [FLOW] [--json]
-emb flow --lead FLOW TASK (--send FILE | --accept [--commit SHA] | --review [--reviewer W] | --worker W | --drop)
+emb flow --lead FLOW TASK (--send FILE | --accept [--commit SHA] | --review [--reviewer W] | --worker W | --drop | --withdraw)
+emb flow --lead FLOW --reviewer W
 emb flow --resume FLOW [--check '<JSON argv list>' --reason TEXT]
 emb flow --cancel FLOW [--reason TEXT] [--json]
 ```
@@ -2020,14 +2037,16 @@ emb flow --cancel FLOW [--reason TEXT] [--json]
 | `--stall MINUTES` | With `--start`: minutes without screen changes before a task stops waiting; default 10 |
 | `--watch FLOW` | Wait for a lead stop or terminal outcome, using the shared watch cursor |
 | `--status [FLOW]` | Read one full record, or summaries of every flow, oldest first |
-| `--lead FLOW TASK` | Queue exactly one answer for a task |
+| `--lead FLOW TASK` | Queue exactly one answer for a task; it replaces the task's unapplied answer |
+| `--lead FLOW` | With `--reviewer W` and no answer: queue a change of the flow's saved reviewer |
 | `--send FILE` | Copy a nonblank UTF-8 correction for the existing writer |
 | `--accept` | Accept the current task branch tip without another review |
 | `--commit SHA` | With `--accept`: use this commit instead; resolve it to a full commit hash before queueing |
 | `--review` | Collect a running writer turn and request fresh reviews with a new fix budget |
-| `--reviewer W` | Also accepted with `--lead ... --review`; change this task's reviewer |
+| `--reviewer W` | Also accepted with `--lead ... --review`; change this task's reviewer. With `--lead FLOW` and no task, change the flow's saved reviewer for reviews that start later |
 | `--worker W` | Replace this task's writer and run its pipeline from the flow tip |
 | `--drop` | Drop the task; its dependants remain blocked |
+| `--withdraw` | Remove the task's unapplied answer |
 | `--resume FLOW` | Start another runner attempt for an idle, unfinished flow |
 | `--check JSON` | With `--resume`: replace the check of a failed flow with a pending check |
 | `--reason TEXT` | Required nonblank reason with `--resume --check`; also accepted with `--cancel` |
@@ -2037,7 +2056,8 @@ emb flow --cancel FLOW [--reason TEXT] [--json]
 Exactly one mode is required. `--plan`, `--writer` and `--claim` are
 accepted only with `--dry-run` or `--start`. Answer options require
 `--lead`, which accepts exactly one of `--send`, `--accept`, `--review`,
-`--worker` and `--drop`. `--previous` without `--dry-run` exits 64 with
+`--worker`, `--drop` and `--withdraw` with a flow and a task, or
+`--reviewer` alone with a flow and no task. `--previous` without `--dry-run` exits 64 with
 `next: emb flow --help`. Other combinations exit 64 before reading files.
 
 Validation reads the plan, checks its read files for empty text, then
@@ -2257,7 +2277,15 @@ stored model and effort, the plan's read paths, and no claim.
 
 Between waves the runner takes queued answers, recomputes dependency
 blocking, merges accepted tasks in plan order and runs the check when a
-merge is pending. It then selects the next wave of pending tasks with
+merge is pending. During a wave it reads the answer queue at every poll.
+It then applies a `reviewer` answer at once, and a `review` answer when a
+job slot is free, new runs are not halted, the task has no running job and
+its declared files overlap no running task's files; that review starts in
+the running wave. Every other answer waits for the end of the wave. A fix
+that such a review decides is a writer turn and waits for the next wave:
+the task becomes `pending` with the fix decision saved.
+
+The runner then selects the next wave of pending tasks with
 merged dependencies or an operation scheduled by a lead answer. File
 declarations select disjoint tasks in plan order. At most `parallel` jobs
 run at once; each job has its own Core and output streams. Every task
@@ -2542,6 +2570,20 @@ to the owner with its findings and every available choice.
 | `pending`, `blocked` | `drop` |
 | Other | None |
 
+An answer is unapplied until the runner takes it. A new answer for a task
+replaces that task's unapplied answer, and the command prints
+`(replaces answer <n>)`, with every replaced number. `--withdraw` queues a
+`withdraw` line that removes the task's unapplied answer; it exits 75 with
+`task <task> has no queued answer` when there is none. The command checks
+an answer against the task's saved status; the runner checks it again when
+it takes it and refuses it with a lead stop when the status has changed.
+
+`--lead FLOW --reviewer W` queues a `reviewer` line with no task. The
+runner sets the flow's saved reviewer when it takes the line; reviews that
+start later use it, and a task's own reviewer stays. A later `reviewer`
+line replaces an unapplied one. The command starts no runner for a
+`reviewer` or `withdraw` line.
+
 `--send` copies the correction to `answers/<n>.md` under the same lock
 that allocates its number and appends its answer. Intentional commands in
 the correction remain as written. The writer receives it, then gets a
@@ -2579,12 +2621,19 @@ branch. A pending task that has not started is dropped without starting a
 writer. Dropped tasks leave their dependants blocked. Retained branches
 are listed in the flow's `abandoned` field.
 
-Answers are queued, then taken between waves. The runner checks each
-answer again against the task's current state. A refused answer produces
-a lead stop naming its number and reason. An answer refused at queue time
-exits 75 and lists the allowed answers. Unknown flows or tasks exit 64;
-completed flows refuse answers with 75. With no live runner or pending
-startup, `--lead` starts a runner after queueing the answer. A launch
+Answers are queued, then taken between waves, except for the `reviewer`
+and `review` answers the runner takes during a wave. The command and the
+runner hold the flow's `answers.lock` while one reads the queue and
+appends and the other checks that an answer is still in effect and saves
+its marker, so an answer reported as replaced or withdrawn is not applied
+afterwards. The runner checks each answer again against the task's current
+state. A refused answer produces a lead stop naming its number and reason.
+An answer refused at queue time exits 75 and lists the allowed answers.
+Unknown flows or tasks exit 64; completed flows refuse answers with 75.
+With no live runner or pending startup, `--lead` starts a runner after
+queueing a task answer other than `--withdraw`; for a `withdraw` or
+`reviewer` line it prints
+`no runner is live; the next runner takes this line`. A launch
 failure leaves the queued answer available for `--resume`.
 
 ### Cancellation
@@ -2697,7 +2746,8 @@ refused. `save` updates `updated_at` and atomically replaces `flow.json`.
 | `check_pending` | Whether a base or wave check is owed; set at wave 0 by `--check-base` and after merges; cleared after saving a passing check |
 | `check_base` | Whether start requested the base check; defaults to false when absent; only `check_pending` controls whether a check runs |
 | `checks` | Entries with `wave`, `exit`, `log`, `at`; one per attempt; wave 0 is the base |
-| `answers_seen` | Complete answer lines already consumed; initially 0 |
+| `answers_seen` | Complete answer lines already consumed in order; initially 0 |
+| `answers_taken` | Indexes of answer lines at or after `answers_seen` that the runner applied during a wave; absent in a record written before 0.27.0 |
 | `halted` | Reason new runs are halted, or null |
 | `abandoned` | Retained branches from dropped or replaced writers |
 | `runner` | Last runner's `pid`, `started_at`, process start ticks (`start`) and `exiting` flag, or null; older records may omit the latter two fields |
@@ -2740,13 +2790,15 @@ Events have `seq` starting at 1, `at` in epoch seconds, and `kind`:
 | `denied_paths` | `task`, `role`, `denied_paths`; each new denial includes `path`, `reason`, `allow_path`, `run` and `turn` |
 | `check` | `wave`, `exit`, `log`, `output` |
 | `check_replaced` | `at`, `old`, `new`, `reason`, matching the saved `check_changes` entry |
+| `reviewer` | `answer`, `worker`: the flow's saved reviewer changed |
 | `end` | `status`, `reason`, `exit` |
 
 Creation writes event 1 with kind `flow` and status `starting`. Event reads
 can start after a sequence number and skip unreadable complete lines.
 
 An answer has `n`, `at`, `task`, `kind`, `file`, `commit`, `worker`. Kinds are
-`send`, `accept`, `review`, `worker`, `drop`; optional values are null.
+`send`, `accept`, `review`, `worker`, `drop`, `withdraw` and `reviewer`;
+optional values are null. A `reviewer` answer has a null `task`.
 `worker` uses the worker option syntax. The answer append function takes
 `flock` on `answers.jsonl`, allocates the number, copies a send source file
 to `answers/<n>.md`, and appends the object with that path, all under the
@@ -2853,8 +2905,11 @@ worktree <path>
 
 The resolved worker lines and any same-model line follow on standard
 error. Its action line is `next: emb flow --watch <id> --json`. `--resume` prints
-`flow <id>`. `--lead` prints `queued answer <n>: <kind> for <task>`, then
-`flow <id>` when it starts a runner. Both end with the same watch action.
+`flow <id>`. `--lead` prints `queued answer <n>: <kind> for <task>`, with
+` (replaces answer <m>)` or ` (withdraws answer <m>)` when an unapplied
+answer is replaced or withdrawn, then `flow <id>` when it starts a runner.
+A reviewer change prints
+`queued answer <n>: reviewer <worker> for the flow's later reviews`. Both end with the same watch action.
 
 `--watch` polls files once a second. It returns on an unread lead stop or
 the current attempt's terminal outcome. A missing runner in a nonterminal
@@ -2967,6 +3022,10 @@ when present, and omits it otherwise. Each task has
 latest review's counts separately and each finding with its round and run.
 Each task's non-empty `outside_files` prints directly under its task line,
 one indented `outside file: <path>` line per path; an empty list prints nothing.
+`queued_answers` lists the unapplied answers in effect, oldest first, each
+with `n`, `task`, `kind`, `worker` and `replaces` (the numbers of the
+answers it replaces). Text status prints one
+`queued answer <n>: <kind>[ for <task>][ <worker>]` line for each.
 Each task has `provider_wait`: null, or the `run`, `kind`, `message` and
 `since` of the provider wait saved for the open turn of its running writer
 or reviewer run. A task with a wait and no stored reason shows

@@ -828,3 +828,83 @@ def test_invalid_check_changes(
     flow["check_changes"] = bad
     with pytest.raises(record.FlowError, match="check"):
         record.save(flow, env)
+
+
+def _line(number: int, task: str | None, kind: str) -> dict[str, Any]:
+    return {"n": number, "task": task, "kind": kind}
+
+
+def test_answer_queue_keeps_the_last_unapplied_answer_of_each_task() -> None:
+    lines: list[dict[str, Any] | None] = [
+        _line(1, "a", "review"),
+        _line(2, "b", "drop"),
+        None,
+        _line(4, "a", "send"),
+        _line(5, None, "reviewer"),
+        _line(6, "c", "review"),
+        _line(7, "c", "withdraw"),
+        _line(8, None, "reviewer"),
+        _line(9, "a", "drop"),
+    ]
+    flow = {"answers_seen": 0}
+    assert record.answer_queue(flow, lines) == [
+        (1, lines[1], []),
+        (7, lines[7], [5]),
+        (8, lines[8], [1, 4]),
+    ]
+    assert record.answer_queue({"answers_seen": 4}, lines) == [
+        (7, lines[7], [5]),
+        (8, lines[8], []),
+    ]
+    assert record.answer_queue({"answers_seen": 9}, lines) == []
+
+
+def test_answer_queue_leaves_out_answers_taken_ahead_of_the_cursor() -> None:
+    lines: list[dict[str, Any] | None] = [
+        _line(1, "a", "send"),
+        _line(2, "a", "review"),
+        _line(3, "b", "review"),
+        _line(4, "a", "drop"),
+    ]
+    assert record.answer_queue({"answers_seen": 0, "answers_taken": [1, 2]}, lines) == [
+        (3, lines[3], [])
+    ]
+    assert record.answer_queue({"answers_seen": 0, "answers_taken": [3]}, lines) == [
+        (2, lines[2], [])
+    ]
+
+
+def test_withdraw_and_reviewer_answers_are_appended(
+    flow: dict[str, Any], created: Path, env: dict[str, str]
+) -> None:
+    first = record.append_answer(flow["id"], {"kind": "withdraw", "task": "a"}, env)
+    second = record.append_answer(
+        flow["id"], {"kind": "reviewer", "worker": "codex:m@low"}, env
+    )
+    assert (first["n"], first["task"], first["kind"]) == (1, "a", "withdraw")
+    assert (second["n"], second["task"], second["kind"]) == (2, None, "reviewer")
+    for answer in (
+        {"kind": "withdraw"},
+        {"kind": "reviewer"},
+        {"kind": "reviewer", "task": "a", "worker": "codex:m"},
+        {"kind": "other", "task": "a"},
+    ):
+        with pytest.raises(record.FlowError):
+            record.append_answer(flow["id"], answer, env)
+    assert len(record.read_answers(flow["id"], env)) == 2
+
+
+@pytest.mark.parametrize("taken", [None, "0", [1, "2"], [True]])
+def test_invalid_answers_taken(
+    flow: dict[str, Any], created: Path, env: dict[str, str], taken: object
+) -> None:
+    saved = record.load(flow["id"], env)
+    assert "answers_taken" not in saved
+    record.save({**saved, "answers_taken": [0, 2]}, env)
+    assert record.load(flow["id"], env)["answers_taken"] == [0, 2]
+    path = created / record.FLOW_NAME
+    path.write_text(
+        json.dumps({**json.loads(path.read_text()), "answers_taken": taken})
+    )
+    with pytest.raises(record.FlowError, match="invalid answers_taken"):
+        record.load(flow["id"], env)

@@ -110,6 +110,21 @@ output is indented and does not match."""
 _WAIT_COUNT = re.compile(r"\s+\d+/\d+$")
 """The retry count at the end of the status line's text."""
 
+_EXIT_ERROR = re.compile(r"^Error: \S")
+"""The line Codex prints when it ends with an error."""
+
+_EXIT_OUTAGE = re.compile(
+    r"\baccount/[\w/]+ failed|request timed out"
+    r"|failed to lookup address information|connection reset by peer"
+    r"|error sending request|failed to connect to responses",
+    re.IGNORECASE,
+)
+"""Texts of Codex's exit error when it could not reach its provider: a
+failed request to the account service, a timed-out request, a failed name
+lookup, a reset connection, a request that could not be sent, or a failed
+connection to the Responses endpoint. A timeout or a failed connection with
+other wording, such as one to a local server, is not among them."""
+
 _SIGNED_OUT = re.compile(
     r"\b401\b|unauthori[sz]ed|(?:log|sign)\s?(?:in|out) again"
     r"|not (?:logged|signed) in|access token could not be refreshed",
@@ -1175,6 +1190,43 @@ class CodexDriver(Driver):
             run: The run.
         """
         tmux.send_keys(run.id, "Escape", env=run.env)
+
+    def exit_words(self, screen: str) -> str | None:
+        """Return Codex's `Error:` line when it is the pane's last line.
+
+        Args:
+            screen: The dead pane's text.
+
+        Returns:
+            The line, or `None`: without it the pane's last line is text of
+            the session, not a word about the exit.
+        """
+        line = tmux.last_line(screen)
+        # Codex prints its error in the first column; an indented line is
+        # text of the session.
+        if line is None or _EXIT_ERROR.match(line) is None:
+            return None
+        return line[: tmux.LAST_WORDS_LIMIT]
+
+    def exit_outcome(self, words: str) -> TurnOutcome | None:
+        """Classify Codex's exit error.
+
+        Args:
+            words: Codex's `Error:` line.
+
+        Returns:
+            An `outage` when the error says a request timed out or a
+            connection or name lookup failed; otherwise `None`.
+        """
+        if (
+            _EXIT_ERROR.match(words) is None
+            or _EXIT_OUTAGE.search(words) is None
+            or _SIGNED_OUT.search(words) is not None
+        ):
+            return None
+        return TurnOutcome(
+            FAILED, reason=words, provider_error=True, provider_kind="outage"
+        )
 
     def provider_wait(self, screen: str) -> ProviderWait | None:
         """Read Codex's retry status line.

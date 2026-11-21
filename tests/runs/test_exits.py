@@ -177,3 +177,19 @@ def test_start_failure_reports_before_a_recorded_turn_was_launched() -> None:
     assert exits.report(69, "runtime", turn=1, last_start_failure=True) == exits.report(
         69
     )
+
+
+@pytest.mark.parametrize("variant", ["starting", "ended"])
+def test_an_outage_that_ended_the_engine_points_to_a_new_run(variant: str) -> None:
+    line = exits.line(73, variant, run="codex-1")
+    assert line is not None
+    assert line.startswith(
+        "next: emb run --close codex-1, then emb run --engine <engine> "
+        "--dir <git checkout> --task-file <file> ("
+    )
+    assert "outage clears" in line
+    assert exits.report(73, variant, run="codex-1") == (
+        "report: outage; the engine ended; offer only a new run with the same "
+        "model and effort once it clears; offer no other model, engine, "
+        "Claude subagent or Claude's own work"
+    )

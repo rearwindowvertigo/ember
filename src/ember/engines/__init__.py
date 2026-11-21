@@ -320,6 +320,34 @@ class Driver(ABC):
         """
         return screen
 
+    def exit_words(self, screen: str) -> str | None:
+        """Return what the engine printed last before its process ended.
+
+        The core adds the text to the reason of a turn or a start whose
+        engine ended. The default is the pane's last line.
+
+        Args:
+            screen: The text of the dead session's pane.
+
+        Returns:
+            The engine's last words, or `None` when the pane holds none.
+        """
+        return tmux.last_words(screen)
+
+    def exit_outcome(self, words: str) -> TurnOutcome | None:
+        """Classify the last words of an engine whose process ended.
+
+        Args:
+            words: The text `exit_words` returned.
+
+        Returns:
+            A `failed` outcome with `provider_error` and a `provider_kind`
+            when the words name a failure to reach the provider; `None`
+            for any other end, which the core reports as an engine failure.
+            The default is `None`.
+        """
+        return None
+
     def close(self, run: Run) -> None:  # noqa: B027
         """Clean up the engine's own state before the core kills the session.
 

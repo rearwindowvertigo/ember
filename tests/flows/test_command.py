@@ -3030,3 +3030,110 @@ def test_status_names_a_task_whose_run_waits_for_the_provider(
     loaded.status = "failed"
     gone = json.loads(invoke(env, "--status", flow["id"], "--json")[1])["tasks"][0]
     assert gone["provider_wait"] is None
+
+
+def test_a_new_lead_answer_names_the_answer_it_replaces(
+    tmp_path: Path, env: dict[str, str], flow: dict[str, Any]
+) -> None:
+    stopped(flow, env)
+    with lock.hold(flow["id"], env):
+        code, out, err = invoke(env, "--lead", flow["id"], "a", "--review")
+        assert code == 0 and out.strip() == "queued answer 1: review for a", err
+        code, out, err = invoke(env, "--lead", flow["id"], "a", "--drop")
+        assert code == 0, err
+        assert out.strip() == "queued answer 2: drop for a (replaces answer 1)"
+        code, out, err = invoke(
+            env, "--lead", flow["id"], "a", "--review", "--reviewer", "codex:m@low"
+        )
+        assert code == 0, err
+        assert out.strip() == "queued answer 3: review for a (replaces answers 1, 2)"
+        code, out, _ = invoke(env, "--status", flow["id"], "--json")
+        assert json.loads(out)["queued_answers"] == [
+            {
+                "n": 3,
+                "task": "a",
+                "kind": "review",
+                "worker": "codex:m@low",
+                "replaces": [1, 2],
+            }
+        ]
+        code, out, _ = invoke(env, "--status", flow["id"])
+        assert "queued answer 3: review for a codex:m@low" in out.splitlines()
+    assert not tmux_log(tmp_path)
+
+
+def test_withdraw_removes_a_queued_answer(
+    tmp_path: Path, env: dict[str, str], flow: dict[str, Any]
+) -> None:
+    stopped(flow, env)
+    with lock.hold(flow["id"], env):
+        code, out, err = invoke(env, "--lead", flow["id"], "a", "--withdraw")
+        assert code == 75 and not out
+        assert err.splitlines() == [
+            "emb flow: task a has no queued answer",
+            f"next: emb flow --status {flow['id']}",
+        ]
+        assert not record.read_answers(flow["id"], env)
+        assert invoke(env, "--lead", flow["id"], "a", "--drop")[0] == 0
+        code, out, err = invoke(env, "--lead", flow["id"], "a", "--withdraw")
+        assert code == 0, err
+        assert out.strip() == "queued answer 2: withdraw for a (withdraws answer 1)"
+        assert (
+            json.loads(invoke(env, "--status", flow["id"], "--json")[1])[
+                "queued_answers"
+            ]
+            == []
+        )
+        assert invoke(env, "--lead", flow["id"], "a", "--withdraw")[0] == 75
+    assert not tmux_log(tmp_path)
+    assert record.load(flow["id"], env)["tasks"][0]["status"] == "stopped"
+
+
+def test_lead_without_a_task_queues_a_reviewer_change(
+    tmp_path: Path, env: dict[str, str], flow: dict[str, Any]
+) -> None:
+    stopped(flow, env)
+    code, out, err = invoke(env, "--lead", flow["id"], "--reviewer", "codex:m@low")
+    assert code == 0, err
+    assert out.splitlines() == [
+        "queued answer 1: reviewer codex:m@low for the flow's later reviews",
+        "no runner is live; the next runner takes this line",
+    ]
+    answer = record.read_answers(flow["id"], env)[0]
+    assert answer is not None
+    assert (answer["task"], answer["kind"]) == (None, "reviewer")
+    assert answer["worker"] == "codex:m@low"
+    assert not tmux_log(tmp_path)
+    code, out, err = invoke(env, "--lead", flow["id"], "--reviewer", "codex:n@low")
+    assert code == 0, err
+    assert out.splitlines()[0].endswith("(replaces answer 1)")
+    queued = json.loads(invoke(env, "--status", flow["id"], "--json")[1])[
+        "queued_answers"
+    ]
+    assert [(item["n"], item["task"], item["worker"]) for item in queued] == [
+        (2, None, "codex:n@low")
+    ]
+    code, out, _ = invoke(env, "--status", flow["id"])
+    assert "queued answer 2: reviewer codex:n@low" in out.splitlines()
+
+
+@pytest.mark.parametrize(
+    ("options", "problem"),
+    [
+        (["x", "a", "b", "--drop"], "--lead takes a flow and at most one task"),
+        (["x"], "--lead without a task needs --reviewer and no answer"),
+        (["x", "--drop"], "--lead without a task needs --reviewer and no answer"),
+        (
+            ["x", "--reviewer", "codex:m", "--withdraw"],
+            "--lead without a task needs --reviewer and no answer",
+        ),
+        (["x", "a", "--drop", "--withdraw"], "--lead needs exactly one of"),
+        (["x", "a", "--withdraw", "--reviewer", "codex:m"], "--reviewer needs"),
+    ],
+)
+def test_lead_usage_with_the_queue_options(
+    env: dict[str, str], options: list[str], problem: str
+) -> None:
+    code, out, err = invoke(env, "--lead", *options)
+    assert code == 64 and not out
+    assert problem in err
