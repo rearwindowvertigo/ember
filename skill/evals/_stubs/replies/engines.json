@@ -20,7 +20,8 @@
         "fix": null
       }
     ],
-    "checked_at": 1793520000.0
+    "checked_at": 1793520000.0,
+    "holds": []
   },
   "opencode": {
     "engine": "opencode",
@@ -43,7 +44,8 @@
         "fix": null
       }
     ],
-    "checked_at": 1793520000.0
+    "checked_at": 1793520000.0,
+    "holds": []
   },
   "claude": {
     "engine": "claude",
@@ -66,6 +68,7 @@
         "fix": null
       }
     ],
-    "checked_at": 1793520000.0
+    "checked_at": 1793520000.0,
+    "holds": []
   }
 }

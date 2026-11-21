@@ -29,7 +29,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, TextIO
@@ -1667,6 +1667,18 @@ def _check_flow_base(
     )
 
 
+def _continued_runs(repo: Repository, branch: str) -> list[Run]:
+    """Return the earlier runs whose branches an Ember run branch continues."""
+    match = WORKER_BRANCH.fullmatch(branch)
+    if match is None or FLOW_BRANCH.fullmatch(branch):
+        return []
+    try:
+        run = record.load(match["run"], repo.env)
+    except record.RecordError, OSError:
+        return []
+    return record.linked(run, "continues")
+
+
 def _squash_message(
     repo: Repository,
     head: str,
@@ -1674,8 +1686,14 @@ def _squash_message(
     subject: str,
     note: str | None,
     worktree: Path,
+    earlier: Sequence[str] = (),
 ) -> tuple[str, bool]:
-    """Collect Git trailers and report breaking signals in the worker history."""
+    """Collect Git trailers and report breaking signals in the worker history.
+
+    `earlier` holds the tips of the runs whose branches the merged branch
+    continues. Each gets its own task-tip trailer, so those branches count
+    as landed too.
+    """
     separators = _trailer_separators(worktree, repo.env)
     separator = separators[0] if separators else ":"
     base = repo.git("merge-base", head, tip, cwd=worktree)
@@ -1729,6 +1747,11 @@ def _squash_message(
             trailers.append(f"{key}{separator} {value}")
     if note is not None:
         trailers.append(f"{VERDICT_TRAILER}: {note}")
+    trailers.extend(
+        f"{TASK_TIP_TRAILER}: {commit}"
+        for commit in dict.fromkeys(earlier)
+        if commit != tip
+    )
     trailers.append(f"{TASK_TIP_TRAILER}: {tip}")
     return subject + "\n\n" + "\n".join(trailers) + "\n", breaking
 
@@ -1828,7 +1851,15 @@ def _squash(
             f"git merge-tree failed: {_git_message(tree)}",
             f"next: git -C {worktree} status",
         )
-    message, breaking = _squash_message(repo, head, tip, subject, note, worktree)
+    earlier = [
+        commit
+        for run in _continued_runs(repo, branch)
+        if (commit := record.work_tip(run)) is not None
+        and repo.git("merge-base", "--is-ancestor", commit, tip).returncode == 0
+    ]
+    message, breaking = _squash_message(
+        repo, head, tip, subject, note, worktree, earlier
+    )
     made = _commit_tree(
         repo, worktree, tree.stdout.split("\0", 1)[0], (head,), message, "squash"
     )
@@ -2177,8 +2208,14 @@ def merge(
         err=err,
     )
     failure: GitFailedError | None = None
+    # The branches this branch continues landed with it.
+    continued = [
+        run.branch
+        for run in _continued_runs(repo, branch)
+        if run.branch and repo.branch_exists(run.branch)
+    ]
     try:
-        job.run([branch])
+        job.run([branch, *dict.fromkeys(continued)])
     except GitFailedError as error:
         failure = error
     next_line, owner_wait = _merged_run_lines(job, branch)

@@ -17,7 +17,7 @@ from PySide6.QtGui import QFontMetricsF, QImage
 from PySide6.QtWidgets import QApplication, QLabel, QScrollArea, QWidget
 from pytestqt.qtbot import QtBot
 
-from ember import choices, sandbox
+from ember import choices, holds, sandbox
 from ember.app import theme
 from ember.app.context import AppContext
 from ember.app.screens.common import inline, when
@@ -667,6 +667,46 @@ def test_cards_show_badges_and_versions(
     assert claude.version_label.text() == "claude 1.0.0"
     assert screen.subtitle.text().startswith("Checked today ")
     assert claude.logo.pixmap() is not None
+
+
+def test_cards_refresh_and_release_only_the_selected_hold(
+    env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
+) -> None:
+    screen, context = _screen(env, qtbot)
+    _shown(screen, context, qtbot)
+    assert all(card.holds_widget.isHidden() for card in screen.cards.values())
+
+    now = time.time()
+    until = time.strftime("%H:%M", time.localtime(now + 900))
+    holds.start("codex", "gpt-5", "capacity", 15, env=env, now=now)
+    holds.start("codex", "other", "outage", 15, env=env, now=now)
+    holds.start("claude", "opus", "usage_limit", 15, env=env, now=now)
+    _shown(screen, context, qtbot)
+    codex, claude = screen.cards["codex"], screen.cards["claude"]
+    qtbot.waitUntil(lambda: len(codex.retry_buttons) == 2)
+    assert not codex.holds_widget.isHidden()
+    assert screen.cards["opencode"].holds_widget.isHidden()
+    assert [line.text() for line in codex.holds_widget.findChildren(QLabel)] == [
+        f"gpt-5: held after capacity until {until}",
+        f"Held after outage until {until}",
+    ]
+    assert [line.text() for line in claude.holds_widget.findChildren(QLabel)] == [
+        f"Held after usage_limit until {until}",
+    ]
+    retry = codex.retry_buttons[0]
+    assert retry.text() == "Try again now"
+    assert retry.accessibleName() == "Try again now: codex gpt-5"
+    retry.click()
+    qtbot.waitUntil(lambda: len(codex.retry_buttons) == 1)
+    assert [(h.engine, h.model) for h in holds.active(env)] == [
+        ("codex", None),
+        ("claude", None),
+    ]
+    assert codex.retry_buttons[0].accessibleName() == "Try again now: codex"
+    codex.retry_buttons[0].click()
+    qtbot.waitUntil(codex.holds_widget.isHidden)
+    assert [(h.engine, h.model) for h in holds.active(env)] == [("claude", None)]
+    assert len(claude.retry_buttons) == 1
 
 
 def test_engine_off_shows_off(

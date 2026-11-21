@@ -1646,6 +1646,12 @@ def _status(
                 print(_task_line(task), file=out)
                 for path in task["outside_files"]:
                     print(f"  outside file: {path}", file=out)
+                for item in task.get("fallbacks", []):
+                    print(
+                        f"  fallback: {item['role']} {item['from']} -> "
+                        f"{item['to']} ({item['cause']}) run {item['run']}",
+                        file=out,
+                    )
                 print(f"  latest review: {json.dumps(task['latest_review'])}", file=out)
                 for finding in task["findings"]:
                     print(f"  finding: {json.dumps(finding)}", file=out)

@@ -269,6 +269,20 @@ exit 73 without retrying. Codex recognizes capacity and usage-limit
 messages; Claude and both OpenCode drivers classify provider errors as
 `outage`. Unmatched provider errors are `outage`.
 
+The owner can set a fallback list on the Team screen. When an entry
+applies, exit 73 prints `report: fallback; ...` and the `next:` line holds
+the close of the failed run and the start of the fallback worker. Run that
+line as printed, without a worker question, and tell the owner which model
+failed, with which error, and which model runs now. The line follows the
+owner's list as it is when printed: `emb run --status <run>` prints the
+current one. A failed worker is
+then held for the time the owner set, and a start on a held worker prints
+`WARNING: <worker> is held after <kind> until <time>; starting <engine>
+<model> from the fallback list`. Quote that line to the owner. Never set
+or change the list or the hold time, and never release a hold: both are
+the owner's, on the Team and Engines screens. Without a `report: fallback`
+line, the rules below hold.
+
 Never switch workers silently. Only a Codex `usage_limit` permits offering
 OpenCode in the next worker question.
 

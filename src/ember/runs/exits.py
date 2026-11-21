@@ -83,6 +83,7 @@ LINES: dict[int, str | Mapping[str, str]] = {
         "starting": "next: emb run --close {run}, then "
         + START
         + " (after the provider's outage clears)",
+        "fallback": "next: emb run --close {run}, then {fallback}",
         "ended": "next: emb run --close {run}, then "
         + START
         + " (a new run after the provider's outage clears; "
@@ -218,6 +219,10 @@ def report(code: int, variant: str | None = None, **context: object) -> str | No
             "usage_limit": "usage_limit; a retry on the same worker needs no "
             "question; another worker or model needs the owner's answer; "
             "OpenCode may be offered",
+            "fallback": "fallback; the owner's fallback list names the worker "
+            "of the next: line; run that line without a question; tell the "
+            "owner which model failed, with which error, and which model runs "
+            "now",
             **dict.fromkeys(
                 ("starting", "ended"),
                 "outage; the engine ended; offer only a new run with the same "

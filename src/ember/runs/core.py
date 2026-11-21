@@ -39,6 +39,7 @@ from ember import (
     citations,
     db,
     engines,
+    holds,
     paths,
     prepare,
     processes,
@@ -60,6 +61,21 @@ stops with exit 124."""
 
 WAIT_END_SECONDS = 30.0
 """Seconds a turn has to end after the core interrupts its provider wait."""
+
+HANDOVER_HEADING = "\n## Work already done\n"
+"""The heading that starts the note of `HANDOVER`."""
+
+HANDOVER = """
+
+## Work already done
+
+An earlier worker, run {run} ({engine} {model}), started this task and stopped
+after a provider error. Its commits are in your branch.
+`git log --oneline {base}..HEAD` lists them and `git diff {base}..HEAD` shows
+the work. Read that work first and check it against the task. Then finish
+the task. Keep what is correct and do not redo it.
+"""
+"""The note added to the brief of a run that continues another run's branch."""
 
 SUBJECT_LIMIT = 72
 """The longest commit subject taken from the brief, before ` (turn <n>)`."""
@@ -228,6 +244,18 @@ class StartOptions:
 
     base: str | None = None
     """A saved commit for a panel member; `None` uses the checkout's HEAD."""
+
+    fallback_avoid: tuple[tuple[str, str], ...] = ()
+    """`(engine, model)` pairs a fallback for this run must not use, such as
+    the model that wrote the work a review reads."""
+
+    continue_run: str | None = None
+    """An earlier editing run whose branch the new run is cut from, with a
+    note about its work added to the brief; `None` starts from the base."""
+
+    fallback_from: str | None = None
+    """The run that a provider error ended and that this run replaces. Its
+    worker, and those of the runs it replaced, are not used again."""
 
     dry_run: bool = False
     """Check inputs and resolve the worker without starting anything."""
@@ -471,7 +499,11 @@ class Core:
                         run,
                         error.code,
                         str(error),
-                        last_variant=error.variant,
+                        # The record keeps the failure's own variant; the
+                        # fallback line is derived from the owner's list.
+                        last_variant=run.last_variant
+                        if error.variant == "fallback"
+                        else error.variant,
                         last_start_failure=run.last_start_failure,
                     )
                 if text and text.startswith("owner:"):
@@ -1027,6 +1059,11 @@ class Core:
             ) from error
         settings = self._settings(options.claim)
         driver, worker = self._select(options, settings)
+        redirected = self._held_replacement(options, settings, worker)
+        if redirected is not None:
+            options = redirected
+            engine = options.engine
+            driver, worker = self._select(options, settings)
         self._check_codex_trust(engine, common)
         if options.base is not None and not options.read_only:
             raise RunError(exits.USAGE, "a saved base requires a read-only run")
@@ -1034,6 +1071,25 @@ class Core:
             top, "rev-parse", "-q", "--verify", f"{options.base or 'HEAD'}^{{commit}}"
         )
         base_branch = self._git_out(top, "symbolic-ref", "-q", "--short", "HEAD")
+        if options.continue_run is not None:
+            earlier, base = self._continued(options, top, common)
+            base_branch = earlier.base_branch
+            first = earlier
+            # The note's diff starts at the base of the first run of the chain.
+            for _ in range(choices.FALLBACK_LIMIT):
+                if first.continues is None:
+                    break
+                try:
+                    first = record.load(first.continues, self.env)
+                except record.RecordError:
+                    break
+            # A saved brief of an earlier continued run already ends with a note.
+            brief = brief.split(HANDOVER_HEADING)[0].rstrip() + HANDOVER.format(
+                run=earlier.id,
+                engine=earlier.engine,
+                model=earlier.model,
+                base=first.base,
+            )
         with self._worktree_lock(common):
             main_checkout, checkouts = self._checkouts(top)
         main = Path(top) if options.read_only else main_checkout
@@ -1114,6 +1170,8 @@ class Core:
                 commits=(),
                 subject=subject,
                 parent=options.parent,
+                continues=options.continue_run,
+                fallback_from=options.fallback_from,
                 folder=record.run_dir(run_id, self.env),
                 env=self.env,
             )
@@ -1160,7 +1218,7 @@ class Core:
                 )
             except RunError as error:
                 _close_quietly(driver, run)
-                self._record_exit(
+                run = self._record_exit(
                     run,
                     error.code,
                     str(error),
@@ -1168,6 +1226,14 @@ class Core:
                     status=record.FAILED,
                     last_start_failure=True,
                 )
+                if error.code == exits.PROVIDER_ERROR:
+                    # The engine could not reach its provider before the brief.
+                    self._hold(run, "outage")
+                    shown, fallback = steps.shown_variant(run)
+                    if fallback is not None:
+                        raise RunError(
+                            error.code, str(error), shown, run=run.id, fallback=fallback
+                        ) from error
                 raise
             except KeyboardInterrupt as error:
                 _close_quietly(driver, run)
@@ -1198,6 +1264,74 @@ class Core:
                 )
                 raise failure from error
             return self._turn(run, driver, started, window)
+
+    def _held_replacement(
+        self,
+        options: StartOptions,
+        settings: Mapping[str, Any],
+        worker: WorkerSelection,
+    ) -> StartOptions | None:
+        """Return the options of the fallback worker when the worker is held.
+
+        A held model or engine is passed over while its hold lasts, when the
+        owner's fallback list names a worker that applies. A panel member,
+        which has a saved base, runs as named.
+        """
+        if options.base is not None:
+            return None
+        hold = holds.find(worker.engine, worker.model, self.env)
+        if hold is None:
+            return None
+        failed = [(worker.engine, worker.model, hold.kind)]
+        if options.fallback_from is not None:
+            with contextlib.suppress(record.RecordError):
+                earlier = record.load(options.fallback_from, self.env)
+                failed += [
+                    (run.engine, run.model, record.provider_kind(run))
+                    for run in (earlier, *record.linked(earlier, "fallback_from"))
+                ]
+        row = holds.replacement(
+            settings["answers"], failed, avoid=options.fallback_avoid, env=self.env
+        )
+        if row is None:
+            return None
+        until = time.strftime("%H:%M", time.localtime(hold.until))
+        self._warn(
+            f"WARNING: {hold.name()} is held after {hold.kind} until {until}; "
+            f"starting {row['engine']} {row['model']} from the fallback list"
+        )
+        return replace(
+            options, engine=row["engine"], model=row["model"], effort=row["effort"]
+        )
+
+    def _continued(
+        self, options: StartOptions, top: str, common: Path
+    ) -> tuple[Run, str | None]:
+        """Return the run that `--continue-run` names and its branch tip.
+
+        Raises:
+            RunError: 64 when the run is unknown, is read-only, belongs to
+                another repository, or the new run is read-only.
+        """
+        name = options.continue_run or ""
+        if options.read_only:
+            raise RunError(exits.USAGE, "--continue-run needs an editing run")
+        try:
+            earlier = record.load(name, self.env)
+        except record.RecordError as error:
+            raise RunError(exits.USAGE, f"--continue-run: {error}", "no_run") from error
+        if earlier.branch is None:
+            raise RunError(
+                exits.USAGE, f"--continue-run: {name} is read-only and has no branch"
+            )
+        if earlier.common is not None and Path(earlier.common).resolve() != common:
+            raise RunError(
+                exits.USAGE, f"--continue-run: {name} belongs to {earlier.repo}"
+            )
+        tip = self._git_out(
+            top, "rev-parse", "-q", "--verify", f"{earlier.branch}^{{commit}}"
+        )
+        return earlier, tip or None
 
     def _check_codex_trust(self, engine: str, common: Path) -> None:
         """Refuse an untrusted Codex repository before creating launch artifacts."""
@@ -1420,6 +1554,8 @@ class Core:
             ("--model", options.model),
             ("--effort", options.effort),
             ("--claim", options.claim),
+            ("--continue-run", options.continue_run),
+            ("--fallback-from", options.fallback_from),
         ):
             if value is not None:
                 argv.extend((flag, value))
@@ -2034,6 +2170,22 @@ class Core:
                 raise RunError(exits.STALLED, message, run=run.id)
             time.sleep(self.poll_seconds)
 
+    def _hold(self, run: Run, kind: str) -> None:
+        """Record a run's provider failure as a hold of the owner's set length."""
+        with contextlib.suppress(Exception):
+            answers = choices.read(None, env=self.env)["answers"]
+            hold = holds.start(
+                run.engine,
+                run.model,
+                kind,
+                holds.minutes(answers),
+                run=run.id,
+                env=self.env,
+            )
+            if hold is not None:
+                until = time.strftime("%H:%M", time.localtime(hold.until))
+                self._warn(f"WARNING: {hold.name()} is held after {kind} until {until}")
+
     def _wait_outcome(
         self, run: Run, outcome: TurnOutcome, ended: engines.ProviderWait | None
     ) -> TurnOutcome:
@@ -2122,8 +2274,10 @@ class Core:
                 attempts = self._saved_outcome(run).get("attempts", [])
                 if attempts and attempts[-1]["sending"] and not attempts[-1]["sent"]:
                     variant = "uncertain"
-                elif variant == "outage" and self._session_state(run.id) == DEAD:
-                    variant = "ended"
+                else:
+                    self._hold(run, variant)
+                    if variant == "outage" and self._session_state(run.id) == DEAD:
+                        variant = "ended"
             if outcome.signed_out and not outcome.provider_error:
                 fix = self._signed_out_fix(run.engine)
                 if fix:
@@ -2174,6 +2328,16 @@ class Core:
                 **({"retry_clock": None} if "retry_clock" in saved else {}),
             },
         )
+        if code == exits.PROVIDER_ERROR:
+            # The saved variant stays the failure's own; the lines name the
+            # fallback start while the owner's list has one that applies.
+            shown, fallback = steps.shown_variant(run)
+            if fallback is not None:
+                variant = shown
+                context["fallback"] = fallback
+        elif code == exits.OK:
+            with contextlib.suppress(OSError):
+                holds.succeeded(run.engine, run.model, env=self.env)
         text = exits.line(code, variant, **context)
         if text and text.startswith("owner:"):
             run = self._wait_owner(run, text)

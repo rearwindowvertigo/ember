@@ -16,6 +16,9 @@ writes each turn's outcome to `turn-<n>.json` in its output folder:
 - `@hang`: stop changing the screen until `release` exists in the output
   folder.
 - `@fail`, `@provider`, `@signedout <reason>`: a failed turn.
+- `@provider-once <marker file> <reason>`: a provider failure the first time
+  any session reaches it, recorded by creating the marker file; later the
+  line does nothing.
 - `@exit [<text>]`: end the engine without a reply; with text, leave it as
   the pane's last line above tmux's dead pane notice.
 - `@git <args>`: run git in the working folder.
@@ -231,6 +234,13 @@ def handle(message, turn):
                 provider_error=word == "@provider", signed_out=word == "@signedout",
             )
             return
+        elif word == "@provider-once":
+            marker, _, text = rest.partition(" ")
+            if not Path(marker).exists():
+                Path(marker).write_text("")
+                show(f"turn {turn} failed\n")
+                outcome(turn, state="failed", reason=text, provider_error=True)
+                return
         elif word == "@exit":
             if rest:
                 show(rest + "\nPane is dead (status 1, Fri Nov 20 20:06:13 2026)\n")

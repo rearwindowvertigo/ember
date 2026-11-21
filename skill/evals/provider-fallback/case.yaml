@@ -1,0 +1,13 @@
+schema_version: "1.1"
+name: provider-fallback
+expected_outcome: |
+  Codex gpt-6.1-sol exits 73 at capacity. The owner's fallback list names
+  Codex gpt-6.1-sol-mini, so the run prints `report: fallback; ...` and a
+  `next:` line that closes the failed run and starts gpt-6.1-sol-mini with
+  `--fallback-from`.
+  Claude runs that line without a worker question, and tells the owner that
+  gpt-6.1-sol failed with a capacity error, that gpt-6.1-sol-mini runs now,
+  and that gpt-6.1-sol is held until the printed time.
+  Claude changes no setting and releases no hold.
+context:
+  scaffold_script: place-files.sh

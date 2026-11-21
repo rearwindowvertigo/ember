@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from ember import __version__, branches, choices, deps, paths, skill
+from ember import __version__, branches, choices, deps, holds, paths, skill
 from ember.cli import main
 from ember.engines import models, status
 
@@ -1921,6 +1921,45 @@ def test_failed_status_report_uses_saved_variant(
     )
 
 
+def test_status_names_the_fallback_start_while_the_list_has_one(
+    finished_cli_run: str,
+    run_env: dict[str, str],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from ember.runs import exits, record
+
+    run = record.load(finished_cli_run, run_env)
+    record.update(
+        run, {"last_exit": 73, "last_variant": "outage", "status": record.FAILED}
+    )
+    assert main(["run", "--status", run.id], env=run_env) == 0
+    lines = capsys.readouterr().err.splitlines()
+    assert lines[0] == exits.line(73, "outage", run=run.id)
+    assert lines[-1] == exits.report(73, "outage")
+    choices.set_settings({"provider.fallback": ["codex:gpt-5"]}, env=run_env)
+    assert main(["run", "--status", run.id], env=run_env) == 0
+    lines = capsys.readouterr().err.splitlines()
+    start = (
+        f"emb run --engine codex --model gpt-5 --effort high --dir {run.repo} "
+        f"--task-file {run.folder / record.BRIEF_NAME} --fallback-from {run.id}"
+    )
+    assert lines[0] == f"next: emb run --close {run.id}, then {start}"
+    assert lines[-1] == exits.report(73, "fallback")
+    assert main(["run", "--close", run.id], env=run_env) == 0
+    capsys.readouterr()
+    assert main(start.split()[1:], env=run_env) == 0
+    out = capsys.readouterr().out
+    next_run = record.load(out.splitlines()[0].removeprefix("run "), run_env)
+    assert (next_run.engine, next_run.fallback_from) == ("codex", run.id)
+    assert (
+        main(["run", "--status", run.id, "--fallback-from", run.id], env=run_env) == 64
+    )
+    assert (
+        "emb run: --fallback-from cannot be used with --status"
+        in capsys.readouterr().err
+    )
+
+
 def test_answered_unknown_run(
     run_env: dict[str, str], capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2082,3 +2121,31 @@ def test_prune_empty_claim_json(
         removed=[], skipped=[], branches=[], worktrees=[]
     )
     assert captured.err == ""
+
+
+def test_engines_show_provider_holds(
+    env: dict[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    _stub(env, "codex", CODEX_OK)
+    now = time.time()
+    holds.start("codex", "sol", "capacity", 15, run="codex-1", env=env, now=now)
+    holds.start("claude", "opus", "outage", 5, env=env, now=now)
+    code, out, _ = _engines(["--json"], env, capsys)
+    assert code == 0
+    data = json.loads(out)
+    assert data["codex"]["holds"] == [
+        {
+            "model": "sol",
+            "kind": "capacity",
+            "since": now,
+            "until": now + 900,
+            "run": "codex-1",
+        }
+    ]
+    assert data["opencode"]["holds"] == []
+    assert data["claude"]["holds"][0]["model"] is None
+    code, out, _ = _engines([], env, capsys)
+    lines = out.splitlines()
+    until = time.strftime("%H:%M", time.localtime(now + 900))
+    assert lines[1] == f"  held: codex sol after capacity until {until}"
+    assert any(line.startswith("  held: claude after outage until ") for line in lines)

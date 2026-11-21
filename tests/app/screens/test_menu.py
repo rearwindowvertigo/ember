@@ -322,6 +322,7 @@ def test_cards_and_subtitle(env: dict[str, str], qtbot: QtBot) -> None:
         "Flows",
         "Claude Workflows",
         "Provider capacity",
+        "Fallback models",
         "Panel",
     ]
     assert menu.SUBTITLE in _texts(screen)
@@ -384,6 +385,124 @@ def test_multi_shows_saved_value_and_saves_only_changes(
     # Multi-task work remains usable without any shortlisted model.
     assert screen.empty.isVisibleTo(screen)
     assert not screen.add_member.isVisibleTo(screen)
+
+
+def test_fallback_empty_picker_and_ordered_edits(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    choices.set_settings({**SHORTLISTS, "engine.opencode": "off"}, env=env)
+    context, screen = _screen(env, qtbot)
+    picker = screen.add_fallback
+    assert picker.accessibleName() == "Add fallback model"
+    assert screen.fallback_info is not None
+    assert screen.fallback_info.toolTip() == menu.FALLBACK_HELP
+    assert menu.NO_FALLBACK in _texts(screen)
+    assert _items(picker) == [
+        ("Add fallback model", None, False),
+        ("Codex", None, True),
+        ("gpt-5 · high", "codex:gpt-5", False),
+        ("Claude", None, True),
+        ("opus · medium", "claude:opus", False),
+        ("sonnet · low", "claude:sonnet", False),
+    ]
+    _pick(context, picker, "codex:gpt-5", qtbot)
+    _pick(context, picker, "claude:opus", qtbot)
+    assert menu.NO_FALLBACK not in _texts(screen)
+    assert picker.value() is None
+    assert picker.findData("claude:opus") == picker.findData("codex:gpt-5") == -1
+    assert "1. Codex · gpt-5 · high" in _texts(screen)
+    assert "2. Claude · opus · medium" in _texts(screen)
+    assert [button.accessibleName() for button in screen.fallback_buttons] == [
+        "Remove Codex · gpt-5 · high",
+        "Move up Claude · opus · medium",
+        "Remove Claude · opus · medium",
+    ]
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        screen.fallback_buttons[1].click()
+    assert _stored(env, "provider.fallback") == ["claude:opus", "codex:gpt-5"]
+    assert "1. Claude · opus · medium" in _texts(screen)
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        screen.fallback_buttons[0].click()
+    assert _stored(env, "provider.fallback") == ["codex:gpt-5"]
+    assert "1. Codex · gpt-5 · high" in _texts(screen)
+    assert picker.findData("claude:opus") >= 0
+
+
+def test_full_fallback_list_enables_add_after_removal(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    limit = choices.FALLBACK_LIMIT
+    ids = [f"model-{i}" for i in range(limit + 1)]
+    choices.set_settings(
+        {"shortlist.codex": [f"{model}@high" for model in ids]}, env=env
+    )
+    values = [f"codex:{model}" for model in ids[:limit]]
+    choices.set_settings({"provider.fallback": values}, env=env)
+    context, screen = _screen(env, qtbot)
+    assert screen.add_fallback.isVisibleTo(screen)
+    assert not screen.add_fallback.isEnabled()
+    assert f"{limit}. Codex · {ids[limit - 1]} · high" in _texts(screen)
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        screen.fallback_buttons[-1].click()
+    assert screen.add_fallback.isEnabled()
+    assert _stored(env, "provider.fallback") == values[:-1]
+
+
+def test_fallback_reasons_follow_settings_and_connections(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    choices.set_settings(SHORTLISTS, env=env)
+    choices.set_settings(
+        {
+            "provider.fallback": [
+                "codex:gpt-5",
+                "claude:opus",
+                "opencode:openrouter/qwen3-coder",
+            ]
+        },
+        env=env,
+    )
+    choices.set_settings({"engine.codex": "off", "shortlist.claude": []}, env=env)
+    context, screen = _screen(env, qtbot)
+    engines = {"opencode": _engine_status("opencode", False)}
+    context._engines = engines
+    context.engines_changed.emit(engines)
+    texts = _texts(screen)
+    assert "codex is off" in texts
+    assert "not on the claude shortlist" in texts
+    assert "opencode is not connected" in texts
+    engines["opencode"] = _engine_status("opencode", True)
+    context.engines_changed.emit(engines)
+    assert "opencode is not connected" not in _texts(screen)
+
+
+def test_fallback_edits_wait_for_the_saved_snapshot(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    choices.set_settings(SHORTLISTS, env=env)
+    choices.set_settings({"provider.fallback": ["claude:opus", "codex:gpt-5"]}, env=env)
+    context, screen = _screen(env, qtbot)
+    release = threading.Event()
+    snapshot = choices.snapshot
+
+    def delayed_snapshot(*, env: dict[str, str]) -> dict[str, Any]:
+        assert release.wait(5)
+        return snapshot(env=env)
+
+    monkeypatch.setattr(choices, "snapshot", delayed_snapshot)
+    try:
+        screen.fallback_buttons[1].click()
+        context.engines_changed.emit({})
+        assert not screen.add_fallback.isEnabled()
+        assert all(not button.isEnabled() for button in screen.fallback_buttons)
+        screen.fallback_buttons[0].clicked.emit()
+        with qtbot.waitSignal(context.settings_changed, timeout=5000):
+            release.set()
+    finally:
+        release.set()
+    assert _stored(env, "provider.fallback") == ["codex:gpt-5", "claude:opus"]
+    assert screen.add_fallback.isEnabled()
+    assert all(button.isEnabled() for button in screen.fallback_buttons)
 
 
 def test_panel_empty_add_choices_and_save(env: dict[str, str], qtbot: QtBot) -> None:
@@ -657,7 +776,7 @@ def test_panel_queued_behind_failed_save_stays_locked_until_its_own_completion(
         context.settings_failed.emit("An unrelated settings read failed.")
         assert reloads == []
         assert not screen.add_member.isEnabled()
-        assert not screen._panel_refresh_failed
+        assert not screen.panel_save.refresh_failed
         # A read can complete while the queued removal is still running.
         with qtbot.waitSignal(context.settings_changed, timeout=5000):
             context.reload_settings()
@@ -673,7 +792,7 @@ def test_panel_queued_behind_failed_save_stays_locked_until_its_own_completion(
         first_release.set()
         panel_release.set()
     qtbot.waitUntil(lambda: context.tasks.pending() == 0)
-    assert reloads == ([None, screen._panel_done] if panel_fails else [None])
+    assert reloads == ([None, screen.panel_save.done] if panel_fails else [None])
     assert writes == [
         {"multi.runs_as": "flow"},
         {"panel.members": ["claude:opus"]},
@@ -756,17 +875,17 @@ def test_panel_dropped_by_stale_save_waits_for_its_result_after_reload(
     assert reloads == []
     if not reload_succeeds:
         assert not screen.add_member.isEnabled()
-        assert screen._panel_pending
-        assert screen._panel_refresh_failed
+        assert screen.panel_save.pending
+        assert screen.panel_save.refresh_failed
         monkeypatch.setattr(choices, "snapshot", snapshot)
         with qtbot.waitSignal(context.settings_changed, timeout=5000):
             context.reload_settings()
         qtbot.waitUntil(lambda: context.tasks.pending() == 0)
-        assert reloads == [None, screen._panel_done]
+        assert reloads == [None, screen.panel_save.done]
     assert list(screen.member_removes) == ["claude:sonnet"]
     assert screen.add_member.isEnabled()
     assert screen.member_removes["claude:sonnet"].isEnabled()
-    assert not screen._panel_pending
+    assert not screen.panel_save.pending
 
 
 @pytest.mark.parametrize("write_succeeds", [False, True])
@@ -795,8 +914,8 @@ def test_panel_failed_save_and_failed_refresh_stay_locked_until_refresh_succeeds
     with qtbot.waitSignal(context.settings_failed, timeout=5000):
         screen.member_removes["codex:gpt-5"].click()
     qtbot.waitUntil(lambda: context.tasks.pending() == 0)
-    assert screen._panel_pending
-    assert screen._panel_refresh_failed
+    assert screen.panel_save.pending
+    assert screen.panel_save.refresh_failed
     assert not screen.add_member.isEnabled()
     assert all(not b.isEnabled() for b in screen.member_removes.values())
     monkeypatch.setattr(choices, "snapshot", snapshot)
@@ -807,7 +926,7 @@ def test_panel_failed_save_and_failed_refresh_stay_locked_until_refresh_succeeds
     assert list(screen.member_removes) == expected
     assert screen.add_member.isEnabled()
     assert all(b.isEnabled() for b in screen.member_removes.values())
-    assert not screen._panel_pending
+    assert not screen.panel_save.pending
 
 
 def test_menu_none_uses_answers_and_snapshot_rows_until_status_read(
@@ -913,7 +1032,7 @@ def test_panel_stale_save_with_failed_reload_unlocks_after_a_read(
     with qtbot.waitSignal(context.settings_changed, timeout=5000):
         context.reload_settings()
     qtbot.waitUntil(lambda: context.tasks.pending() == 0)
-    qtbot.waitUntil(lambda: not screen._panel_pending)
+    qtbot.waitUntil(lambda: not screen.panel_save.pending)
     assert list(screen.member_removes) == ["claude:opus"]
     assert screen.add_member.isEnabled()
     assert screen.member_removes["claude:opus"].isEnabled()
@@ -1102,6 +1221,28 @@ def test_capacity_rows_show_ranges_and_save(env: dict[str, str], qtbot: QtBot) -
     assert other.capacity["provider.capacity_wait"].value() == "600"
 
 
+def test_hold_minutes_choices_and_save(env: dict[str, str], qtbot: QtBot) -> None:
+    context, screen = _screen(env, qtbot)
+    key = "provider.hold_minutes"
+    picker = screen.capacity[key]
+    assert picker.accessibleName() == "Try the first choice again after"
+    assert screen.tip_rows[key].info.toolTip() == (
+        "How long Ember passes over a model or engine after a provider error "
+        "before a job tries it again. Every job records no hold."
+    )
+    assert picker.value() == "15"
+    assert _items(picker) == [
+        ("Every job", "0", False),
+        ("5 min", "5", False),
+        ("15 min", "15", False),
+        ("30 min", "30", False),
+        ("60 min", "60", False),
+    ]
+    _pick(context, picker, "0", qtbot)
+    assert _stored(env, key) == "0"
+    assert picker.currentText() == "Every job"
+
+
 @pytest.mark.parametrize("width", [576, 1400])
 def test_screen_fits_width(env: dict[str, str], qtbot: QtBot, width: int) -> None:
     from ember.app import theme
@@ -1155,6 +1296,7 @@ def test_rows_shrink_stack_and_return(env: dict[str, str], qtbot: QtBot) -> None
         ("workflow.late", "stop"),
         ("provider.capacity_retries", "0"),
         ("provider.capacity_wait", "5"),
+        ("provider.hold_minutes", "0"),
     ],
 )
 def test_every_team_row_marks_saved_changes_and_resets(
