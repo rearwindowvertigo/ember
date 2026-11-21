@@ -246,7 +246,8 @@ omits are still unknown.
 Ember retries `capacity` with the same prompt, model and effort. Team's
 Capacity retries (`provider.capacity_retries`, 0 to 10, default 2) limits
 resends per turn; zero turns retries off. Wait before a retry
-(`provider.capacity_wait`, 5 to 600 seconds, default 30) sets the wait.
+(`provider.capacity_wait`, 5, 15, 30, 60, 120, 300 or 600 seconds,
+default 30) sets the wait.
 Both are standing settings reported by `emb choices`. Each run saves them
 at start for all its turns and recovery; later Team changes apply to new
 runs. Never change these settings to clear an error.

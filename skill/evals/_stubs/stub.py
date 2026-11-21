@@ -85,9 +85,10 @@ pending owner line; the recorded turn exit stays unchanged. Merge prints
 pending owner lines on standard error and in JSON's `owner_wait` array when
 nonempty. Status repeats the pending owner lines. `run-answered` clears the wait;
 a later turn or all suggested sandbox read paths also end it.
-Run, merge and cleanup replies, and flow watch and failure replies, append
+Run, merge failure and cleanup replies, and flow watch and failure replies, append
 the production `report:` lines after next or owner lines, including canned
-replies. Flow replies whose template starts with `report:` keep reports
+replies. Successful merges print their report before the next line.
+Flow replies whose template starts with `report:` keep reports
 before the other stderr lines. Flow watch JSON also carries the report list.
 No `.reply` file holds a next line.
 Done flow status reports appear on standard output, or in JSON's `reports`.
@@ -1776,9 +1777,7 @@ def merge(args: list[str], state: dict[str, Any], variables: dict[str, str]) -> 
     try:
         opened = branches.open_repository(repo, os.environ, "merge", from_main=True)
         worktree = branches._target_worktree(opened, target)
-        tip = out(repo, "rev-parse", f"refs/heads/{branch}")
-        variables.update(BRANCH=branch, TARGET=target, TIP=tip)
-        commit, first = branches._merge(
+        commit, merged = branches._merge(
             opened,
             branch,
             target,
@@ -1792,6 +1791,7 @@ def merge(args: list[str], state: dict[str, Any], variables: dict[str, str]) -> 
         if error.code == 75 and error.variant == "conflict":
             response.err += f"{exits.report(75, 'conflict')}\n"
         return response
+    variables.update(BRANCH=branch, TARGET=target, TIP=merged.tip)
     cleaned = cleanup_branch(repo, branch, state)
     run_match = branches.WORKER_BRANCH.fullmatch(branch)
     run = None
@@ -1807,6 +1807,7 @@ def merge(args: list[str], state: dict[str, Any], variables: dict[str, str]) -> 
     next_line = derive_next(run, state)[1] if run is not None else None
     err = "".join(f"{warning}\n" for warning in warnings)
     err += "".join(f"{line}\n" for line in owner_wait)
+    err += f"{merged.report()}\n"
     if has(args, "--json"):
         action, _, reason = cleaned.partition(": ")
         reason, separator, next_action = reason.partition("; next: ")
@@ -1815,7 +1816,7 @@ def merge(args: list[str], state: dict[str, Any], variables: dict[str, str]) -> 
             "target": target,
             "note": note,
             "warnings": warnings,
-            "merge_commit": commit,
+            **merged.commit_fields(commit),
             "contained_before": commit is None,
             "cleanup": [
                 {
@@ -1832,7 +1833,7 @@ def merge(args: list[str], state: dict[str, Any], variables: dict[str, str]) -> 
             result["owner_wait"] = owner_wait
         err += f"{next_line}\n" if next_line else ""
         return Reply(0, json.dumps(result, indent=2) + "\n", err)
-    lines = [f"Verdict: {note}", first, cleaned]
+    lines = [f"Verdict: {note}", merged.summary, cleaned]
     err += f"{next_line}\n" if next_line else ""
     return Reply(0, "\n".join(lines) + "\n", err)
 

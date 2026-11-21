@@ -19,6 +19,7 @@ import stat
 import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
+from typing import NamedTuple
 
 APP_NAME = "ember"
 """The name of Ember's folder inside each base directory."""
@@ -37,7 +38,10 @@ RUNTIME_FALLBACK_ROOT = Path("/run/user")
 
 
 RUN_TMP_ROOT = Path("/tmp")
-"""The base for short, private Codex run temporary folders."""
+"""The base for Codex run and flow check temporary folders."""
+
+RUN_TMP_MIN_FREE_INODES = 50_000
+RUN_TMP_MIN_FREE_BYTES = 256 * 1024**2
 
 RUN_TMP_PATTERN = re.compile(r"ember-[0-9a-f]{6}\Z")
 """The exact names reserved for Codex run temporary folders."""
@@ -56,6 +60,14 @@ class RuntimeDirError(RuntimeError):
 
 class WorktreeDirError(ValueError):
     """The worktree folder is inside a Git working tree or repository folder."""
+
+
+class RunTmpVolume(NamedTuple):
+    """Available capacity on the volume holding the run temporary root."""
+
+    free_inodes: int | None
+    free_bytes: int
+    low: bool
 
 
 def _env(env: Mapping[str, str] | None) -> Mapping[str, str]:
@@ -199,6 +211,25 @@ def run_tmp_dir(
     return (RUN_TMP_ROOT if base is None else base) / f"ember-{suffix}"
 
 
+def run_tmp_volume(base: Path | None = None) -> RunTmpVolume | None:
+    """Return free inodes, free bytes and whether the run temporary volume is low.
+
+    Read RUN_TMP_ROOT unless a base is given. If the filesystem reports no
+    inode count, free_inodes is None and only free space determines the result.
+    Return None if the volume cannot be read.
+    """
+    try:
+        volume = os.statvfs(RUN_TMP_ROOT if base is None else base)
+    except OSError:
+        return None
+    free_inodes = volume.f_favail if volume.f_files else None
+    free_bytes = volume.f_bavail * volume.f_frsize
+    low = (free_inodes is not None and free_inodes < RUN_TMP_MIN_FREE_INODES) or (
+        free_bytes < RUN_TMP_MIN_FREE_BYTES
+    )
+    return RunTmpVolume(free_inodes, free_bytes, low)
+
+
 def ensure_run_tmp_dir(
     run_id: str,
     env: Mapping[str, str] | None = None,
@@ -257,6 +288,106 @@ def remove_run_tmp_dir(
     finally:
         os.close(fd)
     return True
+
+
+@contextlib.contextmanager
+def _open_tmp_dir(path: Path | str, *, dir_fd: int | None = None) -> Iterator[int]:
+    """Open a temporary directory without following its final component."""
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    try:
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def clean_run_tmp_dir(
+    run_id: str,
+    keep: Iterable[str],
+    env: Mapping[str, str] | None = None,
+    *,
+    base: Path | None = None,
+) -> None:
+    """Remove worker leftovers, keeping the named entries and every codex-* entry.
+
+    A missing folder needs no cleanup. Try every entry before raising the
+    first removal error.
+    """
+    from ember.choices import ENGINES
+
+    engine, _, stamp = run_id.partition("-")
+    if engine not in ENGINES or not re.fullmatch(
+        r"[0-9]{8}-[0-9]{6}-[0-9a-f]{6}", stamp
+    ):
+        raise ValueError(f"{run_id!r} is not a run id")
+    folder = run_tmp_dir(run_id, env, base=base)
+    with contextlib.ExitStack() as opened:
+        try:
+            parent = opened.enter_context(_open_tmp_dir(folder.parent))
+            fd = opened.enter_context(_open_tmp_dir(folder.name, dir_fd=parent))
+        except FileNotFoundError:
+            return
+        kept = set(keep)
+        failure = None
+        for name in os.listdir(fd):
+            if name in kept or name.startswith("codex-"):
+                continue
+            try:
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    shutil.rmtree(name, dir_fd=fd)
+                else:
+                    os.unlink(name, dir_fd=fd)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                if failure is None:
+                    failure = error
+        if failure is not None:
+            raise failure
+
+
+def check_tmp_dir(flow_id: str, *, base: Path | None = None) -> Path:
+    """Return the temporary path for a full flow ID, refusing other names."""
+    from ember.flows.record import is_flow_id
+
+    if not is_flow_id(flow_id):
+        raise ValueError(f"{flow_id!r} is not a flow id")
+    return (RUN_TMP_ROOT if base is None else base) / f"ember-{flow_id}"
+
+
+def _remove_check_dir(parent: int, folder: Path, *, dry_run: bool = False) -> bool:
+    """Remove only a real check directory owned by the current user."""
+    try:
+        info = os.stat(folder.name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise PermissionError(f"{folder} is not a directory owned by the current user")
+    if not dry_run:
+        shutil.rmtree(folder.name, dir_fd=parent)
+    return True
+
+
+def ensure_check_tmp_dir(flow_id: str, *, base: Path | None = None) -> Path:
+    """Replace a stale check directory with an empty private one."""
+    folder = check_tmp_dir(flow_id, base=base)
+    with _open_tmp_dir(folder.parent) as parent:
+        _remove_check_dir(parent, folder)
+        os.mkdir(folder.name, mode=DIR_MODE, dir_fd=parent)
+        os.chmod(folder.name, DIR_MODE, dir_fd=parent, follow_symlinks=False)
+    return folder
+
+
+def remove_check_tmp_dir(
+    flow_id: str, *, base: Path | None = None, dry_run: bool = False
+) -> bool:
+    """Remove the flow's owned check directory, or report its presence in a dry run."""
+    folder = check_tmp_dir(flow_id, base=base)
+    try:
+        with _open_tmp_dir(folder.parent) as parent:
+            return _remove_check_dir(parent, folder, dry_run=dry_run)
+    except FileNotFoundError:
+        return False
 
 
 def runtime_dir(

@@ -1740,24 +1740,46 @@ def test_engine_cards_never_scroll_sideways_while_resizing(
             assert card.width() >= card.minimumSizeHint().width(), width
 
 
-def test_opencode_filters_fit_the_default_window(
-    env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any]
+@pytest.mark.usefixtures("engine_theme")
+@pytest.mark.parametrize("width", [880, 680, 500])
+def test_opencode_filter_spacing(
+    env: dict[str, str], qtbot: QtBot, stubs: dict[str, Any], width: int
 ) -> None:
     stubs["lists"] = {"opencode": _integrations_list()}
     screen, context = _screen(env, qtbot)
     panel = _open(screen, context, qtbot, "opencode")
-    names = {"Provider", "Tools", "Max price", "Min context"}
-    assert names <= {label.text() for label in panel.findChildren(QLabel)}
-    tips = {tip.accessibleName() for tip in panel.findChildren(InfoTip)}
-    assert {f"About {name}" for name in names} <= tips
     from ember.app.screens.common import FittingRow
 
     rows = panel.findChildren(FittingRow)
     assert len(rows) == 2
-    screen.resize(880, 720)
+    screen.resize(width, 720)
     screen.show()
     qtbot.wait(20)
-    assert all(row.width() <= 880 - 2 * 24 for row in rows)
+    assert all(row.width() <= width - 2 * 24 for row in rows)
+    if width <= 680:
+        assert (
+            panel.context_picker.parentWidget().y()
+            > panel.price_picker.parentWidget().y()
+        )
+    if width == 500:
+        assert (
+            panel.tools_switch.parentWidget().y()
+            > panel.provider_picker.parentWidget().y()
+        )
+    for name, control in (
+        ("Provider", panel.provider_picker),
+        ("Tools", panel.tools_switch),
+        ("Max price", panel.price_picker),
+        ("Min context", panel.context_picker),
+    ):
+        group = control.parentWidget()
+        heading = next(
+            line for line in group.findChildren(QLabel) if line.text() == name
+        )
+        info = group.findChild(InfoTip)
+        assert info is not None and info.accessibleName() == f"About {name}"
+        assert info.x() - heading.x() - heading.sizeHint().width() == 8, name
+        assert control.x() - info.x() - info.width() == 12, name
 
 
 @pytest.mark.parametrize(("width", "scrolls"), [(880, False), (680, True)])

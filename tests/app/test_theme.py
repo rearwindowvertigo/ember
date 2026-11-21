@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QColor, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
@@ -330,6 +330,33 @@ def test_picker_arrow_is_chevron_in_text_secondary(mode: str) -> None:
     assert "currentColor" not in svg
     assert theme.hex_value("text-secondary", mode) in svg
     assert "m6 9 6 6 6-6" in svg
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_picker_scroll_bar_uses_theme_inside_list_padding(
+    qapp: QApplication, qtbot: QtBot, mode: str
+) -> None:
+    qapp.setStyleSheet("")
+    qapp.setStyle("Fusion")
+    picker = widgets.Picker()
+    qtbot.addWidget(picker)
+    theme.apply(qapp, mode)
+    for row in range(20):
+        picker.add_option(str(row), row)
+    picker.show()
+    picker.showPopup()
+    view = picker.view()
+    popup = view.window()
+    qtbot.waitExposed(popup)
+    bar = view.verticalScrollBar()
+    bounds = QRect(bar.mapTo(popup, QPoint()), bar.size())
+    assert bar.isVisible()
+    assert popup.rect().adjusted(9, 9, -9, -9).contains(bounds)
+    assert bar.width() == 10
+    image = popup.grab().toImage()
+    assert image.pixelColor(bounds.center().x(), bounds.top() + 8) == theme.color(
+        "border-strong", mode
+    )
 
 
 @pytest.mark.parametrize("mode", theme.MODES)

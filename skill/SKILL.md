@@ -472,7 +472,10 @@ Exit 0 proves the merge, not that cleanup removed everything. Report the
 worker branch's tip commit (not the landed commit) and every `kept` line
 with its reason. Leave a kept worktree as
 it is: do not delete, clean or commit its files so that cleanup removes
-it. What happens to it is the owner's decision. After a merge or cleanup that
+it. What happens to it is the owner's decision. Tell the owner what it
+holds, and give the owner no forced removal command
+(`git worktree remove --force`, `git branch -D`, `rm -rf`) unless the owner
+says to drop it. After a merge or cleanup that
 prints no `next:` line, report each kept line and run
 `emb run --status <run>`; follow the `next:` line it prints.
 

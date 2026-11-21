@@ -134,6 +134,13 @@ def _merge(
     )
 
 
+def _merge_report(tip: str, landed: str) -> str:
+    return (
+        f"report: the worker branch tip is {tip}; the landed commit is {landed}; "
+        "name the tip, not the landed commit, and each kept line with its reason"
+    )
+
+
 def _cleanup(
     env: dict[str, str],
     driver: StubDriver,
@@ -367,12 +374,14 @@ def test_merge_json(
         "target",
         "note",
         "warnings",
+        "tip",
         "merge_commit",
         "contained_before",
         "cleanup",
         "next",
     }
     assert document["branch"] == run.branch
+    assert document["tip"] == run.commits[-1]
     assert document["target"] == "main"
     assert document["merge_commit"] == git(repo, "rev-parse", "HEAD", env=env)
     assert document["contained_before"] is False
@@ -407,6 +416,7 @@ def test_merge_prints_pending_owner_lines(
     )
     record.save(run)
     assert run.branch is not None
+    tip = git(repo, "rev-parse", run.branch, env=env)
     if contained:
         git(repo, "merge", "-q", "--ff-only", run.branch, env=env)
     if kept:
@@ -420,6 +430,10 @@ def test_merge_prints_pending_owner_lines(
     assert [line for line in err.splitlines() if line.startswith("owner:")] == list(
         owner_wait
     )
+    landed = git(repo, "rev-parse", "HEAD", env=env)
+    assert [line for line in err.splitlines() if line.startswith("report:")] == [
+        _merge_report(tip, landed)
+    ]
     assert "next:" not in err
     if as_json:
         document = json.loads(out)
@@ -428,12 +442,16 @@ def test_merge_prints_pending_owner_lines(
             "target",
             "note",
             "warnings",
+            "tip",
             "merge_commit",
             "contained_before",
             "cleanup",
             "next",
             "owner_wait",
-        }
+        } | ({"landed_commit"} if contained else set())
+        assert document["tip"] == tip
+        if contained:
+            assert document["landed_commit"] == landed
         assert document["owner_wait"] == list(owner_wait)
         assert document["next"] is None
         assert document["branch"] == run.branch
@@ -667,6 +685,7 @@ def test_merge_conflict_leaves_target_unchanged_and_75(
     )
     captured = capsys.readouterr()
     assert "next:" not in captured.err
+    assert "report: the worker branch tip" not in captured.err
     assert captured.err.splitlines()[-1] == exits.report(75, "conflict")
 
 
@@ -685,6 +704,78 @@ def test_merge_of_a_contained_branch_makes_no_commit(
     assert document["cleanup"][0]["action"] == "removed"
     assert git(repo, "rev-parse", "HEAD", env=env) == head
     assert not _branch_exists(repo, run.branch, env)
+
+
+@pytest.mark.parametrize("landing", ["merge", "squash", "fast-forward"])
+def test_merge_retry_reports_first_landing_after_target_advances(
+    env: dict[str, str], repo: Path, driver: StubDriver, landing: str
+) -> None:
+    git(repo, "switch", "-q", "-c", "feature", env=env)
+    (repo / "feature.txt").write_text("feature\n")
+    git(repo, "add", "feature.txt", env=env)
+    git(repo, "commit", "-qm", "feature", env=env)
+    tip = git(repo, "rev-parse", "HEAD", env=env)
+    git(repo, "switch", "-q", "main", env=env)
+    if landing == "fast-forward":
+        git(repo, "merge", "--ff-only", "feature", env=env)
+    else:
+        (repo / "main.txt").write_text("main\n")
+        git(repo, "add", "main.txt", env=env)
+        git(repo, "commit", "-qm", "diverge", env=env)
+        if landing == "merge":
+            assert _merge(env, driver, Streams(), "feature", repo) == 0
+        else:
+            _squash(repo, "feature", env)
+
+    landed = git(repo, "rev-parse", "HEAD", env=env)
+    (repo / "later.txt").write_text("unrelated\n")
+    git(repo, "add", "later.txt", env=env)
+    git(repo, "commit", "-qm", "advance target", env=env)
+    streams = Streams()
+    assert _merge(env, driver, streams, "feature", repo, as_json=True) == 0
+    out, err = streams.take()
+    result = json.loads(out)
+    assert result["contained_before"] and result["merge_commit"] is None
+    assert (result["tip"], result["landed_commit"]) == (tip, landed)
+    assert err.splitlines() == [_merge_report(tip, landed)]
+
+
+@pytest.mark.parametrize(
+    "landing", ["merge", "squash", "fast-forward", "merge-after-squash"]
+)
+@pytest.mark.parametrize("advance", [False, True])
+def test_retry_of_a_revert_reports_its_landing(
+    env: dict[str, str], repo: Path, driver: StubDriver, landing: str, advance: bool
+) -> None:
+    old_tree = git(repo, "rev-parse", "HEAD^{tree}", env=env)
+    (repo / "README.md").write_text("regression\n")
+    git(repo, "commit", "-qam", "regression", env=env)
+    git(repo, "switch", "-qc", "feature", env=env)
+    git(repo, "revert", "--no-edit", "HEAD", env=env)
+    tip = git(repo, "rev-parse", "HEAD", env=env)
+    assert git(repo, "rev-parse", "HEAD^{tree}", env=env) == old_tree
+    git(repo, "switch", "-q", "main", env=env)
+    if landing == "merge":
+        assert _merge(env, driver, Streams(), "feature", repo) == 0
+    elif landing == "fast-forward":
+        git(repo, "merge", "--ff-only", "feature", env=env)
+    else:
+        _squash(repo, "feature", env)
+        if landing == "merge-after-squash":
+            git(repo, "merge", "--no-ff", "--no-edit", "feature", env=env)
+    landed = git(repo, "rev-parse", "HEAD", env=env)
+    if advance:
+        (repo / "later.txt").write_text("unrelated\n")
+        git(repo, "add", "later.txt", env=env)
+        git(repo, "commit", "-qm", "advance target", env=env)
+
+    streams = Streams()
+    assert _merge(env, driver, streams, "feature", repo, as_json=True) == 0
+    out, err = streams.take()
+    result = json.loads(out)
+    assert result["contained_before"] and result["merge_commit"] is None
+    assert (result["tip"], result["landed_commit"]) == (tip, landed)
+    assert err.splitlines() == [_merge_report(tip, landed)]
 
 
 def test_merge_of_a_contained_branch_prints_already_contained(
@@ -707,9 +798,13 @@ def test_merge_of_a_branch_that_is_not_a_run_branch_keeps_it(
     git(repo, "add", "f.txt", env=env)
     git(repo, "commit", "-q", "-m", "f", env=env)
     git(repo, "switch", "-q", "main", env=env)
+    tip = git(repo, "rev-parse", "feature", env=env)
     streams = Streams()
     assert _merge(env, driver, streams, "feature", repo) == 0
-    out, _ = streams.take()
+    out, err = streams.take()
+    assert err.splitlines() == [
+        _merge_report(tip, git(repo, "rev-parse", "HEAD", env=env))
+    ]
     assert out.splitlines()[1] == (
         "kept feature: not an Ember run branch; no claim is recorded; "
         "next: git branch -d feature"
@@ -2262,6 +2357,7 @@ def test_merge_into_flow_preserves_cleanup_and_owner_lines(
     assert "emb choices --finish" not in out + err
     assert [s for s in err.splitlines() if s.startswith("owner:")] == list(owner_wait)
     if cleanup == "failed":
+        assert "report:" not in err
         assert "deleting the branch" in err
         assert err.splitlines()[-1].startswith("next: git -C ")
     elif cleanup == "kept":
@@ -2426,6 +2522,7 @@ def test_merge_completed_flow_requires_target_tip(
 
     out, err = streams.take()
     assert not out
+    assert "report:" not in err
     assert f"flow {flow.branch} at {tip}" in err
     assert f"target {target} at {head}" in err
     assert f"git -C {shlex.quote(str(flow.worktree))} switch {flow.branch}" in err
@@ -2455,9 +2552,13 @@ def test_merge_completed_flow_requires_target_tip(
         )
         == 0
     )
+    out, err = streams.take()
+    landed = git(repo, "rev-parse", "HEAD", env=env)
+    assert err.splitlines() == [_merge_report(checked_tip, landed)]
     if as_json:
-        result = json.loads(streams.take()[0])
-        assert result["merge_commit"] == git(repo, "rev-parse", "HEAD", env=env)
+        result = json.loads(out)
+        assert result["tip"] == checked_tip
+        assert result["merge_commit"] == landed
         assert result["cleanup"][0]["action"] == "removed"
     assert git(repo, "log", "-1", "--format=%P", env=env) == f"{head} {checked_tip}"
     assert "Ember-Verdict: Keep" in git(repo, "log", "-1", "--format=%B", env=env)
@@ -3202,8 +3303,10 @@ def test_merge_prints_only_the_step_after_cleanup(
     assert _merge(env, driver, streams, run.branch, repo, as_json=as_json) == 0
     out, err = streams.take()
     line = None if parent else "next: emb choices --finish claim-a"
-    assert [s for s in err.splitlines() if s.startswith("next:")] == (
-        [] if line is None else [line]
+    landed = git(repo, "rev-parse", "HEAD", env=env)
+    report = _merge_report(run.commits[-1], landed)
+    assert [s for s in err.splitlines() if s.startswith(("report:", "next:"))] == (
+        [report] if line is None else [report, line]
     )
     if as_json:
         assert json.loads(out)["next"] == line

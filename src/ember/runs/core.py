@@ -1429,6 +1429,23 @@ class Core:
         """Create a sandboxed Codex run's temporary folder or refuse with 69."""
         if provider != sandbox.CODEX:
             return
+        volume = paths.run_tmp_volume()
+        if volume is not None and volume.low:
+            root = paths.RUN_TMP_ROOT
+            inodes = (
+                "free inode count unavailable"
+                if volume.free_inodes is None
+                else f"{volume.free_inodes:,} free inodes"
+            )
+            raise RunError(
+                exits.UNAVAILABLE,
+                f"the temporary volume {root} has {volume.free_bytes // 1024**2} MiB "
+                f"free ({inodes}, minimum "
+                f"{paths.RUN_TMP_MIN_FREE_INODES:,} inodes where reported "
+                f"and {paths.RUN_TMP_MIN_FREE_BYTES // 1024**2} MiB)",
+                "fix",
+                fix=f"free files or space on {root}",
+            )
         try:
             paths.ensure_run_tmp_dir(run_id, self.env)
         except (OSError, ValueError) as error:

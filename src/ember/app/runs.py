@@ -33,14 +33,25 @@ DONE = (record.CLOSED, record.FAILED)
 """The statuses of a finished run."""
 
 _Key = tuple[str, int, str | None, float]
+_Records = tuple[list[Run], int, list[str]]
+_ReadResult = tuple[_Records | Exception, paths.RunTmpVolume | None]
 
 
 def _key(run: Run) -> _Key:
     return (run.status, run.turn, run.turn_state, run.updated_at)
 
 
-def _read(env: Mapping[str, str]) -> tuple[list[Run], int, list[str]]:
-    """Read every record, and list the paths to watch."""
+def _read(env: Mapping[str, str]) -> _ReadResult:
+    """Read temporary volume capacity even when reading the run records fails."""
+    volume = paths.run_tmp_volume()
+    try:
+        return _read_records(env), volume
+    except Exception as error:
+        return error, volume
+
+
+def _read_records(env: Mapping[str, str]) -> _Records:
+    """Read the run records and paths to watch."""
     root = paths.runs_dir(env)
     with contextlib.suppress(OSError, ValueError):
         paths.ensure_private_dir(root, root=paths.state_dir(env))
@@ -105,6 +116,7 @@ class RunsModel(QObject):
         self._runs: list[Run] = []
         self._keys: dict[str, _Key] = {}
         self._unreadable = 0
+        self._tmp_volume: paths.RunTmpVolume | None = None
         self._loaded = False
         self._error: str | None = None
         self._failed_turns: set[tuple[str, int]] = set()
@@ -166,6 +178,10 @@ class RunsModel(QObject):
         """Return how many run folders hold no readable record."""
         return self._unreadable
 
+    def tmp_volume(self) -> paths.RunTmpVolume | None:
+        """Return the temporary volume capacity from the last reload."""
+        return self._tmp_volume
+
     def watched(self) -> list[str]:
         """Return the watched files and folders."""
         return self._watcher.files() + self._watcher.directories()
@@ -197,8 +213,12 @@ class RunsModel(QObject):
             self._queued = False
             self.reload()
 
-    def _loaded_records(self, result: tuple[list[Run], int, list[str]]) -> None:
-        runs, unreadable, watch = result
+    def _loaded_records(self, result: _ReadResult) -> None:
+        records, self._tmp_volume = result
+        if isinstance(records, Exception):
+            self._read_failed(records)
+            return
+        runs, unreadable, watch = records
         self._watch(watch)
         keys = {run.id: _key(run) for run in runs}
         differs = (

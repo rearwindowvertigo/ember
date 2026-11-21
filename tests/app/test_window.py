@@ -284,7 +284,7 @@ def test_count_groups_workers_and_keeps_live_workers_of_finished_parents(
                 ["starting", "running", "waiting", "running", "closed", "failed"]
             )
         ]
-        context.runs._loaded_records((workers, 0, []))
+        context.runs._loaded_records(((workers, 0, []), None))
         assert window.nav["overview"].count() == 4
         flow = make_flow(env, status="stopped")
         flow["tasks"][0]["writer_run"] = workers[1].id
@@ -307,9 +307,8 @@ def test_count_groups_workers_and_keeps_live_workers_of_finished_parents(
         assert window.nav["overview"].count() == 4
         assert window.nav["overview"].accessibleDescription() == "4 live"
 
-        context.runs._loaded_records(
-            ([replace(run, status="closed", ended_at=200) for run in workers], 0, [])
-        )
+        closed = [replace(run, status="closed", ended_at=200) for run in workers]
+        context.runs._loaded_records(((closed, 0, []), None))
         assert window.nav["overview"].count() is None
         assert window.nav["overview"].accessibleDescription() == ""
     finally:

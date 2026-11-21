@@ -52,6 +52,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractButton,
+    QAbstractItemView,
     QApplication,
     QButtonGroup,
     QComboBox,
@@ -223,6 +224,16 @@ def _breakable(word: str, metrics: QFontMetrics) -> str:
             part = part[cut:]
         pieces.append(part)
     return PATH_BREAK.join(html.escape(piece, quote=False) for piece in pieces if piece)
+
+
+def _set_translucent_popup(window: QWidget) -> None:
+    """Let the desktop show through the popup's rounded corners."""
+    window.setWindowFlags(
+        window.windowFlags()
+        | Qt.WindowType.FramelessWindowHint
+        | Qt.WindowType.NoDropShadowWindowHint
+    )
+    window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
 
 class TipPopup(QWidget):
@@ -852,14 +863,23 @@ class _PickerDelegate(QStyledItemDelegate):
     """Draws a picker's items with their hint line and its group headers."""
 
     PAD = 8
+    vertical_padding = PAD
 
     def sizeHint(  # noqa: D102
         self, option: QStyleOptionViewItem, index: QModelIndex | QPersistentModelIndex
     ) -> QSize:
-        metrics = QFontMetrics(cast(QFont, option.font))
-        lines = 2 if index.data(HINT_ROLE) else 1
-        height = lines * metrics.height() + 2 * self.PAD
-        return QSize(super().sizeHint(option, index).width(), height)
+        text_height = QFontMetrics(cast(QFont, option.font)).height()
+        if index.data(HINT_ROLE):
+            if self.vertical_padding < self.PAD:
+                body = QFontMetrics(theme.font("body"))
+                caption = QFontMetrics(theme.font("caption"))
+                text_height = body.height() + caption.height()
+            else:
+                text_height *= 2
+        return QSize(
+            super().sizeHint(option, index).width(),
+            text_height + 2 * self.vertical_padding,
+        )
 
     def paint(  # noqa: D102
         self,
@@ -878,7 +898,9 @@ class _PickerDelegate(QStyledItemDelegate):
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing)
                 radius = theme.RADIUS["sm"]
                 painter.drawRoundedRect(QRectF(rect), radius, radius)
-            text_rect = rect.adjusted(12, self.PAD, -12, -self.PAD)
+            text_rect = rect.adjusted(
+                12, self.vertical_padding, -12, -self.vertical_padding
+            )
             text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
             if header:
                 painter.setFont(theme.font("caption"))
@@ -905,6 +927,8 @@ class Picker(QComboBox):
     Headers are not selectable. Each item's value is its user data.
     """
 
+    MAX_VISIBLE_ROWS = 10
+
     def __init__(self, parent: QWidget | None = None) -> None:
         """Create an empty picker."""
         super().__init__(parent)
@@ -912,8 +936,119 @@ class Picker(QComboBox):
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._model = QStandardItemModel(self)
         self.setModel(self._model)
-        self.setItemDelegate(_PickerDelegate(self))
+        self._delegate = _PickerDelegate(self)
+        self.setItemDelegate(self._delegate)
+        self.setMaxVisibleItems(self.MAX_VISIBLE_ROWS)
+        view = self.view()
+        container = cast(QFrame, view.window())
+        _set_translucent_popup(container)
+        container.setFrameShape(QFrame.Shape.NoFrame)
+        view.viewport().setAutoFillBackground(False)
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerItem)
+        view.verticalScrollBar().valueChanged.connect(self._fit_popup)
+        self.highlighted.connect(self._reveal_popup_row)
+        self._refit_timer = QTimer(self)
+        self._refit_timer.setSingleShot(True)
+        self._refit_timer.timeout.connect(self._refit_changed_rows)
+        for signal in (
+            self._model.modelReset,
+            self._model.rowsInserted,
+            self._model.rowsRemoved,
+            self._model.layoutChanged,
+            self._model.dataChanged,
+        ):
+            signal.connect(self._schedule_refit)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def _schedule_refit(self) -> None:
+        """Refit once after a batch of changes to the open list's model."""
+        if self.view().isVisible():
+            self._refit_timer.start(0)
+
+    def _refit_changed_rows(self) -> None:
+        view = self.view()
+        if view.isVisible():
+            self._layout_popup_rows()
+            self._reveal_popup_row(view.currentIndex().row())
+
+    def _layout_popup_rows(self) -> None:
+        """Reduce short lists' vertical padding when the work area requires it."""
+        view = self.view()
+        count = self.count()
+        empty = count == 0
+        if bool(view.property("empty")) != empty:
+            view.setProperty("empty", empty)
+            repolish(view)
+        self._delegate.vertical_padding = self._delegate.PAD
+        if 0 < count <= self.maxVisibleItems():
+            available = (
+                self.screen().availableGeometry().height() - 2 * view.frameWidth()
+            )
+            height = sum(view.sizeHintForRow(row) for row in range(count))
+            if height > available:
+                self._delegate.vertical_padding = 0
+                text_height = sum(view.sizeHintForRow(row) for row in range(count))
+                padding = (available - text_height) // (2 * count)
+                self._delegate.vertical_padding = max(
+                    0, min(self._delegate.PAD - 1, padding)
+                )
+        view.doItemsLayout()
+
+    def showPopup(self) -> None:  # noqa: N802
+        """Open the list with the chosen row in view."""
+        self._layout_popup_rows()
+        super().showPopup()
+        if not self.count():
+            # QComboBox skips showing its popup when the model is empty.
+            view = self.view()
+            popup = view.window()
+            popup.resize(self.width(), view.frameWidth() * 2)
+            popup.move(self.mapToGlobal(QPoint(0, self.height())))
+            popup.show()
+            self._fit_popup(0)
+            return
+        self._reveal_popup_row(self.currentIndex())
+
+    def _reveal_popup_row(self, row: int) -> None:
+        """Include the highlighted row after the list changes height."""
+        view = self.view()
+        if not view.isVisible():
+            return
+        bar = view.verticalScrollBar()
+        first = max(row + 1 - self.maxVisibleItems(), min(bar.value(), row), 0)
+        self._fit_popup(first)
+        bar.setValue(first)
+        view.scrollTo(self.model().index(row, 0))
+
+    def _fit_popup(self, first: int) -> None:
+        """Fit the visible rows as scrolling brings different hint lines into view."""
+        view = self.view()
+        popup = view.window()
+        if not popup.isVisible():
+            return
+        # Qt sizes the popup from the first rows, even after they scroll away.
+        limit = self.maxVisibleItems()
+        area = self.screen().availableGeometry()
+        first = min(first, max(0, self.count() - 1))
+        stop = min(self.count(), first + limit)
+        rows = list(range(first, stop))
+        # On the last page, fill spare space with the rows before the scroll position.
+        rows.extend(reversed(range(max(0, stop - limit), first)))
+        height = 2 * view.frameWidth()
+        for row in rows:
+            row_height = view.sizeHintForRow(row)
+            if height + row_height > area.height():
+                break
+            height += row_height
+        geometry = popup.geometry()
+        y = geometry.top()
+        if geometry.bottom() <= self.mapToGlobal(QPoint()).y():
+            y = geometry.bottom() + 1 - height
+        width = min(geometry.width(), area.width())
+        x = max(area.left(), min(geometry.x(), area.right() + 1 - width))
+        y = max(area.top(), min(y, area.bottom() + 1 - height))
+        popup.setGeometry(x, y, width, height)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         """Let the parent scroll without changing the chosen item."""
@@ -1387,6 +1522,7 @@ class _CommandLabel(QLabel):
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: D102
         menu = QMenu(self)
+        _set_translucent_popup(menu)
         copy = menu.addAction("Copy")
         copy.setEnabled(self.hasSelectedText())
         copy.triggered.connect(

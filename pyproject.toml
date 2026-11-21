@@ -55,3 +55,4 @@ testpaths = ["tests"]
 addopts = ["-n", "auto", "--strict-markers"]
 qt_api = "pyside6"
 tmp_path_retention_count = 1
+tmp_path_retention_policy = "failed"

@@ -1,5 +1,6 @@
 """Run worker commands in transient systemd user scopes and end their members."""
 
+import errno
 import os
 import shutil
 import subprocess
@@ -93,6 +94,11 @@ def _members(group: Path) -> list[int]:
             try:
                 pids = file.read_text().split()
             except FileNotFoundError:
+                continue
+            except OSError as error:
+                # A group removed after its file was opened reads as ENODEV.
+                if error.errno != errno.ENODEV:
+                    raise
                 continue
             # cgroup.procs omits zombies and includes reparented processes.
             result.update(int(text) for text in pids)

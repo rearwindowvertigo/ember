@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -453,6 +454,7 @@ def test_dry_run_resolves_team_without_creating_launch_artifacts(
     def forbidden(*args: object, **kwargs: object) -> None:
         pytest.fail("dry run reached launch setup")
 
+    monkeypatch.setattr(paths, "run_tmp_volume", forbidden)
     monkeypatch.setattr(sandbox, "require", forbidden)
     monkeypatch.setattr(paths, "ensure_worker_cache_dir", forbidden)
     monkeypatch.setattr(record, "new_id", forbidden)
@@ -5230,14 +5232,23 @@ def test_close_leaves_a_locked_start_and_its_preparation_alone(
             process.kill()
 
 
+@pytest.mark.parametrize("statvfs_error", [False, True], ids=["at-minimum", "error"])
 def test_codex_runs_create_distinct_temporary_folders_before_launch(
     tmp_path: Path,
     env: dict[str, str],
     repo: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
+    statvfs_error: bool,
 ) -> None:
     choices.set_settings({"sandbox.codex": "on"}, env=env)
+    statvfs = Mock(
+        return_value=Mock(
+            f_files=100_000, f_favail=50_000, f_bavail=65_536, f_frsize=4096
+        ),
+        side_effect=OSError("volume unavailable") if statvfs_error else None,
+    )
+    monkeypatch.setattr(os, "statvfs", statvfs)
     monkeypatch.setattr(sandbox, "require", lambda engine, env=None: None)
     folders: list[Path] = []
     runs: list[record.Run] = []
@@ -5291,8 +5302,9 @@ def test_codex_off_creates_no_temporary_folder_and_closes_if_missing(
     read_only: bool,
 ) -> None:
     def forbidden(*args: object, **kwargs: object) -> None:
-        pytest.fail("unsandboxed Codex tried to create a temporary folder")
+        pytest.fail("unsandboxed Codex reached temporary folder setup")
 
+    monkeypatch.setattr(paths, "run_tmp_volume", forbidden)
     monkeypatch.setattr(paths, "ensure_run_tmp_dir", forbidden)
     core_ = _core(env, _driver(env, "codex"))
     assert _start(
@@ -5304,6 +5316,57 @@ def test_codex_off_creates_no_temporary_folder_and_closes_if_missing(
     assert "TMPDIR" not in (run.folder / core.LAUNCH_NAME).read_text()
     assert core_.close(run.id) == 0
     assert not list(paths.RUN_TMP_ROOT.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("files", "free_inodes", "free_mib", "inode_message"),
+    [
+        (100_000, 49_999, 512, "49,999 free inodes"),
+        (100_000, 80_000, 255, "80,000 free inodes"),
+        (100_000, 0, 512, "0 free inodes"),
+        (0, 0, 255, "free inode count unavailable"),
+    ],
+)
+def test_codex_low_temporary_volume_refuses_start_before_setup(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    files: int,
+    free_inodes: int,
+    free_mib: int,
+    inode_message: str,
+) -> None:
+    choices.set_settings({"sandbox.codex": "on"}, env=env)
+    volume = Mock(
+        f_files=files, f_favail=free_inodes, f_bavail=free_mib * 256, f_frsize=4096
+    )
+    monkeypatch.setattr(os, "statvfs", Mock(return_value=volume))
+    branches = git(repo, "branch", "--list", env=env)
+    worktrees = git(repo, "worktree", "list", "--porcelain", env=env)
+    driver = _driver(env, "codex")
+    assert (
+        _start(
+            _core(env, driver),
+            repo,
+            _brief(tmp_path, "Task\n"),
+            engine="codex",
+            model="gpt-5",
+        )
+        == exits.UNAVAILABLE
+    )
+    out, err = capsys.readouterr()
+    assert not out
+    assert f"{paths.RUN_TMP_ROOT} has {free_mib} MiB free ({inode_message}," in err
+    assert "minimum 50,000 inodes where reported and 256 MiB" in err
+    assert f"owner: free files or space on {paths.RUN_TMP_ROOT}" in err.splitlines()
+    assert not list(paths.RUN_TMP_ROOT.iterdir())
+    assert not paths.runs_dir(env).exists()
+    assert not paths.worktrees_dir(env).exists()
+    assert git(repo, "branch", "--list", env=env) == branches
+    assert git(repo, "worktree", "list", "--porcelain", env=env) == worktrees
+    assert not driver.commands
 
 
 @pytest.mark.parametrize("read_only", [False, True])

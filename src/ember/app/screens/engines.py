@@ -41,6 +41,7 @@ from ember import choices, holds, sandbox
 from ember.app import icons, theme
 from ember.app.screens.common import (
     CARD_MARGIN,
+    INFO_SPACING,
     FittingRow,
     chain_tab_order,
     clear_layout,
@@ -801,6 +802,17 @@ class _TableArea(QScrollArea):
             self.updateGeometry()
 
 
+def _filter_heading(row: QHBoxLayout, name: str, description: str) -> InfoTip:
+    """Add a filter's label and info button together, and return the button."""
+    heading = QHBoxLayout()
+    heading.setSpacing(INFO_SPACING)
+    heading.addWidget(QLabel(name))
+    info = InfoTip(name, description)
+    heading.addWidget(info)
+    row.addLayout(heading)
+    return info
+
+
 class _ModelPanel(Card):
     """One engine's model list, below the cards."""
 
@@ -925,13 +937,13 @@ class _ModelPanel(Card):
         row = QHBoxLayout(first)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(12)
-        row.addWidget(QLabel("Provider"))
-        self.provider_info = InfoTip(
+        row.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.provider_info = _filter_heading(
+            row,
             "Provider",
             "The OpenCode integration that serves the model. Ember lists the "
             "integrations you connected with /connect in OpenCode.",
         )
-        row.addWidget(self.provider_info)
         self.provider_picker = Picker()
         self.provider_picker.setAccessibleName("Provider")
         self.provider_picker.add_option("All providers", None)
@@ -943,13 +955,11 @@ class _ModelPanel(Card):
         row = QHBoxLayout(second)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(12)
-        row.addWidget(QLabel("Tools"))
-        row.addWidget(
-            InfoTip(
-                "Tools",
-                "Shows only models that take tool calls. A worker needs tool "
-                "calls to read and change files.",
-            )
+        _filter_heading(
+            row,
+            "Tools",
+            "Shows only models that take tool calls. A worker needs tool "
+            "calls to read and change files.",
         )
         self.tools_switch = Switch()
         self.tools_switch.setChecked(True)
@@ -964,13 +974,12 @@ class _ModelPanel(Card):
         row = QHBoxLayout(first)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(12)
-        row.addWidget(QLabel("Max price"))
-        row.addWidget(
-            InfoTip(
-                "Max price",
-                "No more than this input price per million tokens. Models that "
-                "show Subscription always pass.",
-            )
+        row.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        _filter_heading(
+            row,
+            "Max price",
+            "No more than this input price per million tokens. Models that "
+            "show Subscription always pass.",
         )
         self.price_picker = Picker()
         self.price_picker.setAccessibleName("Max price")
@@ -983,13 +992,11 @@ class _ModelPanel(Card):
         row = QHBoxLayout(second)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(12)
-        row.addWidget(QLabel("Min context"))
-        row.addWidget(
-            InfoTip(
-                "Min context",
-                "At least this many tokens of context: how much text the model "
-                "takes in at once.",
-            )
+        _filter_heading(
+            row,
+            "Min context",
+            "At least this many tokens of context: how much text the model "
+            "takes in at once.",
         )
         self.context_picker = Picker()
         self.context_picker.setAccessibleName("Min context")
