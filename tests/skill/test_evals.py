@@ -6,6 +6,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -3861,3 +3862,54 @@ def test_gapcheck_reply_stub_checks_the_saved_brief(
         assert made["schema_version"] == 3
         assert made["checked_plan"] == previous.snapshot(gap_plan.load(plan))
         assert made["checked_plan"]["kind"] == "flow"
+
+
+def test_the_fixture_clock_follows_the_time_the_fixtures_are_made(
+    tmp_path: Path,
+) -> None:
+    """Without a fixed clock, dated ids and times are a few minutes old."""
+    environment = {
+        key: value for key, value in os.environ.items() if key != "EMBER_EVAL_BEGAN"
+    }
+    before = time.time()
+    result = subprocess.run(
+        ["bash", "skill/evals/_stubs/generate.sh", "replies", str(tmp_path / "made")],
+        cwd=TOP,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    began = float((tmp_path / "made/_stubs/replies/began").read_text())
+    assert before - 240 <= began <= time.time() - 180
+    assert began % 60 == 0
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(began))
+    replies = tmp_path / "made/panel-progress-reported/files/.ember-eval/replies"
+    texts = [path.read_text() for path in replies.iterdir() if path.is_file()]
+    assert any(f"panel-{stamp}-aaaaa0" in text for text in texts)
+    assert not any("20261102" in text for text in texts)
+    # The generated run records are dated from the same clock.
+    run_id = "codex-" + time.strftime("%Y%m%d-%H%M%S", time.gmtime(began + 1))
+    started = tmp_path / "made/provider-outage/files/.ember-eval/replies/run-start.out"
+    assert started.read_text().startswith(f"run {run_id}-000001\n")
+    state = json.loads(
+        (
+            tmp_path / "made/turn-results-counted/files/.ember-eval/state.json"
+        ).read_text()
+    )
+    assert state["runs"][f"{run_id}-000001"]["started_at"] == began + 1
+    assert all(name.startswith(f"codex-{stamp[:9]}") for name in state["runs"])
+
+
+def test_templates_take_the_fixture_clock(tmp_path: Path, env: dict[str, str]) -> None:
+    work = case("flow-lead-stop-waits", tmp_path, env)
+    assert (work.eval / "replies/began").read_text().strip() == "1793620800"
+    raw = (work.eval / "replies/flow-watch.1.json").read_text()
+    assert '"at": "{{BEGAN_LATER}}"' in raw and "{{STAMP_LATER}}" in raw
+    result = work.emb("flow", "--watch", "flow-id", "--json")
+    assert result.returncode == 0, result.stderr
+    document = json.loads(result.stdout)
+    assert document["stops"][0]["at"] == 1793620860.0
+    assert "codex-20261102-120100-bbbbbb" in result.stdout
+    assert "{{" not in result.stdout

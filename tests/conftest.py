@@ -63,7 +63,8 @@ def generated_eval_fixtures(tmp_path_factory: pytest.TempPathFactory) -> Path:
     result = subprocess.run(
         ["bash", "skill/evals/_stubs/generate.sh", "all", str(folder)],
         cwd=top,
-        env=os.environ.copy(),
+        # A fixed fixture clock keeps the generated ids and times the same.
+        env={**os.environ, "EMBER_EVAL_BEGAN": "1793620800"},
         capture_output=True,
         text=True,
         check=False,
