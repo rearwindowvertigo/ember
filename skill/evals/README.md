@@ -60,6 +60,15 @@ third owner reply. The runner sends one reply per question turn.
 
 The folder name starts with an underscore, so it is not a case.
 
+Dated ids and times in generated and hand-written replies follow the
+fixture clock. `make_replies.py` sets it to three minutes before the minute
+the fixtures are generated, or to `EMBER_EVAL_BEGAN` in epoch seconds, and
+writes it to `replies/began`. A hand-written reply names it with the
+templates `{{BEGAN}}`, `{{STAMP}}`, `{{STARTED}}`, `{{BEGAN_LATER}}` and
+`{{STAMP_LATER}}`, which `stub.py` describes. A record that a case shows as
+running is therefore a few minutes old on the day the case runs. The kit's
+tests generate their fixtures with `EMBER_EVAL_BEGAN=1793620800`.
+
 `place-files.sh`, run in an empty working directory, runs `install.sh`,
 which:
 

@@ -23,7 +23,13 @@ and the number of earlier calls on that route: the first of
 Templates replace `{{ID}}`, `{{RUN}}`, `{{BRANCH}}`, `{{WORKTREE}}`,
 `{{WORKTREES}}`, `{{TIP}}`, `{{HEAD}}`, `{{SHORT_HEAD}}`,
 `{{TARGET}}`, `{{EVAL}}`, `{{FLOW}}`, `{{PANEL}}`, `{{PLAN}}`, `{{DIR}}`
-`{{SUMMARY}}` and `{{SKILL_VERSION}}` (the claim's `--skill` value). A folder
+`{{SUMMARY}}` and `{{SKILL_VERSION}}` (the claim's `--skill` value), and the
+fixture clock's `{{BEGAN}}` (epoch seconds), `{{STAMP}}` (its id time in
+UTC), `{{STARTED}}` (its local ISO time), and `{{BEGAN_LATER}}` and
+`{{STAMP_LATER}}` one minute after it. `"{{BEGAN}}"` and `"{{BEGAN_LATER}}"`
+in quotes are replaced with the number, so a JSON template stays valid JSON.
+The clock is the generated `replies/began`, or three minutes before the
+current minute without it. A folder
 named `pycache` in a tree is placed as
 `__pycache__` and a name ending in `.placeholder` loses that ending, which the
 repository's ignore rules would otherwise leave out of the kit.
@@ -107,6 +113,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
@@ -326,6 +333,32 @@ def part(base: Path | None, suffix: str) -> Path | None:
     return path if path.exists() else None
 
 
+def clock_variables() -> dict[str, str]:
+    """Return the template values of the fixture clock.
+
+    Returns:
+        `BEGAN`, `STAMP` and `STARTED` for the clock, and `BEGAN_LATER` and
+        `STAMP_LATER` for one minute after it.
+    """
+    try:
+        began = float((REPLIES / "began").read_text())
+    except OSError, ValueError:
+        began = float(int(time.time()) // 60 * 60 - 180)
+
+    def stamp(moment: float) -> str:
+        return time.strftime("%Y%m%d-%H%M%S", time.gmtime(moment))
+
+    return {
+        "BEGAN": f"{began:.1f}",
+        "BEGAN_LATER": f"{began + 60:.1f}",
+        "STAMP": stamp(began),
+        "STAMP_LATER": stamp(began + 60),
+        "STARTED": datetime.datetime.fromtimestamp(began)
+        .astimezone()
+        .isoformat(timespec="seconds"),
+    }
+
+
 def render(text: str, variables: dict[str, str]) -> str:
     """Fill a template.
 
@@ -337,6 +370,12 @@ def render(text: str, variables: dict[str, str]) -> str:
         The text with each `{{NAME}}` replaced; an unknown name becomes
         `<name>`.
     """
+    # A clock time in quotes is a number: a JSON template stays valid JSON.
+    text = re.sub(
+        r'"\{\{(BEGAN(?:_LATER)?)\}\}"',
+        lambda match: variables.get(match.group(1), match.group(0)),
+        text,
+    )
     return re.sub(
         r"\{\{([A-Z_]+)\}\}",
         lambda match: variables.get(match.group(1), f"<{match.group(1).lower()}>"),
@@ -1530,6 +1569,7 @@ def record_variables(args: list[str], state: dict[str, Any]) -> dict[str, str]:
     if args and args[0] == "panel":
         panel_id = option(args, "--status") or option(args, "--recover") or panel_id
     variables = {
+        **clock_variables(),
         "FLOW": flow_id,
         "PANEL": panel_id,
         "PLAN": str(Path(plan_path).expanduser().resolve()) if plan_path else "",

@@ -34,9 +34,9 @@
       "status": "stopped",
       "reason": "needs the lead",
       "round": 0,
-      "writer_run": "codex-20261102-120100-bbbbbb",
-      "branch": "ember/codex/codex-20261102-120100-bbbbbb",
-      "worktree": "{{WORKTREES}}/codex-20261102-120100-bbbbbb",
+      "writer_run": "codex-{{STAMP_LATER}}-bbbbbb",
+      "branch": "ember/codex/codex-{{STAMP_LATER}}-bbbbbb",
+      "worktree": "{{WORKTREES}}/codex-{{STAMP_LATER}}-bbbbbb",
       "merge_commit": null,
       "outside_files": [],
       "cleanup": [],
@@ -70,7 +70,7 @@
   "stops": [
     {
       "seq": 1,
-      "at": 1793620860.0,
+      "at": "{{BEGAN_LATER}}",
       "kind": "lead_stop",
       "task": "strict",
       "status": "stopped",

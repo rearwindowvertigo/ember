@@ -1,7 +1,14 @@
-"""Generate canned replies with Ember's records and commands."""
+"""Generate canned replies with Ember's records and commands.
+
+Dated ids and times in the replies follow the fixture clock (`fixture_began`),
+so a record a case shows as running is a few minutes old on the day the case
+runs.
+"""
 
 import argparse
 import json
+import os
+import time
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import asdict, dataclass, replace
 from io import StringIO
@@ -24,6 +31,33 @@ from ember.panels.members import Member
 from ember.panels.run import member_line
 from ember.runs import exits, record, steps
 from ember.runs.core import Core, RunError, StartOptions
+
+BEGAN_ENV = "EMBER_EVAL_BEGAN"
+"""The variable that fixes the fixture clock, in epoch seconds."""
+
+BEGAN_NAME = "_stubs/replies/began"
+"""The generated file that holds the fixture clock for the stub's templates."""
+
+FIXTURE_AGE = 180
+"""Seconds between the fixture clock and the minute the fixtures are made."""
+
+
+def fixture_began() -> float:
+    """Return the fixture clock: when the fixtures' records say they began.
+
+    Returns:
+        `EMBER_EVAL_BEGAN` when it is set; otherwise `FIXTURE_AGE` seconds
+        before the start of the current minute.
+    """
+    value = os.environ.get(BEGAN_ENV)
+    if value:
+        return float(value)
+    return float(int(time.time()) // 60 * 60 - FIXTURE_AGE)
+
+
+def fixture_stamp(offset: int = 0) -> str:
+    """Return the id time of the fixture clock plus `offset` seconds, in UTC."""
+    return time.strftime("%Y%m%d-%H%M%S", time.gmtime(fixture_began() + offset))
 
 
 def run_dry_run_replies(settings: dict[str, Any]) -> dict[str, str]:
@@ -469,7 +503,9 @@ def denied_path_replies() -> dict[str, str]:
 def panel_replies() -> dict[str, str]:
     """Build completion streams and three running-panel status snapshots."""
     replies: dict[str, str] = {}
-    panel_id = "panel-20261102-120000-aaaaa0"
+    began = fixture_began()
+    stamp = fixture_stamp()
+    panel_id = f"panel-{stamp}-aaaaa0"
     entries = [
         Member(engine, model, None, "option").entry(n)
         for n, (engine, model) in enumerate(
@@ -481,10 +517,9 @@ def panel_replies() -> dict[str, str]:
             1,
         )
     ]
-    began = 1793620800.0
     for n, member in enumerate(entries, 1):
         member.update(
-            run=f"{member['engine']}-20261102-120000-aaaaa{n}",
+            run=f"{member['engine']}-{stamp}-aaaaa{n}",
             status="answered" if n < 3 else "failed",
             seconds=30.0 + n,
             exit=0 if n < 3 else 80,
@@ -753,8 +788,8 @@ def gapcheck_replies() -> dict[str, str]:
             source="option" if named else "menu",
         )
         made["run"] = dict(
-            id="codex-20261102-120000-aaaaaa",
-            reply="{{EVAL}}/runs/codex-20261102-120000-aaaaaa/turn-1.md",
+            id=f"codex-{fixture_stamp()}-aaaaaa",
+            reply=f"{{{{EVAL}}}}/runs/codex-{fixture_stamp()}-aaaaaa/turn-1.md",
             exit=0,
             closed=True,
             close_error=None,
@@ -856,6 +891,7 @@ def generated_replies() -> dict[str, str]:
     """Return every generated reply and state file by its eval-relative path."""
     choices = choices_replies()
     return {
+        BEGAN_NAME: f"{fixture_began():.0f}\n",
         "turn-results-counted/files/.ember-eval/state.json": (
             json.dumps(turn_results_state(), indent=2) + "\n"
         ),
