@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.27.0](https://github.com/rearwindowvertigo/ember/compare/v0.26.2...v0.27.0) (2026-11-21)
+
+
+### Added
+
+* **engines:** show the Codex speed tier of a worker and let the owner set it ([c6144b7](https://github.com/rearwindowvertigo/ember/commit/c6144b75b5d3bfcda5733313a6eeb57c69230e94)), closes [#316](https://github.com/rearwindowvertigo/ember/issues/316)
+* **flows:** replace or withdraw a queued lead answer and change a flow's saved reviewer ([41e240a](https://github.com/rearwindowvertigo/ember/commit/41e240ae267ddff0f6eb68eef3ae222b4d90f9ba))
+* **flows:** take review answers during a wave ([41e240a](https://github.com/rearwindowvertigo/ember/commit/41e240ae267ddff0f6eb68eef3ae222b4d90f9ba))
+* **runs:** end a turn in which the engine waits for the provider ([6618e0c](https://github.com/rearwindowvertigo/ember/commit/6618e0c0d66da4301fac10585079c9cd917df327)), closes [#309](https://github.com/rearwindowvertigo/ember/issues/309)
+* **runs:** fall back to an owner-set list of models after a provider error ([ac49788](https://github.com/rearwindowvertigo/ember/commit/ac497885b99fa926e3010325f2cf33d15977356a)), closes [#312](https://github.com/rearwindowvertigo/ember/issues/312)
+
+
+### Fixed
+
+* **runs:** report what a dead engine printed and end a provider outage at exit 73 ([41e240a](https://github.com/rearwindowvertigo/ember/commit/41e240ae267ddff0f6eb68eef3ae222b4d90f9ba)), closes [#310](https://github.com/rearwindowvertigo/ember/issues/310)
+
 ## [0.26.2](https://github.com/rearwindowvertigo/ember/compare/v0.26.1...v0.26.2) (2026-11-20)
 
 
