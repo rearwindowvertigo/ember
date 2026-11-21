@@ -743,6 +743,35 @@ def test_check_tmp_dir_uses_full_id_and_private_mode(tmp_path: Path) -> None:
     assert not paths.remove_check_tmp_dir(flow, base=tmp_path)
 
 
+@pytest.mark.parametrize(
+    "operation", [paths.ensure_check_tmp_dir, paths.remove_check_tmp_dir]
+)
+def test_check_tmp_helpers_remove_read_only_directories(
+    tmp_path: Path, operation: Callable[..., object]
+) -> None:
+    flow = "flow-20261121-172129-05d358"
+    folder = paths.ensure_check_tmp_dir(flow, base=tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "saved").touch()
+    outside.chmod(0o555)
+    locked = folder / "fixture" / "locked"
+    locked.mkdir(parents=True)
+    (locked / "file").touch()
+    (locked / "link").symlink_to(outside)
+    locked.chmod(0o000)
+    (folder / "fixture").chmod(0o555)
+    folder.chmod(0o555)
+    try:
+        operation(flow, base=tmp_path)
+        assert folder.exists() == (operation is paths.ensure_check_tmp_dir)
+        assert not (folder / "fixture").exists()
+        assert stat.S_IMODE(outside.stat().st_mode) == 0o555
+        assert (outside / "saved").is_file()
+    finally:
+        outside.chmod(0o755)
+
+
 @pytest.mark.parametrize("kind", ["symlink", "file", "foreign"])
 def test_check_tmp_helpers_leave_unowned_entries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str

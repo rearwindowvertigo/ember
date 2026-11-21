@@ -355,6 +355,27 @@ def check_tmp_dir(flow_id: str, *, base: Path | None = None) -> Path:
     return (RUN_TMP_ROOT if base is None else base) / f"ember-{flow_id}"
 
 
+def _make_dirs_writable(name: str, dir_fd: int) -> None:
+    """Give the current user full access to each directory they own in a tree.
+
+    Entries are read relative to open directory descriptors and no symlink
+    is followed. Other users' directories and entries that cannot be read or
+    changed are left as they are.
+    """
+    try:
+        info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            return
+        mode = stat.S_IMODE(info.st_mode)
+        if mode & stat.S_IRWXU != stat.S_IRWXU:
+            os.chmod(name, mode | stat.S_IRWXU, dir_fd=dir_fd, follow_symlinks=False)
+        with _open_tmp_dir(name, dir_fd=dir_fd) as fd:
+            for entry in os.listdir(fd):
+                _make_dirs_writable(entry, fd)
+    except OSError:
+        return
+
+
 def _remove_check_dir(parent: int, folder: Path, *, dry_run: bool = False) -> bool:
     """Remove only a real check directory owned by the current user."""
     try:
@@ -364,7 +385,11 @@ def _remove_check_dir(parent: int, folder: Path, *, dry_run: bool = False) -> bo
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
         raise PermissionError(f"{folder} is not a directory owned by the current user")
     if not dry_run:
-        shutil.rmtree(folder.name, dir_fd=parent)
+        try:
+            shutil.rmtree(folder.name, dir_fd=parent)
+        except PermissionError:
+            _make_dirs_writable(folder.name, parent)
+            shutil.rmtree(folder.name, dir_fd=parent)
     return True
 
 
