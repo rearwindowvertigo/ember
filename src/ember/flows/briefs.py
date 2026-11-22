@@ -254,10 +254,9 @@ def review_brief(
             + indent(
                 "\n".join(f"{path} (task {other})" for path, other in shared), "    "
             )
-            + "\n\nThe writer limits forbid these edits. Ember did not stop the "
-            "task for them. Raise each one the task did not need as a must "
-            "finding. An edit the task needed is not a finding for breaking "
-            "the limit."
+            + "\n\nThe writer limits forbid these edits. Raise each one the task "
+            "did not need as a must finding. An edit the task needed is not a "
+            "finding for breaking the limit."
         )
     parts.append(
         "## The writer's report\n\n"

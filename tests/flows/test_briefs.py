@@ -326,9 +326,9 @@ def test_review_names_files_another_task_declares(task: Task) -> None:
     assert (
         "The writer changed these files, which another task in this wave "
         "declares:\n\n    src/b.py (task b)\n    src/c.py (task c)\n\n"
-        "The writer limits forbid these edits. Ember did not stop the task for "
-        "them. Raise each one the task did not need as a must finding. An edit "
-        "the task needed is not a finding for breaking the limit."
+        "The writer limits forbid these edits. Raise each one the task did not "
+        "need as a must finding. An edit the task needed is not a finding for "
+        "breaking the limit."
     ) in text
     assert text.index("In outside_files, give") < text.index("src/b.py (task b)")
 

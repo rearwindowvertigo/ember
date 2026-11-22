@@ -376,8 +376,8 @@ behaviour or user-facing wording the task did not ask for, in any file.
 A writer's change to a file that another task of its wave declares does
 not stop the task. The task's `shared_files` records each such file with
 the declaring task, and the review brief names them and asks for a `must`
-for each edit the task did not need. When both tasks changed the same
-lines, the later merge stops as `conflict`.
+for each edit the task did not need. When Git reports a conflict at the
+later task's merge, that task stops as `conflict`.
 
 `emb merge` checks a completed flow branch against the local `--into`
 target. With a matching flow record whose status is `done`, the flow tip

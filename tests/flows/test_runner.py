@@ -786,6 +786,17 @@ def test_same_wave_declared_file_is_recorded_and_reviewed(h: Harness) -> None:
     assert "shared_files" in flow["tasks"][1] and not flow["tasks"][1]["shared_files"]
 
 
+def test_both_writers_change_a_declared_file_and_the_later_merge_conflicts(
+    h: Harness,
+) -> None:
+    h.scripts_update(**{"Review of task a,": "@reply " + shared_reply()})
+    h.create([task("a", text="@write b first"), task("b", text="@write b second")])
+    first, second = h.run()["tasks"]
+    assert first["status"] == "merged" and len(first["reviews"]) == 1
+    assert first["shared_files"] == [{"file": "b", "task": "b"}]
+    assert second["status"] == "conflict"
+
+
 def test_outside_file_and_same_wave_merge_conflict(h: Harness) -> None:
     h.scripts_update(**{"a read-only review;": "@reply " + outside_reply(PASS)})
     h.create(
