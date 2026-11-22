@@ -865,7 +865,7 @@ def main(
         if not document.failure_model:
             print(
                 "WARNING: the plan has no failure model; "
-                "every unsettled case is reported as a gap",
+                "the check reports that as a gap of step 1",
                 file=err,
             )
         details = result["run"]

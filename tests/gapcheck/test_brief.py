@@ -111,9 +111,9 @@ def test_brief_contains_steps_schema_and_numbered_plan(
     assert loaded.flow is None
     assert not loaded.flow_problems
     assert (
-        "For each task, search for and name tests and callers outside the "
-        "declared files that reference what it changes, so the lead can "
-        "include them in the plan."
+        "For each task, search for tests and callers outside the declared "
+        "files that reference what it changes. Name one in a gap when the "
+        "task's change breaks it."
     ) in rendered
     assert "Do not redesign the plan" in rendered
     assert (
@@ -166,6 +166,27 @@ def test_paths_preserve_spaces_tabs_and_backslashes(tmp_path: Path) -> None:
     assert "repository in your own working folder" in rendered
     assert f"repository at {checkout}." not in rendered
     assert f"The plan ({path}), with line numbers:" in rendered
+
+
+def test_brief_states_when_a_gap_is_reported(tmp_path: Path) -> None:
+    path = tmp_path / "plan.md"
+    path.write_text("1. First\n2. Second\n")
+    text = brief.text(plan.load(path), str(tmp_path))
+    assert (
+        "A case the failure model settles is not a gap. Report a gap only when "
+        "you can state a case in which a writer who follows the plan as written "
+        "produces a wrong result or cannot finish, two tasks change the same "
+        "thing, or a test or caller outside a task's declared files breaks. "
+        "State that case in why. A step with no such case gets an empty list: "
+        "do not look for gaps to fill a step. One gap is reported whatever "
+        "this rule says: when the plan has no failure model, say so in the "
+        "first gap of step 1 with harm high."
+    ) in text
+    assert (
+        "For each task, search for tests and callers outside the declared "
+        "files that reference what it changes. Name one in a gap when the "
+        "task's change breaks it."
+    ) in text
 
 
 def test_brief_without_previous_leaves_out_earlier(tmp_path: Path) -> None:

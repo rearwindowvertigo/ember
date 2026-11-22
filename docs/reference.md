@@ -1803,8 +1803,14 @@ the clean detached worktree. Its temporary brief file is
 Ember runtime fallback. It is removed after the start returns or fails;
 the run keeps its own copy as `brief.md`.
 
-The brief asks the reviewer to search for and name tests and callers
-outside each task's declared files that reference what it changes.
+The brief asks the reviewer to search for tests and callers outside each
+task's declared files that reference what it changes, and to name one in a
+gap when the task's change breaks it.
+It asks for a gap only where the reviewer can state a case in which a
+writer who follows the plan produces a wrong result or cannot finish, two
+tasks change the same thing, or a test or caller outside a task's declared
+files breaks, and for an empty list for a step with no such case. A
+missing failure model is a gap of step 1 whatever that rule says.
 
 On every route, Ember also parses the document with the flow plan parser.
 A valid flow plan's brief includes `How this flow runs`, with the planner's
@@ -2098,7 +2104,7 @@ warnings, including those from a successful run. Then come the gap check's
 run, and at most one action line from the gap check. A failed close prints
 `WARNING: the run <id> stays open: <reason>; close it with emb run --close <id>`.
 When no failure model is present, the warning is
-`WARNING: the plan has no failure model; every unsettled case is reported as a gap`.
+`WARNING: the plan has no failure model; the check reports that as a gap of step 1`.
 
 A non-zero run exit keeps the run open. Its follow-up names
 `emb gapcheck --plan <plan> --reply <run folder>/turn-1.md --brief-file <run folder>/brief.md` only when the

@@ -190,16 +190,17 @@ plan once with all of them. For a flow, run
 comparison lines (or `gapcheck_comparison` in JSON):
 
 - `repeat needed` names each structural change: tasks added or removed,
-  changed `files` or `after`, or changed waves. Run a whole-plan check.
+  changed `files` or `after`, or changed waves. Run the plan's one repeat
+  check. When the plan has had it, follow Repeat checks below.
 - `lead judgement` lists changed task text, context or failure model and
   the affected task ids. Judge whether these change scope or behaviour
-  enough to need a whole-plan check. Changes only from writing recorded
+  enough to need the repeat check. Changes only from writing recorded
   answers into that text are the expected result of the step above. They
   do not by themselves call for a repeat check. For example, writing a
   recorded answer's timeout into the task text alone needs no repeat.
-  A `repeat needed` line still calls for a whole-plan check when the change
+  A `repeat needed` line still calls for the repeat check when the change
   follows from a recorded answer. For example, adding a file the answer
-  names to a task's `files` needs a whole-plan check.
+  names to a task's `files` needs it.
 - An incomplete earlier check or a result without a saved flow baseline
   reports `repeat needed`. For an incomplete check, complete it or run a
   whole-plan check without passing that result as `--previous`.
@@ -212,10 +213,17 @@ JSON `repeat_needed` is `true` for a recommendation and `null` otherwise;
 `reasons`, `judge` and `recovery` carry the same findings as the text.
 Results save a versioned checked plan; older results still load.
 For a Workflow, judge material changes to scope, files, dependencies or
-ordering yourself and repeat with the same `--previous` when needed.
+ordering yourself and run the one repeat check with the same `--previous`
+when needed.
 The reviewer finds gaps; it decides nothing.
 
 ## Repeat checks
+
+Run at most one repeat check of a plan. Record that check's answers and
+write them into the plan; do not check the plan again for those changes.
+When the dry run reports `repeat needed` after the one repeat check, or
+your own judgement of a Workflow plan calls for another, say so to the
+owner and start the flow or the Workflow only on the owner's word.
 
 Every repeat check passes the last result, with its answers recorded, as
 `--previous <scratch>/gapcheck-<plan stem>-<n>.json`, and saves its own
