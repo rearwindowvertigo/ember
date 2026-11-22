@@ -169,14 +169,15 @@ def text(
             "same time, a missing order between dependent tasks, or a missing check. "
             "A case the failure model settles is not a gap. Report a gap only when "
             "you can state a case in which a writer who follows the plan as written "
-            "produces a wrong result, two tasks change the same thing, or a test or "
-            "caller outside a task's declared files breaks. State that case in why. "
-            "A step with no such case gets an empty list: do not look for gaps to "
-            "fill a step. When the plan has no "
-            "failure model, say so in the first gap of step 1 with harm high.",
-            "For each task, search for and name tests and callers outside the "
-            "declared files that reference what it changes, so the lead can "
-            "include them in the plan.",
+            "produces a wrong result or cannot finish, two tasks change the same "
+            "thing, or a test or caller outside a task's declared files breaks. "
+            "State that case in why. A step with no such case gets an empty list: "
+            "do not look for gaps to fill a step. One gap is reported whatever "
+            "this rule says: when the plan has no failure model, say so in the "
+            "first gap of step 1 with harm high.",
+            "For each task, search for tests and callers outside the declared "
+            "files that reference what it changes. Name one in a gap when the "
+            "task's change breaks it.",
             "Change, stage, commit or stash nothing.",
             "",
             "For each gap give these four fields:",

@@ -401,7 +401,7 @@ def test_single_step_without_failure_model(
     assert code == 0 and not json.loads(out)["failure_model"]
     assert err == (
         "WARNING: the plan has no failure model; "
-        "every unsettled case is reported as a gap\n"
+        "the check reports that as a gap of step 1\n"
     )
 
 
