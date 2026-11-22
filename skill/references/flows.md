@@ -373,6 +373,13 @@ whether each edit was needed and raise an unneeded edit as `must` or
 finding just for being outside the list. Reviewers also check changes to
 behaviour or user-facing wording the task did not ask for, in any file.
 
+A writer's change to a file that another task of its wave declares does
+not stop the task. The review brief names each such file with the
+declaring task, and the reviewer judges it as an outside edit. The writer
+brief forbids such a change unless the task text names the file as the
+task's to change. When Git reports a conflict at the
+later task's merge, that task stops as `conflict`.
+
 `emb merge` checks a completed flow branch against the local `--into`
 target. With a matching flow record whose status is `done`, the flow tip
 must contain the target tip (`git merge-base --is-ancestor <target tip>

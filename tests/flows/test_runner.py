@@ -759,13 +759,45 @@ def test_no_change_initial_or_fix(h: Harness, text: str) -> None:
     )
 
 
-def test_same_wave_declaration_violation_stops_before_review(h: Harness) -> None:
-    h.create([task("a", text="@write b wrong"), task("b")])
+def shared_reply() -> str:
+    value = json.loads(PASS)
+    value["outside_files"] = [
+        {"file": "b", "needed": True, "reason": "The task needs this edit"}
+    ]
+    return json.dumps(value)
+
+
+def _review_brief(h: Harness, name: str) -> str:
+    folder = record.folder(h.id, h.env) / "briefs"
+    return sorted(folder.glob(f"{name}-review-*.md"))[-1].read_text()
+
+
+def test_same_wave_declared_file_is_named_in_the_review_brief(h: Harness) -> None:
+    h.scripts_update(**{"Review of task a,": "@reply " + shared_reply()})
+    h.create(
+        [
+            task("a", text="@write b wrong"),
+            task("b", text="@write c value", files=["b", "c"]),
+        ]
+    )
     flow = h.run()
     item = flow["tasks"][0]
-    assert item["reason"] == "changed b, which task b in this wave declares"
-    assert not item["reviews"]
+    assert item["status"] == "merged" and len(item["reviews"]) == 1
+    assert item["outside_files"] == ["b"]
+    assert "    b (task b)" in _review_brief(h, "a")
     assert flow["tasks"][1]["status"] == "merged"
+    assert "another task in this wave declares" not in _review_brief(h, "b")
+
+
+def test_both_writers_change_a_declared_file_and_the_later_merge_conflicts(
+    h: Harness,
+) -> None:
+    h.scripts_update(**{"Review of task a,": "@reply " + shared_reply()})
+    h.create([task("a", text="@write b first"), task("b", text="@write b second")])
+    first, second = h.run()["tasks"]
+    assert first["status"] == "merged" and len(first["reviews"]) == 1
+    assert "    b (task b)" in _review_brief(h, "a")
+    assert second["status"] == "conflict"
 
 
 def test_outside_file_and_same_wave_merge_conflict(h: Harness) -> None:
@@ -2157,7 +2189,8 @@ def test_changed_files_include_both_rename_sides(h: Harness) -> None:
     assert item["outside_files"] == ["README.md"]
 
 
-def test_recovered_turn_checks_original_wave_declarations(h: Harness) -> None:
+def test_recovered_turn_records_original_wave_declarations(h: Harness) -> None:
+    h.scripts_update(**{"Review of task a,": "@reply " + shared_reply()})
     h.create([task("a"), task("b")])
     flow, writer = started_writer(h)
     worktree = Path(writer.worktree)
@@ -2170,8 +2203,39 @@ def test_recovered_turn_checks_original_wave_declarations(h: Harness) -> None:
     flow["tasks"][1].update(status="dropped", wave=2)
     record.save(flow, h.env)
     item = h.run()["tasks"][0]
-    assert item["reason"] == "changed b, which task b in this wave declares"
-    assert item["reviews"] == []
+    assert "    b (task b)" in _review_brief(h, "a")
+    assert len(item["reviews"]) == 1
+
+
+def test_review_answer_reviews_a_task_stopped_for_a_declared_file(h: Harness) -> None:
+    h.scripts_update(**{"Review of task a,": "@reply " + shared_reply()})
+    h.create([task("a"), task("b")])
+    flow, writer = started_writer(h)
+    worktree = Path(writer.worktree)
+    (worktree / "b").write_text("shared\n")
+    git(worktree, "add", "b", env=h.env)
+    git(worktree, "commit", "-m", "shared", env=h.env)
+    head = git(worktree, "rev-parse", "HEAD", env=h.env).strip()
+    flow["tasks"][0].update(
+        status="stopped",
+        reason="changed b, which task b in this wave declares",
+        writer_run=writer.id,
+        branch=writer.branch,
+        worktree=writer.worktree,
+        task_base=runs.first_base(writer),
+        head=head,
+        changed_files=["a", "b"],
+        outside_files=["b"],
+        wave=1,
+        wave_declarations={"b": ["b"]},
+    )
+    flow["tasks"][1].update(status="dropped", wave=1)
+    record.save(flow, h.env)
+    h.answer("review")
+    item = h.run()["tasks"][0]
+    assert item["status"] == "merged" and len(item["reviews"]) == 1
+    assert "    b (task b)" in _review_brief(h, "a")
+    assert _refusals(h) == []
 
 
 def test_saved_answer_effect_closes_once_after_recovery(h: Harness) -> None:

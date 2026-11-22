@@ -57,7 +57,8 @@ _LIMITS = (
     "file outside your list that no other task in this wave changes, make it, "
     'check the code that uses it, and list it under "Outside files" in your '
     "final message with one line on why. Never change a file another task in "
-    'this wave changes; if the task needs that, list it under "Not done".'
+    "this wave changes, unless the task text names that file as yours to "
+    'change; if the task needs that otherwise, list it under "Not done".'
 )
 
 
@@ -174,8 +175,12 @@ def review_brief(
     merged_siblings: Sequence[tuple[str, str, str]] = (),
     corrections: Sequence[tuple[int, str]] = (),
     writer_check: Sequence[Sequence[str]] | None = None,
+    shared: Sequence[tuple[str, str]] = (),
 ) -> str:
     """Build a review brief with indented evidence and the packaged reply schema.
+
+    `shared` holds each changed file that another task of the wave declares,
+    with that task's id.
 
     `standing` holds the `sandbox.read` paths, listed as sources before the
     plan's `read`.
@@ -242,6 +247,18 @@ def review_brief(
             "set needed to whether the task needed the edit, and explain why in "
             "a one-line reason. Raise an edit the task did not need as a must "
             "or should finding under the review bar."
+        )
+    if shared:
+        parts.append(
+            "The writer changed these files, which another task in this wave "
+            "declares:\n\n"
+            + indent(
+                "\n".join(f"{path} (task {other})" for path, other in shared), "    "
+            )
+            + "\n\nJudge each as an outside edit. Raise one the task did not "
+            "need as a must or should finding under the review bar. One the "
+            "task needed, or the task text allows, is not a lead finding for "
+            "being in another task's files."
         )
     parts.append(
         "## The writer's report\n\n"

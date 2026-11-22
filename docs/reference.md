@@ -2423,10 +2423,10 @@ fresh budgets and replacement writers.
 
 An unchanged first turn stops with `the writer made no change`; an
 unchanged correction stops with `the fix made no change`. Changed paths
-include both sides of renames. A change to another task's declaration in
-the same wave stops before review with `changed <file>, which task <id> in
-this wave declares`. Other outside paths are recorded and sent to the
-reviewer. A failed run stops with Core's diagnostic and action line. An
+include both sides of renames. Paths outside the task's declarations are
+recorded and sent to the reviewer. A change to another task's declaration
+in the same wave does not stop the task; the review brief names the file
+with that task. A failed run stops with Core's diagnostic and action line. An
 unlaunched captured writer stops with a worker-replacement instruction.
 Unreadable reviews, exhausted fix rounds, lead findings and fix verdicts
 without blocking findings stop as described under Reviews. Each stop
@@ -2589,10 +2589,15 @@ named without trying to fix them.
 The limits permit needed changes to files outside the task's list when no
 other task in the wave changes them, with a check of their callers and an
 `Outside files` report explaining each change. Files another task in the
-wave changes remain forbidden. The review brief repeats these writer
+wave changes remain forbidden unless the task text names the file as the
+task's to change. The review brief repeats these writer
 limits and asks the reviewer to judge whether each outside edit was needed,
 using `must` or `should` for findings about its need. An allowed outside
 edit is not a `lead` finding merely for being outside the declared files.
+When the writer changed a file another task in the wave declares, the
+review brief lists each such file with that task's id. The reviewer judges
+it as an outside edit; one the task needed or the task text allows is not
+a `lead` finding for being in another task's files.
 The review brief also asks for findings on changes to behaviour or
 user-facing wording that the task text does not ask for, in any file.
 The review bar's severity rules also apply.
@@ -2717,10 +2722,11 @@ the Git rule and closing report. Review rounds after the first include
 that earlier numbered must list and the fix diff; they check those
 findings and the fix only. A new must or lead must be caused by the fix.
 
-After a writer or fix turn, a changed file declared by another task in the
-same wave stops the task before review. Other changed files outside the
-task's declarations are recorded in `outside_files` and included in the
-review brief for the reviewer to judge.
+After a writer or fix turn, changed files outside the task's declarations
+are recorded in `outside_files` and included in the review brief for the
+reviewer to judge. A changed file declared by another task in the same
+wave is one of them; the review brief names it with that task. Two tasks' edits to one file meet at the
+merge, where a conflict stops the later task as `conflict`.
 
 ### Lead stops
 

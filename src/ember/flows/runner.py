@@ -788,17 +788,6 @@ class _Runner:
             outside_files=outside,
             turn_pending=False,
         )
-        for other, files in self.declarations(task).items():
-            for path in changed:
-                if any(plan.overlaps(path, f) for f in files):
-                    self.change(
-                        task,
-                        status="stopped",
-                        reason=(
-                            f"changed {path}, which task {other} in this wave declares"
-                        ),
-                    )
-                    return False
         return True
 
     def start(self, task: dict[str, Any], role: str, path: str) -> bool:
@@ -978,6 +967,12 @@ class _Runner:
                 head=task["head"],
                 changed=task["changed_files"],
                 outside=task["outside_files"],
+                shared=[
+                    (path, other)
+                    for other, files in self.declarations(task).items()
+                    for path in task["changed_files"]
+                    if any(plan.overlaps(path, f) for f in files)
+                ],
                 wave_files=self.other_files(task),
                 writer_report=report,
                 writer_check=task["writer_check"],
