@@ -1220,7 +1220,7 @@ complete `next:` or `owner:` line, or null. The first matching row applies:
 | The run has a `parent` | `parent` | null |
 | Pending owner actions recorded | `owner` | null |
 | Closed and either read-only, without commits, with its last commit contained in its base branch, or with no branch left in its checkout; claim status is `gone` | `done` | null |
-| Closed under the same conditions, with an open or unknown claim status, or no claim | `finish` | `next: emb choices --finish <claim>`; null without a claim |
+| Closed under the same conditions, with an open or unknown claim status, or no claim | `finish` | `next: emb choices --finish <claim>`; null without a claim, and null while another record under the claim is unfinished |
 | Closed with uncontained editing commits on a branch that still exists | `merge` | Verify and merge line below |
 | Status `failed`, or a turn not `sent` whose `last_exit` is nonzero | `failed` | The exit line for `last_exit` and its saved variant; older records fall back to the provider kind; null for 0 or null, and the exit-1 line for an unknown code |
 | Status `starting`, or turn 0 | `starting` | `next: emb run --status <run>` |
@@ -1228,6 +1228,11 @@ complete `next:` or `owner:` line, or null. The first matching row applies:
 | Turn `sent`, or result collection remains unfinished | `recover` | `next: emb run --recover <run>` |
 | Editing run with commits whose last commit is not contained in its base branch | `merge` | Verify and merge line below |
 | Otherwise | `close` | `next: emb run --close <run>` |
+
+Another record under the claim is unfinished when it is a run without a
+`parent` that is not closed, a flow with status `starting`, `running`,
+`checking` or `stopped`, a `done` flow whose branch still exists, or a
+running panel.
 
 The `done` step appears in text and JSON status with no `next:` line.
 `session_state` still reports the tmux session's state. Runs without claim

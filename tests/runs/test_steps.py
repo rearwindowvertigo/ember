@@ -155,6 +155,56 @@ def test_open_or_unknown_claim_stays_finish(run: record.Run, state: str) -> None
         assert not paths.settings_db_path(run.env).exists()
 
 
+def _missing(directory: str, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args, 1, "", "")
+
+
+@pytest.mark.parametrize(
+    ("kind", "fields", "git", "held"),
+    [
+        ("flow", {"status": "stopped"}, _git, True),
+        ("flow", {"status": "running"}, _git, True),
+        ("flow", {"status": "done"}, _git, True),
+        ("flow", {"status": "done"}, _missing, False),
+        ("flow", {"status": "cancelled"}, _git, False),
+        ("flow", {"status": "stopped", "claim": "other"}, _git, False),
+        ("panel", {"status": "running"}, _git, True),
+        ("panel", {"status": "done"}, _git, False),
+        ("run", {"status": record.WAITING}, _git, True),
+        ("run", {"status": record.CLOSED}, _git, False),
+        ("run", {"status": record.WAITING, "parent": {"command": "flow"}}, _git, False),
+        ("run", {"status": record.WAITING, "claim": "other"}, _git, False),
+    ],
+)
+def test_finish_line_waits_for_other_records_of_the_claim(
+    run: record.Run,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    fields: dict[str, Any],
+    git: Any,  # noqa: ANN401
+    held: bool,
+) -> None:
+    from ember.flows import record as flows
+    from ember.panels import record as panels
+
+    document = {"claim": "claim-a", "main": "main", "branch": "ember/flow/f", **fields}
+    other = replace(run, id="codex-20261105-120001-abcdef", **fields)
+    monkeypatch.setattr(
+        record, "list_runs", lambda env: ([run, other] if kind == "run" else [run], [])
+    )
+    monkeypatch.setattr(
+        flows, "list_flows", lambda env: ([document] if kind == "flow" else [], [])
+    )
+    monkeypatch.setattr(
+        panels, "list_panels", lambda env: ([document] if kind == "panel" else [], [])
+    )
+    closed = replace(run, status=record.CLOSED)
+    assert steps.derive(closed, core.MISSING, False, git) == (
+        "finish",
+        None if held else "next: emb choices --finish claim-a",
+    )
+
+
 @pytest.mark.parametrize("error", [OSError, sqlite3.OperationalError])
 def test_unreadable_claim_stays_finish(
     run: record.Run, monkeypatch: pytest.MonkeyPatch, error: type[Exception]

@@ -38,7 +38,7 @@ def derive(
             or _merged(run)
             or not _branch_exists(run, git)
         ):
-            return _finish(run)
+            return _finish(run, git)
         return "merge", _verify(run, git)
     if run.status == record.FAILED or (
         run.turn_state != record.SENT and run.last_exit not in (None, 0)
@@ -242,8 +242,65 @@ def _branch_exists(
     return result.returncode not in (1, 128)
 
 
-def _finish(run: Run) -> tuple[str, str | None]:
-    """Return the closed run's step and claim-finish line."""
+def _claim_in_use(
+    run: Run, git: Callable[..., subprocess.CompletedProcess[str]]
+) -> bool:
+    """Return whether another record under the run's claim is unfinished.
+
+    Another run with the claim counts while it is not closed and has no
+    parent. A flow counts while it has not ended, and after `done` while its
+    branch exists. A panel counts while it is running. A record that cannot
+    be read does not count.
+    """
+    from ember.flows import record as flows
+    from ember.panels import record as panels
+    from ember.runs.core import RunError
+
+    try:
+        others = record.list_runs(run.env)[0]
+        listed = flows.list_flows(run.env)[0]
+        running = panels.list_panels(run.env)[0]
+    except OSError:
+        return False
+    if any(
+        other.id != run.id
+        and other.claim == run.claim
+        and other.parent is None
+        and other.status != record.CLOSED
+        for other in others
+    ):
+        return True
+    for flow in listed:
+        if flow.get("claim") != run.claim:
+            continue
+        if flow["status"] in ("starting", "running", "checking", "stopped"):
+            return True
+        if flow["status"] == "done":
+            try:
+                result = git(
+                    flow["main"],
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    f"refs/heads/{flow['branch']}",
+                )
+            except RunError, OSError, subprocess.SubprocessError:
+                return True
+            if result.returncode == 0:
+                return True
+    return any(
+        panel.get("claim") == run.claim and panel["status"] == "running"
+        for panel in running
+    )
+
+
+def _finish(
+    run: Run, git: Callable[..., subprocess.CompletedProcess[str]]
+) -> tuple[str, str | None]:
+    """Return the closed run's step and claim-finish line.
+
+    The line is withheld while another record under the claim is unfinished.
+    """
     if run.claim is None:
         return "finish", None
     try:
@@ -256,6 +313,8 @@ def _finish(run: Run) -> tuple[str, str | None]:
                     return "done", None
     except OSError, sqlite3.Error:
         pass
+    if _claim_in_use(run, git):
+        return "finish", None
     return "finish", f"next: emb choices --finish {shlex.quote(run.claim)}"
 
 
