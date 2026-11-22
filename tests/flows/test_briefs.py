@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 from ember.flows import briefs, verdict
+from ember.flows.plan import from_json, writer_check_json
 from runs.stub_engine import make_env  # pyrefly: ignore[missing-import]
 
 if TYPE_CHECKING:
@@ -143,19 +144,35 @@ def test_writer_fix_and_send_checks(
     assert sections == [expected] * 3
 
 
-@pytest.mark.parametrize("check", [(), ("make", "check all")])
 @pytest.mark.parametrize(
-    "writer_check",
-    [(), (("pytest", "two words"), ("ruff", ""), ("printf", "%s", "a\nb"))],
+    ("check_arg", "separate_check"),
+    [(None, False), ("other words", True), ("two words", False)],
 )
+@pytest.mark.parametrize("writer_scope", ["plan", "task", "empty"])
 def test_resolved_writer_checks_in_briefs(
-    task: Task, check: tuple[str, ...], writer_check: tuple[tuple[str, ...], ...]
+    tmp_path: Path, check_arg: str | None, separate_check: bool, writer_scope: str
 ) -> None:
-    document = cast(
-        "Plan", SimpleNamespace(context="", failure_model="", read=(), check=check)
+    task_data: dict[str, object] = {
+        "id": "a",
+        "subject": "feat: parse input",
+        "task": "Read input",
+        "files": ["src/a.py"],
+    }
+    raw: dict[str, object] = {"dir": str(tmp_path), "tasks": [task_data]}
+    if check_arg is not None:
+        raw["check"] = ["pytest", check_arg]
+    target = raw if writer_scope == "plan" else task_data
+    target["writer_check"] = (
+        []
+        if writer_scope == "empty"
+        else [["ruff", ""], ["pytest", "two words"], ["printf", "%s", "a\nb"]]
     )
+    document = from_json(raw, tmp_path / "plan.json")
+    task = document.task("a")
+    check = list(document.check)
+    writer_check = writer_check_json(document.writer_check_for(task))
     commands = (
-        "\n\n    pytest 'two words'\n    ruff ''\n    printf %s $'a\\nb'"
+        "\n\n    ruff ''\n    pytest 'two words'\n    printf %s $'a\\nb'"
         if writer_check
         else ""
     )
@@ -164,9 +181,9 @@ def test_resolved_writer_checks_in_briefs(
         if writer_check
         else "Run no writer check command."
     )
-    if check:
+    if check and (separate_check or writer_scope == "empty"):
         instruction += (
-            "\n\nDo not run the flow's check command `make 'check all'`. "
+            f"\n\nDo not run the flow's check command `pytest '{check_arg}'`. "
             "The flow runs it on the merged result after the wave."
         )
     messages = [
@@ -184,7 +201,7 @@ def test_resolved_writer_checks_in_briefs(
             "Search for tests and callers of what changed" in message
         )
 
-    def review(commands: tuple[tuple[str, ...], ...] | None) -> str:
+    def review(commands: list[list[str]] | None) -> str:
         return briefs.review_brief(
             FLOW,
             document,
@@ -205,7 +222,7 @@ def test_resolved_writer_checks_in_briefs(
         else "The writer was told to run no check command."
     )
     wave_check = (
-        "The flow runs its check command `make 'check all'` on the merged result "
+        f"The flow runs its check command `pytest '{check_arg}'` on the merged result "
         "after the wave."
         if check
         else "The flow has no check command."

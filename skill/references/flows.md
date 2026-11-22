@@ -66,10 +66,16 @@ Stall after (`flow.stall`) unless you pass `--stall`.
   runs the wave check once per task; wave count multiplies check time.
 - `writer_check`: optional default list of check commands for writers. Each
   command is an argv list with the same rules as `check`. A task can set its
-  own list, and an empty list tells the writer to run no check command. Use
-  narrower writer checks when the full check is long or several writers
-  would run it at once on one machine. The wave check covers the merged
-  result.
+  own list, and an empty list tells the writer to run no writer check
+  command. Writer briefs, fix messages and lead corrections omit the
+  separate wave check instruction when the current flow check's argv
+  matches a writer command. If the plan has a check, a dry run reports
+  `<task id>: writer_check runs the plan's check` once per task whose
+  resolved writer check contains the plan's check argv, in plan order.
+  The warning appears as `WARNING: <text>` in text output and in the JSON
+  `warnings` list. Use narrower writer checks when the full check is long
+  or several writers would run it at once on one machine. The wave check
+  covers the merged result.
 - `failure_model`: the cases that must work and those accepted.
 - `context`: only settled decisions and the rules tasks need.
 - `read`: the files that hold each source the plan cites, such as an
@@ -310,11 +316,12 @@ Ember saves the replacement and its history entry atomically in the flow
 record, with the time, old argv, new argv and reason. The saved plan stays
 unchanged. The runner runs the flow record's check. When the flow tip lacks
 the target tip, `emb merge` names that check in its next action. Writer
-briefs, fix briefs and lead corrections name that check and use the task's
-saved `writer_check` to tell the writer what to run. Replacing `check` leaves
-each task's `writer_check` unchanged. If runner launch fails after the save,
-the replacement stays and a plain resume uses it. The replacement runs before
-any pending wave and must pass. No option accepts a wave without a passing check.
+briefs, fix messages and lead corrections use the current flow check and
+the task's saved `writer_check` in their checks section. Replacing `check`
+leaves each task's `writer_check` unchanged. If runner launch fails after
+the save, the replacement stays and a plain resume uses it. The replacement
+runs before any pending wave and must pass. No option accepts a wave without
+a passing check.
 A flow merged while `failed` keeps that status in its record.
 
 ## Provider errors

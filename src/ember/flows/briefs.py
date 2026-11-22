@@ -82,7 +82,7 @@ def _checks(check: Sequence[str], writer_check: Sequence[Sequence[str]] | None) 
             if writer_check
             else "Run no writer check command."
         )
-        if check:
+        if check and tuple(check) not in map(tuple, writer_check):
             command += (
                 f"\n\nDo not run the flow's check command `{shlex.join(check)}`. "
                 "The flow runs it on the merged result after the wave."
