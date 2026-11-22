@@ -238,10 +238,12 @@ def test_repeat_brief_limits_new_gaps_to_the_listed_changes(tmp_path: Path) -> N
     path.write_text("1. Read\n2. Build\n", encoding="utf-8")
     earlier = _checked(path, tmp_path)
     unchanged = brief.text(plan.load(path), str(tmp_path), earlier)
+    limits = f"{brief._COMPARED} {brief._REPEAT_LIMITS}"
     assert (
         "## Changes since the earlier check\n\n"
-        "The plan has not changed since the earlier check. Report a gap only "
-        "to reopen an earlier one; every other step list is empty.\n"
+        "Nothing in the list below has changed since the earlier check. "
+        "Report a gap only to reopen an earlier one; every other step list "
+        f"is empty. {limits}\n"
     ) in unchanged
     path.write_text("1. Read\n2. Build\n3. Ship\n", encoding="utf-8")
     rendered = brief.text(plan.load(path), str(tmp_path), earlier)
@@ -249,12 +251,16 @@ def test_repeat_brief_limits_new_gaps_to_the_listed_changes(tmp_path: Path) -> N
         "## Changes since the earlier check\n\n"
         "The earlier check read this plan before the changes below. Report a "
         "new gap only when it arises from a change listed here: text that was "
-        "added or altered, or a file or dependency that was added or removed. "
+        "added, altered or removed, a task that was added or removed, a file "
+        "or dependency that was added or removed, or changed waves. "
         "Do not review unchanged text again. A step whose changes raise no gap "
-        "gets an empty list. An earlier gap is reopened as the rule above says."
-        "\n\nThe plan:\n  text, added or altered lines:\n      3. Ship\n\n"
+        "gets an empty list. An earlier gap is reopened as the rule above says. "
+        f"{limits}\n\nThe plan's text, as a line diff:\n"
+        "  @@ -1,2 +1,3 @@\n   1. Read\n   2. Build\n  +3. Ship\n\n"
         "Do not redesign the plan"
     ) in rendered
+    assert "report a missing failure model only when no earlier gap" in limits
+    assert "check, writer checks, read files and folder are not compared" in limits
     no_baseline = previous.Previous(tmp_path / "earlier.json", ())
     assert "## Changes since the earlier check" not in brief.text(
         plan.load(path), str(tmp_path), no_baseline

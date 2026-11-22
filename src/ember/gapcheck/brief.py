@@ -90,6 +90,19 @@ def _earlier(previous: Previous | None) -> list[str]:
     return [*lines, ""]
 
 
+_COMPARED = (
+    "The list compares a flow plan's context, failure model, tasks and waves, "
+    "or another plan's text. A flow plan's check, writer checks, read files "
+    "and folder are not compared: read them as they stand below, and report "
+    "a gap that one of them causes."
+)
+_REPEAT_LIMITS = (
+    "On this repeat, report a missing failure model only when no earlier gap "
+    "names it, and search for outside tests and callers only for the listed "
+    "changes."
+)
+
+
 def _changes(plan: Plan, previous: Previous | None) -> list[str]:
     """Limit a repeat check to what the plan gained and lost since the earlier one.
 
@@ -103,17 +116,20 @@ def _changes(plan: Plan, previous: Previous | None) -> list[str]:
     if not found:
         return [
             *heading,
-            "The plan has not changed since the earlier check. Report a gap "
-            "only to reopen an earlier one; every other step list is empty.",
+            "Nothing in the list below has changed since the earlier check. "
+            "Report a gap only to reopen an earlier one; every other step list "
+            f"is empty. {_COMPARED} {_REPEAT_LIMITS}",
             "",
         ]
     return [
         *heading,
         "The earlier check read this plan before the changes below. Report a "
         "new gap only when it arises from a change listed here: text that was "
-        "added or altered, or a file or dependency that was added or removed. "
+        "added, altered or removed, a task that was added or removed, a file "
+        "or dependency that was added or removed, or changed waves. "
         "Do not review unchanged text again. A step whose changes raise no gap "
-        "gets an empty list. An earlier gap is reopened as the rule above says.",
+        "gets an empty list. An earlier gap is reopened as the rule above says. "
+        f"{_COMPARED} {_REPEAT_LIMITS}",
         "",
         *found,
     ]

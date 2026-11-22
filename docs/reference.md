@@ -2038,11 +2038,17 @@ With `--previous`, the brief also holds `## Changes since the earlier
 check`, built from the plan saved in the earlier result. It lists, for a
 flow plan, the added and removed lines of `context`, `failure_model` and of
 each task's `subject`, `task` and `review`, each task's added and removed
-`files` and `after`, and added and removed tasks; for another plan, the
-added and removed lines of its text. The brief asks for a new gap only
-when it arises from a listed change, and for an unchanged plan only to
-reopen an earlier gap. The section is left out when the earlier result is
-incomplete, holds no saved plan, or holds a saved plan of another kind.
+`files` and `after`, added and removed tasks, and the earlier and current
+waves when they differ; for another plan, a line diff of its text with
+line numbers. A flow plan's `check`, `writer_check`, `read` and `dir` are
+not saved in a result and are not compared; the brief says so and allows a
+gap that one of them causes. The brief asks for a new gap only when it
+arises from a listed change, and for a plan with no listed change only to
+reopen an earlier gap. On a repeat it asks for the missing-failure-model
+gap only when no earlier gap names it, and for the search for outside
+tests and callers only for the listed changes. The section is left out
+when the earlier result holds no saved plan or a saved plan of another
+kind. An incomplete earlier result is refused with exit 65.
 
 Settled gaps carry into `settled` in each later result; closed gaps carry
 with their reasons in `closed`. Neither is counted as active. Closed history

@@ -232,13 +232,16 @@ result as the next number. Keep the plan stem in each result filename; report a
 records `plan` and `previous_plan`; check that the earlier file belongs to
 this review chain.
 
-A repeat check reviews what changed. Its brief lists the lines, files and
-dependencies the plan gained and lost since the earlier check, and the
-reviewer reports a new gap only when it arises from a listed change. An
-unchanged plan gets a gap only to reopen an earlier one. The list is left
-out, and the repeat covers the whole plan, when the earlier result is
-incomplete or holds no saved plan of the same kind. For a check of the
-whole plan, run the check without `--previous`.
+A repeat check reviews what changed. Its brief lists the lines, files,
+dependencies, tasks and waves the plan gained and lost since the earlier
+check, and the reviewer reports a new gap only when it arises from a
+listed change. A plan with no listed change gets a gap only to reopen an
+earlier one. The list does not compare a flow plan's `check`,
+`writer_check`, `read` or `dir`; the reviewer reads those as they stand.
+The list is left out, and the repeat covers the whole plan, when the
+earlier result holds no saved plan of the same kind. An incomplete earlier
+result is refused: finish that check first. For a check of the whole plan,
+run the check without `--previous`.
 
 The reviewer sees the ids, original steps, gap text and answers of every
 active and settled earlier gap and gives each a `dispositions` entry:

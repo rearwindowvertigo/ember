@@ -665,6 +665,28 @@ def test_changes_list_what_a_flow_plan_gained_and_lost(tmp_path: Path) -> None:
     assert "  files added: tests/new_test.py" in lines
     assert "Task added: a new task." in lines
     assert f"Task {second['id']}: removed." in lines
+    assert "The waves changed." in lines
+    assert "  earlier wave 1: a, b, c" in lines
+    assert "  wave 1 now: a, added" in lines
+
+
+def test_changes_name_reordered_waves_and_escape_file_names(tmp_path: Path) -> None:
+    from ember.gapcheck import plan
+
+    path, document = checked_flow(tmp_path)
+    document["tasks"][0]["files"] = ["shared.py"]
+    document["tasks"][1]["files"] = ["shared.py"]
+    path.write_text(json.dumps(document))
+    saved = result(schema_version=3, checked_plan=previous.snapshot(plan.load(path)))
+    earlier = previous.load(write(tmp_path, saved))
+    document["tasks"][:2] = document["tasks"][1::-1]
+    document["tasks"][2]["files"] = ["line\nbreak.py"]
+    path.write_text(json.dumps(document))
+    lines = previous.changes(plan.load(path), earlier)
+    assert lines is not None
+    assert "  files added: line\\nbreak.py" in lines
+    assert "The waves changed." in lines
+    assert "  earlier wave 1: a, c" in lines and "  wave 1 now: b, c" in lines
 
 
 def test_changes_of_a_document_plan_and_missing_baselines(tmp_path: Path) -> None:
@@ -676,11 +698,11 @@ def test_changes_of_a_document_plan_and_missing_baselines(tmp_path: Path) -> Non
     earlier = previous.load(write(tmp_path, saved))
     path.write_text("1. Read\n2. Build twice\n")
     assert previous.changes(plan.load(path), earlier) == [
-        "The plan:",
-        "  text, added or altered lines:",
-        "      2. Build twice",
-        "  text, removed or replaced lines:",
-        "      2. Build",
+        "The plan's text, as a line diff:",
+        "  @@ -1,2 +1,2 @@",
+        "   1. Read",
+        "  -2. Build",
+        "  +2. Build twice",
         "",
     ]
     without = previous.load(write(tmp_path, result()))
