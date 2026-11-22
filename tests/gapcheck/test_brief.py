@@ -168,6 +168,20 @@ def test_paths_preserve_spaces_tabs_and_backslashes(tmp_path: Path) -> None:
     assert f"The plan ({path}), with line numbers:" in rendered
 
 
+def test_brief_states_when_a_gap_is_reported(tmp_path: Path) -> None:
+    path = tmp_path / "plan.md"
+    path.write_text("1. First\n2. Second\n")
+    text = brief.text(plan.load(path), str(tmp_path))
+    assert (
+        "A case the failure model settles is not a gap. Report a gap only when "
+        "you can state a case in which a writer who follows the plan as written "
+        "produces a wrong result, two tasks change the same thing, or a test or "
+        "caller outside a task's declared files breaks. State that case in why. "
+        "A step with no such case gets an empty list: do not look for gaps to "
+        "fill a step."
+    ) in text
+
+
 def test_brief_without_previous_leaves_out_earlier(tmp_path: Path) -> None:
     path = tmp_path / "plan.md"
     path.write_text("1. Read\n2. Build\n", encoding="utf-8")

@@ -1805,6 +1805,10 @@ the run keeps its own copy as `brief.md`.
 
 The brief asks the reviewer to search for and name tests and callers
 outside each task's declared files that reference what it changes.
+It asks for a gap only where the reviewer can state a case in which a
+writer who follows the plan produces a wrong result, two tasks change the
+same thing, or a test or caller outside a task's declared files breaks,
+and for an empty list for a step with no such case.
 
 On every route, Ember also parses the document with the flow plan parser.
 A valid flow plan's brief includes `How this flow runs`, with the planner's

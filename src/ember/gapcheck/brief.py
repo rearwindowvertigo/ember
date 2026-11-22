@@ -167,7 +167,12 @@ def text(
             "contradictory: what a writer following the plan would have to invent, "
             "where two parts disagree, files shared by tasks that can run at the "
             "same time, a missing order between dependent tasks, or a missing check. "
-            "A case the failure model settles is not a gap. When the plan has no "
+            "A case the failure model settles is not a gap. Report a gap only when "
+            "you can state a case in which a writer who follows the plan as written "
+            "produces a wrong result, two tasks change the same thing, or a test or "
+            "caller outside a task's declared files breaks. State that case in why. "
+            "A step with no such case gets an empty list: do not look for gaps to "
+            "fill a step. When the plan has no "
             "failure model, say so in the first gap of step 1 with harm high.",
             "For each task, search for and name tests and callers outside the "
             "declared files that reference what it changes, so the lead can "

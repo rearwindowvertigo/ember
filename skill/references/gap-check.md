@@ -217,6 +217,13 @@ The reviewer finds gaps; it decides nothing.
 
 ## Repeat checks
 
+Run at most one repeat check of a plan. Record that check's answers and
+write them into the plan; do not check the plan again for those changes. A
+further check of an unchanged plan reports further gaps, so a chain of
+checks does not end with an empty result. When the dry run reports
+`repeat needed` after the one repeat check, say so to the owner and start
+the flow or the Workflow only on the owner's word.
+
 Every repeat check passes the last result, with its answers recorded, as
 `--previous <scratch>/gapcheck-<plan stem>-<n>.json`, and saves its own
 result as the next number. Keep the plan stem in each result filename; report a
