@@ -123,6 +123,14 @@ Keep a shared-file edit with its implementation when the task's own checks
 need it: a parser option exercised by that task's tests stays with the
 task, and tasks touching that parser serialize.
 
+For a task whose product reads input the task does not control, such as a
+check, parser or validator over the repository's code or data, state the
+input contract in `task` before the gap check: the inputs and planned
+changes the product must handle, and what it does with input it cannot
+handle. List each miss you accept under the accepted cases in
+`failure_model`. In `review`, name one case that must pass and one
+violation the product must catch.
+
 Put a shared interface first and make its users depend on it through
 `after`. Each implementation task completes its change and its own checks;
 it does not leave required implementation or checks to the shared-file
