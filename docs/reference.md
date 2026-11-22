@@ -1220,7 +1220,7 @@ complete `next:` or `owner:` line, or null. The first matching row applies:
 | The run has a `parent` | `parent` | null |
 | Pending owner actions recorded | `owner` | null |
 | Closed and either read-only, without commits, with its last commit contained in its base branch, or with no branch left in its checkout; claim status is `gone` | `done` | null |
-| Closed under the same conditions, with an open or unknown claim status, or no claim | `finish` | `next: emb choices --finish <claim>`; null without a claim, and null while another record under the claim is unfinished |
+| Closed under the same conditions, with an open or unknown claim status, or no claim | `finish` | `next: emb choices --finish <claim>`; null without a claim; while another record under the claim is unfinished, that record's status command |
 | Closed with uncontained editing commits on a branch that still exists | `merge` | Verify and merge line below |
 | Status `failed`, or a turn not `sent` whose `last_exit` is nonzero | `failed` | The exit line for `last_exit` and its saved variant; older records fall back to the provider kind; null for 0 or null, and the exit-1 line for an unknown code |
 | Status `starting`, or turn 0 | `starting` | `next: emb run --status <run>` |
@@ -1231,8 +1231,11 @@ complete `next:` or `owner:` line, or null. The first matching row applies:
 
 Another record under the claim is unfinished when it is a run without a
 `parent` that is not closed, a flow with status `starting`, `running`,
-`checking` or `stopped`, a `done` flow whose branch still exists, or a
-running panel.
+`checking` or `stopped`, a `failed` flow whose check is pending, a `done`
+flow whose branch still exists, or a running panel. The `next` line is then
+`next: emb run --status <run>`, `next: emb flow --status <flow>` or
+`next: emb panel --status <panel>` for the first such record.
+`emb cleanup --claim` prints the same line in place of its finish line.
 
 The `done` step appears in text and JSON status with no `next:` line.
 `session_state` still reports the tmux session's state. Runs without claim
@@ -3937,8 +3940,8 @@ report: the worker branch tip is <tip>; the landed commit is <landed>; name the 
 After successful cleanup, the command derives the next line from the
 newest matching run without a parent and prints it once on standard error
 when non-null, using the rules in `emb run` Status. Cleanup normally closes
-the run, so a contained, closed run with an unfinished claim gives
-`next: emb choices --finish <claim>`.
+the run, so a contained, closed run with an unfinished claim gives its
+`finish` line as the Status table of `emb run` defines it.
 
 When `TARGET` is `ember/flow/<id>` and its flow record matches the target
 branch and repository identity, a status other than `done` replaces the

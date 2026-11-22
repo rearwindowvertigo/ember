@@ -3,7 +3,7 @@
 import shlex
 import sqlite3
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from ember import db, skill
 from ember.runs import exits, record
@@ -242,40 +242,54 @@ def _branch_exists(
     return result.returncode not in (1, 128)
 
 
-def _claim_in_use(
-    run: Run, git: Callable[..., subprocess.CompletedProcess[str]]
-) -> bool:
-    """Return whether another record under the run's claim is unfinished.
+def claim_holder(
+    claim: str,
+    env: Mapping[str, str],
+    git: Callable[..., subprocess.CompletedProcess[str]],
+    skip: str | None = None,
+) -> str | None:
+    """Return the status line of an unfinished record under a claim.
 
-    Another run with the claim counts while it is not closed and has no
-    parent. A flow counts while it has not ended, and after `done` while its
-    branch exists. A panel counts while it is running. A record that cannot
-    be read does not count.
+    A run with the claim counts while it is not closed and has no parent.
+    A flow counts while it has not ended, after `failed` while its check is
+    pending, and after `done` while its branch exists. A panel counts while
+    it is running. A record that cannot be read does not count.
+
+    Args:
+        claim: The claim id.
+        env: The environment that locates the records.
+        git: Run git with a directory followed by command arguments.
+        skip: A run id to leave out.
+
+    Returns:
+        The `next:` line naming the first such record's status command, or
+        None when the claim has none.
     """
     from ember.flows import record as flows
     from ember.panels import record as panels
     from ember.runs.core import RunError
 
     try:
-        others = record.list_runs(run.env)[0]
-        listed = flows.list_flows(run.env)[0]
-        running = panels.list_panels(run.env)[0]
+        others = record.list_runs(env)[0]
+        listed = flows.list_flows(env)[0]
+        running = panels.list_panels(env)[0]
     except OSError:
-        return False
-    if any(
-        other.id != run.id
-        and other.claim == run.claim
-        and other.parent is None
-        and other.status != record.CLOSED
-        for other in others
-    ):
-        return True
+        return None
+    for other in others:
+        if (
+            other.id != skip
+            and other.claim == claim
+            and other.parent is None
+            and other.status != record.CLOSED
+        ):
+            return f"next: emb run --status {other.id}"
     for flow in listed:
-        if flow.get("claim") != run.claim:
+        if flow.get("claim") != claim:
             continue
-        if flow["status"] in ("starting", "running", "checking", "stopped"):
-            return True
-        if flow["status"] == "done":
+        held = flow["status"] in ("starting", "running", "checking", "stopped") or (
+            flow["status"] == "failed" and flow.get("check_pending")
+        )
+        if not held and flow["status"] == "done":
             try:
                 result = git(
                     flow["main"],
@@ -284,14 +298,15 @@ def _claim_in_use(
                     "--quiet",
                     f"refs/heads/{flow['branch']}",
                 )
+                held = result.returncode == 0
             except RunError, OSError, subprocess.SubprocessError:
-                return True
-            if result.returncode == 0:
-                return True
-    return any(
-        panel.get("claim") == run.claim and panel["status"] == "running"
-        for panel in running
-    )
+                held = True
+        if held:
+            return f"next: emb flow --status {flow['id']}"
+    for panel in running:
+        if panel.get("claim") == claim and panel["status"] == "running":
+            return f"next: emb panel --status {panel['id']}"
+    return None
 
 
 def _finish(
@@ -299,7 +314,8 @@ def _finish(
 ) -> tuple[str, str | None]:
     """Return the closed run's step and claim-finish line.
 
-    The line is withheld while another record under the claim is unfinished.
+    While another record under the claim is unfinished, the line names that
+    record's status command instead.
     """
     if run.claim is None:
         return "finish", None
@@ -313,8 +329,9 @@ def _finish(
                     return "done", None
     except OSError, sqlite3.Error:
         pass
-    if _claim_in_use(run, git):
-        return "finish", None
+    holder = claim_holder(run.claim, run.env, git, skip=run.id)
+    if holder is not None:
+        return "finish", holder
     return "finish", f"next: emb choices --finish {shlex.quote(run.claim)}"
 
 

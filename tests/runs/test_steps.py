@@ -166,6 +166,8 @@ def _missing(directory: str, *args: str) -> subprocess.CompletedProcess[str]:
         ("flow", {"status": "running"}, _git, True),
         ("flow", {"status": "done"}, _git, True),
         ("flow", {"status": "done"}, _missing, False),
+        ("flow", {"status": "failed", "check_pending": True}, _git, True),
+        ("flow", {"status": "failed", "check_pending": False}, _git, False),
         ("flow", {"status": "cancelled"}, _git, False),
         ("flow", {"status": "stopped", "claim": "other"}, _git, False),
         ("panel", {"status": "running"}, _git, True),
@@ -176,7 +178,7 @@ def _missing(directory: str, *args: str) -> subprocess.CompletedProcess[str]:
         ("run", {"status": record.WAITING, "claim": "other"}, _git, False),
     ],
 )
-def test_finish_line_waits_for_other_records_of_the_claim(
+def test_finish_line_names_another_unfinished_record_of_the_claim(
     run: record.Run,
     monkeypatch: pytest.MonkeyPatch,
     kind: str,
@@ -187,8 +189,15 @@ def test_finish_line_waits_for_other_records_of_the_claim(
     from ember.flows import record as flows
     from ember.panels import record as panels
 
-    document = {"claim": "claim-a", "main": "main", "branch": "ember/flow/f", **fields}
-    other = replace(run, id="codex-20261105-120001-abcdef", **fields)
+    document = {
+        "id": "other-id",
+        "claim": "claim-a",
+        "main": "main",
+        "branch": "ember/flow/f",
+        **fields,
+    }
+    run_fields = {key: value for key, value in fields.items() if key != "check_pending"}
+    other = replace(run, id="other-id", **run_fields) if kind == "run" else run
     monkeypatch.setattr(
         record, "list_runs", lambda env: ([run, other] if kind == "run" else [run], [])
     )
@@ -201,7 +210,9 @@ def test_finish_line_waits_for_other_records_of_the_claim(
     closed = replace(run, status=record.CLOSED)
     assert steps.derive(closed, core.MISSING, False, git) == (
         "finish",
-        None if held else "next: emb choices --finish claim-a",
+        f"next: emb {kind} --status other-id"
+        if held
+        else "next: emb choices --finish claim-a",
     )
 
 

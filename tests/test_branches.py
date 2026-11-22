@@ -1161,7 +1161,11 @@ def test_cleanup_filters_recorded_claims_and_merge_suggestions(
     assert _cleanup(env, driver, streams, repo, **options) == 0
     out, err = streams.take()
     assert len(out.splitlines()) == len(expected)
-    assert ("next: emb choices --finish" in err) == (claim is not None and not expected)
+    held = single_branch and claim == "claim-b"
+    assert ("next: emb choices --finish" in err) == (
+        claim is not None and not expected and not held
+    )
+    assert (f"next: emb run --status {runs[1].id}" in err) == held
     for run in runs:
         assert run.branch is not None
         if run in expected:

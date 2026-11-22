@@ -1509,7 +1509,12 @@ def cleanup(
         and not any(item.action == KEPT and item.claim == claim for item in job.results)
         and _claim_open(claim, env)
     ):
-        print(f"next: emb choices --finish {shlex.quote(claim)}", file=err)
+        from ember.runs import steps
+
+        holder = steps.claim_holder(
+            claim, env, lambda cwd, *args: _git(cwd, *args, env=env)
+        )
+        print(holder or f"next: emb choices --finish {shlex.quote(claim)}", file=err)
     return exits.OK
 
 
