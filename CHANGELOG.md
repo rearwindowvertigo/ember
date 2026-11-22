@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.30.0](https://github.com/rearwindowvertigo/ember/compare/v0.29.0...v0.30.0) (2026-11-22)
+
+
+### Added
+
+* **flows:** let a plan give writers a narrower check ([02a1f85](https://github.com/rearwindowvertigo/ember/commit/02a1f85ab9e5bca6c43cbd6572f392674221910c))
+
+
+### Fixed
+
+* **flows:** drop the do-not-run line when a writer command is the flow check ([cbb340a](https://github.com/rearwindowvertigo/ember/commit/cbb340abb4d3a61a0c7c7029ed2e8d282b42f20b))
+
 ## [0.29.0](https://github.com/rearwindowvertigo/ember/compare/v0.28.0...v0.29.0) (2026-11-21)
 
 
