@@ -75,15 +75,13 @@ def test_writer(plan: Plan, task: Task) -> None:
     for value in (*task.files, "src/b.py", plan.context, plan.failure_model):
         assert value in text
     assert "Other tasks in this wave change these files; do not change them:" in text
-    assert "You may run git commands that only read" in text
-    assert "Ember commits your edits on its run branch" in text
+    assert "You may run git commands that only read" not in text
     headings = re.findall(r"^## (.*)$", text, re.M)
     assert headings == [
         "Files",
         "Context",
         "Failure model",
         "Limits",
-        "Git",
         "Checks",
         "Closing report",
     ]

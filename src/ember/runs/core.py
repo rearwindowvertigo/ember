@@ -109,6 +109,23 @@ HOOK_OUTPUT_BYTES = 64 * 1024
 BRIEF_LINE = "Brief from Claude, the lead, for Ember run {id}."
 """The first line of the first message, above the brief."""
 
+GIT_RULE = (
+    "You may run git commands that only read, such as `git log`, "
+    "`git show`, `git diff`, `git status` and `git blame`. Run no git command "
+    "that changes the index, a tracked file's state, a branch or a ref: Ember "
+    "commits your edits on its run branch at the end of each turn."
+)
+"""The git rule of an editing run."""
+
+READ_ONLY_GIT_RULE = (
+    "This is a read-only run. You may run git commands that only read. Change "
+    "nothing in git: Ember commits nothing from this run."
+)
+"""The git rule of a read-only run."""
+
+GIT_RULE_PRECEDENCE = "This rule holds over any git instruction in the brief below."
+"""The sentence that ends the git rule in the first message."""
+
 REPLY_MARK = "--- reply ---"
 """The line above the reply text in a turn's output."""
 
@@ -364,17 +381,20 @@ def _outcome_exit(outcome: TurnOutcome) -> int:
     }[incomplete_reason(outcome)]
 
 
-def first_message(run_id: str, brief: str) -> str:
-    """Return the first message of a run: the attributed brief.
+def first_message(run_id: str, brief: str, *, read_only: bool) -> str:
+    """Return the first message of a run: the attributed brief under the git rule.
 
     Args:
         run_id: The run id.
         brief: The brief text.
+        read_only: Whether the run is read-only.
 
     Returns:
-        The line naming Claude as the brief's author, a blank line, the brief.
+        The line naming Claude as the brief's author, the run's git rule and
+        the brief, separated by blank lines.
     """
-    return f"{BRIEF_LINE.format(id=run_id)}\n\n{brief}"
+    rule = READ_ONLY_GIT_RULE if read_only else GIT_RULE
+    return f"{BRIEF_LINE.format(id=run_id)}\n\n{rule} {GIT_RULE_PRECEDENCE}\n\n{brief}"
 
 
 def _walk_files(root: Path) -> Iterator[Path]:
@@ -1482,7 +1502,9 @@ class Core:
         if run.sandbox == sandbox.NONE:
             self._warn(sandbox.none_warning(run.engine))
         with self._engine_calls(run, "starting"):
-            spec = driver.command(run, first_message(run.id, brief))
+            spec = driver.command(
+                run, first_message(run.id, brief, read_only=run.read_only)
+            )
         if run.sandbox != sandbox.NONE:
             program = spec.binary or (spec.argv[0] if spec.argv else run.engine)
             binary = self._which(run.engine if run.engine == "claude" else program)
@@ -1508,7 +1530,9 @@ class Core:
         if admit is not None:
             admit(run)
         if spec.first_message is None:
-            run = self._turn_sent(run, 1, first_message(run.id, brief))
+            run = self._turn_sent(
+                run, 1, first_message(run.id, brief, read_only=run.read_only)
+            )
         launch = run.folder / LAUNCH_NAME
         ready = run.folder / "scope-ready"
         script = f"exec {shlex.join(spec.argv)}\n"
@@ -1554,7 +1578,9 @@ class Core:
         window = self._open_window(run, settings) if options.window else None
         if spec.first_message is not None:
             self._wait_ready(run, driver)
-            run = self._turn_sent(run, 1, first_message(run.id, brief))
+            run = self._turn_sent(
+                run, 1, first_message(run.id, brief, read_only=run.read_only)
+            )
             with self._engine_calls(run):
                 driver.send(run, spec.first_message)
         return run, window

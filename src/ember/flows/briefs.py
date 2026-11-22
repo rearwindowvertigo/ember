@@ -9,6 +9,7 @@ from ember import citations
 from ember.flows import verdict
 from ember.flows.plan import writer_command_text
 from ember.flows.verdict import Finding
+from ember.runs.core import GIT_RULE
 
 if TYPE_CHECKING:
     from ember.flows.plan import Plan, Task  # pyrefly: ignore[missing-import]
@@ -42,12 +43,7 @@ REVIEW_FIRST = (
 )
 FIX_FIRST = "Fix round {round} of task {task} in flow {flow}."
 
-_GIT = (
-    "## Git\n\nYou may run git commands that only read, such as `git log`, "
-    "`git show`, `git diff`, `git status` and `git blame`. Run no git command "
-    "that changes the index, a tracked file's state, a branch or a ref: Ember "
-    "commits your edits on its run branch at the end of each turn."
-)
+_GIT = "## Git\n\n" + GIT_RULE
 _CLOSING = (
     "## Closing report\n\nState what you changed and how you checked it. "
     'List "Outside files", "Not done" and "Not covered".'
@@ -133,7 +129,6 @@ def writer_brief(
     parts.extend(
         [
             "## Limits\n\n" + _LIMITS,
-            _GIT,
             _checks(plan.check, writer_check),
             _CLOSING,
         ]
