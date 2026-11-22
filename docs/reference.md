@@ -2285,6 +2285,8 @@ Warnings do not refuse a plan:
 
 - `no failure_model; every unsettled case is a gap`
 - `no check; waves are merged without a check`
+- `<id>: writer_check runs the plan's check`, when the plan has a check and
+  the task's resolved `writer_check` contains its argv
 - `<id>: <path> is a folder; list the files the task changes`, when the path
   is a tree at `base`, read with `git cat-file -t`
 - `<id>: no test file in its files`, when no file is under `test`, `tests`
