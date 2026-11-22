@@ -434,7 +434,7 @@ def cited(plan: Plan) -> list[citations.Citation]:
 def warnings(
     plan: Plan, top: str, env: Mapping[str, str], standing: Sequence[str] = ()
 ) -> list[str]:
-    """Describe missing checks and tests, folders declared as files, and sources.
+    """Report check, test, declared folder and source warnings.
 
     A source the plan cites by reference that no read file supplies is named
     once, at its first citation. Read files are the standing `sandbox.read`
@@ -447,6 +447,8 @@ def warnings(
         result.append("no check; waves are merged without a check")
     clean_env = {key: value for key, value in env.items() if key not in _GIT_ENV}
     for task in plan.tasks:
+        if plan.check and plan.check in (plan.writer_check_for(task) or ()):
+            result.append(f"{task.id}: writer_check runs the plan's check")
         for file in task.files:
             try:
                 output = subprocess.run(

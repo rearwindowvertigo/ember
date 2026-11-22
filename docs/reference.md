@@ -2227,8 +2227,9 @@ after the save leaves the replacement in place; plain `--resume` uses it.
 The runner runs the pending check before scheduling further work and
 continues only after it passes. `emb merge` names the flow record's check
 in its next action when the flow tip lacks the target tip. Writer briefs,
-fix messages and lead corrections also name that check. Replacing it leaves
-each task's saved `writer_check` unchanged.
+fix messages and lead corrections use the current flow check in their
+checks section. Replacing it leaves each task's saved `writer_check`
+unchanged.
 
 ### Plan
 
@@ -2284,6 +2285,8 @@ Warnings do not refuse a plan:
 
 - `no failure_model; every unsettled case is a gap`
 - `no check; waves are merged without a check`
+- `<id>: writer_check runs the plan's check`, when the plan has a check and
+  the task's resolved `writer_check` contains its argv
 - `<id>: <path> is a folder; list the files the task changes`, when the path
   is a tree at `base`, read with `git cat-file -t`
 - `<id>: no test file in its files`, when no file is under `test`, `tests`
@@ -2569,9 +2572,11 @@ preserve their text as written.
 Writer briefs, fix-round messages and lead `--send` corrections use the
 task's saved `writer_check`. They list its commands as shell words, one
 command per line, and ask the writer to run them or say why it could not
-run one. An empty list tells the writer to run no check command. When the
-flow has a check, the brief names it, tells the writer not to run
-it, and says the flow runs it on the merged result after the wave.
+run one. An empty list tells the writer to run no writer check command.
+When the flow has a check whose argv is absent from the writer check list,
+the section tells the writer to leave that command to the flow, which runs
+it on the merged result after the wave. A matching command appears only in
+the writer check list.
 With no resolved `writer_check`, the brief asks the writer to run the
 flow record's current check or say why it could not. With neither check,
 it asks for tests for the changed files and quick static checks.
@@ -3022,8 +3027,10 @@ source is `plan` when the plan sets `rounds`, otherwise `setting` (the
 owner's `flow.review_rounds` minus one). When the plan or a task sets
 `writer_check`, a `writer check` line follows the `check` line. It lists each
 task with a resolved writer check and its commands as shell words, or `none`
-for an empty list. Warnings print as
-`WARNING: <text>`. JSON has `plan`, `dir`, `base`, `writer`, `reviewer`,
+for an empty list. Warnings print as `WARNING: <text>`. If the plan has a
+check, the dry run adds `<task id>: writer_check runs the plan's check` once
+per task whose resolved `writer_check` contains the plan's check argv, in
+plan order. JSON has `plan`, `dir`, `base`, `writer`, `reviewer`,
 `same_model`, `check`, `writer_check` (the plan value, or null when omitted),
 `tasks` (objects in plan order with `id` and the resolved `writer_check`, or
 null when unset), `rounds`, `rounds_source`, `parallel`, `parallel_source` (`plan`

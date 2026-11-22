@@ -455,6 +455,32 @@ def test_warnings_at_base(
     assert plan.warnings(parsed(raw, tmp_path), str(repo), env) == []
 
 
+@pytest.mark.parametrize("has_check", [True, False])
+def test_writer_check_overlap_warnings(
+    raw: dict[str, Any], tmp_path: Path, env: dict[str, str], has_check: bool
+) -> None:
+    repo = make_repo(tmp_path, env)
+    check = ["make", "check"]
+    raw.update(failure_model="cases", writer_check=[check])
+    if has_check:
+        raw["check"] = check
+    first = raw["tasks"][0]
+    first.update(id="inherited", files=["tests/test_a.py"])
+    raw["tasks"] += [
+        {**first, "id": "different", "writer_check": [["make", "test"]]},
+        {**first, "id": "empty", "writer_check": []},
+        {**first, "id": "explicit", "writer_check": [["ruff"], check, check]},
+    ]
+    assert plan.warnings(parsed(raw, tmp_path), str(repo), env) == (
+        [
+            "inherited: writer_check runs the plan's check",
+            "explicit: writer_check runs the plan's check",
+        ]
+        if has_check
+        else ["no check; waves are merged without a check"]
+    )
+
+
 @pytest.mark.parametrize(
     "file",
     [
