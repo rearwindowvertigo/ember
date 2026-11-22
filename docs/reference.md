@@ -866,8 +866,12 @@ same folder while they read, merge and write it.
 The session is a tmux session named by the run id. It runs `launch.sh` in
 the run folder, mode 600, which holds the engine's command, because tmux
 refuses a command longer than about 16 KiB. Its first message is the
-line `Brief from Claude, the lead, for Ember run <id>.`, a blank line and the
-brief, pasted once the engine is ready; a driver that puts the brief on the
+line `Brief from Claude, the lead, for Ember run <id>.`, the run's git rule
+and the brief, separated by blank lines, pasted once the engine is ready.
+The git rule of an editing run allows git commands that only read and says
+Ember commits the edits at the end of each turn. The git rule of a
+read-only run says to change nothing in git. Both end with `This rule holds
+over any git instruction in the brief below.`; a driver that puts the brief on the
 engine's command line pastes nothing. The session runs with no window. With
 `--window`, a window of the `terminal` setting also opens on the session; a
 window that cannot open prints a `WARNING:` line and the run goes on.
@@ -2572,9 +2576,9 @@ the run open and is reported by the runner.
 The writer brief starts with the task's commit subject and preserves the
 task text as written. It lists the task's files, the other tasks' files in
 the wave, a `## Sources to read` section listing the read files of the
-`sandbox.read` setting and the plan's `read` when there are any, context and failure model when present, limits, the git rule
-(git commands that only read are allowed; Ember makes the commit), checks
-and closing report headings. Lead corrections also
+`sandbox.read` setting and the plan's `read` when there are any, context and failure model when present, limits, checks
+and closing report headings. The run's first message carries the git rule
+above the brief. Lead corrections also
 preserve their text as written.
 
 Writer briefs, fix-round messages and lead `--send` corrections use the

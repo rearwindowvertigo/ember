@@ -45,13 +45,9 @@ by this task's own checks in this task's files.>
 
 ## Git
 
-<Keep the line that applies; remove the others.>
-
-`emb run` worker:
-You may run git commands that only read, such as `git log`, `git show`,
-`git diff`, `git status` and `git blame`. Run no git command that changes
-the index, a tracked file's state, a branch or a ref: Ember commits your
-edits on its run branch at the end of each turn.
+<For an `emb run` worker, editing or read-only, remove this section: Ember
+states the run's git rule above the brief. Never tell an `emb run` worker
+to commit. For a Claude agent, keep the block that applies.>
 
 Editing Claude subagent or Workflow agent:
 Commit on your own branch in this worktree, with this exact trailer:
@@ -59,13 +55,18 @@ Commit on your own branch in this worktree, with this exact trailer:
 Do not push, merge, rebase, cherry-pick, force-push, stash, delete
 branches, or touch main or a branch you did not create.
 
-Read-only worker:
+Read-only Claude subagent or Workflow agent:
 Read the repository in your own working folder, using relative paths.
-For `emb run --read-only` and panel members, this is a detached worktree
-at the recorded commit; uncommitted source edits are absent.
-You may install dependencies in your own detached worktree to run checks,
-without changing tracked files. Otherwise create, edit or delete no file,
-and change nothing in git.
+Create, edit or delete no file, and change nothing in git.
+Put your whole answer in your final message.
+
+## Read-only work
+
+<For `emb run --read-only`; remove otherwise.>
+Read the repository in your own working folder, using relative paths. It
+is a detached worktree at the recorded commit; uncommitted source edits
+are absent. You may install dependencies there to run checks, without
+changing tracked files. Otherwise create, edit or delete no file.
 Put your whole answer in your final message.
 
 ## Checks and stop condition

@@ -228,8 +228,9 @@ objective; the lead writes the landed subject at merge.
 
 Use `assets/task-brief.md` for every brief: one objective, exact scope and
 exclusions, a reading budget, outputs, a stop condition, a required
-"Not covered" list and the right git line. Name checks the worker cannot
-run in its sandbox, why, who runs them, and the constraints, grants and
+"Not covered" list and, for a Claude agent, its git line. Ember states the
+git rule of every `emb run` above the brief; write none for it. Name checks
+the worker cannot run in its sandbox, why, who runs them, and the constraints, grants and
 fixture prerequisites those checks exercise. Editing workers report branch,
 worktree and tip, and update comments and docstrings their change makes
 untrue. Say whether empty input, zero counts and equal endpoints are valid

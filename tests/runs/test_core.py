@@ -158,7 +158,7 @@ def test_start_lists_read_paths_in_saved_brief_and_first_message(
     )
     run = record.load(core_.last_run_id or "", env)
     saved = (run.folder / record.BRIEF_NAME).read_text()
-    message = core.first_message(run.id, saved)
+    message = core.first_message(run.id, saved, read_only=read_only)
     assert driver.commands[0][1] == message
     assert (run.folder / "turn-1.prompt.md").read_text() == message
     if paste:
@@ -222,7 +222,9 @@ def test_start_from_saved_brief_lists_sources_once(
         assert f"- {standing}" in rendered
     else:
         assert rendered.encode() == before
-    assert driver.commands[0][1] == core.first_message(run.id, rendered)
+    assert driver.commands[0][1] == core.first_message(
+        run.id, rendered, read_only=run.read_only
+    )
 
 
 @pytest.mark.parametrize("name", [record.BRIEF_NAME, record.RECORD_NAME])
@@ -778,9 +780,12 @@ def test_editing_run_commits_its_turn(
     assert stat.S_IMODE(run.folder.stat().st_mode) == 0o700
     assert stat.S_IMODE((run.folder / "run.json").stat().st_mode) == 0o600
     pasted = "".join(item.get("text", "") for item in _events(tmp_path, run_id))
-    assert pasted == core.first_message(run_id, Path(brief).read_text())
+    assert pasted == core.first_message(
+        run_id, Path(brief).read_text(), read_only=False
+    )
     assert pasted.startswith(
         f"Brief from Claude, the lead, for Ember run {run_id}.\n\n"
+        "You may run git commands that only read"
     )
     assert driver.commands[0][1] == pasted
 
@@ -3217,9 +3222,16 @@ def test_subject_helpers() -> None:
     assert core.incomplete_reason(replace(done, reply="")) == "no reply"
     failed = engines.TurnOutcome(engines.FAILED, signed_out=True)
     assert core.incomplete_reason(failed) == "sign-in failure"
-    assert core.first_message("r", "brief") == (
-        "Brief from Claude, the lead, for Ember run r.\n\nbrief"
+    assert core.first_message("r", "brief", read_only=False) == (
+        "Brief from Claude, the lead, for Ember run r.\n\n"
+        f"{core.GIT_RULE} {core.GIT_RULE_PRECEDENCE}\n\nbrief"
     )
+    assert core.first_message("r", "brief", read_only=True) == (
+        "Brief from Claude, the lead, for Ember run r.\n\n"
+        f"{core.READ_ONLY_GIT_RULE} {core.GIT_RULE_PRECEDENCE}\n\nbrief"
+    )
+    assert "Ember commits your edits" in core.GIT_RULE
+    assert "Change nothing in git" in core.READ_ONLY_GIT_RULE
 
 
 def test_read_only_tree_ignores_source_edits_during_turn(
