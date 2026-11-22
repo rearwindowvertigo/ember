@@ -106,10 +106,15 @@ def test_writer_omits_blank_optional_sections(task: Task) -> None:
     ("check", "instruction"),
     [
         ((), "Run the tests for the files you change and quick static checks."),
-        (("make", "check"), "Run the plan's check command `make check`"),
+        (
+            ("make", "check"),
+            "Run the plan's check command `make check`, "
+            "or say why you could not run it.",
+        ),
         (
             ("./check script", "--name", "two words"),
-            "Run the plan's check command `'./check script' --name 'two words'`",
+            "Run the plan's check command `'./check script' --name 'two words'`, "
+            "or say why you could not run it.",
         ),
     ],
 )
@@ -128,18 +133,89 @@ def test_writer_fix_and_send_checks(
         text.split("## Checks\n\n", 1)[1].split("\n\n## ")[0].strip()
         for text in messages
     ]
-    assert sections[0] == sections[1] == sections[2]
-    for text in messages:
-        assert instruction in text
-        assert ("or say why you could not run it" in text) == bool(check)
-        assert "Search for tests and callers of what changed" in text
-        assert "including outside the declared files" in text
-        assert "Fix a break your change causes in an outside file" in text
-        assert 'the Limits allow it; otherwise list it under "Not done"' in text
+    expected = (
+        instruction + "\n\n"
+        "Search for tests and callers of what changed, including outside the "
+        "declared files. Fix a break your change causes in an outside file when "
+        'the Limits allow it; otherwise list it under "Not done". Name failures '
+        "from an unavailable service or environment without trying to fix them."
+    )
+    assert sections == [expected] * 3
+
+
+@pytest.mark.parametrize("check", [(), ("make", "check all")])
+@pytest.mark.parametrize(
+    "writer_check",
+    [(), (("pytest", "two words"), ("ruff", ""), ("printf", "%s", "a\nb"))],
+)
+def test_resolved_writer_checks_in_briefs(
+    task: Task, check: tuple[str, ...], writer_check: tuple[tuple[str, ...], ...]
+) -> None:
+    document = cast(
+        "Plan", SimpleNamespace(context="", failure_model="", read=(), check=check)
+    )
+    commands = (
+        "\n\n    pytest 'two words'\n    ruff ''\n    printf %s $'a\\nb'"
+        if writer_check
+        else ""
+    )
+    instruction = (
+        "Run these writer check commands, or say why you could not run one." + commands
+        if writer_check
+        else "Run no writer check command."
+    )
+    if check:
+        instruction += (
+            "\n\nDo not run the flow's check command `make 'check all'`. "
+            "The flow runs it on the merged result after the wave."
+        )
+    messages = [
+        briefs.writer_brief(FLOW, document, task, [], writer_check=writer_check),
+        briefs.fix_message(
+            FLOW, task, 1, [_finding()], check=check, writer_check=writer_check
+        ),
+        briefs.send_message(
+            FLOW, task, "Correct this", check=check, writer_check=writer_check
+        ),
+    ]
+    for message in messages:
         assert (
-            "Name failures from an unavailable service or environment without "
-            "trying to fix them."
-        ) in text
+            f"## Checks\n\n{instruction}\n\n"
+            "Search for tests and callers of what changed" in message
+        )
+
+    def review(commands: tuple[tuple[str, ...], ...] | None) -> str:
+        return briefs.review_brief(
+            FLOW,
+            document,
+            task,
+            round=1,
+            base="base",
+            head="head",
+            changed=[],
+            outside=[],
+            wave_files=[],
+            writer_report="My report",
+            writer_check=commands,
+        )
+
+    reviewer_instruction = (
+        "The writer was told to run these check commands." + commands
+        if writer_check
+        else "The writer was told to run no check command."
+    )
+    wave_check = (
+        "The flow runs its check command `make 'check all'` on the merged result "
+        "after the wave."
+        if check
+        else "The flow has no check command."
+    )
+    default = review(None)
+    report = "## The writer's report\n\n    My report"
+    assert report + "\n\n## Review bar" in default
+    assert review(writer_check) == default.replace(
+        report, f"{report}\n\n{reviewer_instruction}\n\n{wave_check}"
+    )
 
 
 @pytest.mark.parametrize("round", [1, 2])

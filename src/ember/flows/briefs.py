@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from ember import citations
 from ember.flows import verdict
+from ember.flows.plan import writer_command_text
 from ember.flows.verdict import Finding
 
 if TYPE_CHECKING:
@@ -60,14 +61,32 @@ _LIMITS = (
 )
 
 
-def _checks(check: Sequence[str]) -> str:
-    """Describe the plan check and the writer's checks of affected code."""
-    command = (
-        f"Run the plan's check command `{shlex.join(check)}`, or say why you "
-        "could not run it."
-        if check
-        else "Run the tests for the files you change and quick static checks."
-    )
+def _command_lines(commands: Sequence[Sequence[str]]) -> str:
+    """Display shell-quoted commands as a Markdown code block."""
+    return indent("\n".join(map(writer_command_text, commands)), "    ")
+
+
+def _checks(check: Sequence[str], writer_check: Sequence[Sequence[str]] | None) -> str:
+    """Describe the writer's checks and any separate wave check."""
+    if writer_check is None:
+        command = (
+            f"Run the plan's check command `{shlex.join(check)}`, or say why you "
+            "could not run it."
+            if check
+            else "Run the tests for the files you change and quick static checks."
+        )
+    else:
+        command = (
+            "Run these writer check commands, or say why you could not run one.\n\n"
+            + _command_lines(writer_check)
+            if writer_check
+            else "Run no writer check command."
+        )
+        if check:
+            command += (
+                f"\n\nDo not run the flow's check command `{shlex.join(check)}`. "
+                "The flow runs it on the merged result after the wave."
+            )
     return (
         "## Checks\n\n" + command + "\n\n"
         "Search for tests and callers of what changed, including outside the "
@@ -94,11 +113,13 @@ def writer_brief(
     task: Task,
     wave_files: Sequence[str],
     standing: Sequence[str] = (),
+    *,
+    writer_check: Sequence[Sequence[str]] | None = None,
 ) -> str:
     """Build an editing brief, keeping the task text and commit subject intact.
 
     `standing` holds the `sandbox.read` paths, listed as sources before the
-    plan's `read`.
+    plan's `read`. `writer_check` is the task's resolved check from the record.
     """
     parts = [task.subject, task.task, "## Files\n\n" + _files(task.files, wave_files)]
     sources = citations.sources_section(citations.source_files([*standing, *plan.read]))
@@ -112,7 +133,7 @@ def writer_brief(
         [
             "## Limits\n\n" + _LIMITS,
             _GIT,
-            _checks(plan.check),
+            _checks(plan.check, writer_check),
             _CLOSING,
         ]
     )
@@ -152,6 +173,7 @@ def review_brief(
     standing: Sequence[str] = (),
     merged_siblings: Sequence[tuple[str, str, str]] = (),
     corrections: Sequence[tuple[int, str]] = (),
+    writer_check: Sequence[Sequence[str]] | None = None,
 ) -> str:
     """Build a review brief with indented evidence and the packaged reply schema.
 
@@ -160,6 +182,7 @@ def review_brief(
     `merged_siblings` holds task ids, subjects and merge commits absent from
     the reviewed head.
     `corrections` holds answer numbers and the lead's correction texts in order.
+    `writer_check` is the task's resolved check from the record.
     """
     parts = [
         REVIEW_FIRST.format(task=task.id, round=round, flow=flow_id),
@@ -228,6 +251,20 @@ def review_brief(
             else "The writer left no report."
         )
     )
+    if writer_check is not None:
+        instructions = (
+            "The writer was told to run these check commands.\n\n"
+            + _command_lines(writer_check)
+            if writer_check
+            else "The writer was told to run no check command."
+        )
+        wave_check = (
+            f"The flow runs its check command `{shlex.join(plan.check)}` on the "
+            "merged result after the wave."
+            if plan.check
+            else "The flow has no check command."
+        )
+        parts.append(instructions + "\n\n" + wave_check)
     if round > 1:
         parts.append(
             "## Earlier findings\n\n"
@@ -258,6 +295,7 @@ def fix_message(
     findings: Sequence[Finding],
     *,
     check: Sequence[str] = (),
+    writer_check: Sequence[Sequence[str]] | None = None,
 ) -> str:
     """Send the numbered must findings to the existing writer."""
     return (
@@ -269,7 +307,7 @@ def fix_message(
                 "in your final message.",
                 _must_list(findings),
                 _GIT,
-                _checks(check),
+                _checks(check, writer_check),
                 _CLOSING,
             ]
         )
@@ -278,13 +316,18 @@ def fix_message(
 
 
 def send_message(
-    flow_id: str, task: Task, text: str, *, check: Sequence[str] = ()
+    flow_id: str,
+    task: Task,
+    text: str,
+    *,
+    check: Sequence[str] = (),
+    writer_check: Sequence[Sequence[str]] | None = None,
 ) -> str:
     """Prefix a lead correction while preserving its text as written."""
     return (
         f"Correction from the lead for task {task.id} in flow {flow_id}.\n\n"
         + text
         + "\n\n"
-        + _checks(check)
+        + _checks(check, writer_check)
         + "\n"
     )

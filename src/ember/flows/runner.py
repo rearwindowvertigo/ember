@@ -971,7 +971,7 @@ class _Runner:
             )
             text = briefs.review_brief(
                 self.id,
-                self.plan,
+                replace(self.plan, check=tuple(self.flow["check"])),
                 self.plan.task(task["id"]),
                 round=task["round"] + 1,
                 base=task["task_base"],
@@ -980,6 +980,7 @@ class _Runner:
                 outside=task["outside_files"],
                 wave_files=self.other_files(task),
                 writer_report=report,
+                writer_check=task["writer_check"],
                 earlier=earlier,
                 fix_base=task.get("fix_base"),
                 standing=self.standing_read(),
@@ -1108,6 +1109,7 @@ class _Runner:
                 self.plan.task(task["id"]),
                 self.other_files(task),
                 standing=self.standing_read(),
+                writer_check=task["writer_check"],
             )
             path = self.artifact(task, "write", text)
             self.change(
@@ -1126,7 +1128,11 @@ class _Runner:
                 task,
                 "fix",
                 briefs.send_message(
-                    self.id, self.plan.task(task["id"]), text, check=self.flow["check"]
+                    self.id,
+                    self.plan.task(task["id"]),
+                    text,
+                    check=self.flow["check"],
+                    writer_check=task["writer_check"],
                 ),
             )
             if not self.send(task, path, fresh=not hook_refused):
@@ -1174,6 +1180,7 @@ class _Runner:
                     task["round"] + 1,
                     self.earlier(task),
                     check=self.flow["check"],
+                    writer_check=task["writer_check"],
                 ),
             )
             if not self.send(task, path, fresh=False):

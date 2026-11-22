@@ -49,6 +49,7 @@ def test_defaults_and_lookup(raw: dict[str, Any], tmp_path: Path) -> None:
     assert item.writer is item.reviewer is None
     assert item.context == item.failure_model == ""
     assert item.trailers == item.check == item.read == ()
+    assert item.writer_check is item.writer_check_for(item.task("a")) is None
     assert item.path.is_absolute()
     assert item.task("a") == plan.Task(
         "a", "feat: a", "Implement a", ("src/a.py",), (), ""
@@ -84,6 +85,64 @@ def test_full_plan(raw: dict[str, Any], tmp_path: Path) -> None:
     assert item.trailers == ("Co-Authored-By: X <x@y>",)
     assert item.read == ("/data",) and item.base == "main"
     assert item.task("a").subject == "feat: implement a"
+
+
+@pytest.mark.parametrize("default", [[], [["pytest", "tests/a b.py", ""], ["ruff"]]])
+def test_writer_check_resolution(
+    raw: dict[str, Any], tmp_path: Path, default: list[list[str]]
+) -> None:
+    first = raw["tasks"][0]
+    raw["writer_check"] = default
+    raw["tasks"] += [
+        {**first, "id": "b", "writer_check": [["pytest", "tests/test_b.py"]]},
+        {**first, "id": "c", "writer_check": []},
+        {**first, "id": "d", "writer_check": default},
+    ]
+    document = parsed(raw, tmp_path)
+    expected = tuple(tuple(argv) for argv in default)
+    assert document.check == ()
+    assert document.writer_check == expected
+    assert document.task("a").writer_check is None
+    assert document.task("d").writer_check == expected
+    assert [document.writer_check_for(task) for task in document.tasks] == [
+        expected,
+        (("pytest", "tests/test_b.py"),),
+        (),
+        expected,
+    ]
+    del raw["writer_check"]
+    document = parsed(raw, tmp_path)
+    assert document.writer_check is None
+    assert document.writer_check_for(document.task("a")) is None
+    assert document.writer_check_for(document.task("c")) == ()
+
+
+@pytest.mark.parametrize("scope", ["plan", "task"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        None,
+        "make",
+        ["make"],
+        [[]],
+        [[""]],
+        [[" \n"]],
+        [["make\0"]],
+        [["make", 1]],
+        [["make", "a\0\n"]],
+    ],
+)
+def test_invalid_writer_check(
+    raw: dict[str, Any], tmp_path: Path, scope: str, bad: object
+) -> None:
+    target, location = (
+        (raw, "plan") if scope == "plan" else (raw["tasks"][0], "plan.tasks[0]")
+    )
+    target["writer_check"] = bad
+    with pytest.raises(plan.PlanError) as caught:
+        parsed(raw, tmp_path)
+    assert caught.value.code == 64
+    assert caught.value.problems[0].startswith(f"{location}.writer_check")
 
 
 @pytest.mark.parametrize(

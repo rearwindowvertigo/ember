@@ -220,6 +220,11 @@ def test_dry_run(
         }
         assert result["same_model"] is True
         assert result["check"] == []
+        assert result["writer_check"] is None
+        assert result["tasks"] == [
+            {"id": "a", "writer_check": None},
+            {"id": "b", "writer_check": None},
+        ]
         gapcheck = result["gapcheck"]
     else:
         assert out.splitlines()[:3] == [
@@ -231,6 +236,7 @@ def test_dry_run(
         assert "plan, writer:" not in err
         assert "plan, reviewer:" not in err
         assert "wave 1:\n  a: a.py\nwave 2:\n  b: b.py" in out
+        assert "\nwriter check " not in out
         gapcheck = out.split("gap check: ")[1].strip()
     assert shlex.split(gapcheck) == [
         "emb",
@@ -255,6 +261,39 @@ def test_dry_run(
     assert not paths.runs_dir(env).exists()
     assert not tmux_log(tmp_path)
     assert git(repo, "branch", "--list", env=env) == before
+
+
+@pytest.mark.parametrize(
+    "default", [None, [], [["pytest", "tests/a b.py"], ["printf", "%s", "a\nb"]]]
+)
+def test_dry_run_writer_checks(
+    env: dict[str, str], plan_file: Path, default: list[list[str]] | None
+) -> None:
+    data = json.loads(plan_file.read_text())
+    if default is not None:
+        data["writer_check"] = default
+        data["check"] = ["make", "check"]
+    data["tasks"][1]["writer_check"] = []
+    plan_file.write_text(json.dumps(data))
+    options = ("--plan", str(plan_file), "--dry-run")
+    code, out, err = invoke(env, *options, "--json")
+    assert code == 0, err
+    result = json.loads(out)
+    assert result["writer_check"] == default
+    assert result["tasks"] == [
+        {"id": "a", "writer_check": default},
+        {"id": "b", "writer_check": []},
+    ]
+    code, out, err = invoke(env, *options)
+    assert code == 0, err
+    lines = out.splitlines()
+    if default is None:
+        assert lines[lines.index("check none") + 1] == "writer check b: none"
+    else:
+        first = "pytest 'tests/a b.py', printf %s $'a\\nb'" if default else "none"
+        assert lines[lines.index("check make check") + 1] == (
+            f"writer check a: {first} | b: none"
+        )
 
 
 @pytest.mark.parametrize(
@@ -2788,6 +2827,7 @@ def test_dry_run_does_not_execute_check(env: dict[str, str], plan_file: Path) ->
         "-c",
         f"from pathlib import Path; Path({str(marker)!r}).touch()",
     ]
+    data["writer_check"] = [data["check"]]
     plan_file.write_text(json.dumps(data))
     code, _, err = invoke(env, "--plan", str(plan_file), "--dry-run")
     assert code == 0, err
@@ -2908,6 +2948,8 @@ def test_check_replacement_record_event_status(
     wave: int,
 ) -> None:
     flow.update(status="failed", check_pending=True, check=["false"], wave=wave)
+    writer_check = [["pytest", "tests/test_a.py"]]
+    flow["tasks"][0]["writer_check"] = writer_check
     record.save(flow, env)
     before = flow_files(flow["id"], env)
     saves = []
@@ -2931,6 +2973,7 @@ def test_check_replacement_record_event_status(
     assert len(saves) == 1
     saved = record.load(flow["id"], env)
     assert saved["check"] == ["true", ""] and saved["check_pending"]
+    assert [task["writer_check"] for task in saved["tasks"]] == [writer_check, None]
     (change,) = saved["check_changes"]
     assert change == {
         "at": change["at"],
@@ -2949,7 +2992,12 @@ def test_check_replacement_record_event_status(
         )
         assert code == 0, err
         if as_json:
-            assert json.loads(out)["check_changes"] == [change]
+            status = json.loads(out)
+            assert status["check_changes"] == [change]
+            assert [task["writer_check"] for task in status["tasks"]] == [
+                writer_check,
+                None,
+            ]
         else:
             assert f"latest check replacement: {json.dumps(change)}" in out
 

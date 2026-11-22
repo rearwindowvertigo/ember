@@ -1192,10 +1192,20 @@ def test_answers_resume_stopped_tasks(h: Harness, kind: str) -> None:
 
 
 @pytest.mark.parametrize("check", [[], [sys.executable, "-c", "print('plan checked')"]])
-def test_send_correction_carries_record_check(h: Harness, check: list[str]) -> None:
+@pytest.mark.parametrize("writer_check", [None, [], [["pytest", "some tests"]]])
+def test_send_correction_carries_record_check(
+    h: Harness, check: list[str], writer_check: list[list[str]] | None
+) -> None:
     h.scripts_update(**{"Review of task a,": "@reply " + FIX})
     options: dict[str, Any] = {"check": check} if check else {}
+    if writer_check is not None:
+        options["writer_check"] = writer_check
     h.create(rounds=0, **options)
+    folder = record.folder(h.id, h.env)
+    saved_plan = folder / record.PLAN_NAME
+    document = json.loads(saved_plan.read_text())
+    document["tasks"][0]["writer_check"] = [["other-check"]]
+    saved_plan.write_text(json.dumps(document))
     assert h.run()["tasks"][0]["status"] == "stopped"
     if check:
         check = [*check, ""]
@@ -1207,10 +1217,31 @@ def test_send_correction_carries_record_check(h: Harness, check: list[str]) -> N
     h.scripts_update(**{"Review of task a,": "@reply " + PASS})
     h.answer("send", file=str(correction))
     assert h.run()["status"] == "done"
-    folder = record.folder(h.id, h.env) / "briefs"
-    message = next(folder.glob("a-fix-*.md")).read_text()
+    artifacts = folder / "briefs"
+    message = next(artifacts.glob("a-fix-*.md")).read_text()
     assert "\n\n@write a corrected\n\n## Checks" in message
-    if check:
+    assert "other-check" not in message
+    if writer_check is not None:
+        instruction = (
+            "    pytest 'some tests'"
+            if writer_check
+            else "Run no writer check command."
+        )
+        assert instruction in message
+        assert instruction in next(artifacts.glob("a-write-*.md")).read_text()
+        for artifact in artifacts.glob("a-review-*.md"):
+            review = artifact.read_text()
+            assert "other-check" not in review
+            assert (
+                "    pytest 'some tests'"
+                if writer_check
+                else "The writer was told to run no check command."
+            ) in review
+        if check:
+            assert (
+                f"Do not run the flow's check command `{shlex.join(check)}`" in message
+            )
+    elif check:
         assert f"Run the plan's check command `{shlex.join(check)}`" in message
         assert "or say why you could not run it" in message
     else:
@@ -3138,18 +3169,26 @@ def test_old_record_runs_without_base_check(h: Harness) -> None:
 
 
 @pytest.mark.parametrize("wave", [0, 1])
-@pytest.mark.parametrize("passes", [False, True])
+@pytest.mark.parametrize(
+    ("passes", "scoped"), [(False, False), (True, False), (True, True)]
+)
 def test_replace_failed_check_before_pending_wave(
-    h: Harness, monkeypatch: pytest.MonkeyPatch, wave: int, passes: bool
+    h: Harness, monkeypatch: pytest.MonkeyPatch, wave: int, passes: bool, scoped: bool
 ) -> None:
     old_check = [sys.executable, "-c", 'print("old check"); raise SystemExit(1)']
+    writer_check = [["pytest", "tests/test_b.py"]]
+    options: dict[str, Any] = {"writer_check": writer_check} if scoped else {}
+    first = {**task("a"), "writer_check": []} if scoped else task("a")
     h.create(
-        [task("a"), task("b", after=["a"])],
+        [first, task("b", after=["a"])],
         check=old_check,
         check_base=wave == 0,
         rounds=1,
+        **options,
     )
     failed = h.run()
+    resolved = [[], writer_check] if scoped else [None, None]
+    assert [task["writer_check"] for task in failed["tasks"]] == resolved
     assert failed["status"] == "failed" and failed["wave"] == wave
     assert failed["check_pending"]
     folder = record.folder(h.id, h.env)
@@ -3196,6 +3235,7 @@ def test_replace_failed_check_before_pending_wave(
         == 0
     ), err.getvalue()
     final = h.run()
+    assert [task["writer_check"] for task in final["tasks"]] == resolved
     assert final["status"] == ("done" if passes else "failed")
     assert final["check_pending"] is not passes
     assert final["checks"][1]["wave"] == wave
@@ -3206,8 +3246,23 @@ def test_replace_failed_check_before_pending_wave(
         assert all(t["status"] == "merged" for t in final["tasks"])
         for kind in ("write", "fix"):
             brief = next((folder / "briefs").glob(f"b-{kind}-*.md")).read_text()
-            assert f"Run the plan's check command `{shlex.join(new_check)}`" in brief
+            if scoped:
+                assert "    pytest tests/test_b.py" in brief
+                assert (
+                    f"Do not run the flow's check command `{shlex.join(new_check)}`"
+                    in brief
+                )
+            else:
+                assert (
+                    f"Run the plan's check command `{shlex.join(new_check)}`" in brief
+                )
             assert shlex.join(old_check) not in brief
+        if scoped:
+            review = next((folder / "briefs").glob("b-review-*.md")).read_text()
+            assert "    pytest tests/test_b.py" in review
+            assert (
+                f"The flow runs its check command `{shlex.join(new_check)}`" in review
+            )
     else:
         assert started == []
         assert final["tasks"] == failed["tasks"]

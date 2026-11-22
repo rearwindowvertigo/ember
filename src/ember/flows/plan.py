@@ -2,6 +2,7 @@
 
 import json
 import re
+import shlex
 import subprocess
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -29,6 +30,9 @@ _GIT_ENV = (
     "GIT_PREFIX",
     "EMBER_FLOW_RUNNER",
 )
+
+type WriterCheck = tuple[tuple[str, ...], ...]
+_COMMAND_ESCAPES = str.maketrans({"\\": r"\\", "'": r"\'", "\r": r"\r", "\n": r"\n"})
 
 
 class PlanError(Exception):
@@ -90,6 +94,7 @@ class Task:
     files: tuple[str, ...]
     after: tuple[str, ...]
     review: str
+    writer_check: WriterCheck | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +122,7 @@ class Plan:
     parallel_source: str = "plan"
     """Where `parallel` came from: `plan`, `setting`, or `default` before the
     owner's `flow.parallel` row is applied."""
+    writer_check: WriterCheck | None = None
 
     def task(self, task_id: str) -> Task:
         """Find a task by id, raising KeyError if it is absent."""
@@ -124,6 +130,32 @@ class Plan:
             if task.id == task_id:
                 return task
         raise KeyError(task_id)
+
+    def writer_check_for(self, task: Task) -> WriterCheck | None:
+        """Return the task's override or the plan's writer check."""
+        return self.writer_check if task.writer_check is None else task.writer_check
+
+
+def writer_check_json(commands: WriterCheck | None) -> list[list[str]] | None:
+    """Return the writer check as JSON arrays, or null when unset."""
+    return [list(argv) for argv in commands] if commands is not None else None
+
+
+def writer_command_text(argv: Sequence[str]) -> str:
+    """Quote argv for a shell, using ANSI-C quotes to keep line breaks escaped."""
+    return " ".join(
+        "$'" + arg.translate(_COMMAND_ESCAPES) + "'"
+        if "\n" in arg or "\r" in arg
+        else shlex.quote(arg)
+        for arg in argv
+    )
+
+
+def _writer_check(value: Mapping[str, Any]) -> WriterCheck | None:
+    """Read an optional writer check from validated plan or task fields."""
+    if "writer_check" in value:
+        return tuple(tuple(argv) for argv in value["writer_check"])
+    return None
 
 
 def schema_text() -> str:
@@ -282,6 +314,7 @@ def parse(text: str, path: Path) -> Plan:
             files=tuple(item["files"]),
             after=tuple(item.get("after", [])),
             review=item.get("review", ""),
+            writer_check=_writer_check(item),
         )
         for item in value["tasks"]
     )
@@ -298,6 +331,7 @@ def parse(text: str, path: Path) -> Plan:
         parallel=value.get("parallel", 4),
         parallel_source="plan" if "parallel" in value else "default",
         check=tuple(value.get("check", [])),
+        writer_check=_writer_check(value),
         check_timeout=value.get("check_timeout", 1800),
         context=value.get("context", ""),
         failure_model=value.get("failure_model", ""),
