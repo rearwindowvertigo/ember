@@ -525,6 +525,9 @@ def _dry_run(
     whole = _whole_review(settings)
     stall = _stall_minutes(args, settings)
     waves = plan.waves(document)
+    writer_checks = {
+        task.id: document.writer_check_for(task) for task in document.tasks
+    }
     warnings = plan.warnings(document, str(top), env, citations.standing(settings))
     if args.json:
         print(
@@ -543,6 +546,11 @@ def _dry_run(
                     },
                     "same_model": _same_model(writer, reviewer),
                     "check": list(document.check),
+                    "writer_check": document.writer_check,
+                    "tasks": [
+                        {"id": task_id, "writer_check": commands}
+                        for task_id, commands in writer_checks.items()
+                    ],
                     "rounds": document.rounds,
                     "rounds_source": document.rounds_source,
                     "parallel": document.parallel,
@@ -572,6 +580,13 @@ def _dry_run(
             f"check {shlex.join(document.check) if document.check else 'none'}",
             file=out,
         )
+        checked_tasks = [
+            f"{task_id}: {', '.join(map(plan.writer_command_text, commands)) or 'none'}"
+            for task_id, commands in writer_checks.items()
+            if commands is not None
+        ]
+        if checked_tasks:
+            print("writer check " + " | ".join(checked_tasks), file=out)
         for number, wave in enumerate(waves, 1):
             print(f"wave {number}:", file=out)
             for task in wave:

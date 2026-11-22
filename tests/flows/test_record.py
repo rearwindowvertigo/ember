@@ -84,6 +84,7 @@ def test_creation(flow: dict[str, Any], created: Path, env: dict[str, str]) -> N
         "source": "default",
     }
     assert record.task_entry(flow, "a")["status"] == "pending"
+    assert record.task_entry(flow, "a")["writer_check"] is None
     record.task_entry(flow, "a")["findings"].append({"problem": "a"})
     assert record.task_entry(flow, "b")["findings"] == []
     assert record.task_entry(flow, "a")["corrections"] == []
@@ -392,6 +393,19 @@ def test_load_without_corrections(
     assert record.load(flow["id"], env)["tasks"][0]["corrections"] == ["answers/1.md"]
 
 
+def test_load_without_writer_check(
+    flow: dict[str, Any], created: Path, env: dict[str, str]
+) -> None:
+    del flow["tasks"][0]["writer_check"]
+    flow["tasks"][1]["writer_check"] = []
+    path = created / record.FLOW_NAME
+    text = json.dumps(flow)
+    path.write_text(text)
+    loaded = record.load(flow["id"], env)
+    assert [task["writer_check"] for task in loaded["tasks"]] == [None, []]
+    assert path.read_text() == text
+
+
 @pytest.mark.parametrize("bad", [b"invalid", b"\xff", b"[]", b"{}"])
 def test_broken_json(
     flow: dict[str, Any], created: Path, env: dict[str, str], bad: bytes
@@ -443,6 +457,8 @@ def test_invalid_field(
         ("corrections", None),
         ("corrections", "answers/1.md"),
         ("corrections", [1]),
+        ("writer_check", ["make"]),
+        ("writer_check", [["make", 1]]),
         ("files", None),
     ],
 )

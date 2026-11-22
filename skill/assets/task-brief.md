@@ -71,7 +71,10 @@ Put your whole answer in your final message.
 ## Checks and stop condition
 
 Run <checks for this task>.
-Run the repository's full test suite, or name why not.
+<Choose one. Use "Run the repository's full test suite, or name why not."
+When the full suite is long and the lead or CI runs it on the result, use
+"Run only <named checks>, or name why not. Do not run the full suite.
+<Lead or CI> runs it on the result.">
 <Name checks the worker cannot run in its sandbox, why, who runs them, and
 the constraints, grants and fixture prerequisites those checks exercise.>
 For a test someone else runs against a database: before writing it, read

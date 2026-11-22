@@ -2118,7 +2118,7 @@ or when the run cannot be closed, the run's exit 73 is the check's exit.
 
 A flow runs a JSON plan of tasks in waves, in a runner's own session. Each
 task has a writer run and read-only review runs with fix rounds. Accepted
-tasks merge into `ember/flow/<id>`; the plan's check runs after each wave's
+tasks merge into `ember/flow/<id>`; the flow record's check runs after each wave's
 merges. Tasks that need a decision produce lead stops. Claude answers the
 stops, reviews the flow branch and merges it with `emb merge`.
 
@@ -2225,8 +2225,10 @@ One atomic save replaces the flow record's `check` and appends to
 the save. The saved `plan.json` stays unchanged. A runner launch failure
 after the save leaves the replacement in place; plain `--resume` uses it.
 The runner runs the pending check before scheduling further work and
-continues only after it passes. After start, the runner, `emb merge`,
-writer briefs and fix messages all read the check from the flow record.
+continues only after it passes. `emb merge` names the flow record's check
+in its next action when the flow tip lacks the target tip. Writer briefs,
+fix messages and lead corrections also name that check. Replacing it leaves
+each task's saved `writer_check` unchanged.
 
 ### Plan
 
@@ -2247,6 +2249,7 @@ is refused with code 64.
 | `rounds` | `flow.review_rounds` minus one | Integer from 0 to 3; fix rounds per task |
 | `parallel` | `flow.parallel` (default `4`) | Integer from 1 to 8; maximum concurrent jobs within a wave |
 | `check` | No check | Non-empty argv list of strings; first argument non-blank; no NUL in any argument |
+| `writer_check` | Omitted | List of writer commands, each an argv list with the same validation as `check`. An empty list specifies no writer check commands. |
 | `check_timeout` | `1800` | Integer seconds, at least 1 |
 | `context`, `failure_model` | `""` | Strings |
 | `read` | `[]` | List of strings starting with `/`, without duplicates |
@@ -2265,6 +2268,7 @@ contains no whitespace or `@`, and need not be shortlisted. Effort matches
 | `files` | Required | Non-empty list of unique relative POSIX paths; no leading slash, empty component, `.` component, `..` component or NUL |
 | `after` | `[]` | List of ids of other tasks; every id exists, no self dependency and no cycle |
 | `review` | `""` | String |
+| `writer_check` | Plan's `writer_check`, if set | List of writer commands with the same rules as the plan field. An empty list overrides any plan value. |
 
 Recorded flows retain their resolved task subjects when loading their saved
 plans. New plans require an explicit subject for every task.
@@ -2562,12 +2566,18 @@ the wave, a `## Sources to read` section listing the read files of the
 and closing report headings. Lead corrections also
 preserve their text as written.
 
-Writer briefs, fix-round messages and lead `--send` corrections name the
-flow record's current check command as shell words and ask the writer to
-run it or say why it could not. With no check, they ask for tests for the
-changed files and quick static checks. They also ask the writer to search for tests
-and callers, including outside the declared files, fix breaks caused by
-the change where the limits allow, and list other needed fixes under
+Writer briefs, fix-round messages and lead `--send` corrections use the
+task's saved `writer_check`. They list its commands as shell words, one
+command per line, and ask the writer to run them or say why it could not
+run one. An empty list tells the writer to run no check command. When the
+flow has a check, the brief names it, tells the writer not to run
+it, and says the flow runs it on the merged result after the wave.
+With no resolved `writer_check`, the brief asks the writer to run the
+flow record's current check or say why it could not. With neither check,
+it asks for tests for the changed files and quick static checks.
+They also ask the writer to search for tests and callers, including outside
+the declared files, to fix breaks caused by the change where the limits
+allow, and to list other needed fixes under
 `Not done`. Failures from unavailable services or the environment are
 named without trying to fix them.
 
@@ -2588,6 +2598,9 @@ subject, declared files and the other tasks' files, the `## Sources to read`
 section when the setting or plan has read files, review focus, context,
 failure model, the base and head for `git diff` and `git log`, changed and
 outside files, and up to 20,000 characters of the writer's last report.
+When the task has a saved `writer_check`, the review brief lists the checks
+the writer was told to run, or says the writer was told to run none. It says
+which check the flow runs on the merged result after the wave, if any.
 The `Changed outside the declared files` section lists Ember's recorded
 `outside_files`, independently of the writer's report. When nonempty, it
 asks for exactly one `outside_files` reply entry per listed path, whether
@@ -2905,6 +2918,7 @@ refused. `save` updates `updated_at` and atomically replaces `flow.json`.
 | Task field | Value |
 |---|---|
 | `id`, `subject` | Plan values |
+| `writer_check` | Resolved list of writer command argv lists at flow creation. Null when unset or absent from the record. |
 | `status` | `pending`, `writing`, `reviewing`, `fixing`, `accepted`, `merging`, `merged`, `stopped`, `conflict`, `blocked` or `dropped` |
 | `reason` | Stop, conflict, blocking or drop reason, or null |
 | `wave` | Last wave used, or null |
@@ -3005,9 +3019,14 @@ whole-flow review on|off`, and the gap check line: `gap check: <command>`,
 `gap check: skipped, <reason>`, or `gap check: ask the owner, then
 <command>`. The rounds
 source is `plan` when the plan sets `rounds`, otherwise `setting` (the
-owner's `flow.review_rounds` minus one). Warnings print as
+owner's `flow.review_rounds` minus one). When the plan or a task sets
+`writer_check`, a `writer check` line follows the `check` line. It lists each
+task with a resolved writer check and its commands as shell words, or `none`
+for an empty list. Warnings print as
 `WARNING: <text>`. JSON has `plan`, `dir`, `base`, `writer`, `reviewer`,
-`same_model`, `check`, `rounds`, `rounds_source`, `parallel`, `parallel_source` (`plan`
+`same_model`, `check`, `writer_check` (the plan value, or null when omitted),
+`tasks` (objects in plan order with `id` and the resolved `writer_check`, or
+null when unset), `rounds`, `rounds_source`, `parallel`, `parallel_source` (`plan`
 or `setting`), `stall_minutes`, `whole_review`, `waves` (arrays of task
 ids), `warnings`, `gapcheck` (the shell command, or null when skipped),
 `gapcheck_status` (`run`, `skipped` or `ask`), `gapcheck_reason` and
@@ -3169,7 +3188,8 @@ history. Text status with replacements prints
 `check_output` has the same string-or-null value as the watch report, including
 after a resume: a passing check replaces an earlier failed check's output
 with null. Text status prints the same bounded tail under `check log output:`
-when present, and omits it otherwise. Each task has
+when present, and omits it otherwise. Each JSON task entry has its saved
+`writer_check`, with null for an unset or absent value. Each task has
 `latest_review` as in watch reports, and its `findings` objects include
 `round` and `run`, with null for missing values. Text status prints the
 latest review's counts separately and each finding with its round and run.
@@ -3828,7 +3848,7 @@ from the repository's main checkout, which cleanup never removes.
   target tip. Ember checks `git merge-base --is-ancestor <target tip>
   <flow tip>` before containment or merging. A failure exits 75 and merges
   nothing. Its `next:` line names merging the target into the flow branch
-  in the recorded worktree, the saved plan check argv to run again there
+  in the recorded worktree, the flow record's check argv to run again there
   (or that no check is configured), and `emb merge` again. An unreadable
   or mismatched flow record also refuses with exit 75 and a flow status
   action. Run branches, non-completed flows and flow branches with no

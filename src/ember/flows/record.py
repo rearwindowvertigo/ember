@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ember import choices, paths
-from ember.flows.plan import Plan, Worker, waves
+from ember.flows.plan import Plan, Task, Worker, waves, writer_check_json
 from ember.runs import record
 
 FLOW_NAME, PLAN_NAME, EVENTS_NAME, ANSWERS_NAME, WATCH_NAME = (
@@ -96,6 +96,7 @@ _FLOW_FIELDS = {
 _TASK_FIELDS = {
     "id": "str",
     "subject": "str",
+    "writer_check": "[[str]]?",
     "status": "str",
     "reason": "str?",
     "wave": "int?",  # The runner pass assigned to the task.
@@ -152,10 +153,16 @@ def folder(flow_id: str, env: Mapping[str, str] | None = None) -> Path:
     return record.run_dir(flow_id, env)
 
 
-def _new_task(task_id: str, subject: str) -> dict[str, Any]:
-    """Initialize every task field with independent lists."""
+def _new_task(plan: Plan, specification: Task) -> dict[str, Any]:
+    """Initialize a task record with its resolved writer check."""
     task: dict[str, Any] = dict.fromkeys(_TASK_FIELDS)
-    task.update(id=task_id, subject=subject, status="pending", round=0)
+    task.update(
+        id=specification.id,
+        subject=specification.subject,
+        writer_check=writer_check_json(plan.writer_check_for(specification)),
+        status="pending",
+        round=0,
+    )
     for key in (
         "reviews",
         "findings",
@@ -243,7 +250,7 @@ def new_flow(
         "started_at": at,
         "updated_at": at,
         "ended_at": None,
-        "tasks": [_new_task(task.id, task.subject) for task in plan.tasks],
+        "tasks": [_new_task(plan, task) for task in plan.tasks],
     }
 
 
@@ -435,6 +442,7 @@ def load(flow_id: str, env: Mapping[str, str] | None = None) -> dict[str, Any]:
             for task in value["tasks"]:
                 if isinstance(task, dict):
                     task.setdefault("corrections", [])
+                    task.setdefault("writer_check", None)
     _validate(flow_id, value)
     if choices.OPENCODE_ID_FORMAT not in value:
         for row in (value, *value["tasks"]):

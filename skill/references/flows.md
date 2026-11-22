@@ -61,9 +61,15 @@ Stall after (`flow.stall`) unless you pass `--stall`.
   Leave out a test this machine cannot run through a wrapper script named
   as the check argv. The wrapper lists each excluded file and fails on any
   other failure. Name the exclusions to the owner and in the report.
-  The check runs once after every wave's merges. Each writer is told to
-  run it too. A chain of one-task waves runs the wave check once per task;
-  wave count multiplies check time.
+  The check runs on the merged result after each wave. Writers without a
+  resolved `writer_check` are told to run it too. A chain of one-task waves
+  runs the wave check once per task; wave count multiplies check time.
+- `writer_check`: optional default list of check commands for writers. Each
+  command is an argv list with the same rules as `check`. A task can set its
+  own list, and an empty list tells the writer to run no check command. Use
+  narrower writer checks when the full check is long or several writers
+  would run it at once on one machine. The wave check covers the merged
+  result.
 - `failure_model`: the cases that must work and those accepted.
 - `context`: only settled decisions and the rules tasks need.
 - `read`: the files that hold each source the plan cites, such as an
@@ -82,6 +88,7 @@ Stall after (`flow.stall`) unless you pass `--stall`.
 | `files` | Required non-empty list of unique exact relative POSIX file paths, with no trailing `/` | `["src/totals.py", "tests/test_totals.py"]` |
 | `after` | List of other task ids as strings; default `[]`; every id exists, no self dependency or cycle | `["schema"]` |
 | `review` | String giving the reviewer's focus; default `""` | `"Check empty orders and rounding."` |
+| `writer_check` | List of command argv lists for this task, including `[]` for no commands. Omit to inherit the plan's `writer_check`. | `[["pytest", "tests/test_totals.py"]]` |
 
 Write `subject` in the repository's commit convention, with `!` for a
 breaking Conventional Commit: the one `AGENTS.md` or `CONTRIBUTING` states;
@@ -301,10 +308,13 @@ and no NUL characters. Later arguments may be empty. Invalid argv or a
 missing or blank reason exits 64. A refused call changes nothing.
 Ember saves the replacement and its history entry atomically in the flow
 record, with the time, old argv, new argv and reason. The saved plan stays
-unchanged. The runner, `emb merge`, writer briefs and fix briefs use the
-flow record's check. If runner launch fails after the save, the replacement
-stays and a plain resume uses it. The new check runs before any pending
-wave and must pass. No option accepts a wave without a passing check.
+unchanged. The runner runs the flow record's check. When the flow tip lacks
+the target tip, `emb merge` names that check in its next action. Writer
+briefs, fix briefs and lead corrections name that check and use the task's
+saved `writer_check` to tell the writer what to run. Replacing `check` leaves
+each task's `writer_check` unchanged. If runner launch fails after the save,
+the replacement stays and a plain resume uses it. The replacement runs before
+any pending wave and must pass. No option accepts a wave without a passing check.
 A flow merged while `failed` keeps that status in its record.
 
 ## Provider errors
@@ -361,7 +371,7 @@ target. With a matching flow record whose status is `done`, the flow tip
 must contain the target tip (`git merge-base --is-ancestor <target tip>
 <flow tip>`). Otherwise it exits 75 and merges nothing. Follow its `next:`
 line: merge the target into the flow branch in the recorded flow worktree,
-run the saved plan check again there, then run `emb merge` again. The line
+run the flow record's check again there, then run `emb merge` again. The line
 prints the saved check argv or says no check is configured. An unreadable
 or mismatched flow record also refuses. Run branches, non-completed flows
 and flow branches without records have no such target-tip check.
