@@ -93,8 +93,7 @@ def _earlier(previous: Previous | None) -> list[str]:
 _COMPARED = (
     "The list compares a flow plan's context, failure model, tasks and waves, "
     "or another plan's text. A flow plan's check, writer checks, read files "
-    "and folder are not compared: read them as they stand below, and report "
-    "a gap that one of them causes."
+    "and folder are not compared and are outside this repeat."
 )
 _REPEAT_LIMITS = (
     "On this repeat, report a missing failure model only when no earlier gap "

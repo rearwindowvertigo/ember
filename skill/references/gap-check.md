@@ -237,7 +237,8 @@ dependencies, tasks and waves the plan gained and lost since the earlier
 check, and the reviewer reports a new gap only when it arises from a
 listed change. A plan with no listed change gets a gap only to reopen an
 earlier one. The list does not compare a flow plan's `check`,
-`writer_check`, `read` or `dir`; the reviewer reads those as they stand.
+`writer_check`, `read` or `dir`, and the repeat does not review them: when
+you changed one of them after the first check, say so to the owner.
 The list is left out, and the repeat covers the whole plan, when the
 earlier result holds no saved plan of the same kind. An incomplete earlier
 result is refused: finish that check first. For a check of the whole plan,

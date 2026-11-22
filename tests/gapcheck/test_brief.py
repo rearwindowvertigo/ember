@@ -260,7 +260,7 @@ def test_repeat_brief_limits_new_gaps_to_the_listed_changes(tmp_path: Path) -> N
         "Do not redesign the plan"
     ) in rendered
     assert "report a missing failure model only when no earlier gap" in limits
-    assert "check, writer checks, read files and folder are not compared" in limits
+    assert "folder are not compared and are outside this repeat." in limits
     no_baseline = previous.Previous(tmp_path / "earlier.json", ())
     assert "## Changes since the earlier check" not in brief.text(
         plan.load(path), str(tmp_path), no_baseline

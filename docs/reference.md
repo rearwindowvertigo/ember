@@ -2041,8 +2041,8 @@ each task's `subject`, `task` and `review`, each task's added and removed
 `files` and `after`, added and removed tasks, and the earlier and current
 waves when they differ; for another plan, a line diff of its text with
 line numbers. A flow plan's `check`, `writer_check`, `read` and `dir` are
-not saved in a result and are not compared; the brief says so and allows a
-gap that one of them causes. The brief asks for a new gap only when it
+not saved in a result and are not compared; the brief says they are
+outside the repeat. The brief asks for a new gap only when it
 arises from a listed change, and for a plan with no listed change only to
 reopen an earlier gap. On a repeat it asks for the missing-failure-model
 gap only when no earlier gap names it, and for the search for outside
