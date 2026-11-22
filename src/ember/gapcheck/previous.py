@@ -1,6 +1,7 @@
 """Validate saved results and carry active, settled and closed gaps forward."""
 
 import copy
+import difflib
 import fcntl
 import json
 import math
@@ -159,6 +160,65 @@ def comparison(document: flow_plan.Plan, earlier: Previous) -> dict[str, Any]:
             else None
         ),
     }
+
+
+def _line_changes(label: str, old: str, new: str) -> list[str]:
+    """List the lines a text gained and lost, indented under their labels."""
+    delta = list(difflib.ndiff(old.splitlines(), new.splitlines()))
+    lines: list[str] = []
+    for mark, title in (("+ ", "added or altered"), ("- ", "removed or replaced")):
+        found = [line[2:] for line in delta if line.startswith(mark)]
+        if found:
+            lines.append(f"  {label}, {title} lines:")
+            lines.extend(f"      {line}" for line in found)
+    return lines
+
+
+def changes(document: Plan, earlier: Previous) -> list[str] | None:
+    """Describe what the plan gained and lost since the earlier check.
+
+    Args:
+        document: The plan under review.
+        earlier: The earlier result.
+
+    Returns:
+        The lines of the change list, one block per changed part, empty when
+        nothing changed. None when the earlier result is incomplete, saved no
+        plan, or saved a plan of another kind: the repeat then covers the
+        whole plan.
+    """
+    saved = earlier.document.get("checked_plan")
+    now = snapshot(document)
+    if saved is None or saved["kind"] != now["kind"] or incomplete(earlier.document):
+        return None
+    if now["kind"] == "document":
+        found = _line_changes("text", saved["text"], now["text"])
+        return ["The plan:", *found, ""] if found else []
+    lines: list[str] = []
+    for name in ("context", "failure_model"):
+        found = _line_changes(name, saved[name], now[name])
+        if found:
+            lines += ["The plan:", *found, ""]
+    before = {task["id"]: task for task in saved["tasks"]}
+    for task in now["tasks"]:
+        old = before.pop(task["id"], None)
+        if old is None:
+            lines += [f"Task {task['id']}: a new task.", ""]
+            continue
+        found = []
+        for name in ("subject", "task", "review"):
+            found += _line_changes(name, old[name], task[name])
+        for name in ("files", "after"):
+            gained = sorted(set(task[name]) - set(old[name]))
+            lost = sorted(set(old[name]) - set(task[name]))
+            if gained:
+                found.append(f"  {name} added: {', '.join(gained)}")
+            if lost:
+                found.append(f"  {name} removed: {', '.join(lost)}")
+        if found:
+            lines += [f"Task {task['id']}:", *found, ""]
+    lines += [line for ident in before for line in (f"Task {ident}: removed.", "")]
+    return lines
 
 
 def incomplete(document: Mapping[str, Any]) -> bool:

@@ -9,7 +9,7 @@ from pathlib import Path
 from ember import citations
 from ember.flows import plan as flow_plan
 from ember.gapcheck.plan import Plan
-from ember.gapcheck.previous import Previous
+from ember.gapcheck.previous import Previous, changes
 from ember.gapcheck.reply import schema_text
 
 FIRST_LINE = "Gap check of the plan {name}: a read-only review; change no file."
@@ -88,6 +88,35 @@ def _earlier(previous: Previous | None) -> list[str]:
                 f"Reason: {_path_text(gap['reason'])}"
             )
     return [*lines, ""]
+
+
+def _changes(plan: Plan, previous: Previous | None) -> list[str]:
+    """Limit a repeat check to what the plan gained and lost since the earlier one.
+
+    Without an earlier result, or when it holds no comparable saved plan,
+    the section is left out and the check covers the whole plan.
+    """
+    found = None if previous is None else changes(plan, previous)
+    if found is None:
+        return []
+    heading = ["## Changes since the earlier check", ""]
+    if not found:
+        return [
+            *heading,
+            "The plan has not changed since the earlier check. Report a gap "
+            "only to reopen an earlier one; every other step list is empty.",
+            "",
+        ]
+    return [
+        *heading,
+        "The earlier check read this plan before the changes below. Report a "
+        "new gap only when it arises from a change listed here: text that was "
+        "added or altered, or a file or dependency that was added or removed. "
+        "Do not review unchanged text again. A step whose changes raise no gap "
+        "gets an empty list. An earlier gap is reopened as the rule above says.",
+        "",
+        *found,
+    ]
 
 
 def _sources(files: Sequence[Path]) -> list[str]:
@@ -196,6 +225,7 @@ def text(
             *_flow(plan.flow),
             *_sources(sources),
             *_earlier(previous),
+            *_changes(plan, previous),
             "Do not redesign the plan and do not decide missing behaviour; "
             "name each gap and propose a default.",
             "",

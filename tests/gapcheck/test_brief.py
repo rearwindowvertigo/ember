@@ -220,6 +220,50 @@ def test_brief_lists_earlier_gaps_with_ids_and_answers(tmp_path: Path) -> None:
     assert "Cover all 2 steps." in "\n".join(lines)
 
 
+def _checked(path: Path, tmp_path: Path) -> previous.Previous:
+    return previous.Previous(
+        tmp_path / "earlier.json",
+        (),
+        document={
+            "checked_plan": previous.snapshot(plan.load(path)),
+            "parse_error": None,
+            "uncovered_steps": [],
+            "unknown_steps": [],
+        },
+    )
+
+
+def test_repeat_brief_limits_new_gaps_to_the_listed_changes(tmp_path: Path) -> None:
+    path = tmp_path / "plan.md"
+    path.write_text("1. Read\n2. Build\n", encoding="utf-8")
+    earlier = _checked(path, tmp_path)
+    unchanged = brief.text(plan.load(path), str(tmp_path), earlier)
+    assert (
+        "## Changes since the earlier check\n\n"
+        "The plan has not changed since the earlier check. Report a gap only "
+        "to reopen an earlier one; every other step list is empty.\n"
+    ) in unchanged
+    path.write_text("1. Read\n2. Build\n3. Ship\n", encoding="utf-8")
+    rendered = brief.text(plan.load(path), str(tmp_path), earlier)
+    assert (
+        "## Changes since the earlier check\n\n"
+        "The earlier check read this plan before the changes below. Report a "
+        "new gap only when it arises from a change listed here: text that was "
+        "added or altered, or a file or dependency that was added or removed. "
+        "Do not review unchanged text again. A step whose changes raise no gap "
+        "gets an empty list. An earlier gap is reopened as the rule above says."
+        "\n\nThe plan:\n  text, added or altered lines:\n      3. Ship\n\n"
+        "Do not redesign the plan"
+    ) in rendered
+    no_baseline = previous.Previous(tmp_path / "earlier.json", ())
+    assert "## Changes since the earlier check" not in brief.text(
+        plan.load(path), str(tmp_path), no_baseline
+    )
+    assert "## Changes since the earlier check" not in brief.text(
+        plan.load(path), str(tmp_path)
+    )
+
+
 def test_brief_with_an_empty_previous_result(tmp_path: Path) -> None:
     path = tmp_path / "plan.md"
     path.write_text("1. Read\n", encoding="utf-8")
