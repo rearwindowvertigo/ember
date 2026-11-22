@@ -754,11 +754,7 @@ class _Runner:
         return [path for files in self.declarations(task).values() for path in files]
 
     def post_turn(self, task: dict[str, Any], initial: bool) -> bool:
-        """Validate recovered and uninterrupted turns by the same changed-file rules.
-
-        A changed file that another task of the wave declares is saved in
-        `shared_files` with that task, for the review brief.
-        """
+        """Validate recovered and uninterrupted turns by the same changed-file rules."""
         run = self.metadata(task)
         if run.turn == 0 or run.turn_state is None:
             self.change(
@@ -785,18 +781,11 @@ class _Runner:
         outside = [
             path for path in changed if not any(plan.overlaps(path, f) for f in own)
         ]
-        shared = [
-            {"file": path, "task": other}
-            for other, files in self.declarations(task).items()
-            for path in changed
-            if any(plan.overlaps(path, f) for f in files)
-        ]
         self.change(
             task,
             head=head,
             changed_files=changed,
             outside_files=outside,
-            shared_files=shared,
             turn_pending=False,
         )
         return True
@@ -979,8 +968,10 @@ class _Runner:
                 changed=task["changed_files"],
                 outside=task["outside_files"],
                 shared=[
-                    (item["file"], item["task"])
-                    for item in task.get("shared_files", [])
+                    (path, other)
+                    for other, files in self.declarations(task).items()
+                    for path in task["changed_files"]
+                    if any(plan.overlaps(path, f) for f in files)
                 ],
                 wave_files=self.other_files(task),
                 writer_report=report,

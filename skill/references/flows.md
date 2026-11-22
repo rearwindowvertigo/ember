@@ -374,9 +374,10 @@ finding just for being outside the list. Reviewers also check changes to
 behaviour or user-facing wording the task did not ask for, in any file.
 
 A writer's change to a file that another task of its wave declares does
-not stop the task. The task's `shared_files` records each such file with
-the declaring task, and the review brief names them and asks for a `must`
-for each edit the task did not need. When Git reports a conflict at the
+not stop the task. The review brief names each such file with the
+declaring task, and the reviewer judges it as an outside edit. The writer
+brief forbids such a change unless the task text names the file as the
+task's to change. When Git reports a conflict at the
 later task's merge, that task stops as `conflict`.
 
 `emb merge` checks a completed flow branch against the local `--into`

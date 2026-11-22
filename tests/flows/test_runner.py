@@ -767,7 +767,12 @@ def shared_reply() -> str:
     return json.dumps(value)
 
 
-def test_same_wave_declared_file_is_recorded_and_reviewed(h: Harness) -> None:
+def _review_brief(h: Harness, name: str) -> str:
+    folder = record.folder(h.id, h.env) / "briefs"
+    return sorted(folder.glob(f"{name}-review-*.md"))[-1].read_text()
+
+
+def test_same_wave_declared_file_is_named_in_the_review_brief(h: Harness) -> None:
     h.scripts_update(**{"Review of task a,": "@reply " + shared_reply()})
     h.create(
         [
@@ -779,11 +784,9 @@ def test_same_wave_declared_file_is_recorded_and_reviewed(h: Harness) -> None:
     item = flow["tasks"][0]
     assert item["status"] == "merged" and len(item["reviews"]) == 1
     assert item["outside_files"] == ["b"]
-    assert item["shared_files"] == [{"file": "b", "task": "b"}]
-    brief = next((record.folder(h.id, h.env) / "briefs").glob("a-review-*.md"))
-    assert "    b (task b)" in brief.read_text()
+    assert "    b (task b)" in _review_brief(h, "a")
     assert flow["tasks"][1]["status"] == "merged"
-    assert "shared_files" in flow["tasks"][1] and not flow["tasks"][1]["shared_files"]
+    assert "another task in this wave declares" not in _review_brief(h, "b")
 
 
 def test_both_writers_change_a_declared_file_and_the_later_merge_conflicts(
@@ -793,7 +796,7 @@ def test_both_writers_change_a_declared_file_and_the_later_merge_conflicts(
     h.create([task("a", text="@write b first"), task("b", text="@write b second")])
     first, second = h.run()["tasks"]
     assert first["status"] == "merged" and len(first["reviews"]) == 1
-    assert first["shared_files"] == [{"file": "b", "task": "b"}]
+    assert "    b (task b)" in _review_brief(h, "a")
     assert second["status"] == "conflict"
 
 
@@ -2200,7 +2203,7 @@ def test_recovered_turn_records_original_wave_declarations(h: Harness) -> None:
     flow["tasks"][1].update(status="dropped", wave=2)
     record.save(flow, h.env)
     item = h.run()["tasks"][0]
-    assert item["shared_files"] == [{"file": "b", "task": "b"}]
+    assert "    b (task b)" in _review_brief(h, "a")
     assert len(item["reviews"]) == 1
 
 
@@ -2231,7 +2234,7 @@ def test_review_answer_reviews_a_task_stopped_for_a_declared_file(h: Harness) ->
     h.answer("review")
     item = h.run()["tasks"][0]
     assert item["status"] == "merged" and len(item["reviews"]) == 1
-    assert item["shared_files"] == [{"file": "b", "task": "b"}]
+    assert "    b (task b)" in _review_brief(h, "a")
     assert _refusals(h) == []
 
 
