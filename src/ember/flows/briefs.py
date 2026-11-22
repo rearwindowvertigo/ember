@@ -174,8 +174,12 @@ def review_brief(
     merged_siblings: Sequence[tuple[str, str, str]] = (),
     corrections: Sequence[tuple[int, str]] = (),
     writer_check: Sequence[Sequence[str]] | None = None,
+    shared: Sequence[tuple[str, str]] = (),
 ) -> str:
     """Build a review brief with indented evidence and the packaged reply schema.
+
+    `shared` holds each changed file that another task of the wave declares,
+    with that task's id.
 
     `standing` holds the `sandbox.read` paths, listed as sources before the
     plan's `read`.
@@ -242,6 +246,18 @@ def review_brief(
             "set needed to whether the task needed the edit, and explain why in "
             "a one-line reason. Raise an edit the task did not need as a must "
             "or should finding under the review bar."
+        )
+    if shared:
+        parts.append(
+            "The writer changed these files, which another task in this wave "
+            "declares:\n\n"
+            + indent(
+                "\n".join(f"{path} (task {other})" for path, other in shared), "    "
+            )
+            + "\n\nThe writer limits forbid these edits. Ember did not stop the "
+            "task for them. Raise each one the task did not need as a must "
+            "finding. An edit the task needed is not a finding for breaking "
+            "the limit."
         )
     parts.append(
         "## The writer's report\n\n"

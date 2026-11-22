@@ -759,13 +759,31 @@ def test_no_change_initial_or_fix(h: Harness, text: str) -> None:
     )
 
 
-def test_same_wave_declaration_violation_stops_before_review(h: Harness) -> None:
-    h.create([task("a", text="@write b wrong"), task("b")])
+def shared_reply() -> str:
+    value = json.loads(PASS)
+    value["outside_files"] = [
+        {"file": "b", "needed": True, "reason": "The task needs this edit"}
+    ]
+    return json.dumps(value)
+
+
+def test_same_wave_declared_file_is_recorded_and_reviewed(h: Harness) -> None:
+    h.scripts_update(**{"Review of task a,": "@reply " + shared_reply()})
+    h.create(
+        [
+            task("a", text="@write b wrong"),
+            task("b", text="@write c value", files=["b", "c"]),
+        ]
+    )
     flow = h.run()
     item = flow["tasks"][0]
-    assert item["reason"] == "changed b, which task b in this wave declares"
-    assert not item["reviews"]
+    assert item["status"] == "merged" and len(item["reviews"]) == 1
+    assert item["outside_files"] == ["b"]
+    assert item["shared_files"] == [{"file": "b", "task": "b"}]
+    brief = next((record.folder(h.id, h.env) / "briefs").glob("a-review-*.md"))
+    assert "    b (task b)" in brief.read_text()
     assert flow["tasks"][1]["status"] == "merged"
+    assert "shared_files" in flow["tasks"][1] and not flow["tasks"][1]["shared_files"]
 
 
 def test_outside_file_and_same_wave_merge_conflict(h: Harness) -> None:
@@ -2157,7 +2175,8 @@ def test_changed_files_include_both_rename_sides(h: Harness) -> None:
     assert item["outside_files"] == ["README.md"]
 
 
-def test_recovered_turn_checks_original_wave_declarations(h: Harness) -> None:
+def test_recovered_turn_records_original_wave_declarations(h: Harness) -> None:
+    h.scripts_update(**{"Review of task a,": "@reply " + shared_reply()})
     h.create([task("a"), task("b")])
     flow, writer = started_writer(h)
     worktree = Path(writer.worktree)
@@ -2170,8 +2189,39 @@ def test_recovered_turn_checks_original_wave_declarations(h: Harness) -> None:
     flow["tasks"][1].update(status="dropped", wave=2)
     record.save(flow, h.env)
     item = h.run()["tasks"][0]
-    assert item["reason"] == "changed b, which task b in this wave declares"
-    assert item["reviews"] == []
+    assert item["shared_files"] == [{"file": "b", "task": "b"}]
+    assert len(item["reviews"]) == 1
+
+
+def test_review_answer_reviews_a_task_stopped_for_a_declared_file(h: Harness) -> None:
+    h.scripts_update(**{"Review of task a,": "@reply " + shared_reply()})
+    h.create([task("a"), task("b")])
+    flow, writer = started_writer(h)
+    worktree = Path(writer.worktree)
+    (worktree / "b").write_text("shared\n")
+    git(worktree, "add", "b", env=h.env)
+    git(worktree, "commit", "-m", "shared", env=h.env)
+    head = git(worktree, "rev-parse", "HEAD", env=h.env).strip()
+    flow["tasks"][0].update(
+        status="stopped",
+        reason="changed b, which task b in this wave declares",
+        writer_run=writer.id,
+        branch=writer.branch,
+        worktree=writer.worktree,
+        task_base=runs.first_base(writer),
+        head=head,
+        changed_files=["a", "b"],
+        outside_files=["b"],
+        wave=1,
+        wave_declarations={"b": ["b"]},
+    )
+    flow["tasks"][1].update(status="dropped", wave=1)
+    record.save(flow, h.env)
+    h.answer("review")
+    item = h.run()["tasks"][0]
+    assert item["status"] == "merged" and len(item["reviews"]) == 1
+    assert item["shared_files"] == [{"file": "b", "task": "b"}]
+    assert _refusals(h) == []
 
 
 def test_saved_answer_effect_closes_once_after_recovery(h: Harness) -> None:

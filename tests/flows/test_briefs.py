@@ -306,6 +306,31 @@ def test_review_without_report_or_outside_files(task: Task) -> None:
     assert "## Context" not in text and "## Failure model" not in text
     assert "## Merged sibling tasks" not in text
     assert "## Lead corrections" not in text
+    assert "which another task in this wave declares" not in text
+
+
+def test_review_names_files_another_task_declares(task: Task) -> None:
+    text = briefs.review_brief(
+        FLOW,
+        cast("Plan", SimpleNamespace(context="", failure_model="", read=())),
+        task,
+        round=1,
+        base="base",
+        head="head",
+        changed=["src/a.py", "src/b.py", "src/c.py"],
+        outside=["src/b.py", "src/c.py"],
+        wave_files=["src/b.py", "src/c.py"],
+        writer_report=None,
+        shared=[("src/b.py", "b"), ("src/c.py", "c")],
+    )
+    assert (
+        "The writer changed these files, which another task in this wave "
+        "declares:\n\n    src/b.py (task b)\n    src/c.py (task c)\n\n"
+        "The writer limits forbid these edits. Ember did not stop the task for "
+        "them. Raise each one the task did not need as a must finding. An edit "
+        "the task needed is not a finding for breaking the limit."
+    ) in text
+    assert text.index("In outside_files, give") < text.index("src/b.py (task b)")
 
 
 @pytest.mark.parametrize("round", [1, 2])
