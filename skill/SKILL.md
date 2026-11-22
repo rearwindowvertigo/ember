@@ -529,7 +529,12 @@ changes first. On an approved drop, report the tip, then use
 `git worktree remove --force` and `git branch -D`.
 
 Finish with the `emb choices --finish <id>` line that merge, cleanup or
-close printed. Nothing prints it for a Claude subagent, a Claude Workflow, no
+close printed. While an unfinished flow, panel or other run still uses the
+claim, those commands print that record's status command instead. Finish
+that record's work, then run `emb run --status <closed run>` or
+`emb cleanup --claim <id>` again for the finish line. When the owner keeps
+a merged flow branch and the claim's work is done, run
+`emb choices --finish <id>` yourself. Nothing prints it for a Claude subagent, a Claude Workflow, no
 worker, or an `emb run` branch that is discarded, failed or abandoned: its
 closed run keeps the verify-and-merge line while the branch is unmerged. For
 those, run `emb choices --finish <id>` after merge or discard for editing
