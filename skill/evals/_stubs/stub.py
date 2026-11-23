@@ -39,7 +39,9 @@ repository's ignore rules would otherwise leave out of the kit.
 `run-answered`, `merge`,
 `cleanup` and `ground` are built from the call and the repository unless the
 reply gives `.out` or a non-zero `.code`. `flow-start` also builds a branch
-when its reply has neither override. `panel-start` writes a summary whenever
+when its reply has neither override: it commits `.files/` under the first
+task's subject, then each `.task-files/<task id>/` tree under that task's
+subject in plan order. `panel-start` writes a summary whenever
 its reply has `.summary`, including with a non-zero `.code`.
 `help` prints the matching section
 of `replies/help.out`.
@@ -1422,7 +1424,12 @@ def flow_worker(
 def flow_start(
     args: list[str], state: dict[str, Any], base: Path | None, variables: dict[str, str]
 ) -> Reply:
-    """Build a flow branch and commit the reply tree with the plan's subject."""
+    """Build a flow branch and commit the reply's trees under the plan's subjects.
+
+    A `.files` tree is one commit under the first task's subject. Each
+    `.task-files/<task id>` tree is one commit under that task's subject, in
+    plan order.
+    """
     from ember.flows import command as flows
 
     plan_path = variables["PLAN"]
@@ -1459,26 +1466,31 @@ def flow_start(
     worktree = worktree_path(flow_id)
     head = out(directory, "rev-parse", "HEAD")
     git(repo, "worktree", "add", "-q", "-b", branch, str(worktree), head)
-    merge_commits = {}
-    tree = part(base, ".files")
-    if tree is not None:
-        copy_tree(tree, worktree)
-        git(worktree, "add", "-A")
-        if git(worktree, "diff", "--cached", "--quiet", check=False).returncode:
-            subject = document.tasks[0].subject
-            trailers = plan.get("trailers") or []
-            message = subject + ("\n\n" + "\n".join(trailers) if trailers else "")
-            git(worktree, "commit", "-q", "--no-verify", "-m", message)
-            merge_commits[document.tasks[0].id] = out(worktree, "rev-parse", "HEAD")
-    state["flows"][flow_id] = {
+    flow = {
         "dir": str(directory),
         "main": str(repo),
         "branch": branch,
         "worktree": str(worktree),
         "subjects": {task.id: task.subject for task in document.tasks},
         "trailers": plan.get("trailers") or [],
-        "merge_commits": merge_commits,
+        "merge_commits": {},
     }
+    trees = []
+    tree = part(base, ".files")
+    if tree is not None:
+        trees.append((document.tasks[0].id, tree))
+    by_task = part(base, ".task-files")
+    if by_task is not None:
+        trees += [
+            (task.id, by_task / task.id)
+            for task in document.tasks
+            if (by_task / task.id).is_dir()
+        ]
+    for task_id, tree in trees:
+        commit = flow_commit(tree, worktree, flow, task_id)
+        if commit is not None:
+            flow["merge_commits"][task_id] = commit
+    state["flows"][flow_id] = flow
     errors = io.StringIO()
     # The announce lines use the settings the workers were resolved with.
     flows._worker_lines(writer, reviewer, errors, settings.get("answers", {}))

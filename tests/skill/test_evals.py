@@ -2727,9 +2727,28 @@ def test_worktree_paths_and_templates_follow_data_environment(
 @pytest.mark.parametrize("name", FLOW_CASES)
 def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) -> None:
     work = case(name, tmp_path, env)
-    plan = (
-        stopped_flow_plan(work) if name == "flow-lead-stop-waits" else flow_plan(work)
-    )
+    ids = {
+        "owner-away-named-workers": ("before", "decimals"),
+        "flow-gap-check-first": ("item", "json"),
+    }.get(name)
+    if name == "flow-lead-stop-waits":
+        plan = stopped_flow_plan(work)
+    elif ids is None:
+        plan = flow_plan(work)
+    else:
+        plan = flow_plan(
+            work,
+            [
+                {
+                    "id": identity,
+                    "subject": f"feat: add {identity}",
+                    "task": f"Add {identity}",
+                    "files": ["tools/report.py", "tests/test_report.py"],
+                    "after": list(ids[:position]),
+                }
+                for position, identity in enumerate(ids)
+            ],
+        )
     document = json.loads(plan.read_text())
     head = work.git("rev-parse", "HEAD")
     workers = json.loads(
@@ -2778,11 +2797,21 @@ def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) ->
     assert result.stderr.splitlines() == lines + [
         f"next: emb flow --watch {flow_id} --json"
     ]
-    assert work.git("rev-parse", f"{branch}^") == head
-    assert work.git("log", "-1", "--format=%B", branch) == (
-        document["tasks"][0]["subject"]
-        + "\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
-    )
+    replies = work.eval / "replies"
+    trees = [
+        (document["tasks"][0], replies / "flow-start.files"),
+        *(
+            (task, replies / "flow-start.task-files" / task["id"])
+            for task in document["tasks"]
+        ),
+    ]
+    trees = [(task, tree_) for task, tree_ in trees if tree_.is_dir()]
+    assert work.git("rev-parse", f"{branch}~{len(trees)}") == head
+    commits = work.git("rev-list", "--reverse", f"{head}..{branch}").splitlines()
+    for commit, (task, _) in zip(commits, trees, strict=True):
+        assert work.git("log", "-1", "--format=%B", commit) == (
+            task["subject"] + "\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
+        )
     assert work.git("diff", "--name-only", f"HEAD...{branch}") == (
         "tests/test_report.py\ntools/report.py"
     )
@@ -2795,7 +2824,9 @@ def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) ->
         "worktree": str(tree),
         "subjects": {task["id"]: task["subject"] for task in document["tasks"]},
         "trailers": document["trailers"],
-        "merge_commits": {document["tasks"][0]["id"]: work.git("rev-parse", branch)},
+        "merge_commits": {
+            task["id"]: commit for commit, (task, _) in zip(commits, trees, strict=True)
+        },
     }
     assert state["runs"] == {}
     check = subprocess.run(
@@ -2824,10 +2855,14 @@ def test_flow_start_and_merge(tmp_path: Path, env: dict[str, str], name: str) ->
         watch = work.emb("flow", "--watch", flow_id, "--json")
         report = json.loads(watch.stdout)
     else:
-        assert work.git("rev-parse", f"{branch}^") == head
-        for fixture in (work.eval / "replies/flow-start.files").rglob("*.py"):
-            relative = fixture.relative_to(work.eval / "replies/flow-start.files")
-            assert (tree / relative).read_bytes() == fixture.read_bytes()
+        assert work.git("rev-parse", f"{branch}~{len(trees)}") == head
+        expected: dict[Path, bytes] = {}
+        for _, staged in trees:
+            for fixture in staged.rglob("*.py"):
+                expected[fixture.relative_to(staged)] = fixture.read_bytes()
+        assert expected
+        for relative, content in expected.items():
+            assert (tree / relative).read_bytes() == content
     assert report["event"] == "end"
     assert all(task["status"] == "merged" for task in report["tasks"])
     assert report["next"] + "\n" == watch.stderr
