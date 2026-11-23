@@ -10,15 +10,9 @@
 
 ### Fixed
 
-* **cli:** hold the claim finish line while the claim is in use ([bea97b9](https://github.com/rearwindowvertigo/ember/commit/bea97b9fe1a7e350dabb4ac60345ae67d89ddcb2)), closes [#347](https://github.com/rearwindowvertigo/ember/issues/347)
 * **cli:** name the record that holds a claim in place of the finish line ([84cb72e](https://github.com/rearwindowvertigo/ember/commit/84cb72e2bc80509b1a51045c577fea542c0aacc3)), closes [#347](https://github.com/rearwindowvertigo/ember/issues/347)
 * **cli:** state the git rule above every run brief ([06a1565](https://github.com/rearwindowvertigo/ember/commit/06a1565f0a76d8d7824b403a8e4362414142a7da)), closes [#346](https://github.com/rearwindowvertigo/ember/issues/346)
-* **flows:** complete the change list of a repeat gap check ([3012082](https://github.com/rearwindowvertigo/ember/commit/30120827a4e62b5bc1a93fd9a675e6d84370d820)), closes [#345](https://github.com/rearwindowvertigo/ember/issues/345)
-* **flows:** judge a shared-file edit as an outside edit ([722507f](https://github.com/rearwindowvertigo/ember/commit/722507f9a848876f63d19088b4bebc5962b9141a)), closes [#344](https://github.com/rearwindowvertigo/ember/issues/344)
-* **flows:** keep a flow plan's check settings outside a repeat check ([63775e4](https://github.com/rearwindowvertigo/ember/commit/63775e42be78742003c5da3bb1b350207a5104ef)), closes [#345](https://github.com/rearwindowvertigo/ember/issues/345)
-* **flows:** reconcile the gap wording with the brief and the repeat cap ([be4948f](https://github.com/rearwindowvertigo/ember/commit/be4948f46ea10cccf1111d026d5a91cc7271187e)), closes [#345](https://github.com/rearwindowvertigo/ember/issues/345)
 * **flows:** review a change to a file another task declares ([a616a8d](https://github.com/rearwindowvertigo/ember/commit/a616a8d60f0c696f3c5decabc44eaec7c56c29e9)), closes [#344](https://github.com/rearwindowvertigo/ember/issues/344)
-* **flows:** state the shared-file review text without the stop ([c79dd8a](https://github.com/rearwindowvertigo/ember/commit/c79dd8a78af421ffbd480edd7b9d43104a8ea7ef)), closes [#344](https://github.com/rearwindowvertigo/ember/issues/344)
 * **flows:** state when the gap check reports a gap, and limit repeats ([bc5d0bd](https://github.com/rearwindowvertigo/ember/commit/bc5d0bd09056e729a1d877c37dd0dcaa572a7c89)), closes [#345](https://github.com/rearwindowvertigo/ember/issues/345)
 
 ## [0.30.0](https://github.com/rearwindowvertigo/ember/compare/v0.29.0...v0.30.0) (2026-11-22)
