@@ -638,3 +638,77 @@ def test_snapshot_schema_and_graph_are_validated(tmp_path: Path, change: str) ->
         saved["tasks"][1]["id"] = "a"
     with pytest.raises(previous.PreviousError):
         previous.load(write(tmp_path, result(schema_version=3, checked_plan=saved)))
+
+
+def test_changes_list_what_a_flow_plan_gained_and_lost(tmp_path: Path) -> None:
+    from ember.gapcheck import plan
+
+    path, document = checked_flow(tmp_path)
+    saved = result(schema_version=3, checked_plan=previous.snapshot(plan.load(path)))
+    earlier = previous.load(write(tmp_path, saved))
+    assert previous.changes(plan.load(path), earlier) == []
+    first, second = document["tasks"][:2]
+    first["task"] += "\n- g1: an answer"
+    first["files"] = [*first["files"], "tests/new_test.py"]
+    document["tasks"] = [first, {**second, "id": "added"}]
+    document["failure_model"] = "Changed model"
+    path.write_text(json.dumps(document))
+    lines = previous.changes(plan.load(path), earlier)
+    assert lines is not None
+    text = "\n".join(lines)
+    assert (
+        "The plan:\n  failure_model, added or altered lines:\n      Changed model"
+        in text
+    )
+    assert f"Task {first['id']}:" in lines
+    assert "      - g1: an answer" in lines
+    assert "  files added: tests/new_test.py" in lines
+    assert "Task added: a new task." in lines
+    assert f"Task {second['id']}: removed." in lines
+    assert "The waves changed." in lines
+    assert "  earlier wave 1: a, b, c" in lines
+    assert "  wave 1 now: a, added" in lines
+
+
+def test_changes_name_reordered_waves_and_escape_file_names(tmp_path: Path) -> None:
+    from ember.gapcheck import plan
+
+    path, document = checked_flow(tmp_path)
+    document["tasks"][0]["files"] = ["shared.py"]
+    document["tasks"][1]["files"] = ["shared.py"]
+    path.write_text(json.dumps(document))
+    saved = result(schema_version=3, checked_plan=previous.snapshot(plan.load(path)))
+    earlier = previous.load(write(tmp_path, saved))
+    document["tasks"][:2] = document["tasks"][1::-1]
+    document["tasks"][2]["files"] = ["line\nbreak.py"]
+    path.write_text(json.dumps(document))
+    lines = previous.changes(plan.load(path), earlier)
+    assert lines is not None
+    assert "  files added: line\\nbreak.py" in lines
+    assert "The waves changed." in lines
+    assert "  earlier wave 1: a, c" in lines and "  wave 1 now: b, c" in lines
+
+
+def test_changes_of_a_document_plan_and_missing_baselines(tmp_path: Path) -> None:
+    from ember.gapcheck import plan
+
+    path = tmp_path / "plan.md"
+    path.write_text("1. Read\n2. Build\n")
+    saved = result(schema_version=3, checked_plan=previous.snapshot(plan.load(path)))
+    earlier = previous.load(write(tmp_path, saved))
+    path.write_text("1. Read\n2. Build twice\n")
+    assert previous.changes(plan.load(path), earlier) == [
+        "The plan's text, as a line diff:",
+        "  @@ -1,2 +1,2 @@",
+        "   1. Read",
+        "  -2. Build",
+        "  +2. Build twice",
+        "",
+    ]
+    without = previous.load(write(tmp_path, result()))
+    assert previous.changes(plan.load(path), without) is None
+    flow_path, _ = checked_flow(tmp_path)
+    assert previous.changes(plan.load(flow_path), earlier) is None
+    saved["uncovered_steps"] = [1]
+    incomplete = previous.load(write(tmp_path, saved), allow_incomplete=True)
+    assert previous.changes(plan.load(path), incomplete) is None

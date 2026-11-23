@@ -1709,7 +1709,7 @@ claim to the run.
 | `--brief` | Print the brief and start nothing; accepts `--dir` and `--read` |
 | `--reply FILE` | Read a reply from another worker and start nothing; accepts `--json` |
 | `--brief-file FILE` | Required with `--reply`: the saved brief printed by `--brief`, or the run's saved `brief.md` |
-| `--previous FILE` | Read an earlier complete result; the reviewer gives a disposition for every active and settled gap |
+| `--previous FILE` | Read an earlier complete result; the reviewer gives a disposition for every active and settled gap and reviews the changes since that result |
 | `--confirmed` | Run the check although `gapcheck.when` skips the plan or leaves it to the owner |
 | `--answer FILE` | Validate a result and record an answer on its active or settled gap |
 | `--id GAP`, `--text ANSWER` | With `--answer`: one active or settled gap id and a nonblank answer; cannot be combined with `--take-defaults` |
@@ -2033,6 +2033,22 @@ An unanswered gap must be reopened or closed. Missing, duplicate or unknown
 dispositions and invalid reopened links leave the check incomplete (exit
 81). Coverage of every current plan step remains required. Without
 `--previous`, the brief asks for neither `earlier` nor `dispositions`.
+
+With `--previous`, the brief also holds `## Changes since the earlier
+check`, built from the plan saved in the earlier result. It lists, for a
+flow plan, the added and removed lines of `context`, `failure_model` and of
+each task's `subject`, `task` and `review`, each task's added and removed
+`files` and `after`, added and removed tasks, and the earlier and current
+waves when they differ; for another plan, a line diff of its text with
+line numbers. A flow plan's `check`, `writer_check`, `read` and `dir` are
+not saved in a result and are not compared; the brief says they are
+outside the repeat. The brief asks for a new gap only when it
+arises from a listed change, and for a plan with no listed change only to
+reopen an earlier gap. On a repeat it asks for the missing-failure-model
+gap only when no earlier gap names it, and for the search for outside
+tests and callers only for the listed changes. The section is left out
+when the earlier result holds no saved plan or a saved plan of another
+kind. An incomplete earlier result is refused with exit 65.
 
 Settled gaps carry into `settled` in each later result; closed gaps carry
 with their reasons in `closed`. Neither is counted as active. Closed history

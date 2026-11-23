@@ -1,6 +1,7 @@
 """Validate saved results and carry active, settled and closed gaps forward."""
 
 import copy
+import difflib
 import fcntl
 import json
 import math
@@ -159,6 +160,110 @@ def comparison(document: flow_plan.Plan, earlier: Previous) -> dict[str, Any]:
             else None
         ),
     }
+
+
+def _one_line(value: str) -> str:
+    """Escape line breaks so a name stays on its line of the change list."""
+    return value.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+
+
+def _line_changes(label: str, old: str, new: str) -> list[str]:
+    """List the lines a text gained and lost, indented under their labels."""
+    delta = list(difflib.ndiff(old.splitlines(), new.splitlines()))
+    lines: list[str] = []
+    for mark, title in (("+ ", "added or altered"), ("- ", "removed or replaced")):
+        found = [line[2:] for line in delta if line.startswith(mark)]
+        if found:
+            lines.append(f"  {label}, {title} lines:")
+            lines.extend(f"      {line}" for line in found)
+    return lines
+
+
+def _text_changes(old: str, new: str) -> list[str]:
+    """List a document's changed lines as hunks with their line numbers."""
+    delta = difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=2)
+    return [f"  {line}" for line in list(delta)[2:]]
+
+
+def _waves(tasks: Sequence[flow_plan.Task], plan: flow_plan.Plan) -> list[str]:
+    """Name the tasks of each wave the planner forms from `tasks`."""
+    return [
+        ", ".join(task.id for task in wave)
+        for wave in flow_plan.waves(replace(plan, tasks=tuple(tasks)))
+    ]
+
+
+def changes(document: Plan, earlier: Previous) -> list[str] | None:
+    """Describe what the plan gained and lost since the earlier check.
+
+    A flow plan is compared by its context, failure model, tasks and waves;
+    its check, writer checks, read files and folder are not saved and are
+    not compared. Another plan is compared by its text.
+
+    Args:
+        document: The plan under review.
+        earlier: The earlier result.
+
+    Returns:
+        The lines of the change list, one block per changed part, empty when
+        nothing compared has changed. None when the earlier result is
+        incomplete, saved no plan, or saved a plan of another kind: the
+        repeat then covers the whole plan.
+    """
+    saved = earlier.document.get("checked_plan")
+    now = snapshot(document)
+    if saved is None or saved["kind"] != now["kind"] or incomplete(earlier.document):
+        return None
+    if document.flow is None:
+        found = _text_changes(saved["text"], now["text"])
+        return ["The plan's text, as a line diff:", *found, ""] if found else []
+    lines: list[str] = []
+    for name in ("context", "failure_model"):
+        found = _line_changes(name, saved[name], now[name])
+        if found:
+            lines += ["The plan:", *found, ""]
+    before = {task["id"]: task for task in saved["tasks"]}
+    for task in now["tasks"]:
+        old = before.pop(task["id"], None)
+        if old is None:
+            lines += [f"Task {task['id']}: a new task.", ""]
+            continue
+        found = []
+        for name in ("subject", "task", "review"):
+            found += _line_changes(name, old[name], task[name])
+        for name in ("files", "after"):
+            gained = sorted(set(task[name]) - set(old[name]))
+            lost = sorted(set(old[name]) - set(task[name]))
+            if gained:
+                found.append(f"  {name} added: {', '.join(map(_one_line, gained))}")
+            if lost:
+                found.append(f"  {name} removed: {', '.join(map(_one_line, lost))}")
+        if found:
+            lines += [f"Task {task['id']}:", *found, ""]
+    lines += [line for ident in before for line in (f"Task {ident}: removed.", "")]
+    old_waves = _waves(
+        [
+            flow_plan.Task(
+                task["id"],
+                task["subject"],
+                task["task"],
+                tuple(task["files"]),
+                tuple(task["after"]),
+                task["review"],
+            )
+            for task in saved["tasks"]
+        ],
+        document.flow,
+    )
+    new_waves = _waves(document.flow.tasks, document.flow)
+    if old_waves != new_waves:
+        lines += [
+            "The waves changed.",
+            *(f"  earlier wave {n}: {wave}" for n, wave in enumerate(old_waves, 1)),
+            *(f"  wave {n} now: {wave}" for n, wave in enumerate(new_waves, 1)),
+            "",
+        ]
+    return lines
 
 
 def incomplete(document: Mapping[str, Any]) -> bool:
