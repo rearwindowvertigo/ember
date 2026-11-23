@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.31.0](https://github.com/rearwindowvertigo/ember/compare/v0.30.0...v0.31.0) (2026-11-23)
+
+
+### Added
+
+* **flows:** limit a repeat gap check to the listed changes ([ac475f9](https://github.com/rearwindowvertigo/ember/commit/ac475f9223211abd22c3668bd82fe7a66036a408)), closes [#345](https://github.com/rearwindowvertigo/ember/issues/345)
+
+
+### Fixed
+
+* **cli:** name the record that holds a claim in place of the finish line ([84cb72e](https://github.com/rearwindowvertigo/ember/commit/84cb72e2bc80509b1a51045c577fea542c0aacc3)), closes [#347](https://github.com/rearwindowvertigo/ember/issues/347)
+* **cli:** state the git rule above every run brief ([06a1565](https://github.com/rearwindowvertigo/ember/commit/06a1565f0a76d8d7824b403a8e4362414142a7da)), closes [#346](https://github.com/rearwindowvertigo/ember/issues/346)
+* **flows:** review a change to a file another task declares ([a616a8d](https://github.com/rearwindowvertigo/ember/commit/a616a8d60f0c696f3c5decabc44eaec7c56c29e9)), closes [#344](https://github.com/rearwindowvertigo/ember/issues/344)
+* **flows:** state when the gap check reports a gap, and limit repeats ([bc5d0bd](https://github.com/rearwindowvertigo/ember/commit/bc5d0bd09056e729a1d877c37dd0dcaa572a7c89)), closes [#345](https://github.com/rearwindowvertigo/ember/issues/345)
+
 ## [0.30.0](https://github.com/rearwindowvertigo/ember/compare/v0.29.0...v0.30.0) (2026-11-22)
 
 
