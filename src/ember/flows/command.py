@@ -886,6 +886,7 @@ def _cancel_report(
             *[("reviewer", item.get("run")) for item in task["reviews"]],
             *[("writer", item.get("run")) for item in task["cleanup"]],
             ("writer", (task.get("answer_effect") or {}).get("run")),
+            ("reviewer", (task.get("answer_effect") or {}).get("reviewer_run")),
         ]
         for role, run_id in references:
             if not run_id or run_id in seen_runs:

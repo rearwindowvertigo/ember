@@ -205,12 +205,15 @@ def _run_history(
         if isinstance(effect := task.get("answer_effect"), dict):
             remember(effect.get("run"), name, "writer", None)
             remember(effect.get("preparation_run"), name, "reviewer", None)
+            remember(effect.get("reviewer_run"), name, "reviewer", None)
         remember(task["writer_run"], name, "writer", task["round"])
         remember(task["reviewer_run"], name, "reviewer", task["round"] + 1)
         for review in task["reviews"]:
             remember(
                 review_run_id(review), name, "reviewer", review_number(review), review
             )
+        if task.get("review_send"):
+            remember(task["reviewer_run"], name, "reviewer", task["round"] + 1)
     return workers
 
 

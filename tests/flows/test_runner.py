@@ -17,12 +17,24 @@ from typing import Any
 
 import pytest
 
-from ember import branches, choices, holds, paths, prepare, processes, sandbox
+from ember import (
+    branches,
+    choices,
+    holds,
+    paths,
+    prepare,
+    processes,
+    prune,
+    sandbox,
+    tmux,
+)
 from ember.cli import build_parser
-from ember.engines import LaunchSpec
+from ember.engines import Driver, LaunchSpec
+from ember.engines.opencode2 import DeliveryUncertainError
 from ember.flows import briefs, command, lock, plan, record, runner
 from ember.runs import record as runs
-from ember.runs.core import Core, StartOptions
+from ember.runs import worktrees
+from ember.runs.core import Core, ReviewFollowUp, StartOptions
 from runs.stub_engine import (  # pyrefly: ignore[missing-import]
     StubDriver,
     git,
@@ -574,8 +586,25 @@ def test_merged_sibling_unreadable_commit_is_not_reported_absent(h: Harness) -> 
 
 @pytest.mark.parametrize("check", [[], [sys.executable, "-c", "print('plan checked')"]])
 def test_fix_round_has_previous_head_and_real_plan_briefs(
-    h: Harness, check: list[str]
+    h: Harness, check: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    read: list[tuple[str, str, str]] = []
+    send = h.driver.send
+
+    def inspect(run: runs.Run, text: str) -> None:
+        if run.read_only and run.turn == 2:
+            tree = Path(run.worktree)
+            assert git(tree, "rev-parse", "--abbrev-ref", "HEAD", env=h.env) == "HEAD"
+            read.append(
+                (
+                    run.id,
+                    git(tree, "rev-parse", "HEAD", env=h.env),
+                    (tree / "a").read_text(),
+                )
+            )
+        send(run, text)
+
+    monkeypatch.setattr(h.driver, "send", inspect)
     h.scripts_update(
         **{
             "Review of task a, round 1,": "@reply " + FIX,
@@ -589,6 +618,14 @@ def test_fix_round_has_previous_head_and_real_plan_briefs(
     assert item["status"] == "merged"
     assert item["round"] == 1
     assert len(item["reviews"]) == 2
+    first, second = item["reviews"]
+    assert second["run"] == first["run"]
+    assert [first["turn"], second["turn"]] == [1, 2]
+    assert [first["head"], second["head"]] == [item["fix_base"], item["head"]]
+    assert read == [(second["run"], item["head"], "fixed\n")]
+    reviewer = runs.load(second["run"], h.env)
+    assert reviewer.base == first["head"] and reviewer.expected_head == second["head"]
+    assert reviewer.status == runs.CLOSED and not Path(reviewer.worktree).exists()
     folder = record.folder(h.id, h.env) / "briefs"
     fix = next(folder.glob("a-fix-*.md")).read_text()
     assert fix.startswith(briefs.FIX_FIRST.format(round=1, task="a", flow=h.id))
@@ -603,6 +640,421 @@ def test_fix_round_has_previous_head_and_real_plan_briefs(
     assert not any(line.startswith("@") for line in second.splitlines())
     for review in item["reviews"]:
         assert runs.load(review["run"], h.env).read == (str(h.scripts),)
+
+
+@pytest.mark.parametrize("rounds", [0, 1])
+def test_clean_prepared_reviewer_is_removed_on_acceptance(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, rounds: int
+) -> None:
+    (h.repo / ".gitignore").write_text(".venv/\n")
+    git(h.repo, "add", ".gitignore", env=h.env)
+    git(h.repo, "commit", "-m", "Ignore dependencies", env=h.env)
+    h.create(rounds=rounds)
+    choices.set_settings(
+        {
+            "worktree.prepare": {
+                str(h.repo): (
+                    "if ! git symbolic-ref -q HEAD >/dev/null; then "
+                    "/bin/mkdir .venv && echo prepared > .venv/marker; fi"
+                )
+            }
+        },
+        env=h.env,
+    )
+    if rounds:
+        h.scripts_update(
+            **{
+                "Review of task a, round 1,": "@reply " + FIX,
+                "Fix round 1 of task a": "@write a fixed",
+            }
+        )
+    checked: list[str] = []
+    close = runner._Runner.close
+
+    def check_before_close(instance: runner._Runner, run_id: str | None) -> str | None:
+        if run_id:
+            run = runs.load(run_id, h.env)
+            if run.read_only:
+                tree = Path(run.worktree)
+                assert (tree / ".venv" / "marker").read_text() == "prepared\n"
+                assert git(tree, "rev-parse", "HEAD", env=h.env) == (
+                    run.expected_head or run.base
+                )
+                assert worktrees.remove_detached(run, dry_run=True)
+                assert tree.exists()
+                checked.append(run_id)
+        return close(instance, run_id)
+
+    monkeypatch.setattr(runner._Runner, "close", check_before_close)
+    item = h.run()["tasks"][0]
+    assert item["status"] == "merged", item["reason"]
+    first, last = item["reviews"][0], item["reviews"][-1]
+    assert first["run"] == last["run"] and last["turn"] == rounds + 1
+    reviewer = runs.load(last["run"], h.env)
+    assert checked == [reviewer.id]
+    assert reviewer.base == first["head"]
+    assert reviewer.expected_head == (last["head"] if rounds else None)
+    assert not reviewer.preserve_ignored
+    assert reviewer.status == runs.CLOSED and not Path(reviewer.worktree).exists()
+
+
+def test_explicit_review_after_automatic_fixes_starts_fresh(h: Harness) -> None:
+    h.scripts_update(
+        **{
+            "a read-only review;": "@reply " + FIX,
+            "Fix round 1 of task a": "@write a fixed",
+        }
+    )
+    h.create(rounds=1)
+    stopped = h.run()["tasks"][0]
+    first, second = stopped["reviews"]
+    assert first["run"] == second["run"] and second["turn"] == 2
+    assert stopped["status"] == "stopped"
+
+    h.scripts_update(**{"a read-only review;": "@reply " + PASS})
+    h.answer("review")
+    accepted = h.run()["tasks"][0]
+    assert accepted["status"] == "merged"
+    assert accepted["reviews"][:2] == stopped["reviews"]
+    fresh = accepted["reviews"][2]
+    assert fresh["run"] != second["run"]
+    assert (fresh["review_round"], fresh["turn"], fresh["head"]) == (
+        1,
+        1,
+        second["head"],
+    )
+    assert (
+        "## Earlier findings"
+        not in (runs.load(fresh["run"], h.env).folder / runs.BRIEF_NAME).read_text()
+    )
+
+
+@pytest.mark.parametrize(
+    "problem",
+    ["dirty", "ignored file", "ignored directory", "moved", "locked", "closed"],
+)
+def test_automatic_review_fallback_keeps_the_previous_worktree(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, problem: str
+) -> None:
+    (h.repo / ".gitignore").write_text("collision\n")
+    git(h.repo, "add", ".gitignore", env=h.env)
+    git(h.repo, "commit", "-m", "Ignore collision", env=h.env)
+    fix = "@write a fixed"
+    reviewed_file = ""
+    if problem.startswith("ignored"):
+        reviewed_file = (
+            "collision/local" if problem == "ignored directory" else "collision"
+        )
+        fix += "\n@write collision fixed\n@git add -f collision"
+    elif problem == "dirty":
+        reviewed_file = "a"
+    first = (
+        (f"@write {reviewed_file} local\n" if reviewed_file else "") + "@reply " + FIX
+    )
+    h.scripts_update(
+        **{
+            "Review of task a, round 1,": first,
+            "Fix round 1 of task a": fix,
+        }
+    )
+    h.create(rounds=1, tasks=[task("a", files=["a", "collision"])])
+    start = runner._Runner.continue_review
+
+    def disrupt(instance: runner._Runner, item: dict[str, Any]) -> bool:
+        old = runs.load(item["reviewer_run"], h.env)
+        if problem == "moved":
+            git(Path(old.worktree), "checkout", "--detach", "HEAD^", env=h.env)
+        if problem == "locked":
+            git(h.repo, "worktree", "lock", old.worktree, env=h.env)
+        if problem == "closed":
+            assert instance.close(old.id) is None
+        return start(instance, item)
+
+    monkeypatch.setattr(runner._Runner, "continue_review", disrupt)
+    flow = h.run()
+    item = flow["tasks"][0]
+    assert item["status"] == "merged", item["reason"]
+    previous, fresh = item["reviews"]
+    assert fresh["run"] != previous["run"] and previous["turn"] == fresh["turn"] == 1
+    old = runs.load(previous["run"], h.env)
+    new = runs.load(fresh["run"], h.env)
+    assert old.status == new.status == runs.CLOSED
+    assert fresh["head"] == new.base == item["head"]
+    assert not Path(new.worktree).exists()
+    if reviewed_file:
+        assert (Path(old.worktree) / reviewed_file).read_text() == "local\n"
+    elif problem == "moved":
+        assert (
+            git(Path(old.worktree), "rev-parse", "HEAD", env=h.env) != previous["head"]
+        )
+    elif problem == "locked":
+        assert Path(old.worktree).is_dir()
+    if problem.startswith("ignored"):
+        assert old.preserve_ignored and not new.preserve_ignored
+        assert h.instance().close(old.id) is None
+        for dry_run in (True, False):
+            result = prune.remove(0, [h.id], env=h.env, dry_run=dry_run)
+            assert any(
+                old.id in error and old.worktree in error for error in result.errors
+            )
+            assert runs.load(old.id, h.env).worktree == old.worktree
+            assert old.worktree in git(h.repo, "worktree", "list", env=h.env)
+            assert (Path(old.worktree) / reviewed_file).read_text() == "local\n"
+
+
+class _RunnerStopped(BaseException):
+    """Simulate runner loss without saving a task failure."""
+
+
+@pytest.mark.parametrize("fallback", ["dead", "missing", "closed", "legacy", "resume"])
+def test_automatic_review_keeps_ignored_evidence_without_advancing(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, fallback: str
+) -> None:
+    (h.repo / ".gitignore").write_text("report.json\n")
+    git(h.repo, "add", ".gitignore", env=h.env)
+    git(h.repo, "commit", "-m", "Ignore review reports", env=h.env)
+    local, fixed = '{"origin":"local"}\n', '{"origin":"fixed"}\n'
+    h.scripts_update(
+        **{
+            "Review of task a, round 1,": f"@write report.json {local}@reply {FIX}",
+            "Fix round 1 of task a": f"@write report.json {fixed}"
+            "@git add -f report.json",
+        }
+    )
+    h.create(tasks=[task("a", files=["a", "report.json"])], rounds=1)
+    original_artifact = runner._Runner.review_artifact
+    original_command = h.driver.command
+    trees: list[tuple[str, str, str]] = []
+
+    def disrupt(instance: runner._Runner, item: dict[str, Any]) -> str:
+        if item["round"] == 1:
+            old = runs.load(item["reviewer_run"], h.env)
+            if fallback == "missing":
+                tmux.kill(old.id, env=h.env)
+            elif fallback == "legacy":
+                # A retained reviewer with a verdict predating turn attribution.
+                item["reviews"][-1].pop("turn")
+            else:
+                pid = tmux.pane_pid(old.id, env=h.env)
+                assert pid is not None
+                os.killpg(pid, signal.SIGTERM)
+                _wait_for(lambda: tmux.pane_dead(old.id, env=h.env))
+                if fallback == "closed":
+                    # Close saved its status before removing the worktree.
+                    runs.update(old, {"status": runs.CLOSED, "ended_at": time.time()})
+        return original_artifact(instance, item)
+
+    def inspect_checkout(run: runs.Run, message: str) -> LaunchSpec:
+        if run.read_only and (report := Path(run.worktree) / "report.json").exists():
+            sha = git(Path(run.worktree), "rev-parse", "HEAD", env=h.env)
+            trees.append((run.id, sha, report.read_text()))
+        return original_command(run, message)
+
+    monkeypatch.setattr(h.driver, "command", inspect_checkout)
+    with monkeypatch.context() as patch:
+        patch.setattr(runner._Runner, "review_artifact", disrupt)
+        if fallback == "resume":
+
+            def stop_before_close(
+                instance: runner._Runner, run_id: str | None
+            ) -> str | None:
+                assert run_id is not None and runs.load(run_id, h.env).preserve_ignored
+                raise _RunnerStopped
+
+            patch.setattr(runner._Runner, "close", stop_before_close)
+            instance = h.instance()
+            instance.begin()
+            with pytest.raises(_RunnerStopped):
+                instance.pipeline(instance.flow["tasks"][0])
+        else:
+            h.run()
+    if fallback == "resume":
+        interrupted = h.flow()["tasks"][0]
+        assert interrupted["review_send"]["head"] == interrupted["head"]
+        assert h.instance().close(interrupted["reviewer_run"]) is None
+
+    item = (h.run() if fallback == "resume" else h.flow())["tasks"][0]
+    assert item["status"] == "merged", item["reason"]
+    previous, fresh = item["reviews"]
+    assert previous["head"] != fresh["head"] == item["head"]
+    assert previous["run"] != fresh["run"]
+    assert (fresh["verdict"], fresh["turn"]) == ("pass", 1)
+    assert trees == [(fresh["run"], item["head"], fixed)]
+    retired = runs.load(previous["run"], h.env)
+    assert retired.status == runs.CLOSED and retired.preserve_ignored
+    report = Path(retired.worktree) / "report.json"
+    assert report.read_text() == local
+    assert h.instance().close(retired.id) is None
+    for dry_run in (True, False):
+        result = prune.remove(0, [h.id], env=h.env, dry_run=dry_run)
+        assert any(
+            retired.id in error and retired.worktree in error for error in result.errors
+        )
+        assert runs.load(retired.id, h.env).worktree == retired.worktree
+        assert retired.worktree in git(h.repo, "worktree", "list", env=h.env)
+        assert report.read_text() == local
+
+
+def test_saved_fix_decision_starts_a_follow_up_on_resume(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h.scripts_update(
+        **{
+            "Review of task a, round 1,": "@reply " + FIX,
+            "Fix round 1 of task a": "@write a fixed",
+        }
+    )
+    h.create(rounds=1)
+
+    def stop_before_fix(
+        instance: runner._Runner, item: dict[str, Any], path: str, *, fresh: bool
+    ) -> bool:
+        raise _RunnerStopped
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runner._Runner, "send", stop_before_fix)
+        instance = h.instance()
+        instance.begin()
+        with pytest.raises(_RunnerStopped):
+            instance.pipeline(instance.flow["tasks"][0])
+    interrupted = h.flow()["tasks"][0]
+    assert (
+        interrupted["status"] == "reviewing" and interrupted["review_action"] == "fix"
+    )
+    (first,) = interrupted["reviews"]
+
+    item = h.run()["tasks"][0]
+    assert item["status"] == "merged", item["reason"]
+    assert item["reviews"][0] == first
+    assert [(r["verdict"], r["head"], r["turn"]) for r in item["reviews"]] == [
+        ("fix", interrupted["head"], 1),
+        ("pass", item["head"], 2),
+    ]
+    assert item["head"] != interrupted["head"]
+    assert [r["run"] for r in item["reviews"]] == [first["run"]] * 2
+
+
+@pytest.mark.parametrize("boundary", ["advanced", "sent", "collected", "closed"])
+def test_automatic_review_recovers_one_turn_at_the_send_boundary(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    h.scripts_update(
+        **{
+            "Review of task a, round 1,": "@reply " + FIX,
+            "Fix round 1 of task a": "@write a fixed",
+        }
+    )
+    h.create(rounds=1)
+    send = h.driver.send
+    delivered: list[str] = []
+
+    def track(run: runs.Run, text: str) -> None:
+        if run.read_only and run.turn == 2:
+            delivered.append(run.id)
+        send(run, text)
+
+    monkeypatch.setattr(h.driver, "send", track)
+    with monkeypatch.context() as patch:
+        original_advance, original_turn = Core._advance_review, Core._turn
+        original_send = Core.send
+
+        def advanced(core: Core, run: runs.Run, review: ReviewFollowUp) -> runs.Run:
+            updated = original_advance(core, run, review)
+            if boundary == "advanced":
+                raise _RunnerStopped
+            return updated
+
+        def sent(
+            core: Core,
+            run: runs.Run,
+            driver: Driver,
+            started: float,
+            window: str | None,
+        ) -> int:
+            if boundary == "sent" and run.read_only and run.turn == 2:
+                raise _RunnerStopped
+            return original_turn(core, run, driver, started, window)
+
+        def collected(
+            core: Core, run_id: str, path: str, *, review: ReviewFollowUp | None = None
+        ) -> int:
+            result = original_send(core, run_id, path, review=review)
+            if review and boundary in ("collected", "closed"):
+                if boundary == "closed":
+                    assert core.close(run_id) == 0
+                raise _RunnerStopped
+            return result
+
+        patch.setattr(Core, "_advance_review", advanced)
+        patch.setattr(Core, "_turn", sent)
+        patch.setattr(Core, "send", collected)
+        instance = h.instance()
+        instance.begin()
+        item = instance.flow["tasks"][0]
+        try:
+            instance.pipeline(item)
+        except _RunnerStopped:
+            pass
+        else:
+            pytest.fail(f"the runner reached {item['status']}: {item['reason']}")
+
+    interrupted = h.flow()["tasks"][0]
+    run_id = interrupted["reviewer_run"]
+    assert interrupted["reviews"][0]["run"] == run_id
+    assert runs.load(run_id, h.env).turn == (1 if boundary == "advanced" else 2)
+    result = h.run()["tasks"][0]
+    assert result["status"] == "merged", result["reason"]
+    assert [(r["run"], r["turn"]) for r in result["reviews"]] == [
+        (run_id, 1),
+        (run_id, 2),
+    ]
+    assert delivered == [run_id]
+
+
+@pytest.mark.parametrize(
+    "obstacle", ["foreign input", "owner wait", "uncertain delivery"]
+)
+def test_automatic_review_stops_for_owner_input_or_uncertain_delivery(
+    h: Harness, monkeypatch: pytest.MonkeyPatch, obstacle: str
+) -> None:
+    h.scripts_update(
+        **{
+            "Review of task a, round 1,": "@reply " + FIX,
+            "Fix round 1 of task a": "@write a fixed",
+        }
+    )
+    h.create(rounds=1)
+    send = h.driver.send
+    start = runner._Runner.continue_review
+
+    def block(instance: runner._Runner, item: dict[str, Any]) -> bool:
+        if obstacle == "owner wait":
+            run = runs.load(item["reviewer_run"], h.env)
+            runs.update(run, {"owner_wait": ("owner: decide",)})
+        return start(instance, item)
+
+    def uncertain(run: runs.Run, text: str) -> None:
+        if obstacle == "uncertain delivery" and run.read_only and run.turn == 2:
+            raise DeliveryUncertainError("delivery is uncertain")
+        send(run, text)
+
+    monkeypatch.setattr(runner._Runner, "continue_review", block)
+    monkeypatch.setattr(h.driver, "send", uncertain)
+    if obstacle == "foreign input":
+        monkeypatch.setattr(
+            h.driver,
+            "foreign_input",
+            lambda run: "owner typed" if run.read_only else None,
+        )
+    item = h.run()["tasks"][0]
+    assert item["status"] == "stopped" and len(item["reviews"]) == 1
+    reviewer = runs.load(item["reviewer_run"], h.env)
+    assert reviewer.id == item["reviews"][0]["run"] and reviewer.status != runs.CLOSED
+    if obstacle == "uncertain delivery":
+        assert reviewer.turn == 2 and reviewer.last_variant == "uncertain"
+    else:
+        assert reviewer.turn == 1 and reviewer.expected_head is None
+    assert h.run()["tasks"][0]["reviews"] == item["reviews"]
 
 
 @pytest.mark.parametrize(
@@ -757,6 +1209,10 @@ def test_no_change_initial_or_fix(h: Harness, text: str) -> None:
         if text == "Do nothing"
         else "the fix made no change"
     )
+    if item["reviews"]:
+        reviewer = runs.load(item["reviews"][0]["run"], h.env)
+        assert item["reviewer_run"] is None
+        assert reviewer.status == runs.CLOSED and not Path(reviewer.worktree).exists()
 
 
 def shared_reply() -> str:
@@ -2608,7 +3064,7 @@ def test_cancel_finish_wins_over_queued_answers(
     assert flow["tasks"][0]["status"] == "pending"
 
 
-@pytest.mark.parametrize("phase", ["writer", "reviewer", "checking"])
+@pytest.mark.parametrize("phase", ["writer", "reviewer", "follow-up", "checking"])
 def test_cancel_live_runner_keeps_turns_and_stops_check(
     h: Harness, monkeypatch: pytest.MonkeyPatch, phase: str
 ) -> None:
@@ -2617,10 +3073,21 @@ def test_cancel_live_runner_keeps_turns_and_stops_check(
     check = [sys.executable, "-c", "import time; time.sleep(60)"]
     h.create(
         [task("a", text="@hang\n@write a value" if phase == "writer" else None)],
+        rounds=1 if phase == "follow-up" else 0,
         **({"check": check} if phase == "checking" else {}),
     )
     if phase == "reviewer":
         h.scripts_update(**{"a read-only review;": "@hang\n@reply " + PASS})
+    if phase == "follow-up":
+        h.scripts_update(
+            **{
+                "Review of task a, round 1,": "@reply " + FIX,
+                "Fix round 1 of task a": "@write a fixed",
+                "Review of task a, round 2,": "@hang\n@reply " + PASS,
+            }
+        )
+    role = "reviewer" if phase == "follow-up" else phase
+    expected_turn = 2 if phase == "follow-up" else 1
     shutdown = threading.Event()
     monkeypatch.setattr(command, "POLL_SECONDS", 0.01)
     signalled: list[bool] = []
@@ -2654,8 +3121,10 @@ def test_cancel_live_runner_keeps_turns_and_stops_check(
                 ready = (
                     flow.get("active_check")
                     if phase == "checking"
-                    else item[f"{phase}_run"]
-                    and runs.load(item[f"{phase}_run"], h.env).status == runs.RUNNING
+                    else item[f"{role}_run"]
+                    and (run := runs.load(item[f"{role}_run"], h.env)).status
+                    == runs.RUNNING
+                    and run.turn == expected_turn
                 )
                 if ready:
                     break
@@ -2682,8 +3151,8 @@ def test_cancel_live_runner_keeps_turns_and_stops_check(
         flow["check"] = [sys.executable, "-c", "pass"]
         record.save(flow, h.env)
     else:
-        run_id = flow["tasks"][0][f"{phase}_run"]
-        assert {"task": "a", "role": phase, "run": run_id} in report["open_runs"]
+        run_id = flow["tasks"][0][f"{role}_run"]
+        assert {"task": "a", "role": role, "run": run_id} in report["open_runs"]
         opened = runs.load(run_id, h.env)
         assert opened.status == runs.RUNNING
         assert Path(opened.worktree).is_dir()
@@ -2699,6 +3168,12 @@ def test_cancel_live_runner_keeps_turns_and_stops_check(
     final = h.run()
     assert final["status"] == "done", final["tasks"]
     assert final["tasks"][0]["status"] == "merged"
+    if phase == "follow-up":
+        run_id = flow["tasks"][0]["reviewer_run"]
+        assert [(r["run"], r["turn"]) for r in final["tasks"][0]["reviews"]] == [
+            (run_id, 1),
+            (run_id, 2),
+        ]
 
 
 def test_recorded_plan_without_subject_keeps_resolved_subject(h: Harness) -> None:
@@ -3397,7 +3872,7 @@ def test_a_runner_that_stopped_after_taking_an_answer_ahead_applies_it_once(
 def test_a_fix_decided_by_a_review_started_in_a_wave_waits_for_the_next_wave(
     h: Harness,
 ) -> None:
-    h.scripts_update(**{"Review of task a,": "@reply " + FIX})
+    h.scripts_update(**{"Review of task a, round 1,": "@reply unreadable"})
     h.create([task("a"), task("c", text="@write c value\n@hang")], rounds=1)
     flow = h.flow()
     flow["stall_minutes"] = 5
@@ -3407,6 +3882,12 @@ def test_a_fix_decided_by_a_review_started_in_a_wave_waits_for_the_next_wave(
         _wait_for(lambda: _status(h, "a") == "stopped")
         stopped = h.flow()["tasks"][0]
         turns = runs.load(stopped["writer_run"], h.env).turn
+        h.scripts_update(
+            **{
+                "Review of task a, round 1,": "@reply " + FIX,
+                "Fix round 1 of task a": "@write a fixed",
+            }
+        )
         h.answer("review")
         # The answer itself makes the task pending; the deferred fix is the
         # pending state with the review's saved decision.
@@ -3427,6 +3908,21 @@ def test_a_fix_decided_by_a_review_started_in_a_wave_waits_for_the_next_wave(
         flow = future.result(timeout=60)
     item = flow["tasks"][0]
     assert runs.load(item["writer_run"], h.env).turn == turns + 1
+    assert item["status"] == "merged", item["reason"]
+    first, follow_up = item["reviews"][-2:]
+    assert first == waiting["reviews"][-1]
+    assert first["run"] == follow_up["run"]
+    assert (first["verdict"], first["head"], first["turn"]) == (
+        "fix",
+        waiting["head"],
+        1,
+    )
+    assert (follow_up["verdict"], follow_up["head"], follow_up["turn"]) == (
+        "pass",
+        item["head"],
+        2,
+    )
+    assert first["head"] != follow_up["head"]
     assert flow["tasks"][1]["status"] == "merged"
 
 
@@ -3513,7 +4009,9 @@ def test_a_writer_that_a_provider_error_ends_is_continued_by_the_fallback_worker
     assert h.instance().fallback_avoid(item, "writer") == ()
 
 
-def test_a_later_start_of_the_role_uses_the_first_choice_again(h: Harness) -> None:
+def test_automatic_fix_continues_a_reviewer_started_on_a_fallback_worker(
+    h: Harness,
+) -> None:
     choices.set_settings(
         {"provider.hold_minutes": "0", "provider.fallback": ["claude:opus"]}, env=h.env
     )
@@ -3530,7 +4028,8 @@ def test_a_later_start_of_the_role_uses_the_first_choice_again(h: Harness) -> No
     item = flow["tasks"][0]
     assert item["status"] == "merged", item["reason"]
     engines = [runs.load(review["run"], h.env).engine for review in item["reviews"]]
-    assert engines == ["claude", "codex"]
+    assert engines == ["claude", "claude"]
+    assert item["reviews"][0]["run"] == item["reviews"][1]["run"]
     assert len(item["fallbacks"]) == 1
     assert (item["reviewer"], item["fallback_failed"]) == (None, {})
 
@@ -3622,3 +4121,54 @@ def test_a_start_that_a_hold_redirects_is_recorded_on_the_task(h: Harness) -> No
     # The review does not go to the model that wrote the work.
     assert runs.load(item["reviews"][-1]["run"], h.env).engine == "codex"
     assert item["writer"] is None
+
+
+def test_held_flow_reviewer_keeps_pinned_head_and_skips_the_writer(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    choices.set_settings(
+        {
+            "shortlist.codex": ["gpt-5@high", "gpt-mini@low"],
+            "provider.fallback": ["claude:opus", "codex:gpt-mini"],
+        },
+        env=h.env,
+    )
+    holds.start("codex", "gpt-5", "capacity", 15, env=h.env)
+    h.create()
+    flow = h.flow()
+    flow["writer"] = plan.Worker("claude", "opus", "high", "option").to_json()
+    record.save(flow, h.env)
+    source_heads: list[str] = []
+    start = Core.start
+
+    def move_source(core: Core, options: StartOptions) -> int:
+        if not options.read_only:
+            return start(core, options)
+        tree = Path(options.dir)
+        branch = git(tree, "symbolic-ref", "--short", "HEAD", env=h.env)
+        git(tree, "checkout", "--detach", "HEAD^", env=h.env)
+        try:
+            source_heads.append(git(tree, "rev-parse", "HEAD", env=h.env))
+            return start(core, options)
+        finally:
+            git(tree, "checkout", branch, env=h.env)
+
+    monkeypatch.setattr(Core, "start", move_source)
+    item = h.run()["tasks"][0]
+    assert item["status"] == "merged", item["reason"]
+    (review,) = item["reviews"]
+    assert source_heads == [item["task_base"]]
+    reviewer = runs.load(review["run"], h.env)
+    assert reviewer.base == review["head"] == item["head"] != source_heads[0]
+    assert (reviewer.engine, reviewer.model, reviewer.effort) == (
+        "codex",
+        "gpt-mini",
+        "low",
+    )
+    (entry,) = item["fallbacks"]
+    assert (entry["role"], entry["cause"], entry["from"], entry["to"]) == (
+        "reviewer",
+        "held",
+        "codex:gpt-5",
+        "codex:gpt-mini",
+    )

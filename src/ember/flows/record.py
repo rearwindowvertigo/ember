@@ -366,6 +366,18 @@ def _validate(flow_id: str, flow: object) -> None:
     seen: set[str] = set()
     for task in flow["tasks"]:
         _fields(flow_id, task, _TASK_FIELDS, "task")
+        if (pending := task.get("review_send")) is not None:
+            _fields(
+                flow_id,
+                pending,
+                {
+                    "file": "str",
+                    "previous_turn": "int",
+                    "previous_head": "str",
+                    "head": "str",
+                },
+                "pending review send",
+            )
         for review in task["reviews"]:
             if "outside_files" in review:
                 _fields(flow_id, review, {"outside_files": "[dict]"}, "review")

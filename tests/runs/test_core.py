@@ -6339,9 +6339,13 @@ def test_a_start_on_a_held_worker_goes_to_the_fallback_entry(
         and line.endswith("; starting codex gpt-5 from the fallback list")
         for line in err.splitlines()
     )
-    # A panel member, which has a saved base, runs as named.
+    # A panel member runs as named, even when its worker is held.
     base = git(repo, "rev-parse", "HEAD", env=env)
-    assert _start(_core(env), repo, brief, read_only=True, base=base) == 0
+    parent = record.parent("panel", "panel-20261124-000000-123abc")
+    assert parent is not None
+    assert (
+        _start(_core(env), repo, brief, read_only=True, base=base, parent=parent) == 0
+    )
     member = record.load(_run_id(capsys.readouterr().out), env)
     assert member.engine == "claude"
 

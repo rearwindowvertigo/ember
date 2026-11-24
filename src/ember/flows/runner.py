@@ -24,6 +24,8 @@ from ember.runs import record as runs
 from ember.runs.core import (
     HOOK_REFUSAL_NAME,
     Core,
+    ReviewFollowUp,
+    ReviewUnavailableError,
     RunError,
     StartOptions,
     WorkerSelection,
@@ -478,7 +480,10 @@ class _Runner:
                     else "send"
                     if task["entry"] == "send"
                     else "continue"
-                    if task.get("review_action") == "fix" or task.get("turn_pending")
+                    if task.get("review_action") == "fix"
+                    or task.get("turn_pending")
+                    or task.get("review_send")
+                    or self.previous_review(task)
                     else "reviewer"
                 ),
             )
@@ -566,7 +571,10 @@ class _Runner:
             if line.strip() and not line.lstrip().startswith(("next:", "owner:"))
         )
         if code == exits.PREPARATION_FAILED:
-            self.halt_preparation(task, role, reason)
+            blocked = (
+                "continue" if role == "reviewer" and task.get("review_send") else role
+            )
+            self.halt_preparation(task, blocked, reason)
         run_id = task[f"{role}_run"]
         denials = runs.referenced_denials([run_id], self.env)
         with self.mutex:
@@ -578,7 +586,7 @@ class _Runner:
                     "denied_paths", task=task["id"], role=role, denied_paths=fresh
                 )
                 self._save()
-        if code == 0:
+        if code == 0 or (code == exits.INTERRUPTED and self.shutdown.is_set()):
             return not self.shutdown.is_set()
         run_id = task[f"{role}_run"]
         if review_failed_turn and run_id:
@@ -787,6 +795,7 @@ class _Runner:
             changed_files=changed,
             outside_files=outside,
             turn_pending=False,
+            validate_turn=False,
         )
         return True
 
@@ -814,6 +823,7 @@ class _Runner:
                 trailers=self.plan.trailers if role == "writer" else (),
                 claim=None,
                 window=False,
+                base=task["head"] if role == "reviewer" else None,
                 parent=runs.parent("flow", self.flow["id"]),
                 fallback_avoid=self.fallback_avoid(task, role),
                 continue_run=pending.get("continue_run"),
@@ -869,12 +879,17 @@ class _Runner:
         if not run_id:
             return None
         run = runs.load(run_id, self.env)
-        if run.status == runs.CLOSED:
+        if run.status == runs.CLOSED and not run.read_only:
             return None
-        stream = io.StringIO()
-        core = self.core(stream, stream)
+        if run.status != runs.CLOSED and run.read_only and run.owner_wait:
+            return f"{run_id} is waiting for an owner decision"
+        out, err = io.StringIO(), io.StringIO()
+        core = self.core(out, err)
         code = core.execute(lambda: core.close(run_id))
-        return stream.getvalue().strip() if code else None
+        message = err.getvalue().strip()
+        if message and not code:
+            print(message, file=sys.stderr)
+        return message if code else None
 
     def clean_writer_tmp(self, task: Mapping[str, Any]) -> None:
         """Remove leftovers once a task with a settled Codex writer is accepted."""
@@ -913,7 +928,7 @@ class _Runner:
             turn_file=path,
             turn_kind="send" if fresh else "fix",
             recover_review=False,
-            reviewer_run=None,
+            review_action=None,
         )
         if not self.call(task, "writer", lambda core: core.send(run.id, path)):
             return False
@@ -944,60 +959,173 @@ class _Runner:
                 raise RunnerError(f"git merge-base: {result.stderr.strip()}")
         return absent
 
+    def previous_review(self, task: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Find the recorded verdict of the reviewer retained for a fix."""
+        if task["reviewer_run"] and task["reviews"]:
+            previous = task["reviews"][-1]
+            if previous.get("run") == task["reviewer_run"]:
+                return previous
+        return None
+
+    def review_artifact(self, task: dict[str, Any]) -> str:
+        """Save the evidence and review bar for either kind of review turn."""
+        writer = self.metadata(task)
+        if task["round"] > 0 and not task.get("fix_base"):
+            raise RunnerError("the previous reviewed head is missing; request --review")
+        text = briefs.review_brief(
+            self.id,
+            replace(self.plan, check=tuple(self.flow["check"])),
+            self.plan.task(task["id"]),
+            round=task["round"] + 1,
+            base=task["task_base"],
+            head=task["head"],
+            changed=task["changed_files"],
+            outside=task["outside_files"],
+            shared=[
+                (path, other)
+                for other, files in self.declarations(task).items()
+                for path in task["changed_files"]
+                if any(plan.overlaps(path, f) for f in files)
+            ],
+            wave_files=self.other_files(task),
+            writer_report=Path(writer.reply).read_text(errors="replace")
+            if writer.reply
+            else None,
+            writer_check=task["writer_check"],
+            earlier=self.earlier(task),
+            fix_base=task.get("fix_base"),
+            standing=self.standing_read(),
+            merged_siblings=self.merged_siblings(task),
+            corrections=[
+                (int(path.stem), path.read_text(encoding="utf-8"))
+                for path in map(Path, task["corrections"])
+            ],
+        )
+        return self.artifact(task, "review", text)
+
+    def retire_reviewer(self, task: dict[str, Any]) -> bool:
+        """Protect a settled reviewer's checkout, then close its run."""
+        if self.shutdown.is_set():
+            return False
+        run_id = task["reviewer_run"]
+        if run_id:
+            run = runs.load(run_id, self.env)
+            # The checkout may never have been tested against the fix.
+            if run.read_only and run.detached and not run.preserve_ignored:
+                runs.update(run, {"preserve_ignored": True}, allow_closed=True)
+        warning = self.close(run_id)
+        if warning:
+            message = f"the review run {run_id} stays open: {warning}"
+            reason = task["reason"]
+            if not reason or message not in reason:
+                self.change(
+                    task,
+                    status="stopped",
+                    reason=f"{reason}; {message}" if reason else message,
+                )
+            return False
+        with self.mutex:
+            if self.finished:
+                return False
+            if run_id and not self.previous_review(task):
+                self._event(
+                    "task", task=task["id"], status=task["status"], reviewer_run=run_id
+                )
+            task.update(reviewer_run=None, review_send=None)
+            self._save()
+        return True
+
+    def close_stopped_review(self, task: dict[str, Any]) -> None:
+        """End a settled reviewer when its writer fix stopped the task."""
+        if (
+            not self.shutdown.is_set()
+            and task["status"] == "stopped"
+            and not task.get("preparation_blocked")
+            and not task.get("review_send")
+            and self.previous_review(task)
+        ):
+            self.retire_reviewer(task)
+
+    def continue_review(self, task: dict[str, Any]) -> bool:
+        """Send or collect the journaled follow-up, or start from the same head."""
+        if not self.allowed(task):
+            return False
+        pending = task["review_send"]
+        run_id = task["reviewer_run"]
+        if pending["head"] != task["head"]:
+            raise RunnerError("the fixed head changed before the review was collected")
+        follow_up = ReviewFollowUp(
+            self.id, pending["previous_turn"], pending["previous_head"], pending["head"]
+        )
+        unavailable = None
+
+        def send(core: Core) -> int:
+            nonlocal unavailable
+            try:
+                return core.send(run_id, pending["file"], review=follow_up)
+            except ReviewUnavailableError as error:
+                unavailable = str(error)
+                return exits.OK
+
+        if not self.call(task, "reviewer", send):
+            return False
+        if unavailable is None:
+            return True
+        if not self.retire_reviewer(task):
+            return False
+        warning = (
+            f"starting a fresh review because {run_id} could not continue "
+            f"({unavailable})"
+        )
+        self.change(task, warnings=[*task.get("warnings", []), warning])
+        return self.start(task, "reviewer", pending["file"])
+
     def review(self, task: dict[str, Any], *, recovering: bool = False) -> str:
-        """Read one review, close it and durably decide the next operation."""
-        earlier = self.earlier(task)
-        if not recovering or not task["reviewer_run"]:
+        """Read one review and save its verdict before scheduling the next fix."""
+        if recovering and task.get("review_send") and task["reviewer_run"]:
+            if not self.continue_review(task):
+                return "stop"
+        elif not recovering or not task["reviewer_run"]:
             if not self.allowed(task):
                 return "stop"
-            writer = self.metadata(task)
-            if task["round"] > 0 and not task.get("fix_base"):
-                raise RunnerError(
-                    "the previous reviewed head is missing; request --review"
-                )
-            report = (
-                Path(writer.reply).read_text(errors="replace") if writer.reply else None
-            )
-            text = briefs.review_brief(
-                self.id,
-                replace(self.plan, check=tuple(self.flow["check"])),
-                self.plan.task(task["id"]),
-                round=task["round"] + 1,
-                base=task["task_base"],
-                head=task["head"],
-                changed=task["changed_files"],
-                outside=task["outside_files"],
-                shared=[
-                    (path, other)
-                    for other, files in self.declarations(task).items()
-                    for path in task["changed_files"]
-                    if any(plan.overlaps(path, f) for f in files)
-                ],
-                wave_files=self.other_files(task),
-                writer_report=report,
-                writer_check=task["writer_check"],
-                earlier=earlier,
-                fix_base=task.get("fix_base"),
-                standing=self.standing_read(),
-                merged_siblings=self.merged_siblings(task),
-                corrections=[
-                    (int(path.stem), path.read_text(encoding="utf-8"))
-                    for path in map(Path, task["corrections"])
-                ],
-            )
-            path = self.artifact(task, "review", text)
+            path = self.review_artifact(task)
+            previous = self.previous_review(task)
+            pending = None
+            if (
+                previous
+                and task["round"]
+                and previous.get("turn")
+                and previous.get("head")
+            ):
+                pending = {
+                    "file": path,
+                    "previous_turn": previous["turn"],
+                    "previous_head": previous["head"],
+                    "head": task["head"],
+                }
+            elif task["reviewer_run"] and not self.retire_reviewer(task):
+                return "stop"
             self.change(
                 task,
                 status="reviewing",
                 entry=None,
-                reviewer_run=None,
                 review_action=None,
                 recover_review=False,
+                review_send=pending,
             )
-            if not self.start(task, "reviewer", path):
+            if not (
+                self.continue_review(task)
+                if pending
+                else self.start(task, "reviewer", path)
+            ):
                 return "stop"
         review_run = runs.load(task["reviewer_run"], self.env)
-        if review_run.turn_state == runs.SENT and review_run.status != runs.CLOSED:
+        if (
+            recovering
+            and not task.get("review_send")
+            and review_run.turn_state in (runs.SENT, runs.COLLECTED)
+            and review_run.status != runs.CLOSED
+        ):
             if not self.call(
                 task, "reviewer", lambda core: core.recover(review_run.id)
             ):
@@ -1018,19 +1146,19 @@ class _Runner:
             )
             result = verdict.read(
                 text,
-                len(earlier),
+                len(self.earlier(task)),
                 outside=task["outside_files"],
                 round=task["round"] + 1,
                 run=review_run.id,
             )
         except (OSError, UnicodeError) as error:
             result = verdict.Review(None, (), f"cannot read the reply: {error}")
-        warning = self.close(review_run.id)
         action, reason = result.decision(
             self.flow["rounds"] - task["round"],
             exhausted_reason="unresolved after "
             + verdict.budget_text(self.flow["review_budget"], fix_rounds=task["round"]),
         )
+        warning = self.close(review_run.id) if action != "fix" else None
         with self.mutex:
             if self.finished or self.shutdown.is_set():
                 return "stop"
@@ -1039,6 +1167,8 @@ class _Runner:
                     "round": task["round"],
                     "review_round": task["round"] + 1,
                     "run": review_run.id,
+                    "turn": review_run.turn,
+                    "head": task["head"],
                     "verdict": result.verdict or "unreadable",
                     "outside_files": [item.to_json() for item in result.outside_files],
                     **result.counts(),
@@ -1052,7 +1182,8 @@ class _Runner:
             task["earlier"] = [
                 f.to_json() for f in result.findings if f.severity == "must"
             ]
-            task["reviewer_run"] = None
+            task["reviewer_run"] = review_run.id if action == "fix" else None
+            task["review_send"] = None
             if warning:
                 message = (
                     f"WARNING: the review run {review_run.id} stays open: {warning}"
@@ -1087,6 +1218,7 @@ class _Runner:
         """Execute one task's write, review and bounded fix rounds."""
         try:
             self._pipeline(task)
+            self.close_stopped_review(task)
         except Exception as error:
             self.change(
                 task, status="stopped", reason=f"{type(error).__name__}: {error}"
@@ -1142,11 +1274,12 @@ class _Runner:
                 and self.tip(task["branch"]) == saved
             ):
                 if task.get("recover_review"):
+                    if task["reviewer_run"] and not self.retire_reviewer(task):
+                        return
                     self.change(
                         task,
                         recover_review=False,
                         review_action=None,
-                        reviewer_run=None,
                     )
                 if not self.review_writer(task):
                     return
@@ -1157,7 +1290,9 @@ class _Runner:
         while not self.shutdown.is_set():
             if action != "fix":
                 action = self.review(task, recovering=recovering)
-                recovering = False
+            # Recovery applies to the saved review or its fix decision.
+            # A completed writer fix needs a new reviewer turn.
+            recovering = False
             if action != "fix":
                 return
             if task["id"] in self.ahead:
@@ -1180,7 +1315,6 @@ class _Runner:
             )
             if not self.send(task, path, fresh=False):
                 return
-            self.change(task, review_action=None)
             action = None
 
     def review_writer(self, task: dict[str, Any]) -> bool:
@@ -1226,7 +1360,7 @@ class _Runner:
             initial = not pending and not task.get("fix_base")
             if not self.post_turn(task, initial):
                 return False
-            self.change(task, validate_turn=False, review_action=None)
+            self.change(task, review_action=None)
         return True
 
     def clean(self) -> None:
@@ -1446,6 +1580,7 @@ class _Runner:
                         task, status="pending", entry="review", recover_review=True
                     )
                 self.answer_effect(task)
+                self.close_stopped_review(task)
             except Exception as error:
                 self.change(task, status="stopped", reason=f"recovery failed: {error}")
         if not self.preparation_recovered:
@@ -1643,13 +1778,17 @@ class _Runner:
         return True
 
     def answer_effect(self, task: dict[str, Any]) -> None:
-        """Complete durable closes for an answer and its blocked reviewer."""
+        """Complete durable closes scheduled by an answer."""
         effect = task.get("answer_effect")
         if not effect:
             return
         warnings = [
             warning
-            for run_id in (effect.get("preparation_run"), effect["run"])
+            for run_id in (
+                effect.get("preparation_run"),
+                effect.get("reviewer_run"),
+                effect["run"],
+            )
             if (warning := self.close(run_id))
         ]
         with self.mutex:
@@ -1830,6 +1969,7 @@ class _Runner:
                 "reason": None,
                 "entry": None,
                 "explicit_review": kind == "review",
+                "review_send": None,
             }
             if kind == "accept" and task["status"] == "conflict":
                 if answer["commit"] != task.get("merge_tip"):
@@ -1917,6 +2057,12 @@ class _Runner:
                     fields.setdefault("answer_effect", {"n": answer["n"], "run": None})[
                         "preparation_run"
                     ] = task["reviewer_run"]
+            old_reviewer = task["reviewer_run"]
+            if old_reviewer and task.get("preparation_blocked") != "reviewer":
+                fields["reviewer_run"] = None
+                fields.setdefault("answer_effect", {"n": answer["n"], "run": None})[
+                    "reviewer_run"
+                ] = old_reviewer
         except (RunnerError, KeyError, TypeError, plan.PlanError) as error:
             number = answer.get("n", index + 1) if answer else index + 1
             problem = f"answer {number} refused: {error}"
@@ -1941,6 +2087,9 @@ class _Runner:
                     task=task["id"],
                     status=task["status"],
                     reason=task["reason"],
+                    reviewer_run=(fields.get("answer_effect") or {}).get(
+                        "reviewer_run"
+                    ),
                 )
         return task if not problem else None
 

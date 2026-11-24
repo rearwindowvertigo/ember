@@ -1540,6 +1540,27 @@ def test_prune_detached_worktrees(tmp_path: Path, dry_run: bool, dirty: bool) ->
         assert {child.id, str(worktree)} <= ids(result)
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_prune_keeps_protected_review_worktree_after_repository_removal(
+    env: dict[str, str], tmp_path: Path, dry_run: bool
+) -> None:
+    common = tmp_path / "missing" / ".git"
+    child = run(env, detached=True, common=str(common), preserve_ignored=True)
+    worktree = paths.worktree_path(child.id, env)
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {common / 'worktrees' / child.id}\n")
+    (worktree / "evidence").write_text("keep\n")
+    runs.save(replace(child, worktree=str(worktree)))
+
+    result = prune.remove(0, [child.id], env=env, dry_run=dry_run)
+    assert not result.removed
+    assert result.errors == [
+        f"{child.id}: kept worktree {worktree} after an incomplete checkout advance"
+    ]
+    assert runs.load(child.id, env).worktree == str(worktree)
+    assert (worktree / "evidence").read_text() == "keep\n"
+
+
 @pytest.mark.parametrize("parent_kind", [None, "panel", "flow"])
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_prune_keeps_uncertain_delivery_worktree(

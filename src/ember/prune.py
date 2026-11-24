@@ -749,6 +749,10 @@ def _artifacts(
             with paths.worktree_lock(Path(run.common or run.repo), env):
                 if worktrees.remove_detached(run, dry_run=dry_run):
                     result.removed.append(dict(id=worktree, kind="worktree"))
+        elif data.get("preserve_ignored") and os.path.lexists(worktree):
+            raise OSError(
+                f"kept worktree {worktree} after an incomplete checkout advance"
+            )
         elif Path(worktree).exists():
             reason = _orphan_reason(Path(worktree), paths.worktrees_dir(env).resolve())
             if reason:
