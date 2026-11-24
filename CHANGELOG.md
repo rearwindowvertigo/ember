@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.32.0](https://github.com/rearwindowvertigo/ember/compare/v0.31.0...v0.32.0) (2026-11-24)
+
+
+### Added
+
+* **cli:** print a JSON error object when a --json command fails ([df1de48](https://github.com/rearwindowvertigo/ember/commit/df1de48f06c437ebeb1dd2ec47579ce4acbf8162))
+
+
+### Fixed
+
+* **flows:** correct an invalid gap check reply in the open session ([30ac7e1](https://github.com/rearwindowvertigo/ember/commit/30ac7e12d1f13328a4f448d7c3e12ccbc6c42f34)), closes [#357](https://github.com/rearwindowvertigo/ember/issues/357)
+
 ## [0.31.0](https://github.com/rearwindowvertigo/ember/compare/v0.30.0...v0.31.0) (2026-11-23)
 
 
