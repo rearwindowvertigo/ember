@@ -2295,3 +2295,34 @@ def test_json_option_is_read_before_a_double_dash(
     import ember.cli as cli
 
     assert cli._wants_json(argv) is wanted
+
+
+@pytest.mark.parametrize(
+    ("raised", "code", "message"),
+    [
+        (RuntimeError("broken"), 1, "RuntimeError: broken"),
+        (KeyboardInterrupt(), 130, "KeyboardInterrupt: "),
+    ],
+)
+def test_json_crash_prints_an_error_object_and_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    raised: BaseException,
+    code: int,
+    message: str,
+) -> None:
+    import ember.cli as cli
+
+    def crash(argv: list[str], env: object) -> int:
+        print("emb gapcheck: before", file=sys.stderr)
+        raise raised
+
+    monkeypatch.setattr(cli, "_main", crash)
+    with pytest.raises(type(raised)):
+        cli.main(["gapcheck", "--json"])
+    assert json.loads(capsys.readouterr().out)["error"] == {
+        "exit": code,
+        "messages": ["before", message],
+        "actions": [],
+        "warnings": [],
+    }

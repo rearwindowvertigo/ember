@@ -5484,7 +5484,9 @@ These are the exit codes of `emb choices` and `emb engines`; `emb run`,
 
 Every command given `--json` that exits non-zero without printing anything
 on standard output prints one error object there, indented by two spaces.
-This covers usage errors too. Standard error is unchanged. A command that
+This covers usage errors, and an exception that escapes the command
+(exit 1, or 130 after an interrupt), which still ends with its traceback.
+Standard error is unchanged. A command that
 printed its own JSON before failing, such as `emb gapcheck` at exit 81,
 keeps that output and prints no error object. `--json` counts only before
 a `--` argument.
@@ -5503,7 +5505,7 @@ a `--` argument.
 | Field | Value |
 |---|---|
 | `exit` | The exit code |
-| `messages` | Each `emb <command>: <message>` line of standard error, without the prefix |
+| `messages` | Each `emb <command>: <message>` line of standard error, without the prefix, then `<type>: <message>` of an escaped exception |
 | `actions` | Each `next:`, `owner:` and `report:` line of standard error, as printed |
 | `warnings` | Each `WARNING:` line of standard error, without the prefix |
 
