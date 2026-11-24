@@ -10,10 +10,7 @@
 
 ### Fixed
 
-* **cli:** print the JSON error object when a --json command crashes ([fbe30d3](https://github.com/rearwindowvertigo/ember/commit/fbe30d3e9e2c45536c6c23c9246b7fe71e4d4c38))
 * **flows:** correct an invalid gap check reply in the open session ([30ac7e1](https://github.com/rearwindowvertigo/ember/commit/30ac7e12d1f13328a4f448d7c3e12ccbc6c42f34)), closes [#357](https://github.com/rearwindowvertigo/ember/issues/357)
-* **flows:** name a gap check correction action that can succeed ([18d921d](https://github.com/rearwindowvertigo/ember/commit/18d921d218e27d0563c6c90c474140b2fe719489))
-* **flows:** warn about an open correction only when it was never sent ([0494c6c](https://github.com/rearwindowvertigo/ember/commit/0494c6c9d10039ee0c62c9a456e354b3faee77cb))
 
 ## [0.31.0](https://github.com/rearwindowvertigo/ember/compare/v0.30.0...v0.31.0) (2026-11-23)
 
