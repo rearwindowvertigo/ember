@@ -4446,7 +4446,7 @@ not valid:
 | `label` | The shown name |
 | `group` | `apps`, `system` or `libraries` |
 | `installed` | `kind = "apt"` with `package`; `kind = "command"` with `pattern`, a regular expression whose group 1 is the version, and either `engine` (the engine's CLI run with `--version`) or `argv`; `kind = "python"` with `package`; or `kind = "skill"` with an optional `commands` map from link states to install commands |
-| `newest` | `kind = "apt"` with `package`; `kind = "apt-index"` with `url` and `package`; `kind = "json"` with `url` and `field`; `kind = "text"` with `url`; `kind = "pypi"` with `package`; or `kind = "none"` for no newest version (required for `skill`). The `apt` and `apt-index` kinds require an apt `installed` source. |
+| `newest` | `kind = "apt"` with `package`; `kind = "apt-index"` with `url` and `package`; `kind = "json"` with `url` and `field`; `kind = "text"` with `url`; `kind = "pypi"` with `package`; `kind = "github"` with `repo` (`owner/repository`); or `kind = "none"` for no newest version (required for `skill`). Every `url` starts with `https://`. The `apt` and `apt-index` kinds require an apt `installed` source. |
 | `update` | Optional: the command shown while an update is available |
 | `methods` | Optional: ordered `[[components.methods]]` tables with `path` and `update`, or `kind = "dpkg"` and `update`; replaces `update` for engines |
 | `updater` | Required with engine methods: `codex update`, `opencode upgrade` or `claude update`, used when no method matches |

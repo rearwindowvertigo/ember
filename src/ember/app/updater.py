@@ -34,7 +34,7 @@ _SUCCESS = 1
 _CANCELLED = 3
 _INSTALLED = 1
 _AVAILABLE = 2
-_TRUSTED = 25
+_TRUSTED = 24
 
 type Argument = bool | int | list[str]
 

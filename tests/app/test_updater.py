@@ -121,7 +121,8 @@ def test_only_finished_success_restarts_once(
         (2, "other;9.0.0;amd64;ember-stable-main"),
         (2, "ember;9.0.0;arm64;ember-stable-main"),
         (2, "ember;9.0.0;amd64;another-repo"),
-        (24, _package(OFFERED)),
+        (23, _package(OFFERED)),
+        (25, _package(OFFERED)),
         (1, "ember;1.0.0;amd64;manual:local"),
         (2, _package("1.1.0")),
         (2, _package(OFFERED)),
@@ -181,7 +182,8 @@ def test_changed_candidate_requires_fresh_confirmation(
         ((2, _package("0.9.0")),),
         ((2, _package(RUNNING)),),
         ((1, "ember;2.0.0;amd64;manual:ember-stable-main"), (2, _package(OFFERED))),
-        ((24, _package(OFFERED)),),
+        ((23, _package(OFFERED)),),
+        ((25, _package(OFFERED)),),
     ],
 )
 def test_equal_older_or_untrusted_candidate_installs_nothing(
@@ -327,3 +329,13 @@ def test_qt_transaction_waits_for_finished_and_keeps_error_code(
     receiver._finished(status, 10)
     expected = None if status == 1 else "Authentication was cancelled."
     assert results == [updater.TransactionResult(error=expected)]
+
+
+@pytest.mark.parametrize("info", [2, 24])
+def test_available_or_trusted_candidate_installs(harness: Harness, info: int) -> None:
+    harness.resolve((info, _package(OFFERED)))
+    install = harness.transport.calls[-1]
+    assert (install.method, install.arguments) == (
+        "UpdatePackages",
+        [2, [_package(OFFERED)]],
+    )
