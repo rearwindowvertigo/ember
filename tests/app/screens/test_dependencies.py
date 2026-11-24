@@ -515,7 +515,13 @@ def test_an_earlier_read_keeps_the_check_spinner(
     asked: list[bool] = []
 
     def read(
-        _env: object, *, installed: bool, newest: str, exclude: Collection[str] = ()
+        _env: object,
+        *,
+        installed: bool,
+        newest: str,
+        exclude: Collection[str],
+        force_newest: Collection[str],
+        fetch: deps.Fetch,
     ) -> deps.DepsReport:
         asked.append(installed)
         gates[installed].wait(5)

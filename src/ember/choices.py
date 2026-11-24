@@ -628,6 +628,7 @@ def _keys() -> dict[str, Key]:
         )
     )
     keys.append(_key("app.autostart", _ON_OFF, "on"))
+    keys.append(_key("updates.check", _ON_OFF, "on"))
     keys.append(_key("app.theme", ("system", "light", "dark"), "system"))
     return {key.name: key for key in keys}
 

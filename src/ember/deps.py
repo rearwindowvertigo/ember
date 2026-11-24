@@ -1125,6 +1125,7 @@ class _Options:
     now: float
     fetch: Fetch
     deadline: float
+    force_newest: Collection[str]
 
 
 @dataclass(frozen=True)
@@ -1212,7 +1213,9 @@ def _evaluate_versions(
             note=None if found is None else found.note,
         )
         return _Outcome(row, found, None)
-    if found is not None and found.missing:
+    missing = found is not None and found.missing
+    forced = spec.id in options.force_newest
+    if missing and not forced:
         newest = held_newest.version if held_newest else None
         row = _row(spec, MISSING, None, newest, None)
         return _Outcome(row, found, held_newest)
@@ -1227,7 +1230,7 @@ def _evaluate_versions(
         # this one.
         held_newest = None
     reported = held_newest
-    if _due(held_newest, options):
+    if forced or _due(held_newest, options):
         try:
             version = _read_newest(spec, options.env, options.deadline, options.fetch)
         except ReadError as error:
@@ -1239,6 +1242,8 @@ def _evaluate_versions(
         errors.append("newest version: not read and nothing cached")
     installed = None if found is None else found.version
     newest = None if reported is None else reported.version
+    if missing and not errors:
+        return _Outcome(_row(spec, MISSING, None, newest, None), found, reported)
     if not errors and installed is not None and newest is not None:
         try:
             older = _older(spec, installed, newest, options.env, options.deadline)
@@ -1251,8 +1256,10 @@ def _evaluate_versions(
             # A source can report an older release than the installed one,
             # such as apt lists read before a newer package was installed.
             with contextlib.suppress(ReadError):
-                if installed != newest and _older(
-                    spec, newest, installed, options.env, options.deadline
+                if (
+                    not forced
+                    and installed != newest
+                    and _older(spec, newest, installed, options.env, options.deadline)
                 ):
                     newest = installed
             return _Outcome(
@@ -1416,6 +1423,7 @@ def read(
     deadline: float = TIMEOUT,
     components: tuple[Spec, ...] | None = None,
     exclude: Collection[str] = (),
+    force_newest: Collection[str] = (),
 ) -> DepsReport:
     """Read the selected components' versions and status.
 
@@ -1434,6 +1442,8 @@ def read(
         deadline: Seconds each command may run.
         components: The component list; `None` reads the packaged list.
         exclude: Component IDs to skip for this read, keeping their cache entries.
+        force_newest: Selected IDs whose newest version is read regardless of the
+            cache or whether their installed version is present.
 
     Returns:
         The report, in the order of the component list.
@@ -1456,6 +1466,7 @@ def read(
         now=time.time() if now is None else now,
         fetch=fetch_text if fetch is None else fetch,
         deadline=deadline,
+        force_newest=force_newest,
     )
     held = _load_cache(env)
     with ThreadPoolExecutor(max_workers=max(1, len(selected))) as pool:
@@ -1474,7 +1485,7 @@ def read(
         )
         for spec, outcome in zip(selected, outcomes, strict=True)
     }
-    if installed or newest != "never":
+    if installed or newest != "never" or force_newest:
         _save_cache(entries, env, preserve=skipped)
     return DepsReport(
         components=tuple(outcome.component for outcome in outcomes),

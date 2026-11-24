@@ -59,6 +59,7 @@ from ember.app import icons, state, theme, tray, widgets
 from ember.app.context import STALE_TEXT, STALE_TITLE, AppContext
 from ember.app.screens import KEYS, SCREENS, Screen
 from ember.app.screens.common import SCREEN_MARGIN
+from ember.app.updater import UpdateNotice
 
 MINIMUM_WIDTH = 640
 """The narrowest the window can be."""
@@ -405,6 +406,7 @@ class MainWindow(QMainWindow):
         self.notice_area = QVBoxLayout(self.notice_column)
         self.notice_area.setContentsMargins(SCREEN_MARGIN, 16, SCREEN_MARGIN, 0)
         self.notice: widgets.Alert | None = None
+        self.update_notice: widgets.Alert | None = None
         self.notice_row = QHBoxLayout()
         self.notice_row.addWidget(self.notice_column, 1)
         content.addLayout(self.notice_row)
@@ -642,6 +644,31 @@ class MainWindow(QMainWindow):
             self.notice.deleteLater()
             self.notice = None
 
+    def show_update(self, notice: UpdateNotice | None) -> None:
+        """Show the release offer or its result above the current screen."""
+        self._clear_update()
+        if notice is None:
+            return
+        actions = []
+        if notice.update is not None:
+            actions.append(("Update", notice.update))
+        if notice.dismissible:
+            actions.append(("Dismiss", self._clear_update))
+        alert = widgets.Alert(notice.tone, notice.title, notice.text, actions=actions)
+        alert.text_label.setTextFormat(Qt.TextFormat.PlainText)
+        alert.text_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.update_notice = alert
+        self.notice_area.insertWidget(0, alert)
+
+    def _clear_update(self) -> None:
+        if self.update_notice is not None:
+            self.update_notice.hide()
+            self.notice_area.removeWidget(self.update_notice)
+            self.update_notice.deleteLater()
+            self.update_notice = None
+
     def show_restart(self, version: str, restart: Callable[[], None]) -> None:
         """Offer a restart into the installed version until Ember restarts.
 
@@ -681,10 +708,16 @@ class MainWindow(QMainWindow):
         if self.restart_offer is not None:
             self.restart_offer.restart()
 
+    def clear_restart(self) -> None:
+        """Withdraw both controls for restarting into an installed version."""
+        self.restart_offer = None
+        self._show_restart_control()
+
     def _show_restart_control(self) -> None:
         if self.update_box is not None and self.update_button is not None:
-            self.update_box.setVisible(not self.sidebar_collapsed)
-            self.update_button.setVisible(self.sidebar_collapsed)
+            offered = self.restart_offer is not None
+            self.update_box.setVisible(offered and not self.sidebar_collapsed)
+            self.update_button.setVisible(offered and self.sidebar_collapsed)
 
     def _stale(self) -> None:
         self.show_notice("info", STALE_TITLE, STALE_TEXT)

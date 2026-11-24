@@ -30,11 +30,12 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication
 
-from ember import autostart, paths
+from ember import __version__, autostart, paths
 from ember.app import icons, theme, widgets
 from ember.app import tray as tray_module
 from ember.app.collector import Collector
 from ember.app.context import AppContext
+from ember.app.updater import Updater
 from ember.app.window import MainWindow
 
 APP_ID = "io.github.rearwindowvertigo.Ember"
@@ -193,10 +194,11 @@ class EmberApp:
     autostart_reason: str | None = None
     version: str | None = None
     """The version this process started as."""
+    updater: Updater | None = None
 
 
 class _Controller(QObject):
-    """Connects the parts: the socket, settings, theme and autostart."""
+    """Connect the socket, settings and package watcher to the window."""
 
     def __init__(self, parts: EmberApp) -> None:
         super().__init__(parts.context)
@@ -216,6 +218,13 @@ class _Controller(QObject):
         if self._package is not None:
             self._watcher.addPath(str(self._package))
         self._watcher.directoryChanged.connect(self._package_changed)
+        updater = Updater(
+            parts.context, parts.version or __version__, lambda: restart(parts)
+        )
+        parts.updater = updater
+        updater.notice_changed.connect(parts.window.show_update)
+        updater.install_started.connect(self._install_started)
+        updater.restart_released.connect(self._check_version)
         parts.app.aboutToQuit.connect(self._quit)
         parts.window.destroyed.connect(self._stop_watching)
         hints = parts.app.styleHints()
@@ -254,10 +263,17 @@ class _Controller(QObject):
             return
         if str(self._package) not in self._watcher.directories():
             self._watcher.addPath(str(self._package))
-        self._settle.start()
+        if not self.parts.updater or not self.parts.updater.holds_restart():
+            self._settle.start()
+
+    def _install_started(self) -> None:
+        self._settle.stop()
+        self.parts.window.clear_restart()
 
     def _check_version(self) -> None:
         """Offer a restart when the installed version is not this one."""
+        if self.parts.updater and self.parts.updater.holds_restart():
+            return
         installed = installed_version()
         if installed is None or installed == self.parts.version:
             return
@@ -402,7 +418,6 @@ def start(argv: list[str], env: Mapping[str, str] | None = None) -> EmberApp | i
 
         context.reload_settings()
         context.refresh_engines()
-        context.refresh_deps(check_now=True)
         context.runs.start()
         context.flows.set_active(True)
         return parts
@@ -441,6 +456,8 @@ def stop(parts: EmberApp) -> None:
     if parts.stopped:
         return
     parts.stopped = True
+    if parts.updater is not None:
+        parts.updater.stop()
     parts.window.hide()
     if parts.tray is not None:
         parts.tray.hide()

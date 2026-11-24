@@ -72,6 +72,7 @@ def _pick_terminal(screen: SettingsScreen, value: str) -> None:
 def test_switches_write_their_keys(env: dict[str, str], qtbot: QtBot) -> None:
     context, screen = _screen(env, qtbot)
     assert screen.autostart.isChecked()
+    assert screen.check_updates.isChecked()
     assert not screen.network.isChecked()
     with qtbot.waitSignal(context.settings_changed, timeout=5000):
         screen.autostart.click()
@@ -84,6 +85,10 @@ def test_switches_write_their_keys(env: dict[str, str], qtbot: QtBot) -> None:
     with qtbot.waitSignal(context.settings_changed, timeout=5000):
         screen.autostart.click()
     assert _stored(env, "app.autostart") == "on"
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        screen.check_updates.click()
+    assert _stored(env, "updates.check") == "off"
+    assert not screen.check_updates.isChecked()
 
 
 @pytest.fixture
@@ -758,6 +763,7 @@ def test_every_control_is_reached_with_tab(
         chain = focus_chain(screen, qtbot, screen.autostart)
         expected = [
             screen.autostart,
+            screen.check_updates,
             screen.theme.buttons()[0],
             screen.tip_rows["Hidden notices"].info,
             *(screen.hidden_rows[path] for path in hidden),
@@ -782,7 +788,14 @@ def test_settings_rows_are_names_with_info_icons(
     env: dict[str, str], qtbot: QtBot
 ) -> None:
     _context, screen = _screen(env, qtbot)
-    names = ["Start at login", "Theme", "Hidden notices", "Worker network", "Terminal"]
+    names = [
+        "Start at login",
+        "Check for updates",
+        "Theme",
+        "Hidden notices",
+        "Worker network",
+        "Terminal",
+    ]
     names.extend(["Sandbox read paths", "Repositories"])
     assert screen.tip_rows["Worker network"].info.toolTip() == (
         "Lets Codex workers and Claude's web tools reach the network. "
@@ -1057,6 +1070,7 @@ def test_empty_read_paths_keep_the_full_width(
     ("name", "key", "value"),
     [
         ("Start at login", "app.autostart", "off"),
+        ("Check for updates", "updates.check", "off"),
         ("Worker network", "worker.network", "on"),
         ("Theme", "app.theme", "dark"),
         ("Terminal", "terminal", "custom-terminal --"),

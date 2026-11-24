@@ -74,6 +74,8 @@ VALID = [
     ("sandbox.read", []),
     ("terminal", "gnome-terminal -- 'a b'"),
     ("app.autostart", "off"),
+    ("updates.check", "on"),
+    ("updates.check", "off"),
     ("app.theme", "dark"),
 ]
 
@@ -115,6 +117,7 @@ INVALID = [
     ("terminal", "   "),
     ("terminal", "xterm -e 'open"),
     ("app.autostart", "maybe"),
+    ("updates.check", True),
     ("app.theme", "blue"),
 ]
 
@@ -186,6 +189,7 @@ def test_defaults(env: dict[str, str]) -> None:
         "sandbox.hidden_notices": [],
         "terminal": "xdg-terminal-exec",
         "app.autostart": "on",
+        "updates.check": "on",
         "app.theme": "system",
     }
 

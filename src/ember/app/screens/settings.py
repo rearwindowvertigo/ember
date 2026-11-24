@@ -1,6 +1,6 @@
 """The Settings screen: start at login, theme, and how workers run (design J2).
 
-General holds Start at login and Theme; Workers holds Worker network,
+General holds Start at login, Check for updates and Theme. Workers holds Worker network,
 Terminal and Sandbox read paths. Worktree preparation holds each repository's
 preparation command. Each change saves at once.
 The app's controller writes or removes the autostart entry after
@@ -56,6 +56,7 @@ THEMES = (("system", "System"), ("light", "Light"), ("dark", "Dark"))
 
 SETTING_KEYS = {
     "Start at login": "app.autostart",
+    "Check for updates": "updates.check",
     "Theme": "app.theme",
     "Worker network": "worker.network",
     "Terminal": "terminal",
@@ -225,6 +226,17 @@ class SettingsScreen(QWidget):
         )
         self.autostart_line = ToneLine("warning")
         column.addWidget(self.autostart_line)
+        self.check_updates = widgets.Switch()
+        self.check_updates.setAccessibleName("Check for updates")
+        self.check_updates.clicked.connect(
+            lambda checked: self._save({"updates.check": "on" if checked else "off"})
+        )
+        self._row(
+            column,
+            "Check for updates",
+            "Check for a new Ember release at startup and once a day.",
+            self.check_updates,
+        )
         self.theme = widgets.Segmented(THEMES)
         self.theme.setAccessibleName("Theme")
         self.theme.changed.connect(self._theme_picked)
@@ -378,6 +390,7 @@ class SettingsScreen(QWidget):
         if not answers:
             return
         self.autostart.setChecked(answers["app.autostart"]["value"] == "on")
+        self.check_updates.setChecked(answers["updates.check"]["value"] == "on")
         self.network.setChecked(answers["worker.network"]["value"] == "on")
         self.theme.blockSignals(True)
         try:
