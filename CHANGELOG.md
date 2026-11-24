@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.0](https://github.com/rearwindowvertigo/ember/compare/v0.33.0...v0.34.0) (2026-11-24)
+
+
+### Added
+
+* **flows:** resume task reviewers across automatic fix rounds ([61e76e4](https://github.com/rearwindowvertigo/ember/commit/61e76e41eb4a78a577d0aa29f27f45cb2fcb8f95))
+
 ## [0.33.0](https://github.com/rearwindowvertigo/ember/compare/v0.32.0...v0.33.0) (2026-11-24)
 
 
