@@ -20,6 +20,7 @@ and supplies `HOME`, the XDG variables and `PATH`.
 
 import contextlib
 import dataclasses
+import fcntl
 import http.client
 import importlib.metadata
 import json
@@ -33,7 +34,7 @@ import subprocess
 import time
 import tomllib
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Generator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from importlib import resources
@@ -70,8 +71,10 @@ GROUPS = ("apps", "system", "libraries")
 INSTALLED_KINDS = ("apt", "command", "python", "skill")
 """How an installed version can be read."""
 
-NEWEST_KINDS = ("apt", "json", "text", "pypi", "github", "none")
+NEWEST_KINDS = ("apt", "apt-index", "json", "text", "pypi", "github", "none")
 """How a newest version can be read."""
+
+_APT_NEWEST_KINDS = ("apt", "apt-index")
 
 NEWEST_MODES = ("due", "always", "never")
 """When `read` reads newest versions."""
@@ -101,7 +104,7 @@ class Source:
     """One of `INSTALLED_KINDS` or `NEWEST_KINDS`."""
 
     package: str | None = None
-    """The apt or Python package, for `apt`, `python` and `pypi`."""
+    """The apt or Python package, for `apt`, `apt-index`, `python` and `pypi`."""
 
     engine: str | None = None
     """The engine whose CLI is run with `--version`, for `command`."""
@@ -113,7 +116,7 @@ class Source:
     """A regular expression whose group 1 is the version, for `command`."""
 
     url: str | None = None
-    """The address read, for `json` and `text`."""
+    """The address read, for `apt-index`, `json` and `text`."""
 
     field: str | None = None
     """The JSON object's key that holds the version, for `json`."""
@@ -332,6 +335,7 @@ _SOURCE_FIELDS: dict[tuple[str, str], tuple[tuple[str, ...], tuple[str, ...]]] =
     ("installed", "skill"): ((), ("commands",)),
     ("newest", "none"): ((), ()),
     ("newest", "apt"): (("package",), ()),
+    ("newest", "apt-index"): (("url", "package"), ()),
     ("newest", "json"): (("url", "field"), ()),
     ("newest", "text"): (("url",), ("channel",)),
     ("newest", "pypi"): (("package",), ()),
@@ -500,9 +504,9 @@ def _spec(index: int, value: object) -> Spec:
     newest = _source(where, "newest", value["newest"])
     if installed.kind == "skill" and newest.kind != "none":
         raise ComponentsError(f"{where}: a skill needs newest kind none")
-    if newest.kind == "apt" and installed.kind != "apt":
+    if newest.kind in _APT_NEWEST_KINDS and installed.kind != "apt":
         raise ComponentsError(
-            f"{where}: an apt newest read needs an apt installed read"
+            f"{where}: an {newest.kind} newest read needs an apt installed read"
         )
     optional = {
         name: _text(where, name, value[name]) if name in value else None
@@ -820,7 +824,12 @@ def _newest_apt(package: str, env: Mapping[str, str], deadline: float) -> str:
     return match.group(1)
 
 
-def _fetch(url: str, fetch: Fetch) -> str:
+def fetch_version_text(url: str, fetch: Fetch) -> str:
+    """Fetch version source text with the dependency-read timeout.
+
+    Raises:
+        ReadError: The request failed or its body could not be decoded.
+    """
     try:
         return fetch(url, TIMEOUT)
     except (OSError, ValueError, http.client.HTTPException) as error:
@@ -847,15 +856,25 @@ def _read_newest(
     source = spec.newest
     if source.kind == "apt":
         return _newest_apt(source.package or "", env, deadline)
+    if source.kind == "apt-index":
+        from ember import updates
+
+        return updates.newest_version(
+            env,
+            url=source.url or "",
+            package=source.package or "",
+            fetch=fetch,
+            deadline=deadline,
+        )
     if source.kind == "pypi":
         url = PYPI_URL.format(package=source.package)
-        return _json_field(url, _fetch(url, fetch), ("info", "version"))
+        return _json_field(url, fetch_version_text(url, fetch), ("info", "version"))
     if source.kind == "github":
         return _newest_github(source.repo or "", fetch)
     url = source.url or ""
     if source.channel == "claude-code":
         url = url.replace("{channel}", claude_channel(env))
-    body = _fetch(url, fetch)
+    body = fetch_version_text(url, fetch)
     if source.kind == "json":
         return _json_field(url, body, (source.field or "",))
     version = body.strip()
@@ -879,7 +898,7 @@ def _newest_github(repo: str, fetch: Fetch) -> str:
     """
     url = f"https://api.github.com/repos/{repo}/releases?per_page=100"
     try:
-        releases = json.loads(_fetch(url, fetch))
+        releases = json.loads(fetch_version_text(url, fetch))
     except ValueError:
         raise ReadError(f"{url} did not return JSON") from None
     if not isinstance(releases, list):
@@ -950,12 +969,24 @@ def dotted(version: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
-def _older(
-    spec: Spec, installed: str, newest: str, env: Mapping[str, str], deadline: float
+def validate_debian_version(
+    version: str, env: Mapping[str, str], deadline: float = TIMEOUT
+) -> None:
+    """Raise `ReadError` if `dpkg` cannot validate a version string."""
+    if "\0" in version:
+        raise ReadError("Debian version contains a NUL character")
+    binary = _tool("dpkg", env)
+    code, out, err = run_command(
+        [binary, "--validate-version", "--", version], env, deadline
+    )
+    if code != 0:
+        raise ReadError(f"invalid Debian version: {_first_line(err or out)}")
+
+
+def debian_older(
+    installed: str, newest: str, env: Mapping[str, str], deadline: float = TIMEOUT
 ) -> bool:
-    """Return whether `installed` is older than `newest`."""
-    if spec.newest.kind != "apt":
-        return dotted(installed) < dotted(newest)
+    """Return whether `installed` precedes `newest` in Debian version order."""
     binary = _tool("dpkg", env)
     code, out, err = run_command(
         [binary, "--compare-versions", installed, "lt", newest], env, deadline
@@ -965,6 +996,14 @@ def _older(
             f"dpkg --compare-versions exited {code}: {_first_line(err or out)}"
         )
     return code == 0
+
+
+def _older(
+    spec: Spec, installed: str, newest: str, env: Mapping[str, str], deadline: float
+) -> bool:
+    if spec.newest.kind in _APT_NEWEST_KINDS:
+        return debian_older(installed, newest, env, deadline)
+    return dotted(installed) < dotted(newest)
 
 
 # Cache
@@ -1042,21 +1081,37 @@ def _load_cache(
     return held
 
 
+@contextlib.contextmanager
+def _cache_write_lock(env: Mapping[str, str]) -> Generator[Path]:
+    path = cache_path(env)
+    paths.ensure_private_dir(path.parent, root=paths.cache_dir(env))
+    fd = paths.open_private_file(path.with_suffix(".lock"))
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield path
+    finally:
+        os.close(fd)
+
+
 def _save_cache(
     entries: dict[str, tuple[_Installed | None, _Newest | None]],
     env: Mapping[str, str],
+    preserve: set[str],
 ) -> None:
-    components: dict[str, dict[str, Any]] = {}
-    for key, (installed, newest) in entries.items():
-        entry: dict[str, Any] = {}
-        if installed is not None:
-            entry["installed"] = installed.to_json()
-        if newest is not None:
-            entry["newest"] = newest.to_json()
-        components[key] = entry
-    data: dict[str, Any] = {"components": components}
-    with contextlib.suppress(OSError, KeyError):
-        status.save_cache_file(cache_path(env), data, env)
+    with contextlib.suppress(OSError, KeyError), _cache_write_lock(env) as path:
+        if preserve:
+            # A skipped component may have been refreshed by another reader.
+            held = _load_cache(env)
+            entries = entries | {key: held[key] for key in preserve if key in held}
+        components: dict[str, dict[str, Any]] = {}
+        for key, (installed, newest) in entries.items():
+            entry: dict[str, Any] = {}
+            if installed is not None:
+                entry["installed"] = installed.to_json()
+            if newest is not None:
+                entry["newest"] = newest.to_json()
+            components[key] = entry
+        status.save_cache_file(path, {"components": components}, env)
 
 
 # Status
@@ -1070,6 +1125,7 @@ class _Options:
     now: float
     fetch: Fetch
     deadline: float
+    force_newest: Collection[str]
 
 
 @dataclass(frozen=True)
@@ -1157,7 +1213,9 @@ def _evaluate_versions(
             note=None if found is None else found.note,
         )
         return _Outcome(row, found, None)
-    if found is not None and found.missing:
+    missing = found is not None and found.missing
+    forced = spec.id in options.force_newest
+    if missing and not forced:
         newest = held_newest.version if held_newest else None
         row = _row(spec, MISSING, None, newest, None)
         return _Outcome(row, found, held_newest)
@@ -1172,7 +1230,7 @@ def _evaluate_versions(
         # this one.
         held_newest = None
     reported = held_newest
-    if _due(held_newest, options):
+    if forced or _due(held_newest, options):
         try:
             version = _read_newest(spec, options.env, options.deadline, options.fetch)
         except ReadError as error:
@@ -1184,6 +1242,8 @@ def _evaluate_versions(
         errors.append("newest version: not read and nothing cached")
     installed = None if found is None else found.version
     newest = None if reported is None else reported.version
+    if missing and not errors:
+        return _Outcome(_row(spec, MISSING, None, newest, None), found, reported)
     if not errors and installed is not None and newest is not None:
         try:
             older = _older(spec, installed, newest, options.env, options.deadline)
@@ -1196,8 +1256,10 @@ def _evaluate_versions(
             # A source can report an older release than the installed one,
             # such as apt lists read before a newer package was installed.
             with contextlib.suppress(ReadError):
-                if installed != newest and _older(
-                    spec, newest, installed, options.env, options.deadline
+                if (
+                    not forced
+                    and installed != newest
+                    and _older(spec, newest, installed, options.env, options.deadline)
                 ):
                     newest = installed
             return _Outcome(
@@ -1360,8 +1422,10 @@ def read(
     fetch: Fetch | None = None,
     deadline: float = TIMEOUT,
     components: tuple[Spec, ...] | None = None,
+    exclude: Collection[str] = (),
+    force_newest: Collection[str] = (),
 ) -> DepsReport:
-    """Read every component's versions and status.
+    """Read the selected components' versions and status.
 
     Reads that ran are written to the cache; a newest read that failed is not,
     so the next due read tries again. A cache that cannot be read is treated
@@ -1376,7 +1440,10 @@ def read(
         now: The time recorded for the reads; `None` for the current time.
         fetch: Reads a URL as text; `None` uses `fetch_text`.
         deadline: Seconds each command may run.
-        components: The components; `None` reads the packaged list.
+        components: The component list; `None` reads the packaged list.
+        exclude: Component IDs to skip for this read, keeping their cache entries.
+        force_newest: Selected IDs whose newest version is read regardless of the
+            cache or whether their installed version is present.
 
     Returns:
         The report, in the order of the component list.
@@ -1389,6 +1456,8 @@ def read(
     if newest not in NEWEST_MODES:
         raise ValueError(f"newest must be one of {', '.join(NEWEST_MODES)}")
     specs = load_components() if components is None else components
+    skipped = {spec.id for spec in specs if spec.id in exclude}
+    selected = tuple(spec for spec in specs if spec.id not in skipped)
     env = os.environ if env is None else env
     options = _Options(
         env=env,
@@ -1397,13 +1466,14 @@ def read(
         now=time.time() if now is None else now,
         fetch=fetch_text if fetch is None else fetch,
         deadline=deadline,
+        force_newest=force_newest,
     )
     held = _load_cache(env)
-    with ThreadPoolExecutor(max_workers=len(specs)) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, len(selected))) as pool:
         outcomes = list(
             pool.map(
                 lambda spec: _evaluate(spec, held.get(spec.id, (None, None)), options),
-                specs,
+                selected,
             )
         )
     entries = {
@@ -1413,10 +1483,10 @@ def read(
             if spec.newest.kind == "none"
             else outcome.newest or held.get(spec.id, (None, None))[1],
         )
-        for spec, outcome in zip(specs, outcomes, strict=True)
+        for spec, outcome in zip(selected, outcomes, strict=True)
     }
-    if installed or newest != "never":
-        _save_cache(entries, env)
+    if installed or newest != "never" or force_newest:
+        _save_cache(entries, env, preserve=skipped)
     return DepsReport(
         components=tuple(outcome.component for outcome in outcomes),
         installed_read_at={

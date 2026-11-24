@@ -10,12 +10,14 @@ import os
 import subprocess
 from collections import deque
 from collections.abc import Callable, Mapping
+from dataclasses import replace
+from threading import Event
 from typing import Any
 
 from PySide6.QtCore import QObject, QProcessEnvironment, Signal
 from PySide6.QtWidgets import QDialog, QWidget
 
-from ember import choices, db, terminals
+from ember import choices, db, terminals, updates
 from ember import deps as dependencies
 from ember.app.flows import FlowsModel
 from ember.app.runs import RunsModel
@@ -77,6 +79,9 @@ class AppContext(QObject):
     deps_failed = Signal(str)
     """The dependency report could not be read."""
 
+    ember_checked = Signal(object)
+    """The Ember row from a fresh index check, or the reason the read failed."""
+
     screen_requested = Signal(str)
     """A screen asked the window to show another screen."""
 
@@ -120,6 +125,10 @@ class AppContext(QObject):
         self._engines_queued = False
         self._deps_busy = False
         self._deps_queued: bool | None = None
+        self._deps_reading_settings = False
+        self._updates_on = False
+        self._updates_disabled = Event()
+        self.settings_changed.connect(self._track_update_setting)
         self._visible = False
         self._autostart_reason: str | None = None
         self._save_queue: deque[
@@ -164,20 +173,28 @@ class AppContext(QObject):
     def _read_settings(
         self,
         done: Callable[[], None] | None,
-        after: Callable[[bool], None] | None,
+        after: Callable[[Exception | None], None] | None,
+        *,
+        changed_only: bool = False,
     ) -> None:
-        """Read settings; `after` receives whether the read succeeded."""
+        """Read settings and pass the read error or `None` to `after`.
+
+        A changed-only read keeps a newer snapshot that arrived while it ran.
+        """
+        previous = self._settings
 
         def loaded(snapshot: dict[str, Any]) -> None:
             """Publish the snapshot and notify the read's callbacks."""
-            self._settings = snapshot
-            self.settings_changed.emit(snapshot)
+            if changed_only:
+                self._publish_changed_settings(snapshot, previous)
+            else:
+                self._publish_settings(snapshot)
             try:
                 if done is not None:
                     done()
             finally:
                 if after is not None:
-                    after(True)
+                    after(None)
 
         def failed(error: Exception) -> None:
             """Report the read failure and notify its completion callback."""
@@ -187,9 +204,24 @@ class AppContext(QObject):
                 "database's folder."
             )
             if after is not None:
-                after(False)
+                after(error)
 
         self.tasks.run(self._settings_snapshot, loaded, failed)
+
+    def _publish_settings(self, snapshot: dict[str, Any]) -> None:
+        self._settings = snapshot
+        self.settings_changed.emit(snapshot)
+
+    def _publish_changed_settings(
+        self, snapshot: dict[str, Any], previous: dict[str, Any] | None
+    ) -> None:
+        current = self.settings()
+        if self._settings is not previous and (
+            (snapshot["generation"] or 0) <= (current.get("generation") or 0)
+        ):
+            return
+        if snapshot != current:
+            self._publish_settings(snapshot)
 
     def _settings_snapshot(self) -> dict[str, Any]:
         """Read the snapshot and each key's environment-dependent default."""
@@ -273,8 +305,7 @@ class AppContext(QObject):
 
         def saved(snapshot: dict[str, Any]) -> None:
             """Publish the snapshot and call both success callbacks."""
-            self._settings = snapshot
-            self.settings_changed.emit(snapshot)
+            self._publish_settings(snapshot)
             try:
                 try:
                     if done is not None:
@@ -291,7 +322,7 @@ class AppContext(QObject):
                 affected = [result, *(entry[2] for entry in self._save_queue)]
                 self._save_queue.clear()
 
-                def reloaded(succeeded: bool) -> None:
+                def reloaded(read_error: Exception | None) -> None:
                     """Notify refused saves after the reload, then resume saves."""
                     callback_error: Exception | None = None
                     try:
@@ -306,7 +337,7 @@ class AppContext(QObject):
                             raise callback_error
                     finally:
                         try:
-                            if succeeded:
+                            if read_error is None:
                                 self.stale.emit()
                         finally:
                             self._next_save()
@@ -380,28 +411,108 @@ class AppContext(QObject):
         """Return whether a dependency read is in flight or waiting."""
         return self._deps_busy
 
+    def updates_enabled(self) -> bool:
+        """Return whether a settings snapshot enables Ember update checks."""
+        return self._updates_on
+
+    def _track_update_setting(self) -> None:
+        enabled = self.setting("updates.check") == "on"
+        if enabled != self._updates_on:
+            self._updates_disabled.set()
+            self._updates_disabled = Event()
+            self._updates_on = enabled
+
     def refresh_deps(self, check_now: bool) -> None:
         """Read the dependency report in a task and emit `deps_changed`.
 
         Args:
-            check_now: Read installed versions, and newest versions when
-                due; otherwise show the cached reads only.
+            check_now: Read installed versions and newest versions when due.
+                Re-read the standing settings before checking Ember. Otherwise
+                show the cached reads only.
         """
         if self._deps_busy:
-            self._deps_queued = bool(self._deps_queued) or check_now
+            # A full check still reading settings can serve this request too.
+            if not self._deps_reading_settings:
+                self._deps_queued = bool(self._deps_queued) or check_now
             return
         self._deps_busy = True
+        if check_now and self.settings_ready():
+            self._deps_reading_settings = True
+            self._read_settings(None, self._deps_settings_read, changed_only=True)
+        else:
+            self._read_deps(check_now, True)
+
+    def _deps_settings_read(self, error: Exception | None) -> None:
+        if error is not None and self.updates_enabled():
+            self.ember_checked.emit(f"Could not read update settings: {error}")
+        self._read_deps(check_now=True, settings_current=error is None)
+
+    def _read_deps(self, check_now: bool, settings_current: bool) -> None:
+        self._deps_reading_settings = False
         env = self.env
+        enabled = settings_current and self.updates_enabled()
+        disabled = self._updates_disabled
+        check_ember = enabled and check_now
+        previous = self._settings
+        turned_off: dict[str, Any] | None = None
+
+        def fetch(url: str, timeout: float) -> str:
+            nonlocal turned_off
+            if url == updates.PACKAGES_URL:
+                # The installed-package lookup may have run since the first
+                # snapshot. Check for an external write and for an app save.
+                if not disabled.is_set():
+                    try:
+                        snapshot = self._settings_snapshot()
+                    except db.DatabaseError as error:
+                        raise dependencies.ReadError(
+                            f"Could not read update settings: {error}"
+                        ) from error
+                    if snapshot["answers"]["updates.check"]["value"] != "on":
+                        turned_off = snapshot
+                if disabled.is_set() or turned_off is not None:
+                    raise dependencies.ReadError("Ember update checks are off.")
+            return dependencies.fetch_text(url, timeout)
 
         def read() -> dependencies.DepsReport:
-            if check_now:
-                return dependencies.read(env, installed=True, newest="due")
-            return dependencies.read(env, installed=False, newest="never")
+            include_ember = enabled and not disabled.is_set()
+            return dependencies.read(
+                env,
+                installed=check_now,
+                newest="due" if check_now else "never",
+                exclude=() if include_ember else ("ember",),
+                force_newest=("ember",) if check_ember and include_ember else (),
+                fetch=fetch,
+            )
 
         def loaded(report: dependencies.DepsReport) -> None:
+            if turned_off is not None:
+                self._publish_changed_settings(turned_off, previous)
+            skipped_ember = not self.updates_enabled() or turned_off is not None
+            if skipped_ember and "ember" in report.installed_read_at:
+                report = replace(
+                    report,
+                    components=tuple(
+                        row for row in report.components if row.id != "ember"
+                    ),
+                    installed_read_at={
+                        k: v
+                        for k, v in report.installed_read_at.items()
+                        if k != "ember"
+                    },
+                    newest_read_at={
+                        k: v for k, v in report.newest_read_at.items() if k != "ember"
+                    },
+                )
             self._deps = report
             self._deps_done()
             self.deps_changed.emit(report)
+            if check_ember and not skipped_ember and not disabled.is_set():
+                ember = next(
+                    (row for row in report.components if row.id == "ember"), None
+                )
+                if ember is not None:
+                    self.ember_checked.emit(ember)
 
         def failed(error: Exception) -> None:
             self._deps_done()
@@ -409,6 +520,8 @@ class AppContext(QObject):
                 f"Ember could not read its dependencies: {error}. "
                 "Reinstall Ember if this keeps happening."
             )
+            if check_ember and not disabled.is_set():
+                self.ember_checked.emit(str(error))
 
         self.tasks.run(read, loaded, failed)
 

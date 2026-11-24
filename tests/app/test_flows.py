@@ -16,6 +16,7 @@ from ember.flows import lock
 from ember.flows import record as flow_record
 from ember.flows.plan import Plan, Task, Worker
 from ember.panels import record as panel_record
+from runs.stub_engine import git, make_repo  # pyrefly: ignore[missing-import]
 
 FLOW = "flow-20260101-120000-aaaaaa"
 PANEL = "panel-20260101-120000-bbbbbb"
@@ -344,6 +345,42 @@ def test_watch_replace_and_activation(
     model.set_active(False)
 
 
+def test_panel_main_checkout_is_read_in_background(
+    env: dict[str, str],
+    tmp_path: Path,
+    proc_locks: Path,
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_env = env | {
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.invalid",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.invalid",
+    }
+    repo = make_repo(tmp_path, repo_env)
+    linked = tmp_path / "linked checkout"
+    git(repo, "worktree", "add", "--detach", str(linked), env=repo_env)
+    subfolder = linked / "inner"
+    subfolder.mkdir()
+    make_panel(env, dir=str(subfolder))
+
+    read_main = flows._panel_main
+
+    def observed(directory: str, environment: Mapping[str, str]) -> str | None:
+        assert threading.current_thread() is not threading.main_thread()
+        return read_main(directory, environment)
+
+    monkeypatch.setattr(flows, "_panel_main", observed)
+    tasks = TaskRunner()
+    model = flows.FlowsModel(env, tasks, proc_locks=proc_locks)
+    model.set_active(True)
+    qtbot.waitUntil(model.loaded)
+    assert model.panels()[0].main == str(repo)
+    qtbot.waitUntil(lambda: tasks.pending() == 0)
+    model.set_active(False)
+
+
 def test_coalescing_and_inactive_completion(
     env: dict[str, str], proc_locks: Path, qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -428,6 +465,57 @@ def test_nested_ids_match_prune(env: dict[str, str], proc_locks: Path) -> None:
     assert str(events) in snapshot.watch
 
 
+def test_flow_run_history(env: dict[str, str], proc_locks: Path) -> None:
+    flow = make_flow(env)
+    first = {"run": "first-review", "round": 0, "review_round": 1, "verdict": "fix"}
+    second = {"run": "second-review", "round": 1, "review_round": 2, "verdict": "keep"}
+    flow["tasks"][0].update(
+        round=1, writer_run="writer", reviewer_run="second-review", reviews=[first]
+    )
+    flow["tasks"][1]["reviews"] = [
+        {"reviewer_run": "legacy-review", "round": 0, "verdict": "keep"}
+    ]
+    flow_record.save(flow, env)
+    flow_record.append_event(
+        FLOW,
+        {"kind": "fallback", "task": "task-0", "role": "writer", "run": "old-writer"},
+        env,
+    )
+    flow_record.append_event(
+        FLOW,
+        {"kind": "task", "task": "task-0", "writer_run": "older-writer", "round": 0},
+        env,
+    )
+    flow_record.append_event(FLOW, {"kind": "task", "run": "unknown"}, env)
+
+    item = flows.read(env, proc_locks=proc_locks).flows[0]
+    assert item.run_ids == {
+        "old-writer",
+        "older-writer",
+        "writer",
+        "first-review",
+        "second-review",
+        "legacy-review",
+        "unknown",
+    }
+    assert item.workers == {
+        "old-writer": flows.FlowRun("task-0", "writer", None),
+        "older-writer": flows.FlowRun("task-0", "writer", 0),
+        "writer": flows.FlowRun("task-0", "writer", 1),
+        "first-review": flows.FlowRun("task-0", "reviewer", 1, first),
+        "second-review": flows.FlowRun("task-0", "reviewer", 2),
+        "legacy-review": flows.FlowRun(
+            "task-1", "reviewer", 1, flow["tasks"][1]["reviews"][0]
+        ),
+    }
+    flow["tasks"][0].update(reviewer_run=None, reviews=[first, second])
+    flow_record.save(flow, env)
+    item = flows.read(env, proc_locks=proc_locks).flows[0]
+    assert item.workers["second-review"] == flows.FlowRun(
+        "task-0", "reviewer", 2, second
+    )
+
+
 def test_event_only_change_and_atomic_replacement(
     env: dict[str, str], proc_locks: Path, qtbot: QtBot
 ) -> None:
@@ -443,6 +531,12 @@ def test_event_only_change_and_atomic_replacement(
         replacement.replace(events)
         qtbot.waitUntil(lambda run=run: model.flows()[0].run_ids == {run})
         qtbot.waitUntil(lambda: str(events) in model.watched())
+    replacement.write_text(
+        json.dumps({"seq": 1, "task": "task-0", "writer_run": "second"}) + "\n"
+    )
+    with qtbot.waitSignal(model.changed, timeout=5000):
+        replacement.replace(events)
+    assert model.flows()[0].workers["second"] == flows.FlowRun("task-0", "writer", None)
     model.set_active(False)
 
 

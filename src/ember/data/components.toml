@@ -112,6 +112,14 @@ update = "sudo apt install --only-upgrade claude-desktop"
 install_note = "Not installed."
 
 [[components]]
+id = "ember"
+label = "Ember"
+group = "apps"
+installed = { kind = "apt", package = "ember" }
+newest = { kind = "apt-index", package = "ember", url = "https://rearwindowvertigo.github.io/ember/apt/dists/stable/main/binary-amd64/Packages" }
+update_note = "Update Ember in the app or with apt."
+
+[[components]]
 id = "ember-skill"
 label = "ember skill"
 group = "apps"

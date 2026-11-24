@@ -44,6 +44,7 @@ def parsed(raw: dict[str, Any], tmp_path: Path) -> plan.Plan:
 
 def test_defaults_and_lookup(raw: dict[str, Any], tmp_path: Path) -> None:
     item = parsed(raw, tmp_path)
+    assert item.title is None
     assert item.base == "HEAD"
     assert (item.rounds, item.parallel, item.check_timeout) == (2, 4, 1800)
     assert item.writer is item.reviewer is None
@@ -61,6 +62,7 @@ def test_defaults_and_lookup(raw: dict[str, Any], tmp_path: Path) -> None:
 def test_full_plan(raw: dict[str, Any], tmp_path: Path) -> None:
     raw.update(
         schema_version=1,
+        title="A" * 100,
         base="main",
         trailers=["Co-Authored-By: X <x@y>"],
         writer={"engine": "codex", "model": "gpt-5", "effort": "high"},
@@ -77,6 +79,7 @@ def test_full_plan(raw: dict[str, Any], tmp_path: Path) -> None:
     text = json.dumps(raw, indent=2) + "\n"
     item = plan.parse(text, tmp_path / "plan.json")
     assert item.text == text
+    assert item.title == "A" * 100
     assert item.writer == plan.Worker("codex", "gpt-5", "high", "plan")
     assert item.reviewer == plan.Worker("claude", "opus", None, "plan")
     assert (item.rounds, item.parallel, item.check_timeout) == (0, 8, 1)
@@ -153,6 +156,13 @@ def test_invalid_writer_check(
         ("schema_version", 1.0),
         ("dir", "relative"),
         ("dir", 1),
+        ("title", None),
+        ("title", ""),
+        ("title", " \t "),
+        ("title", "two\nlines"),
+        ("title", "trailing newline\n"),
+        ("title", "two\u2028lines"),
+        ("title", "A" * 101),
         ("base", " "),
         ("base", None),
         ("unknown", 1),

@@ -1,6 +1,6 @@
 """Icons, engine logos and the Ember drawings, rendered from SVG files.
 
-Interface icons are Lucide icons in `assets/icons/`; each is drawn in a
+Interface icons use the Lucide style in `assets/icons/`; each is drawn in a
 colour by replacing `currentColor`. Engine logos are in `assets/logos/`. The
 Ember app and tray drawings are in `assets/ember/`. Rendered pixmaps are
 cached per name, colour, size and device pixel ratio.
@@ -17,7 +17,9 @@ from ember.app import theme
 
 ICON_NAMES = (
     "layout-dashboard",
+    "user",
     "users",
+    "users-three",
     "cpu",
     "package",
     "settings",
@@ -39,7 +41,7 @@ ICON_NAMES = (
     "trash-2",
     "panel-left",
 )
-"""The Lucide icons shipped in `assets/icons/`."""
+"""The interface icons shipped in `assets/icons/`."""
 
 LOGOS = ("codex", "opencode", "claude")
 """The engines whose logos are shipped in `assets/logos/`."""
@@ -113,7 +115,7 @@ def _cached(
 
 
 def pixmap(name: str, color: QColor, size: int, ratio: float | None = None) -> QPixmap:
-    """Return a Lucide icon drawn in a colour.
+    """Return an interface icon drawn in a colour.
 
     Args:
         name: One of `ICON_NAMES`.
@@ -130,7 +132,7 @@ def pixmap(name: str, color: QColor, size: int, ratio: float | None = None) -> Q
 
 
 def icon(name: str, color: QColor, size: int) -> QIcon:
-    """Return a Lucide icon drawn in a colour, as a `QIcon`."""
+    """Return an interface icon drawn in a colour, as a `QIcon`."""
     return QIcon(pixmap(name, color, size))
 
 

@@ -1,6 +1,7 @@
 import os
 from collections.abc import Callable
 from pathlib import Path
+from threading import Event
 from typing import Any
 from unittest.mock import Mock
 
@@ -9,7 +10,7 @@ from PySide6.QtCore import QProcessEnvironment
 from PySide6.QtWidgets import QDialog, QWidget
 from pytestqt.qtbot import QtBot
 
-from ember import choices, db, deps, terminals, tmux
+from ember import choices, cli, db, deps, terminals, tmux, updates
 from ember.app import context as context_module
 from ember.app.context import AppContext
 from ember.engines import status
@@ -457,17 +458,110 @@ def test_refresh_deps(
     seen: list[tuple[bool, str]] = []
     report = deps.DepsReport(components=(), installed_read_at={}, newest_read_at={})
 
-    def read(_env: object, *, installed: bool, newest: str) -> deps.DepsReport:
+    def read(
+        _env: object,
+        *,
+        installed: bool,
+        newest: str,
+        exclude: tuple[str, ...],
+        force_newest: tuple[str, ...],
+        fetch: deps.Fetch,
+    ) -> deps.DepsReport:
         seen.append((installed, newest))
+        assert exclude == ()
+        assert force_newest == (("ember",) if check_now else ())
         return report
 
     monkeypatch.setattr(deps, "read", read)
-    context = AppContext(env)
+    context = _ready(env, qtbot)
     with qtbot.waitSignal(context.deps_changed, timeout=5000) as blocker:
         context.refresh_deps(check_now)
     assert blocker.args == [report]
     assert context.deps() is report
     assert seen == [(installed, newest)]
+
+
+def test_deps_skip_ember_before_the_first_snapshot_and_while_disabled(
+    env: dict[str, str],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ember, tmux_spec = (
+        next(row for row in deps.load_components() if row.id == key)
+        for key in ("ember", "tmux")
+    )
+    read = deps.read
+    monkeypatch.setattr(deps, "_installed_apt", lambda *_args: "1.0.0")
+    monkeypatch.setattr(deps, "_newest_apt", lambda *_args: "1.0.0")
+    monkeypatch.setattr(
+        deps,
+        "read",
+        lambda env, **kwargs: read(env, components=(ember, tmux_spec), **kwargs),
+    )
+    newest = Mock(side_effect=AssertionError("An Ember index read was attempted"))
+    monkeypatch.setattr(updates, "newest_version", newest)
+    context = AppContext(env)
+    for settings_ready in (False, True):
+        if settings_ready:
+            choices.set_settings({"updates.check": "off"}, env=env)
+            with qtbot.waitSignal(context.settings_changed, timeout=5000):
+                context.reload_settings()
+        with qtbot.waitSignal(context.deps_changed, timeout=5000) as blocker:
+            context.refresh_deps(check_now=True)
+        assert [row.id for row in _first(blocker.args).components] == ["tmux"]
+    newest.assert_not_called()
+    newest.side_effect = None
+    newest.return_value = "2.0.0"
+    assert cli.main(["deps", "--refresh"], env=env) == 0
+    assert "installed 1.0.0, newest 2.0.0" in capsys.readouterr().out
+    newest.assert_called_once()
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_disabling_checks_during_the_package_lookup_skips_the_index(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, external: bool
+) -> None:
+    specs = tuple(
+        spec for spec in deps.load_components() if spec.id in ("ember", "tmux")
+    )
+    read = deps.read
+    monkeypatch.setattr(
+        deps, "read", lambda env, **kwargs: read(env, components=specs, **kwargs)
+    )
+    started, resume = Event(), Event()
+
+    def installed(package: str, *_args: object) -> str:
+        if package == "ember":
+            started.set()
+            assert resume.wait(5)
+        return "1.0.0"
+
+    fetch = Mock(return_value="Package: ember\nVersion: 2.0.0\n")
+    monkeypatch.setattr(deps, "_installed_apt", installed)
+    monkeypatch.setattr(deps, "_newest_apt", lambda *_args: "1.0.0")
+    monkeypatch.setattr(deps, "fetch_text", fetch)
+    context = _ready(env, qtbot)
+    checks: list[object] = []
+    context.ember_checked.connect(checks.append)
+    context.refresh_deps(check_now=True)
+    try:
+        qtbot.waitUntil(started.is_set)
+        if external:
+            choices.set_settings({"updates.check": "off"}, env=env)
+            assert context.updates_enabled()
+        else:
+            with qtbot.waitSignal(context.settings_changed, timeout=5000):
+                context.save_settings({"updates.check": "off"})
+            assert not context.updates_enabled()
+        with qtbot.waitSignal(context.deps_changed, timeout=5000) as blocker:
+            resume.set()
+        assert not context.updates_enabled()
+        assert [row.id for row in _first(blocker.args).components] == ["tmux"]
+        fetch.assert_not_called()
+        assert checks == []
+    finally:
+        resume.set()
 
 
 def test_refresh_deps_failure(

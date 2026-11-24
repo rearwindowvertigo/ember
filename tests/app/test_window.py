@@ -14,6 +14,7 @@ from ember.app import flows, icons, state, theme
 from ember.app import window as window_module
 from ember.app.context import STALE_TITLE, AppContext
 from ember.app.screens import KEYS, SCREENS
+from ember.app.updater import UpdateNotice
 from ember.app.window import MINIMUM_HEIGHT, MINIMUM_WIDTH, MainWindow, app_version
 from ember.flows import record as flow_record
 from ember.panels import record as panel_record
@@ -642,6 +643,34 @@ def test_restart_offer_updates_both_controls(env: dict[str, str], qtbot: QtBot) 
     assert compact.isHidden()
     box.restart_button.click()
     assert second.call_count == 2
+    window.clear_restart()
+    window.resize(959, 600)
+    assert box.isHidden() and compact.isHidden()
+    compact.click()
+    box.restart_button.click()
+    assert second.call_count == 2
+
+
+def test_update_notice_shows_both_versions_and_its_action(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    window, _context, _quit = _window(env, qtbot)
+    action = Mock()
+    window.show_update(
+        UpdateNotice(
+            "Ember update available", "Installed 1.0.0. Available 2.0.0.", update=action
+        )
+    )
+    window.show_notice("info", "Settings changed")
+    notice = window.update_notice
+    assert notice is not None
+    assert "1.0.0" in notice.text_label.text() and "2.0.0" in notice.text_label.text()
+    assert [button.text() for button in notice.buttons] == ["Update", "Dismiss"]
+    notice.buttons[0].click()
+    action.assert_called_once_with()
+    notice.buttons[1].click()
+    assert window.update_notice is None
+    assert window.notice is not None
 
 
 @pytest.mark.parametrize("width", [640, 959, 960, 1100])

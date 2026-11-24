@@ -123,6 +123,7 @@ class Plan:
     """Where `parallel` came from: `plan`, `setting`, or `default` before the
     owner's `flow.parallel` row is applied."""
     writer_check: WriterCheck | None = None
+    title: str | None = None
 
     def task(self, task_id: str) -> Task:
         """Find a task by id, raising KeyError if it is absent."""
@@ -322,6 +323,7 @@ def parse(text: str, path: Path) -> Plan:
         path=path.absolute(),
         text=text,
         dir=value["dir"],
+        title=value.get("title"),
         base=value.get("base", "HEAD"),
         trailers=tuple(value.get("trailers", [])),
         writer=workers["writer"],

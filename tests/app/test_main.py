@@ -6,6 +6,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from threading import Event, get_ident
 from typing import Any
 
 import pytest
@@ -13,14 +14,26 @@ from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QApplication
 from pytestqt.qtbot import QtBot
 
-from ember import autostart, deps, paths
-from ember.app import main, theme
+from ember import autostart, choices, db, deps, paths, updates
+from ember.app import main, theme, updater
 from ember.app import tray as tray_module
+from ember.app.screens.dependencies import DependenciesScreen
 from ember.engines import status
 
 from .test_flows import FLOW, PANEL, make_flow, make_panel  # pyrefly: ignore[missing-import]
+from .test_updater import EMBER_ROW, FakePackageKit  # pyrefly: ignore[missing-import]
 
 EMPTY_REPORT = deps.DepsReport(components=(), installed_read_at={}, newest_read_at={})
+_read_deps = deps.read
+
+
+def _use_ember_dependency_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    specs = tuple(row for row in deps.load_components() if row.id in ("ember", "tmux"))
+    monkeypatch.setattr(
+        deps, "read", lambda env, **kwargs: _read_deps(env, components=specs, **kwargs)
+    )
+    monkeypatch.setattr(deps, "_installed_apt", lambda *_args: "1.0.0")
+    monkeypatch.setattr(main, "installed_version", lambda: "1.0.0")
 
 
 @pytest.fixture
@@ -51,6 +64,17 @@ def _start(
         yield started
     finally:
         main.stop(started)
+
+
+def _check_dependencies(parts: main.EmberApp, trigger: str) -> None:
+    if trigger == "daily":
+        assert parts.updater is not None
+        parts.updater._timer.timeout.emit()
+    else:
+        parts.window.show_screen("dependencies")
+        screen = parts.window.screen_widget("dependencies")
+        assert isinstance(screen, DependenciesScreen)
+        screen.check_button.click()
 
 
 def test_no_graphical_session_exits_69(
@@ -90,6 +114,227 @@ def test_starts_with_the_window_and_reads(
         assert "emb is not on PATH" in parts.autostart_reason
         assert parts.context.autostart_reason() == parts.autostart_reason
         assert not autostart.path(app_env).exists()
+
+
+def test_startup_and_daily_checks_share_a_fresh_index_read_with_dependencies(
+    app_env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_ember_dependency_reader(monkeypatch)
+    release = "1.0.0"
+    reads: list[str] = []
+    apt_reads: list[str] = []
+    gui_thread = get_ident()
+
+    def fetch(url: str, _timeout: float) -> str:
+        assert url == updates.PACKAGES_URL
+        assert get_ident() != gui_thread
+        reads.append(release)
+        return f"Package: ember\nVersion: {release}\n"
+
+    def read_apt(package: str, *_args: object) -> str:
+        apt_reads.append(package)
+        return "1.0.0"
+
+    monkeypatch.setattr(deps, "_newest_apt", read_apt)
+    deps.read(app_env, fetch=lambda _url, _timeout: "Package: ember\nVersion: 1.0.0\n")
+    monkeypatch.setattr(deps, "fetch_text", fetch)
+    release = "2.0.0"
+    for parts in _start([], app_env, qtbot):
+        active = parts.updater
+        assert active is not None
+        assert active._timer.interval() == 86_400_000
+        qtbot.waitUntil(lambda parts=parts: parts.window.update_notice is not None)
+        report = parts.context.deps()
+        assert report is not None
+        assert {row.id: row.newest for row in report.components} == {
+            "ember": "2.0.0",
+            "tmux": "1.0.0",
+        }
+        assert reads == ["2.0.0"] and apt_reads == ["tmux"]
+        release = "3.0.0"
+        with qtbot.waitSignal(active.notice_changed, timeout=5000):
+            active._timer.timeout.emit()
+        notice = parts.window.update_notice
+        assert notice is not None
+        assert (
+            "1.0.0" in notice.text_label.text() and "3.0.0" in notice.text_label.text()
+        )
+        report = parts.context.deps()
+        assert report is not None
+        assert (
+            next(row.newest for row in report.components if row.id == "ember")
+            == "3.0.0"
+        )
+        assert reads == ["2.0.0", "3.0.0"] and apt_reads == ["tmux"]
+
+
+def test_disabled_cold_start_and_check_now_skip_the_ember_index(
+    app_env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_ember_dependency_reader(monkeypatch)
+    choices.set_settings({"updates.check": "off"}, env=app_env)
+    apt_reads: list[str] = []
+
+    def read_apt(package: str, *_args: object) -> str:
+        apt_reads.append(package)
+        return "1.0.0"
+
+    def fetch(url: str, _timeout: float) -> str:
+        pytest.fail(f"Unexpected index request for {url}")
+
+    monkeypatch.setattr(deps, "_newest_apt", read_apt)
+    monkeypatch.setattr(deps, "fetch_text", fetch)
+    for parts in _start([], app_env, qtbot):
+        qtbot.waitUntil(lambda parts=parts: parts.context.deps() is not None)
+        assert apt_reads == ["tmux"]
+        parts.window.show_screen("dependencies")
+        screen = parts.window.screen_widget("dependencies")
+        assert isinstance(screen, DependenciesScreen)
+        with qtbot.waitSignal(parts.context.deps_changed, timeout=5000):
+            screen.check_button.click()
+        assert set(screen.tiles) == {"tmux"}
+        assert parts.window.update_notice is None
+        assert parts.updater is not None and parts.updater._timer.isActive()
+
+
+@pytest.mark.parametrize("trigger", ["daily", "manual"])
+def test_dependency_check_observes_external_disable_and_daily_check_resumes(
+    app_env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, trigger: str
+) -> None:
+    _use_ember_dependency_reader(monkeypatch)
+    installed_reads: list[str] = []
+    index_reads: list[str] = []
+
+    def installed(package: str, *_args: object) -> str:
+        installed_reads.append(package)
+        return "1.0.0"
+
+    def fetch(url: str, _timeout: float) -> str:
+        index_reads.append(url)
+        return "Package: ember\nVersion: 2.0.0\n"
+
+    monkeypatch.setattr(deps, "_installed_apt", installed)
+    monkeypatch.setattr(deps, "_newest_apt", lambda *_args: "1.0.0")
+    monkeypatch.setattr(deps, "fetch_text", fetch)
+    for parts in _start([], app_env, qtbot):
+        context, window = parts.context, parts.window
+        qtbot.waitUntil(lambda window=window: window.update_notice is not None)
+        assert index_reads == [updates.PACKAGES_URL]
+        choices.set_settings({"updates.check": "off"}, env=app_env)
+        assert context.setting("updates.check") == "on"
+        active = parts.updater
+        assert active is not None
+        with qtbot.waitSignal(context.deps_changed, timeout=5000):
+            _check_dependencies(parts, trigger)
+        assert context.setting("updates.check") == "off"
+        assert active._timer.isActive()
+        report = context.deps()
+        assert report is not None and [row.id for row in report.components] == ["tmux"]
+        assert installed_reads.count("tmux") == 2
+        assert installed_reads.count("ember") == 1
+        assert index_reads == [updates.PACKAGES_URL]
+        assert window.update_notice is None
+
+        window.hide()
+        with qtbot.waitSignal(context.deps_changed, timeout=5000):
+            active._timer.timeout.emit()
+        assert index_reads == [updates.PACKAGES_URL]
+        assert window.update_notice is None
+        choices.set_settings({"updates.check": "on"}, env=app_env)
+        assert context.setting("updates.check") == "off"
+        with qtbot.waitSignal(active.notice_changed, timeout=5000):
+            active._timer.timeout.emit()
+        assert context.setting("updates.check") == "on"
+        assert active._timer.isActive() and not context.deps_refreshing()
+        assert not window.isVisible() and window.update_notice is not None
+        report = context.deps()
+        assert report is not None
+        assert {row.id: row.newest for row in report.components} == {
+            "ember": "2.0.0",
+            "tmux": "1.0.0",
+        }
+        assert installed_reads.count("ember") == 2
+        assert index_reads == [updates.PACKAGES_URL, updates.PACKAGES_URL]
+
+
+@pytest.mark.parametrize("trigger", ["daily", "manual"])
+def test_dependency_check_replaces_an_update_offer_when_settings_cannot_be_read(
+    app_env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch, trigger: str
+) -> None:
+    _use_ember_dependency_reader(monkeypatch)
+    monkeypatch.setattr(updater, "running_deb", lambda _env: True)
+    monkeypatch.setattr(deps, "_newest_apt", lambda *_args: "1.0.0")
+    index_reads: list[str] = []
+
+    def fetch(url: str, _timeout: float) -> str:
+        index_reads.append(url)
+        return "Package: ember\nVersion: 2.0.0\n"
+
+    def unavailable(**_kwargs: object) -> dict[str, Any]:
+        raise db.DatabaseError("The settings database is unavailable.")
+
+    monkeypatch.setattr(deps, "fetch_text", fetch)
+    for parts in _start([], app_env, qtbot):
+        context, window = parts.context, parts.window
+        qtbot.waitUntil(
+            lambda window=window: (
+                (notice := window.update_notice) is not None and notice.isVisible()
+            )
+        )
+        offer = window.update_notice
+        assert offer is not None and offer.isVisible()
+        assert [button.text() for button in offer.buttons] == ["Update", "Dismiss"]
+        monkeypatch.setattr(choices, "snapshot", unavailable)
+
+        with qtbot.waitSignal(context.deps_changed, timeout=5000):
+            _check_dependencies(parts, trigger)
+        qtbot.waitUntil(
+            lambda window=window, offer=offer: (
+                (notice := window.update_notice) is not None
+                and notice is not offer
+                and notice.isVisible()
+            )
+        )
+
+        assert index_reads == [updates.PACKAGES_URL]
+        report = context.deps()
+        assert report is not None and [row.id for row in report.components] == ["tmux"]
+        notice = window.update_notice
+        assert notice is not None and notice is not offer
+        assert notice.title_label.text() == "Ember could not check for updates"
+        assert "The settings database is unavailable." in notice.text_label.text()
+        assert "curl -fLO" in notice.text_label.text()
+        assert "sudo apt install" in notice.text_label.text()
+        assert [button.text() for button in notice.buttons] == ["Dismiss"]
+
+
+def test_switching_off_during_a_check_suppresses_the_late_offer(
+    app_env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_ember_dependency_reader(monkeypatch)
+    monkeypatch.setattr(deps, "_newest_apt", lambda *_args: "1.0.0")
+    entered, release = Event(), Event()
+
+    def fetch(_url: str, _timeout: float) -> str:
+        entered.set()
+        assert release.wait(5)
+        return "Package: ember\nVersion: 2.0.0\n"
+
+    monkeypatch.setattr(deps, "fetch_text", fetch)
+    try:
+        for parts in _start([], app_env, qtbot):
+            qtbot.waitUntil(entered.is_set)
+            with qtbot.waitSignal(parts.context.settings_changed, timeout=5000):
+                parts.context.save_settings({"updates.check": "off"})
+            release.set()
+            qtbot.waitUntil(lambda parts=parts: not parts.context.deps_refreshing())
+            report = parts.context.deps()
+            assert report is not None and [row.id for row in report.components] == [
+                "tmux"
+            ]
+            assert parts.window.update_notice is None
+    finally:
+        release.set()
 
 
 def test_second_instance_hands_over(app_env: dict[str, str], qtbot: QtBot) -> None:
@@ -373,6 +618,124 @@ def test_package_change_with_the_same_version_offers_no_restart(
         (package / "other").mkdir()
         qtbot.wait(400)
         assert parts.window.update_box is None
+
+
+@pytest.mark.parametrize("error", [None, "PackageKit could not finish the upgrade."])
+def test_install_holds_both_restart_offers_until_finished(
+    app_env: dict[str, str],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    error: str | None,
+) -> None:
+    package = tmp_path / "site-packages"
+    (package / "ember_app-1.0.0.dist-info").mkdir(parents=True)
+    version = "1.0.0"
+    monkeypatch.setattr(main, "installed_version", lambda: version)
+    monkeypatch.setattr(main, "package_folder", lambda: package)
+    monkeypatch.setattr(main, "UPGRADE_SETTLE_MS", 50)
+    monkeypatch.setattr(updater, "running_deb", lambda _env: True)
+    transport = FakePackageKit()
+    monkeypatch.setattr(updater, "QtPackageKit", lambda _parent: transport)
+    report = deps.DepsReport(
+        components=(EMBER_ROW,),
+        installed_read_at={},
+        newest_read_at={},
+    )
+    monkeypatch.setattr(deps, "read", lambda _env, **_kwargs: report)
+    restarts: list[main.EmberApp] = []
+    monkeypatch.setattr(main, "restart", restarts.append)
+    for parts in _start([], app_env, qtbot):
+        window = parts.window
+        qtbot.waitUntil(lambda window=window: window.update_notice is not None)
+        notice = window.update_notice
+        assert notice is not None and notice.buttons[0].text() == "Update"
+        version = "1.1.0"
+        assert main.start(["--hidden"], app_env) == 0
+        qtbot.waitUntil(lambda window=window: window.restart_offer is not None)
+        notice.buttons[0].click()
+        assert window.restart_offer is None
+        transport.calls[-1].finish()
+        transport.calls[-1].finish((2, "ember;2.0.0;amd64;ember-stable-main"))
+        qtbot.waitUntil(lambda: transport.calls[-1].method == "UpdatePackages")
+        install = transport.calls[-1]
+        version = "2.0.0"
+        (package / "ember_app-1.0.0.dist-info").rename(
+            package / "ember_app-2.0.0.dist-info"
+        )
+        window.hide()
+        assert main.start([], app_env) == 0
+        qtbot.waitUntil(window.isVisible, timeout=5000)
+        qtbot.wait(100)
+        assert window.restart_offer is None
+        assert restarts == []
+        install.finish(error=error)
+        install.finish(error=error)
+        if error is None:
+            assert restarts == [parts]
+            assert window.restart_offer is None
+        else:
+            assert restarts == [] and window.isVisible()
+            failure = window.update_notice
+            assert failure is not None and error in failure.text_label.text()
+            assert "sudo apt install" in failure.text_label.text()
+            restored = window.restart_offer
+            assert restored is not None and restored.version == "2.0.0"
+
+
+@pytest.mark.parametrize("refresh_error", [None, "Authorization was declined."])
+def test_update_preparation_restores_an_existing_restart_offer(
+    app_env: dict[str, str],
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+    refresh_error: str | None,
+) -> None:
+    version = "1.0.0"
+    monkeypatch.setattr(main, "installed_version", lambda: version)
+    monkeypatch.setattr(updater, "running_deb", lambda _env: True)
+    transport = FakePackageKit()
+    monkeypatch.setattr(updater, "QtPackageKit", lambda _parent: transport)
+    report = deps.DepsReport(
+        components=(EMBER_ROW,),
+        installed_read_at={},
+        newest_read_at={},
+    )
+    monkeypatch.setattr(deps, "read", lambda _env, **_kwargs: report)
+    restarts: list[main.EmberApp] = []
+    monkeypatch.setattr(main, "restart", restarts.append)
+    for parts in _start([], app_env, qtbot):
+        window = parts.window
+        active = parts.updater
+        assert active is not None
+        qtbot.waitUntil(lambda window=window: window.update_notice is not None)
+        notice = window.update_notice
+        assert notice is not None
+        version = "1.1.0"
+        assert main.start(["--hidden"], app_env) == 0
+        qtbot.waitUntil(lambda window=window: window.restart_offer is not None)
+        notice.buttons[0].click()
+        assert window.restart_offer is None
+        assert transport.calls[-1].method == "RefreshCache"
+        if refresh_error:
+            transport.calls[-1].finish(error=refresh_error)
+        else:
+            transport.calls[-1].finish()
+            with qtbot.waitSignal(active.restart_released, timeout=5000):
+                transport.calls[-1].finish(
+                    (1, "ember;1.1.0;amd64;manual:ember-stable-main"),
+                    (2, "ember;3.0.0;amd64;ember-stable-main"),
+                )
+        restored = window.restart_offer
+        assert restored is not None and restored.version == "1.1.0"
+        notice = window.update_notice
+        assert notice is not None
+        if refresh_error:
+            assert refresh_error in notice.text_label.text()
+        else:
+            assert "PackageKit found 3.0.0" in notice.text_label.text()
+            assert [button.text() for button in notice.buttons] == ["Update", "Dismiss"]
+        assert not any(call.method == "UpdatePackages" for call in transport.calls)
+        assert restarts == []
 
 
 def test_package_folder_is_the_installed_metadata_folder(
