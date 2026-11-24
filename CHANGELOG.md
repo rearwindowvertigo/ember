@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.33.0](https://github.com/rearwindowvertigo/ember/compare/v0.32.0...v0.33.0) (2026-11-24)
+
+
+### Added
+
+* **app:** check for Ember updates and install them through PackageKit ([5c2b0f4](https://github.com/rearwindowvertigo/ember/commit/5c2b0f49c3ea42c4c64a84baed0d86c05955ebd0))
+* **app:** show runs, flows and panels with one Overview row ([9bc5cd3](https://github.com/rearwindowvertigo/ember/commit/9bc5cd31dab5ab811c66f10a946df3e3bcba85be))
+* **deps:** read the newest Ember version from its apt repository ([8e2e50f](https://github.com/rearwindowvertigo/ember/commit/8e2e50faf4a4b22fabbd7410258e5ec0d976909e))
+* **packaging:** install the Ember apt source and key with the package ([24cdb2a](https://github.com/rearwindowvertigo/ember/commit/24cdb2a3b1480e5e0f31ca6099d11cb0e3c0eed6))
+* **packaging:** publish a signed apt repository on each release ([7ce7995](https://github.com/rearwindowvertigo/ember/commit/7ce799582aeb204852ba211fd7f88a97104b48f8))
+
 ## [0.32.0](https://github.com/rearwindowvertigo/ember/compare/v0.31.0...v0.32.0) (2026-11-24)
 
 
