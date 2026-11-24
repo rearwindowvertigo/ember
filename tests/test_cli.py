@@ -882,7 +882,10 @@ def test_run_usage_errors_exit_64(
 ) -> None:
     assert main(["run", *argv], env={}) == 64
     captured = capsys.readouterr()
-    assert captured.out == ""
+    if "--json" in argv:
+        assert json.loads(captured.out)["error"]["messages"] == [message]
+    else:
+        assert captured.out == ""
     assert captured.err == f"emb run: {message}\nnext: emb run --help\n"
 
 
@@ -1316,7 +1319,9 @@ def test_skill_without_source(
     )
     assert main(["skill", "install", "--json"], env=env) == 66
     captured = capsys.readouterr()
-    assert captured.out == ""
+    assert json.loads(captured.out)["error"]["actions"] == [
+        f"owner: reinstall Ember; the skill is missing from {missing}"
+    ]
     assert captured.err == (
         "emb skill: no skill source found\n"
         f"owner: reinstall Ember; the skill is missing from {missing}\n"
@@ -1494,7 +1499,7 @@ def test_panel_retry_close_dispatch(
 ) -> None:
     assert main(["panel", *options, "--json"], env=env) == 65
     captured = capsys.readouterr()
-    assert not captured.out
+    assert json.loads(captured.out)["error"]["exit"] == 65
     assert "invalid panel id: bad" in captured.err
 
 
@@ -2187,3 +2192,137 @@ def test_engines_show_provider_holds(
     until = time.strftime("%H:%M", time.localtime(now + 900))
     assert lines[1] == f"  held: codex sol after capacity until {until}"
     assert any(line.startswith("  held: claude after outage until ") for line in lines)
+
+
+def test_json_failure_prints_an_error_object(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"dir": str(tmp_path), "tasks": []}))
+    env = {"HOME": str(tmp_path), "PATH": os.environ["PATH"]}
+    code = main(["flow", "--plan", str(plan), "--dry-run", "--json"], env=env)
+    captured = capsys.readouterr()
+    assert code == 64
+    assert json.loads(captured.out) == {
+        "error": {
+            "exit": 64,
+            "messages": ["plan.tasks: expected at least 1 entries"],
+            "actions": ["next: emb flow --help"],
+            "warnings": [],
+        }
+    }
+    assert "emb flow: plan.tasks: expected at least 1 entries" in captured.err
+
+
+def test_json_failure_without_json_prints_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"dir": str(tmp_path), "tasks": []}))
+    env = {"HOME": str(tmp_path), "PATH": os.environ["PATH"]}
+    assert main(["flow", "--plan", str(plan), "--dry-run"], env=env) == 64
+    assert capsys.readouterr().out == ""
+
+
+def test_json_usage_error_prints_an_error_object_and_still_exits(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as raised:
+        main(["run", "--bogus", "--json"])
+    assert raised.value.code == 64
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["error"] == {
+        "exit": 64,
+        "messages": ["unrecognized arguments: --bogus"],
+        "actions": ["next: emb --help"],
+        "warnings": [],
+    }
+    assert captured.err.startswith("usage: emb")
+
+
+def test_json_output_before_a_failure_is_kept_alone(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import ember.cli as cli
+
+    def fail(argv: list[str], env: object) -> int:
+        print(json.dumps({"parse_error": "bad"}))
+        print("WARNING: kept\nemb gapcheck: bad\nnext: emb gapcheck", file=sys.stderr)
+        return 81
+
+    monkeypatch.setattr(cli, "_main", fail)
+    assert cli.main(["gapcheck", "--json"]) == 81
+    assert json.loads(capsys.readouterr().out) == {"parse_error": "bad"}
+
+
+def test_json_error_collects_warnings_and_actions_in_order(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import ember.cli as cli
+
+    def fail(argv: list[str], env: object) -> int:
+        print(
+            "WARNING: one\nemb run: first\nowner: ask\nemb run: second\n"
+            "report: say it\nnext: emb run --status x\nplain line",
+            file=sys.stderr,
+        )
+        return 75
+
+    monkeypatch.setattr(cli, "_main", fail)
+    real = sys.stdout
+    assert cli.main(["run", "--status", "x", "--json"]) == 75
+    assert sys.stdout is real
+    assert json.loads(capsys.readouterr().out)["error"] == {
+        "exit": 75,
+        "messages": ["first", "second"],
+        "actions": ["owner: ask", "report: say it", "next: emb run --status x"],
+        "warnings": ["one"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("argv", "wanted"),
+    [
+        (["run", "--json"], True),
+        (["run", "--", "--json"], False),
+        (["run", "--jsonx"], False),
+        ([], False),
+    ],
+)
+def test_json_option_is_read_before_a_double_dash(
+    argv: list[str], wanted: bool
+) -> None:
+    import ember.cli as cli
+
+    assert cli._wants_json(argv) is wanted
+
+
+@pytest.mark.parametrize(
+    ("raised", "code", "message"),
+    [
+        (RuntimeError("broken"), 1, "RuntimeError: broken"),
+        (KeyboardInterrupt(), 130, "KeyboardInterrupt: "),
+    ],
+)
+def test_json_crash_prints_an_error_object_and_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    raised: BaseException,
+    code: int,
+    message: str,
+) -> None:
+    import ember.cli as cli
+
+    def crash(argv: list[str], env: object) -> int:
+        print("emb gapcheck: before", file=sys.stderr)
+        raise raised
+
+    monkeypatch.setattr(cli, "_main", crash)
+    with pytest.raises(type(raised)):
+        cli.main(["gapcheck", "--json"])
+    assert json.loads(capsys.readouterr().out)["error"] == {
+        "exit": code,
+        "messages": ["before", message],
+        "actions": [],
+        "warnings": [],
+    }
