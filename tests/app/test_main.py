@@ -489,6 +489,7 @@ def test_start_and_stop_collector_and_crash_log(
         with pytest.raises(OSError):
             os.fstat(fd)
     assert gc.isenabled() == enabled
+    gc.disable()  # Back to the fixture's state before teardown delivers events.
 
 
 def test_crash_log_open_failure_starts_without_it(
@@ -505,6 +506,7 @@ def test_crash_log_open_failure_starts_without_it(
         assert parts.collector.timer.isActive()
         assert "cannot open crash log" in capsys.readouterr().err
     assert gc.isenabled() == enabled
+    gc.disable()  # Back to the fixture's state before teardown delivers events.
 
 
 def test_failed_start_restores_gc(
@@ -525,6 +527,7 @@ def test_failed_start_restores_gc(
     with pytest.raises(RuntimeError, match="setup failed"):
         main.start([], app_env)
     assert gc.isenabled() == enabled
+    gc.disable()  # Back to the fixture's state before teardown delivers events.
     assert disabled == [True]
 
 

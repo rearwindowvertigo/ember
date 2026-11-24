@@ -36,9 +36,10 @@ def collect_on_gui_thread() -> Iterator[None]:
     `Collector` turns automatic collection off for the same reason; tests
     that build widgets without it request this fixture. After the test, it
     waits for pool tasks and delivers their events until no task runs, since
-    a delivered result can start another task, then collects. It restores
-    the earlier automatic collection state only once the pool is idle, and
-    leaves collection off when a task still runs after the waits.
+    a delivered result can start another task, then collects. Collection is
+    turned off again first, in case the test turned it on. The fixture
+    restores the earlier state only once the pool is idle; when a task
+    still runs after the waits, it leaves collection off and fails the test.
     """
     from PySide6.QtCore import QCoreApplication, QThreadPool
 
@@ -48,6 +49,7 @@ def collect_on_gui_thread() -> Iterator[None]:
     try:
         yield
     finally:
+        gc.disable()
         try:
             pool = QThreadPool.globalInstance()
             for _ in range(10):
@@ -62,6 +64,8 @@ def collect_on_gui_thread() -> Iterator[None]:
                 gc.enable()
             elif idle:
                 gc.disable()
+    if not idle:
+        pytest.fail("pool tasks still ran after the teardown waits")
 
 
 @pytest.fixture
