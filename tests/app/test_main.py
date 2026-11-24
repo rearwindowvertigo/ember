@@ -437,7 +437,8 @@ def test_start_and_stop_collector_and_crash_log(
     quit_signal: bool,
 ) -> None:
     """Startup installs both guards; stop and quitting release them after reads."""
-    enabled = gc.isenabled()
+    gc.enable()  # The app test fixture starts with collection off.
+    enabled = True
     handlers: list[tuple[int, bool]] = []
     disabled: list[bool] = []
 
@@ -494,7 +495,8 @@ def test_crash_log_open_failure_starts_without_it(
     app_env: dict[str, str], capsys: pytest.CaptureFixture[str], qtbot: QtBot
 ) -> None:
     """An unavailable crash log is reported, and the app starts without it."""
-    enabled = gc.isenabled()
+    gc.enable()  # The app test fixture starts with collection off.
+    enabled = True
     folder = paths.state_dir(app_env)
     folder.mkdir(parents=True)
     (folder / "app-crash.log").mkdir()
@@ -509,7 +511,8 @@ def test_failed_start_restores_gc(
     app_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A setup exception stops the collector and closes the crash log."""
-    enabled = gc.isenabled()
+    gc.enable()  # The app test fixture starts with collection off.
+    enabled = True
     disabled: list[bool] = []
     monkeypatch.setattr(main.faulthandler, "disable", lambda: disabled.append(True))
 

@@ -13,6 +13,7 @@ from ember.app.collector import Collector
 def collector(qapp: QApplication) -> Iterator[Collector]:
     """Stop the collector and restore the caller's GC state after each test."""
     enabled = gc.isenabled()
+    gc.enable()  # The app test fixture starts with collection off.
     instance = Collector(qapp)
     try:
         yield instance

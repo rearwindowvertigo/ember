@@ -1,9 +1,10 @@
 """Provide private test homes and generated eval fixtures."""
 
+import gc
 import os
 import pwd
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,43 @@ def no_user_scopes(
 ) -> None:
     """Keep tests in tree-only mode unless they explicitly enable scopes."""
     monkeypatch.setattr(scopes, "available", lambda env=None: False)
+
+
+@pytest.fixture
+def collect_on_gui_thread() -> Iterator[None]:
+    """Turn off automatic collection, then collect on the GUI thread after.
+
+    Qt objects left in reference cycles must be freed on the GUI thread, not
+    by a garbage collection that happens to run on a pool thread. The app's
+    `Collector` turns automatic collection off for the same reason; tests
+    that build widgets without it request this fixture. After the test, it
+    waits for pool tasks and delivers their events until no task runs, since
+    a delivered result can start another task, then collects. It restores
+    the earlier automatic collection state only once the pool is idle, and
+    leaves collection off when a task still runs after the waits.
+    """
+    from PySide6.QtCore import QCoreApplication, QThreadPool
+
+    enabled = gc.isenabled()
+    gc.disable()
+    idle = False
+    try:
+        yield
+    finally:
+        try:
+            pool = QThreadPool.globalInstance()
+            for _ in range(10):
+                pool.waitForDone(10_000)
+                QCoreApplication.processEvents()
+                if pool.activeThreadCount() == 0:
+                    idle = True
+                    break
+            gc.collect()
+        finally:
+            if idle and enabled:
+                gc.enable()
+            elif idle:
+                gc.disable()
 
 
 @pytest.fixture
