@@ -4,10 +4,12 @@ Run from the repository top as `python3 packaging/deb/build_deb.py [--out DIR]`;
 `make deb` runs it. The package holds a virtual environment at
 `/usr/lib/ember` on `/usr/bin/python3.14` with the locked runtime libraries
 and Ember, the `/usr/bin/emb` wrapper, the desktop entry, the icon, the
-`ember` skill and the copyright file. It has no maintainer scripts.
+`ember` skill, the copyright file, the apt source and the archive key. It
+has no maintainer scripts.
 
 Exit codes: 0 built; 1 a build command failed; 64 usage error; 65 the
-version in `pyproject.toml` is not `X.Y.Z`; 66 `skill/SKILL.md` is missing;
+version in `pyproject.toml` is not `X.Y.Z`; 66 `skill/SKILL.md` or
+`packaging/apt/ember-archive-keyring.asc` is missing;
 69 a tool the build needs is missing; 70 a Qt library or module file is
 missing or unreadable, a needed library has no provider, or a staged file
 holds the staging path.
@@ -39,6 +41,15 @@ PREFIX = "usr/lib/ember"
 
 SITE = f"{PREFIX}/lib/python3.14/site-packages"
 """The environment's site-packages folder, relative to the root."""
+
+ARCHIVE_KEY = Path("packaging/apt/ember-archive-keyring.asc")
+"""The armored public archive key, relative to the repository top."""
+
+KEYRING = f"usr/share/keyrings/{ARCHIVE_KEY.name}"
+"""The installed archive key, relative to the package root."""
+
+APT_SOURCE = "etc/apt/sources.list.d/ember.sources"
+"""The apt source, relative to the package root."""
 
 MAINTAINER = "rearwindowvertigo <254349504+rearwindowvertigo@users.noreply.github.com>"
 """The package's Maintainer field."""
@@ -115,7 +126,7 @@ QT_PLUGINS = (
 )
 """The Qt plugin folders whose libraries the library check reads."""
 
-MODULES = ("QtCore", "QtGui", "QtWidgets", "QtNetwork", "QtSvg")
+MODULES = ("QtCore", "QtGui", "QtWidgets", "QtNetwork", "QtSvg", "QtDBus")
 """The PySide6 modules Ember imports."""
 
 KEEP_BIN = ("python", "python3", "python3.14")
@@ -334,7 +345,7 @@ def _install(path: Path, data: bytes, mode: int = 0o644) -> None:
 
 
 def _write_files(stage: Path) -> None:
-    """Write the wrapper, desktop entry, icon, skill, copyright and changelog."""
+    """Write the package files outside the virtual environment."""
     _install(stage / "usr/bin/emb", wrapper().encode(), 0o755)
     share = stage / "usr/share"
     _install(share / "applications" / f"{APP_ID}.desktop", desktop_entry().encode())
@@ -352,6 +363,16 @@ def _write_files(stage: Path) -> None:
     if changelog.is_file():
         data = gzip.compress(changelog.read_bytes(), compresslevel=9, mtime=0)
         _install(doc / "changelog.gz", data)
+    _install(stage / KEYRING, (REPO / ARCHIVE_KEY).read_bytes())
+    apt_source = (
+        "Types: deb\n"
+        "URIs: https://rearwindowvertigo.github.io/ember/apt/\n"
+        "Suites: stable\n"
+        "Components: main\n"
+        "Architectures: amd64\n"
+        f"Signed-By: /{KEYRING}\n"
+    )
+    _install(stage / APT_SOURCE, apt_source.encode())
 
 
 def _check_paths(stage: Path) -> None:
@@ -508,8 +529,9 @@ def build(out: Path) -> Path:
     """
     _check_tools()
     version = read_version((REPO / "pyproject.toml").read_text(encoding="utf-8"))
-    if not (REPO / "skill/SKILL.md").is_file():
-        raise BuildError(66, f"{REPO / 'skill/SKILL.md'} is missing")
+    for required in ("skill/SKILL.md", ARCHIVE_KEY):
+        if not (REPO / required).is_file():
+            raise BuildError(66, f"{REPO / required} is missing")
     work = REPO / "build/deb"
     if work.exists():
         shutil.rmtree(work)
@@ -554,6 +576,7 @@ def build(out: Path) -> Path:
     debian.mkdir(mode=0o755)
     md5sums = _md5sums(stage)
     _install(debian / "control", control(version, _installed_kb(stage)).encode())
+    _install(debian / "conffiles", f"/{APT_SOURCE}\n".encode())
     _install(debian / "md5sums", md5sums.encode())
     out.mkdir(parents=True, exist_ok=True)
     package = out / f"ember_{version}_amd64.deb"

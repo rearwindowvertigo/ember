@@ -2,6 +2,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import stat
 import time
 import tomllib
@@ -10,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from ember import cli, deps, skill
+from ember import cli, deps, skill, updates
 from ember.engines import status
 
 NOW = 1_800_000_000.0
@@ -122,6 +123,7 @@ def test_packaged_list_is_valid() -> None:
         "opencode",
         "claude",
         "claude-desktop",
+        "ember",
         "ember-skill",
         "tmux",
         "bubblewrap",
@@ -345,6 +347,87 @@ def test_apt_dpkg_query_failure(env: dict[str, str]) -> None:
     assert item.status == deps.CHECK_FAILED
     assert item.error == "installed version: dpkg-query exited 2: broken"
     assert item.newest == "1.0"
+
+
+def _ember_spec() -> deps.Spec:
+    return next(spec for spec in deps.load_components() if spec.id == "ember")
+
+
+def _ember_installed(env: dict[str, str], version: str) -> None:
+    _stub(
+        env,
+        "dpkg-query",
+        f'[ "$3" = ember ] || exit 1\nprintf "installed\\t{version}"\n',
+    )
+    binary = shutil.which("dpkg")
+    assert binary is not None
+    (Path(env["PATH"]) / "dpkg").symlink_to(binary)
+
+
+@pytest.mark.parametrize(
+    ("installed", "other", "newest"),
+    [
+        ("0.33.0", "0.33.0-0", "0.33.0-1"),
+        ("0.33.0~rc1", "0.33.0~rc2", "0.33.0"),
+        ("99.0.0", "0:100.0.0", "1:0.33.0"),
+    ],
+)
+def test_ember_uses_debian_order_for_index_and_status(
+    env: dict[str, str], installed: str, other: str, newest: str
+) -> None:
+    _ember_installed(env, installed)
+    fetch = Fetcher(
+        {
+            updates.PACKAGES_URL: f"Package: ember\nVersion: {other}\n\n"
+            f"Package: ember\nVersion: {newest}\n"
+        }
+    )
+    specs = (_ember_spec(),)
+    report = deps.read(env, components=specs, fetch=fetch, now=NOW)
+    item = _one(report)
+    assert item.status == deps.UPDATE_AVAILABLE
+    assert (item.installed, item.newest, item.error) == (installed, newest, None)
+    assert item.note == "Update Ember in the app or with apt."
+    assert item.command is None
+    assert report.newest_read_at == {"ember": NOW}
+    cached = deps.read(env, components=specs, installed=False, fetch=fetch, now=NOW + 1)
+    assert cached == report
+    assert fetch.calls == [updates.PACKAGES_URL]
+
+
+@pytest.mark.parametrize(
+    ("reply", "reason"),
+    [
+        ("", "Packages index contains no stanza for ember"),
+        (OSError("no network"), "no network"),
+    ],
+)
+def test_ember_failed_refresh_retains_the_cached_version(
+    env: dict[str, str], reply: str | Exception, reason: str
+) -> None:
+    _ember_installed(env, "0.33.0")
+    url = updates.PACKAGES_URL
+    fetch = Fetcher({url: "Package: ember\nVersion: 0.33.0\n"})
+    specs = (_ember_spec(),)
+    first = deps.read(env, components=specs, fetch=fetch, now=NOW)
+    assert _one(first).status == deps.CURRENT
+    fetch.replies[url] = reply
+    later = NOW + deps.MAX_AGE
+    failed = deps.read(env, components=specs, fetch=fetch, now=later)
+    item = _one(failed)
+    assert item.status == deps.CHECK_FAILED
+    assert item.error == f"newest version: {url}: {reason}"
+    assert (item.installed, item.newest) == ("0.33.0", None)
+    assert failed.newest_read_at == {"ember": None}
+    held = deps.read(
+        env, components=specs, installed=False, newest="never", fetch=fetch
+    )
+    assert held.newest_read_at == first.newest_read_at
+    assert _one(held).newest == "0.33.0"
+    fetch.replies[url] = "Package: ember\nVersion: 0.33.0-1\n"
+    retry = deps.read(env, components=specs, fetch=fetch, now=later + 1)
+    assert _one(retry).status == deps.UPDATE_AVAILABLE
+    assert fetch.calls == [url, url, url]
 
 
 # Commands and the network
@@ -734,6 +817,32 @@ def test_cache_drops_components_no_longer_listed(env: dict[str, str]) -> None:
     _apt_stubs(env, "1.0", "1.0", older=False)
     _read(env, APT, fetch)
     assert list(_cache(env)["components"]) == ["tmux"]  # type: ignore[arg-type]
+
+
+def test_cache_keeps_excluded_components(env: dict[str, str]) -> None:
+    _stub(env, "codex", "echo codex-cli 1.0.0\n")
+    _ember_installed(env, "0.33.0")
+    specs = (_ember_spec(), *_specs(CODEX))
+    fetch = Fetcher(
+        {
+            updates.PACKAGES_URL: "Package: ember\nVersion: 0.33.0-1\n",
+            CODEX_URL: '{"version": "1.1.0"}',
+        }
+    )
+    deps.read(env, components=specs, fetch=fetch, now=NOW)
+    cached = _cache(env)["components"]["ember"]  # type: ignore[index]
+    fetch.calls.clear()
+    report = deps.read(
+        env,
+        components=specs,
+        exclude={"ember"},
+        newest="always",
+        fetch=fetch,
+        now=NOW + 1,
+    )
+    assert _one(report).id == "codex"
+    assert fetch.calls == [CODEX_URL]
+    assert _cache(env)["components"]["ember"] == cached  # type: ignore[index]
 
 
 # The report

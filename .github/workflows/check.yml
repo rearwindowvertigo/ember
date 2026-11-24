@@ -34,12 +34,12 @@ jobs:
           python-version: "3.14"
           enable-cache: true
       - if: steps.release.outputs.release_only != 'true'
-        name: Install the system libraries and fonts Qt loads
+        name: Install system dependencies for the checks
         run: >-
           sudo apt-get update &&
           sudo apt-get install --yes --no-install-recommends
           libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 libglib2.0-0t64
-          fonts-dejavu-core
+          fonts-dejavu-core apt-utils
       - if: steps.release.outputs.release_only != 'true'
         run: uv sync --locked
       - if: steps.release.outputs.release_only != 'true'

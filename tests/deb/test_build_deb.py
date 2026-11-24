@@ -2,6 +2,9 @@ import importlib.util
 import shutil
 import subprocess
 import sys
+import tarfile
+from collections.abc import Sequence
+from io import BytesIO
 from pathlib import Path
 from types import ModuleType
 
@@ -21,6 +24,37 @@ def _load() -> ModuleType:
 
 
 build_deb = _load()
+
+
+@pytest.fixture
+def package_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    repo = tmp_path / "repo"
+    for relative in (
+        f"packaging/{build_deb.APP_ID}.desktop",
+        "packaging/deb/copyright",
+        "packaging/deb/icu-LICENSE",
+        f"src/ember/app/assets/ember/{build_deb.APP_ID}-plain.svg",
+    ):
+        destination = repo / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(SCRIPT.parents[2] / relative, destination)
+    (repo / "pyproject.toml").write_text('[project]\nversion = "0.1.0"\n')
+    (repo / "skill").mkdir()
+    (repo / "skill/SKILL.md").write_text("# Ember\n")
+    monkeypatch.setattr(build_deb, "REPO", repo)
+    return repo
+
+
+@pytest.fixture
+def archive_key(package_repo: Path) -> Path:
+    key = package_repo / "packaging/apt/ember-archive-keyring.asc"
+    key.parent.mkdir()
+    key.write_bytes(
+        b"-----BEGIN PGP PUBLIC KEY BLOCK-----\n\n"
+        b"fixture\n"
+        b"-----END PGP PUBLIC KEY BLOCK-----\n"
+    )
+    return key
 
 
 # read_version
@@ -215,6 +249,13 @@ def test_skip_plugin(folder: str, libraries: list[str], skipped: bool) -> None:
     assert build_deb.skip_plugin(folder, libraries, bundled) is skipped
 
 
+def test_qtdbus_binaries_are_checked(tmp_path: Path) -> None:
+    assert {
+        tmp_path / "PySide6/QtDBus.abi3.so",
+        tmp_path / "PySide6/Qt/lib/libQt6DBus.so.6",
+    } <= set(build_deb._binaries(tmp_path))
+
+
 # Command line
 
 
@@ -248,11 +289,74 @@ def test_missing_command_exits_69(
     assert "uv is missing" in capsys.readouterr().err
 
 
-def test_installed_icon_is_the_app_icon_without_masks(tmp_path: Path) -> None:
-    build_deb._write_files(tmp_path)
-    icon = (
-        tmp_path / "usr/share/icons/hicolor/scalable/apps" / f"{build_deb.APP_ID}.svg"
+def test_missing_archive_key_exits_66(
+    package_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(build_deb, "_check_tools", lambda: None)
+    out = package_repo / "dist"
+    assert build_deb.main(["--out", str(out)]) == 66
+    key = package_repo / "packaging/apt/ember-archive-keyring.asc"
+    assert capsys.readouterr().err == f"build_deb: {key} is missing\n"
+    assert not (package_repo / "build").exists()
+    assert not out.exists()
+
+
+def _deb_tar(package: Path, option: str) -> tarfile.TarFile:
+    result = subprocess.run(
+        ["dpkg-deb", option, package], capture_output=True, check=True
     )
+    return tarfile.open(fileobj=BytesIO(result.stdout))
+
+
+def test_build_installs_apt_source_and_key(
+    package_repo: Path, archive_key: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if shutil.which("dpkg-deb") is None:
+        pytest.skip("dpkg-deb is not installed")
+    real_run = build_deb._run
+
+    def run(args: Sequence[str | Path], **kwargs: object) -> None:
+        if args[0] == "dpkg-deb":
+            real_run(args, **kwargs)
+        elif args[:2] == ["uv", "venv"]:
+            (Path(args[-1]) / "bin").mkdir(parents=True)
+
+    monkeypatch.setattr(build_deb, "_run", run)
+    monkeypatch.setattr(build_deb, "_check_tools", lambda: None)
+    monkeypatch.setattr(build_deb, "_check_libraries", lambda stage: None)
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "0")
+    package = build_deb.build(package_repo / "dist")
+
+    with _deb_tar(package, "--fsys-tarfile") as data:
+        source = data.getmember("./etc/apt/sources.list.d/ember.sources")
+        keyring = data.getmember("./usr/share/keyrings/ember-archive-keyring.asc")
+        assert source.mode == keyring.mode == 0o644
+        source_file = data.extractfile(source)
+        keyring_file = data.extractfile(keyring)
+        assert source_file is not None and keyring_file is not None
+        assert source_file.read() == (
+            b"Types: deb\n"
+            b"URIs: https://rearwindowvertigo.github.io/ember/apt/\n"
+            b"Suites: stable\n"
+            b"Components: main\n"
+            b"Architectures: amd64\n"
+            b"Signed-By: /usr/share/keyrings/ember-archive-keyring.asc\n"
+        )
+        assert keyring_file.read() == archive_key.read_bytes()
+
+    with _deb_tar(package, "--ctrl-tarfile") as control:
+        conffiles = control.extractfile("./conffiles")
+        assert conffiles is not None
+        assert conffiles.read() == b"/etc/apt/sources.list.d/ember.sources\n"
+
+
+@pytest.mark.usefixtures("archive_key")
+def test_installed_icon_is_the_app_icon_without_masks(tmp_path: Path) -> None:
+    stage = tmp_path / "stage"
+    build_deb._write_files(stage)
+    icon = stage / "usr/share/icons/hicolor/scalable/apps" / f"{build_deb.APP_ID}.svg"
     text = icon.read_text()
     assert text.startswith("<svg")
     assert "<mask" not in text and "clip-path" not in text

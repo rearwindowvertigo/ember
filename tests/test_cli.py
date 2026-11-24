@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from ember import __version__, branches, choices, db, deps, holds, paths, skill
+from ember import __version__, branches, choices, db, deps, holds, paths, skill, updates
 from ember.cli import main
 from ember.engines import models, status
 
@@ -738,6 +738,8 @@ class _DepsFetch:
         self.calls.append(url)
         if url == "https://registry.npmjs.org/@openai/codex/latest":
             return '{"version": "1.0.0"}'
+        if url == updates.PACKAGES_URL:
+            return "Package: ember\nVersion: 0.33.0-1\n"
         raise OSError("no network")
 
 
@@ -749,7 +751,12 @@ def deps_fetch(monkeypatch: pytest.MonkeyPatch) -> _DepsFetch:
 
 
 def _deps_stubs(env: dict[str, str]) -> None:
-    _stub(env, "dpkg-query", 'printf "installed\\t1.0"\n')
+    _stub(
+        env,
+        "dpkg-query",
+        'if [ "$3" = ember ]; then\n  printf "installed\\t0.32.0"\n'
+        'else\n  printf "installed\\t1.0"\nfi\n',
+    )
     _stub(env, "apt-cache", 'printf "  Candidate: 1.1\\n"\n')
     _stub(env, "dpkg", "exit 0\n")
     _stub(env, "codex", "echo codex-cli 1.0.0\n")
@@ -779,7 +786,7 @@ def test_deps_text(
     captured = capsys.readouterr()
     assert captured.err == ""
     lines = captured.out.splitlines()
-    assert lines[:10] == [
+    assert lines[:12] == [
         "Codex: current, installed 1.0.0, newest 1.0.0",
         "OpenCode: missing",
         "  install: curl -fsSL https://opencode.ai/v2/install | bash",
@@ -787,6 +794,8 @@ def test_deps_text(
         "  install: curl -fsSL https://claude.ai/install.sh | bash",
         "Claude Desktop: update available, installed 1.0, newest 1.1",
         "  update: sudo apt install --only-upgrade claude-desktop",
+        "Ember: update available, installed 0.32.0, newest 0.33.0-1",
+        "  Update Ember in the app or with apt.",
         "ember skill: missing",
         "  install: emb skill install",
         "tmux: update available, installed 1.0, newest 1.1",
@@ -802,21 +811,36 @@ def test_deps_json_and_refresh(
     codex = "https://registry.npmjs.org/@openai/codex/latest"
     assert main(["deps", "--json"], env=env) == 0
     data = json.loads(capsys.readouterr().out)
-    assert [item["id"] for item in data["components"]][:3] == [
+    assert [item["id"] for item in data["components"]][:7] == [
         "codex",
         "opencode",
         "claude",
+        "claude-desktop",
+        "ember",
+        "ember-skill",
+        "tmux",
     ]
     assert data["components"][0]["status"] == "current"
     assert data["components"][0]["resolved_path"] == f"{env['PATH']}/codex"
     assert data["components"][0]["method"] is None
+    ember = data["components"][4]
+    assert ember["label"] == "Ember"
+    assert (ember["status"], ember["installed"], ember["newest"]) == (
+        "update available",
+        "0.32.0",
+        "0.33.0-1",
+    )
+    assert ember["note"] == "Update Ember in the app or with apt."
     assert deps_fetch.calls.count(codex) == 1
+    assert deps_fetch.calls.count(updates.PACKAGES_URL) == 1
     assert main(["deps", "--json"], env=env) == 0
     capsys.readouterr()
     assert deps_fetch.calls.count(codex) == 1
+    assert deps_fetch.calls.count(updates.PACKAGES_URL) == 1
     assert main(["deps", "--refresh"], env=env) == 0
     capsys.readouterr()
     assert deps_fetch.calls.count(codex) == 2
+    assert deps_fetch.calls.count(updates.PACKAGES_URL) == 2
 
 
 def test_deps_invalid_component_list_exits_70(

@@ -1110,7 +1110,7 @@ def _deps_lines(item: deps.Component) -> list[str]:
     if item.command is not None:
         lines.append(f"  {item.command_kind}: {item.command}")
     if item.note is not None and (
-        item.command_kind == "update" or item.installed_kind == "skill"
+        item.status == deps.UPDATE_AVAILABLE or item.installed_kind == "skill"
     ):
         lines.append(f"  {item.note}")
     return lines
