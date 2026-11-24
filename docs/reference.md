@@ -76,6 +76,7 @@ empty list.
 | `terminal` | A non-empty command line in shell syntax | `xdg-terminal-exec` | standing |
 | `app.autostart` | `on`, `off` | `on` | standing |
 | `app.theme` | `system`, `light`, `dark` | `system` | standing |
+| `updates.check` | `on`, `off` | `on` | standing |
 
 `sandbox.read` and `sandbox.hidden_notices` accept a JSON array of strings
 or a comma-separated list at the terminal. Use a shell-quoted JSON array for paths containing commas
@@ -4398,11 +4399,11 @@ Other merge and cleanup exits, including 76 and 77, print no report line.
 emb deps [--refresh] [--json]
 ```
 
-Shows each component Ember depends on: its installed version, the newest
-version its source offers, its status and the command that updates or
-installs it. It reads installed versions every time and newest versions when
-due. The `ember` skill link shows its state in place of a version. It installs
-and updates nothing.
+Reports Ember and its dependencies. For each component it shows the
+installed and newest versions, its status, and any update or install
+command. It reads installed versions every time and newest versions when
+due. The `ember` skill link shows its state in place of a version. The
+command installs and updates nothing.
 
 | Option | Does |
 |---|---|
@@ -4423,6 +4424,7 @@ The list is `ember/data/components.toml` in the package:
 | `opencode` | OpenCode | `apps` | `opencode --version`, `1.19.5` or `opencode v2.2.5` | the highest non-draft, non-prerelease tag of `https://api.github.com/repos/anomalyco/opencode/releases?per_page=100` | `opencode upgrade --major` with OpenCode 1 installed; with OpenCode 2, the detected install method, else `opencode upgrade` | `curl -fsSL https://opencode.ai/v2/install \| bash` |
 | `claude` | Claude Code | `apps` | `claude --version`, `^(\S+) \(Claude Code\)$` | the text of `https://downloads.claude.ai/claude-code-releases/<channel>`, where `<channel>` is `autoUpdatesChannel` from Claude Code's `settings.json` (in `CLAUDE_CONFIG_DIR`, else `~/.claude`): `stable`, or `latest` when it is unset or anything else; a version cached from another channel is read again | Detected install method | `curl -fsSL https://claude.ai/install.sh \| bash` |
 | `claude-desktop` | Claude Desktop | `apps` | apt `claude-desktop` | apt | `sudo apt install --only-upgrade claude-desktop` | none; note "Not installed." |
+| `ember` | Ember | `apps` | apt `ember` | `apt-index` for `ember` at `https://rearwindowvertigo.github.io/ember/apt/dists/stable/main/binary-amd64/Packages` | none. The note is "Update Ember in the app or with apt." | none |
 | `ember-skill` | ember skill | `apps` | `emb skill status` link state | none | none | By link state, below |
 | `tmux` | tmux | `system` | apt `tmux` | apt | `sudo apt install --only-upgrade tmux` | `sudo apt install tmux` |
 | `bubblewrap` | bubblewrap | `system` | apt `bubblewrap` | apt | `sudo apt install --only-upgrade bubblewrap` | `sudo apt install bubblewrap` |
@@ -4444,7 +4446,7 @@ not valid:
 | `label` | The shown name |
 | `group` | `apps`, `system` or `libraries` |
 | `installed` | `kind = "apt"` with `package`; `kind = "command"` with `pattern`, a regular expression whose group 1 is the version, and either `engine` (the engine's CLI run with `--version`) or `argv`; `kind = "python"` with `package`; or `kind = "skill"` with an optional `commands` map from link states to install commands |
-| `newest` | `kind = "apt"` with `package` (only with an apt `installed`); `kind = "json"` with `url` and `field`; `kind = "text"` with `url`; `kind = "pypi"` with `package`; or `kind = "none"` for no newest version (required for `skill`) |
+| `newest` | `kind = "apt"` with `package`; `kind = "apt-index"` with `url` and `package`; `kind = "json"` with `url` and `field`; `kind = "text"` with `url`; `kind = "pypi"` with `package`; or `kind = "none"` for no newest version (required for `skill`). The `apt` and `apt-index` kinds require an apt `installed` source. |
 | `update` | Optional: the command shown while an update is available |
 | `methods` | Optional: ordered `[[components.methods]]` tables with `path` and `update`, or `kind = "dpkg"` and `update`; replaces `update` for engines |
 | `updater` | Required with engine methods: `codex update`, `opencode upgrade` or `claude update`, used when no method matches |
@@ -4548,6 +4550,7 @@ matched; dpkg is skipped and its method remains null.
 | `command` installed | The engine's CLI as `emb engines` finds it, or `argv` with its program found on `PATH`, matched against `pattern`; a program that is not found means missing. `claude` runs without the variables whose names start with `CLAUDE_CODE_`, `CLAUDECODE` or `ANTHROPIC_` |
 | `python` installed | The package's version in the Python that runs Ember; a package that is not installed means missing |
 | `apt` newest | The `Candidate:` line of `apt-cache policy <package>`; `(none)` or no such line is a check failure |
+| `apt-index` newest | The highest `Version` in Debian version order among stanzas for the exact `package` in the apt `Packages` index at `url`. A failed fetch, no matching stanza, or a missing or invalid version in a matching stanza is a check failure. |
 | `json` newest | The string at `field` in the JSON object at `url` |
 | `text` newest | The body at `url`, stripped; it must be one word |
 | `pypi` newest | `info.version` of `https://pypi.org/pypi/<package>/json` |
@@ -4556,11 +4559,11 @@ Every command runs with `LC_ALL=C`, standard input from `/dev/null` and a
 10-second deadline, in its own process group; at the deadline the whole group
 is killed. Every network read has a 10-second timeout. Requests to outside websites, here and for the models.dev catalogue, send `User-Agent: ember/<version>`.
 
-Versions read with apt are compared with `dpkg --compare-versions`, with the
-epoch and revision. Every other version is compared as dotted numbers: a
-leading `v` is removed and trailing `.0` parts are ignored, so `v1.2.0` equals
-`1.2`. A version that is not dotted numbers is a check failure; it is never
-compared as text.
+Versions from `apt` and `apt-index` sources are compared with
+`dpkg --compare-versions`, including the epoch and revision. Every other
+version is compared as dotted numbers. A leading `v` is removed and
+trailing `.0` parts are ignored, so `v1.2.0` equals `1.2`. Other formats
+give a check failure.
 
 ### Status
 
@@ -4765,21 +4768,6 @@ connects to it, sends `show` (nothing with `--hidden`) and exits 0; the
 running app then shows, raises and activates its window. A socket file with
 no app listening is removed and the start goes on.
 
-On every such connection, and 2 seconds after the folder holding the
-installed `ember-app` metadata (`ember_app-<version>.dist-info`) last
-changed, the running app reads the installed version from disk and compares
-it with the version it started as. An upgrade installed while Ember runs
-therefore shows the offer without another start. When they differ, the
-window shows a small info box in the full sidebar, directly above the version
-line: `Ember <version> is installed.` with a Restart button and no Dismiss.
-In the collapsed sidebar, a round 32-pixel button with `refresh-cw` in
-`text-accent` on `bg-accent` replaces the box, has the tooltip
-`Ember <version> is installed. Restart` and restarts Ember when clicked.
-The box stays until Ember restarts; a later installed version replaces its
-text. No alert shows above the screen for it. Restart closes the socket, starts the installed app
-with the running interpreter (`python -I -m ember.cli app`) and quits. Runs
-keep running in their tmux sessions.
-
 At start the app:
 
 - shows the window, unless `--hidden` was given and a tray is available;
@@ -4794,6 +4782,65 @@ At start the app:
 
 Until the settings are read the content area shows "Reading settings"; when
 they cannot be read it shows the reason and Try again.
+
+### Ember updates
+
+With `updates.check` on, the app checks for updates at startup, every
+24 hours while it runs, and when Check now is clicked in Dependencies.
+Each check reads a fresh copy of the signed Ember apt repository's
+`Packages` index over HTTPS. The app uses
+the `apt-index` source listed under `emb deps` and shares the background
+read with the Ember row in Dependencies. The index read needs no password
+and leaves apt's local package lists alone. With the switch off, the app
+clears the update notice and skips the Ember row and index request,
+including on Check now. `emb deps` follows its own cache and refresh rules.
+
+When a newer release is available, `Ember update available` appears above
+the current screen with `Installed version <installed>. Available version
+<newest>.` and a Dismiss button. If the running app belongs to the `ember`
+Debian package, the notice also offers Update. A running development copy
+that receives an offer shows the manual install commands.
+
+Update sends requests through QtDBus to PackageKit on the system bus.
+`Preparing Ember update` with `Refreshing package information.` appears
+while PackageKit refreshes apt's package information and resolves
+`ember:amd64`. Ember selects an available version from its archive. If
+the offered version is unavailable and a different version is newer than
+the installed one, `The available Ember version changed` shows the
+installed, found and previously offered versions. Update must be chosen
+again to install the changed version.
+During installation, `Updating Ember` shows `Installing Ember <version>.`
+PackageKit installs only trusted packages and can prompt for authorization
+through polkit. Ember runs no `sudo` for the update.
+
+A failed check shows `Ember could not check for updates`. If PackageKit is
+unavailable, authorization is declined, or installation fails, the notice
+says `Ember could not install the update`. Ember stays open and either
+notice shows the reason, Dismiss and commands to run in an empty folder.
+The commands fill in the release number when it is known in `X.Y.Z` form.
+
+```sh
+version=X.Y.Z
+curl -fLO "https://github.com/rearwindowvertigo/ember/releases/download/v${version}/ember_${version}_amd64.deb"
+sudo apt install "./ember_${version}_amd64.deb"
+```
+
+After PackageKit reports success, Ember restarts automatically. For a
+package change made outside the app, Ember checks the version on every
+second-launch socket connection and 2 seconds after the folder holding
+`ember_app-<version>.dist-info` last changed. If the version on disk differs
+from the running one, the full sidebar shows `Ember <version> is installed.`
+above the version line with a Restart button. In the collapsed sidebar,
+a round 32-pixel button with `refresh-cw` in `text-accent` on `bg-accent`
+has the tooltip `Ember <version> is installed. Restart`. The offer stays
+until Ember restarts and shows the latest installed version. Ember hides
+the offer while it handles an update through PackageKit.
+
+Both restart paths close the single-instance socket, start the installed
+app with the running interpreter (`python -I -m ember.cli app`) and quit
+the old instance. Runs keep running in their tmux sessions. An installed
+`ember` skill link to `/usr/share/ember/skill` uses the upgraded skill
+files automatically.
 
 ### Window
 
@@ -5013,12 +5060,11 @@ command line:
 
 Overview shows Live and Finished. Live lists starting, running and waiting
 records, oldest first by start time and then id. A live run whose flow or
-panel has ended is a top-level Live row, not nested under that parent; its
-detail line starts with the parent's type and first fact, such as
-`Panel · 7 members`. Finished lists ended
-records, newest first by end time, update time and id, with update time used
-when end time is absent. Its cap of twenty applies to top-level rows across
-runs, flows and panels. Each empty section shows its empty state.
+panel has ended appears at the top level in Live. Its details name the
+parent. Finished lists ended records, newest first by end time, update
+time and id, with update time used when end time is absent. Its cap of
+twenty applies to top-level rows across runs, flows and panels. Each empty
+section shows its empty state.
 
 When run records refresh, Overview shows one warning if `/tmp` has fewer
 than 50,000 free inodes or less than 256 MiB free.
@@ -5033,8 +5079,8 @@ The warning disappears when the volume meets the applicable minimums or
 its statistics are unavailable.
 
 Live comes first. Finished starts as a preview of its three newest
-top-level rows, each with its nested runs, and a `Show all <n>` button in
-its header, where `<n>` is the number of rows the full list shows. The
+top-level rows and a `Show all <n>` button in its header, where `<n>`
+is the number of rows the full list shows. The
 button reads `Newest 20` once Finished holds twenty rows, the most it
 reads, and is hidden when the preview already holds every row. It opens
 the full list with the Type, Status and Engine pickers and Clear; `Show
@@ -5048,9 +5094,10 @@ Flow, Panel), Status (All statuses, Done, Incomplete, Failed) and Engine (All
 engines, Codex, OpenCode, Claude).
 The filters combine and test top-level rows: Run selects standalone runs,
 Status matches the parent's own chip, and a flow or panel matches Engine
-when any of its readable runs, nested or shown in Live, used that engine. A parent without
-readable nested runs matches only Engine=all. Filters start at all when
-the app starts and keep their values across reloads for the app session.
+when any of its readable runs, nested or shown in Live, used that engine.
+A parent without readable runs matches only Engine=all. Filters start at
+all when the app starts and keep their values across reloads for the app
+session.
 
 Clear is a red outline button with a trash icon. Its accessible
 description is `Remove shown records`. Clear is hidden when no records are
@@ -5076,15 +5123,27 @@ and errors. Closing the message reloads both record models and reapplies
 the filters. Confirmation and result lists scroll within the available
 screen height.
 
-Every row has the same columns, each a fixed width, so rows line up: a
-round expand button with an outline and a chevron, one of six status chips,
-the text, and the time and actions on the right. The chip column is as wide
-as the widest chip. The expand button and the chip are centred vertically
-on the text lines. The title starts with the row's type: `Run`, `Flow` or
-`Panel`. The title is set in `type-label` and the second line in
-`type-caption` with `text-secondary`. Each shows one line, cut with an
-ellipsis; the whole text is in the expanded details. Chips are 22 pixels tall with
-6-pixel corners. The status chips:
+Both cards use one row component for runs, flows, panels and child runs.
+Each nonempty card shows these column headings, aligned with every row.
+
+| Column | Run | Flow | Panel |
+|---|---|---|---|
+| Expand | Chevron button | Chevron button | Chevron button |
+| Status | Run status chip | Flow status chip | Panel status chip |
+| Name | `Run · <subject>` or the run's worker if it has no subject | `Flow · <repository folder>` | `Panel · <repository folder>` |
+| Progress | `turn <n>` or `read-only` | `<m>/<n> merged` | `<m>/<n> answered` |
+| Worker | Model | Writer model | `1 member` or `<n> members` |
+| Time | Elapsed time | Elapsed time | Elapsed time |
+| Action | Terminal icon button while live | Empty | Empty |
+
+The Name of a flow worker includes its task and round when recorded, as
+in `Run · Write: <task>, round 1` or `Run · Review: <task>, round 2`.
+A review with no recorded round uses the run's subject if present. The
+worker text used when a run has no subject shows the engine and model,
+followed by recorded effort and speed, separated by ` · `. Visible live
+times update every second, for example `4 min 12 s` or `1 h 5 min 3 s`.
+Finished duration includes seconds under an hour and uses hours and
+minutes from an hour on.
 
 | Chip | States | Colour |
 |---|---|---|
@@ -5097,45 +5156,48 @@ ellipsis; the whole text is in the expanded details. Chips are 22 pixels tall wi
 | Incomplete | A panel's `incomplete`, a flow's `cancelled` | Purple |
 | Failed | `failed`, a gone flow runner or panel process | Red |
 
-The second line does not repeat the status the chip shows; the expanded
-record shows it. A flow's second line includes any reason. A cancelled
-flow appears in Finished with Incomplete and its reason. A starting,
-running or checking flow whose lifetime lock is not held and whose record
-has not changed for more than sixty seconds stays in Live with Failed and
-`runner gone`. A running panel uses Failed and `panel process gone` under
-the same conditions. A stopped flow needs no runner. An unreadable lock
-table or runtime folder leaves the stored status on screen. A run whose
-parent flow is stopped for the lead says `Waiting for Claude's answer to
-flow <id>` on its second line. A run whose parent state is `resume` starts
-its second line with its `wait` text, such as `Waiting for flow <id> to
-resume (failed 3 days ago)`. Neither is shown as Orphaned.
+A starting, running or checking flow whose lifetime lock is free and whose
+record has been idle for more than sixty seconds stays in Live with Failed
+and shows `Runner gone` in its details. A running panel under the same
+conditions shows Failed and `Panel process gone` in its details. A stopped
+flow needs no runner. An unreadable lock table or runtime folder leaves the
+stored status on screen.
 
-Worker runs are nested under their parent, in the parent's section, and
-keep their own status chip and controls. Their ids are collected from the
-same record fields and flow events as Clear uses. A run named by multiple
-parents appears under the oldest parent by start time and then id. A run
-with a parent never appears at the top level in Overview, including when
-that parent falls beyond the Finished cap. A live worker under a Finished
-parent stays nested there; the tray and sidebar count it at the top level.
-Every readable nested run of a shown parent appears, whatever its age,
-oldest first by start time and then id, indented one column. A nested row
-shows its times as any run row does. In Finished, a parent's nested runs are hidden until its
-details are expanded, and its second line adds `1 run` or `<n> runs`; a
-Finished parent with a live nested run keeps them shown. The parent's
-second line starts with `1 live run` or `<n> live runs` when that count is
-above zero.
+A collapsed flow or panel occupies one row and hides its child runs. An
+expanded body shows these parts in order.
 
-A flow's title, after `Flow`, shows the repository folder, task count and
-merged count.
-Its second line includes its branch, active plan wave and reason. Expanded,
-it shows the pass count and task, writer and review details. A panel's title,
-after `Panel`, shows its member and answer counts; its second line includes the repository
-folder. Expanded, a panel shows its whole question under `Question`, then
-member status, worker, duration, reason and changed paths, and left-out
-members.
+1. **Details grid.** Every row starts with Id, Repository, Started and
+   Ended. Ended shows `Not yet` for a live record without an end time and
+   `Not recorded` for an ended record without one. Id, Repository and Branch
+   use the code font.
 
-Expanded panel details have a Summary button for `summary.md`. Expanded
-flow details have Briefs for the `briefs/` folder and one Check logs button.
+   | Row type | Further details |
+   |---|---|
+   | Run | Branch, Turns and commits, Last exit, Last reason, Subject, Engine and Sandbox. Engine shows the engine, model and recorded effort and speed. Parent and Wait appear when applicable. Flow worker details include the task, role and recorded round, plus applicable task status, reason, review verdict and findings. |
+   | Flow | Branch, Wave and Passes, plus recorded reasons and runner state when applicable. Task and review details appear on their readable worker runs. The flow grid shows task and review details whose worker records are unavailable. |
+   | Panel | Question, member rows with worker, status, duration and any reason or changed paths, and Left out rows for omitted members. |
+
+   Wait can show `Waiting for Claude's answer to flow <id>` or a message
+   about the flow resuming or the panel recovering.
+
+2. **Action bar.** A live run has Open terminal, which opens a terminal on
+   the run as `emb run --attach` does. A flow has Briefs for `briefs/` and
+   Check logs. A panel has Summary for `summary.md`.
+3. **Child runs.** Flows and panels show their readable child runs after
+   the action bar, oldest first by start time and then id. Each child
+   lines up with the same columns and opens its own details. A run named
+   by several parents belongs to the oldest parent by start time and then
+   id.
+
+Each card can have one top-level row expanded at a time, and each
+expanded parent can have one child expanded. Collapsing the parent
+closes its child's details. A run's details close when it moves to
+another card or parent. Rows and text selection in expanded details
+survive unrelated reloads. Tab follows the visible controls in reading
+order. The chevron has the accessible name `Show details of <type> <id>`
+or `Hide details of <type> <id>`. Both terminal controls are named
+`Open terminal for run <id>`.
+
 Check logs considers only files matching `check-*.log` directly in the flow
 folder. It selects the highest integer `(wave, attempt)` from
 `check-<wave>-<attempt>.log`; if no name parses, it selects the newest file
@@ -5147,37 +5209,6 @@ while those details are drawn. Collapsed rows do not check targets.
 Buttons pass a file URL to `QDesktopServices.openUrl` for the desktop's
 default viewer. If it returns false, the line under the buttons reads
 `No viewer opened <path>.`
-
-A run's worker text reads `<Engine> · <model>`, followed by its effort and
-speed, each separated by ` · ` when recorded. A panel member's line also
-shows its recorded speed after the effort. A run's title, after `Run`,
-shows its subject on one line, or its worker text for a run without a
-subject. The second line shows the worker text when the title holds the
-subject, then the repository folder, the result and the times:
-
-- live: `turn <n>` and the commits so far (`1 commit`, `<n> commits`), or
-  `read-only`; then `started <start> · <elapsed>`, the elapsed time to the
-  second, such as `4 min 12 s`;
-- done: the commit count or `read-only`; failed: the last reason, or
-  `No reason recorded`; then `<start> to <end>`, such as `08:17 to 08:33`.
-
-The start names its day only when it falls on an earlier day than the end,
-or than now while live: `yesterday 23:50 to 00:10`. Flow and panel rows end
-their second line with the same times. The right column of an ended row
-shows `Elapsed` and its duration: `Elapsed 2 min 5 s` under an hour,
-`Elapsed 1 h 12 min` from an hour on. It is empty while the row is live,
-and has no tooltip. The branch is in the expanded record. Live runs have Open terminal, which
-opens a terminal window on the run as `emb run --attach` does. Expanding a
-run shows its record, including last exit and reason; a live run's Ended is
-`Not yet`. The record's run id, repository and branch are set in the code
-font. Rows and expanded
-details survive unrelated record changes. Elapsed times update every second
-while shown.
-
-One live run and one ended run can be expanded at a time. An expanded live
-run's record follows the run while it is live, and collapses when the run
-ends. Overview shows no worker's screen; Open terminal does. One flow and one panel can also have
-expanded details.
 
 Overview has no subtitle. Above the sections, an alert names each enabled
 engine whose sandbox setting gives it no sandbox, with Open Engines.
@@ -5404,6 +5435,7 @@ Settings has three groups. Each change saves at once.
 | Group | Row | Key | Control |
 |---|---|---|---|
 | General | Start at login | `app.autostart` | Switch |
+| General | Check for updates | `updates.check` | Switch, on by default |
 | General | Theme | `app.theme` | System, Light, Dark; applies at once |
 | General | Hidden notices | `sandbox.hidden_notices` | One row per hidden folder with Show again |
 | Workers | Worker network | `worker.network` | Switch |
@@ -5413,6 +5445,10 @@ Settings has three groups. Each change saves at once.
 
 After Start at login changes, the app writes or removes the autostart entry
 and shows the reason under the switch when it could not.
+
+Check for updates controls the Ember release check. Switching it on starts
+a check. Its info tooltip reads `Check for a new Ember release at startup
+and once a day.`
 
 Terminal lists System default first, marked "(not installed)" when
 `xdg-terminal-exec` is not on `PATH`, then each other known terminal found on
@@ -5473,6 +5509,8 @@ has no maintainer scripts:
 | `/usr/share/ember/skill/` | The `ember` skill, without its eval cases |
 | `/usr/share/applications/io.github.rearwindowvertigo.Ember.desktop` | The desktop entry: `Exec=emb app` |
 | `/usr/share/icons/hicolor/scalable/apps/io.github.rearwindowvertigo.Ember.svg` | The icon, drawn as filled outlines without SVG masks or clip paths |
+| `/usr/share/keyrings/ember-archive-keyring.asc` | The armored public key for the Ember apt archive, mode 644 |
+| `/etc/apt/sources.list.d/ember.sources` | A deb822 apt source for `https://rearwindowvertigo.github.io/ember/apt/`, suite `stable`, component `main` and architecture `amd64`. It uses the archive keyring in `Signed-By` and is a Debian conffile, mode 644. |
 | `/usr/share/doc/ember/copyright` | The copyright file |
 | `/usr/share/doc/ember/icu-LICENSE` | The licence of the ICU libraries Qt bundles |
 | `/usr/share/doc/ember/changelog.gz` | The changelog, when the build had `CHANGELOG.md` |
