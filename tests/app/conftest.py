@@ -1,5 +1,4 @@
 import atexit
-import gc
 import os
 import shutil
 import tempfile
@@ -8,7 +7,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent, QObject, QThreadPool
+from PySide6.QtCore import QEvent, QObject
 from PySide6.QtGui import QFont, QFontInfo, QPalette
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -116,16 +115,8 @@ def env(tmp_path: Path) -> dict[str, str]:
 
 
 @pytest.fixture(autouse=True)
-def _collect_on_gui_thread() -> Iterator[None]:
-    """Wait for pool tasks, deliver their events, then collect garbage.
-
-    Qt objects left in reference cycles must be freed on the GUI thread, not
-    by a garbage collection that happens to run on a pool thread.
-    """
-    yield
-    QThreadPool.globalInstance().waitForDone(10_000)
-    QCoreApplication.processEvents()
-    gc.collect()
+def _collect_on_gui_thread(collect_on_gui_thread: None) -> None:
+    """Keep garbage collection on the GUI thread in every app test."""
 
 
 class _WindowShows(QObject):

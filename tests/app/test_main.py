@@ -437,7 +437,8 @@ def test_start_and_stop_collector_and_crash_log(
     quit_signal: bool,
 ) -> None:
     """Startup installs both guards; stop and quitting release them after reads."""
-    enabled = gc.isenabled()
+    gc.enable()  # The app test fixture starts with collection off.
+    enabled = True
     handlers: list[tuple[int, bool]] = []
     disabled: list[bool] = []
 
@@ -488,13 +489,15 @@ def test_start_and_stop_collector_and_crash_log(
         with pytest.raises(OSError):
             os.fstat(fd)
     assert gc.isenabled() == enabled
+    gc.disable()  # Back to the fixture's state before teardown delivers events.
 
 
 def test_crash_log_open_failure_starts_without_it(
     app_env: dict[str, str], capsys: pytest.CaptureFixture[str], qtbot: QtBot
 ) -> None:
     """An unavailable crash log is reported, and the app starts without it."""
-    enabled = gc.isenabled()
+    gc.enable()  # The app test fixture starts with collection off.
+    enabled = True
     folder = paths.state_dir(app_env)
     folder.mkdir(parents=True)
     (folder / "app-crash.log").mkdir()
@@ -503,13 +506,15 @@ def test_crash_log_open_failure_starts_without_it(
         assert parts.collector.timer.isActive()
         assert "cannot open crash log" in capsys.readouterr().err
     assert gc.isenabled() == enabled
+    gc.disable()  # Back to the fixture's state before teardown delivers events.
 
 
 def test_failed_start_restores_gc(
     app_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A setup exception stops the collector and closes the crash log."""
-    enabled = gc.isenabled()
+    gc.enable()  # The app test fixture starts with collection off.
+    enabled = True
     disabled: list[bool] = []
     monkeypatch.setattr(main.faulthandler, "disable", lambda: disabled.append(True))
 
@@ -522,6 +527,7 @@ def test_failed_start_restores_gc(
     with pytest.raises(RuntimeError, match="setup failed"):
         main.start([], app_env)
     assert gc.isenabled() == enabled
+    gc.disable()  # Back to the fixture's state before teardown delivers events.
     assert disabled == [True]
 
 

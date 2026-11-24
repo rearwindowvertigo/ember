@@ -23,6 +23,10 @@ _spec.loader.exec_module(screens)
 screens.setup()
 
 
+# The renderer builds a MainWindow with a real task pool.
+pytestmark = pytest.mark.usefixtures("collect_on_gui_thread")
+
+
 @pytest.fixture(autouse=True)
 def restore_appearance(qapp: QApplication) -> Iterator[None]:
     """Restore the shared application's appearance and collect on its thread."""
