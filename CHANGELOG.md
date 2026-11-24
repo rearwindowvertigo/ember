@@ -6,18 +6,10 @@
 ### Added
 
 * **app:** check for Ember updates and install them through PackageKit ([5c2b0f4](https://github.com/rearwindowvertigo/ember/commit/5c2b0f49c3ea42c4c64a84baed0d86c05955ebd0))
-* **app:** hide Overview columns instead of scrolling in narrow windows ([46bf4e2](https://github.com/rearwindowvertigo/ember/commit/46bf4e233a9d0122f6d73ce9adb9c17936a48d34))
-* **app:** refine Overview rows with type icons and repository names ([b2fa128](https://github.com/rearwindowvertigo/ember/commit/b2fa128e27d72146ccdb35fde873ccbbbe8320aa))
 * **app:** show runs, flows and panels with one Overview row ([9bc5cd3](https://github.com/rearwindowvertigo/ember/commit/9bc5cd31dab5ab811c66f10a946df3e3bcba85be))
 * **deps:** read the newest Ember version from its apt repository ([8e2e50f](https://github.com/rearwindowvertigo/ember/commit/8e2e50faf4a4b22fabbd7410258e5ec0d976909e))
 * **packaging:** install the Ember apt source and key with the package ([24cdb2a](https://github.com/rearwindowvertigo/ember/commit/24cdb2a3b1480e5e0f31ca6099d11cb0e3c0eed6))
 * **packaging:** publish a signed apt repository on each release ([7ce7995](https://github.com/rearwindowvertigo/ember/commit/7ce799582aeb204852ba211fd7f88a97104b48f8))
-
-
-### Fixed
-
-* **app:** accept only trusted or available PackageKit Ember candidates ([11b3ad5](https://github.com/rearwindowvertigo/ember/commit/11b3ad501b006fb9e08c729f9416ea786d831d08))
-* **app:** round Overview chevrons and a divider under the column headings ([fa6b476](https://github.com/rearwindowvertigo/ember/commit/fa6b476995148df00e107a11264f6845e8f071d6))
 
 ## [0.32.0](https://github.com/rearwindowvertigo/ember/compare/v0.31.0...v0.32.0) (2026-11-24)
 
