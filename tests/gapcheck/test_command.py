@@ -805,8 +805,82 @@ def test_refused_correction_keeps_the_run_with_one_gapcheck_action(
     assert "an owner message" in err
     run = record.load(data["run"]["id"], env)
     assert run.turn == 1 and run.status != record.CLOSED
-    assert err.splitlines()[-1].startswith(f"next: emb run --send {run.id} ")
+    assert err.splitlines()[-1].startswith(
+        f"next: once the run's lines above are settled, emb run --send {run.id} "
+    )
     assert f"--reply {run.folder / 'turn-2.md'}" in err.splitlines()[-1]
+
+
+def test_failed_correction_turn_names_a_new_turn(
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    reply_file: Path,
+    tmp_path: Path,
+) -> None:
+    scripts = tmp_path / "scripts.json"
+    scripts.write_text(json.dumps({"Ember cannot read your reply": "@fail broke"}))
+    driver = StubDriver(
+        "codex", script_path(env), reply_file=reply_file, scripts=scripts
+    )
+    reply_file.write_text("no JSON")
+    code, out, err = invoke(
+        env,
+        plan_file,
+        "--dir",
+        str(repo),
+        "--engine",
+        "codex",
+        "--model",
+        "m",
+        "--json",
+        driver=driver,
+    )
+    data = json.loads(out)
+    assert code not in (0, 81) and not data["run"]["closed"]
+    assert data["run"]["correction"] == {"turn": 2, "exit": code}
+    run = record.load(data["run"]["id"], env)
+    last = err.splitlines()[-1]
+    assert last.startswith(
+        f"next: once the run's lines above are settled, emb run --send {run.id} "
+    )
+    assert f"--reply {run.folder / 'turn-3.md'}" in last
+    assert last.endswith(" --json")
+
+
+def test_unwritable_correction_keeps_the_run_open(
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    reply_file: Path,
+    driver: StubDriver,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Full(str):
+        def format(self, *args: object, **kwargs: object) -> str:
+            raise OSError(28, "No space left on device")
+
+    reply_file.write_text("no JSON")
+    monkeypatch.setattr(command, "CORRECTION", Full(command.CORRECTION))
+    code, out, err = invoke(
+        env,
+        plan_file,
+        "--dir",
+        str(repo),
+        "--engine",
+        "codex",
+        "--model",
+        "m",
+        "--json",
+        driver=driver,
+    )
+    data = json.loads(out)
+    assert code == 69 and not data["run"]["closed"]
+    assert data["run"]["correction"] == {"turn": None, "exit": 69}
+    assert not list(paths.runtime_dir(env).glob("gapcheck-*.md"))
+    run = record.load(data["run"]["id"], env)
+    assert run.status != record.CLOSED and run.turn == 1
+    assert f"WARNING: the run {run.id} stays open for a correction" in err
 
 
 def test_interrupt_while_waiting_keeps_the_run(
@@ -2249,7 +2323,7 @@ def test_run_recovery_names_a_saved_brief_that_verifies(
         Path(recovery.brief_file).read_text(), plan.load(plan_file)
     )
     Path(recovery.reply).write_text(VALID)
-    recovery.json = True
+    assert recovery.json
     output, errors = io.StringIO(), io.StringIO()
     assert command.main(recovery, env, out=output, err=errors) == 0, errors.getvalue()
     assert json.loads(output.getvalue())["checked_plan"] == data["checked_plan"]

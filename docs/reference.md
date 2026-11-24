@@ -2136,12 +2136,19 @@ exits 0. The `next:` lines of a successful correction turn are not
 printed; the gap check prints its own action.
 
 When the corrected reply is still invalid, or the correction turn could
-not be sent, the run stays open and the check exits 81 or the correction
-turn's exit. Re-reading the same reply gives the same result, so the
-action names a new turn of the open run:
+not be sent or failed, the run stays open and the check exits 81 or the
+correction turn's exit. Re-reading the same reply gives the same result,
+so the action names a new turn of the open run, where `<n>` is the run's
+current turn:
 `next: emb run --send <run> --message-file <a message naming each problem>, then emb gapcheck --plan <plan> --reply <run folder>/turn-<n+1>.md --brief-file <run folder>/brief.md`.
-When the correction turn started and ended with a non-zero exit, the
-action is `next: once turn <n> of <run> ends, emb gapcheck --plan <plan> --reply <run folder>/turn-<n>.md --brief-file <run folder>/brief.md`.
+After a correction turn that failed or was refused, the line starts
+`next: once the run's lines above are settled, `. A correction turn still
+waiting to be collected gives
+`next: emb run --recover <run>, then emb gapcheck --plan <plan> --reply <run folder>/turn-<n>.md --brief-file <run folder>/brief.md`.
+With `--json`, the `emb gapcheck` part ends with `--json`. When the
+correction message cannot be written (exit 69), the run stays open and
+`WARNING: the run <run> stays open for a correction; once that is fixed: <action>`
+names the same action.
 
 A reviewer run that a provider error ends at exit 73 is closed, and the
 check is repeated on the entry of `provider.fallback` that applies, with

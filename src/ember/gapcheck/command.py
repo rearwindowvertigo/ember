@@ -467,28 +467,37 @@ def _follow(
 
 
 def _correction_follow(
-    command: str, details: Mapping[str, Any], env: Mapping[str, str]
+    command: str, details: Mapping[str, Any], env: Mapping[str, str], as_json: bool
 ) -> str:
     """Name the action for an open run whose reply a correction did not fix.
 
-    Re-reading the same reply cannot change the result, so the line names a
-    new turn of the open run, or the correction turn still to finish.
+    Re-reading the same reply cannot change the result. A correction turn
+    still pending is collected with `emb run --recover`; otherwise the line
+    names a new turn of the open run. After a failed or refused correction,
+    the run's own lines above come first.
     """
     run_id = details["id"]
     folder = record.run_dir(run_id, env)
-    brief_path = shlex.quote(str(folder / "brief.md"))
     correction = details["correction"]
-    turn = correction["turn"]
-    if correction["exit"] and turn is not None:
-        reply_path = shlex.quote(str(folder / f"turn-{turn}.md"))
+    try:
+        run: record.Run | None = record.load(run_id, env)
+    except record.RecordError:
+        run = None
+    turn = run.turn if run is not None else correction["turn"] or 1
+
+    def reply(number: int) -> str:
         return (
-            f"next: once turn {turn} of {run_id} ends, "
-            f"{command} --reply {reply_path} --brief-file {brief_path}"
+            f"{command} --reply {shlex.quote(str(folder / f'turn-{number}.md'))} "
+            f"--brief-file {shlex.quote(str(folder / 'brief.md'))}"
+            + (" --json" if as_json else "")
         )
-    reply_path = shlex.quote(str(folder / f"turn-{(turn or 1) + 1}.md"))
+
+    if run is not None and run.status in record.OPEN and run.turn_state == record.SENT:
+        return f"next: emb run --recover {run_id}, then {reply(turn)}"
+    prefix = "once the run's lines above are settled, " if correction["exit"] else ""
     return (
-        f"next: emb run --send {run_id} --message-file <a message naming each "
-        f"problem>, then {command} --reply {reply_path} --brief-file {brief_path}"
+        f"next: {prefix}emb run --send {run_id} --message-file <a message naming "
+        f"each problem>, then {reply(turn + 1)}"
     )
 
 
@@ -511,9 +520,9 @@ def verify_brief(document: plan.Plan, path: str | None, command: str) -> None:
     if not brief.matches_plan(text, document):
         raise CommandError(
             64,
-            "the brief's plan hash does not match the plan: the plan text "
-            "changed since the brief was made, or the brief has no plan hash; "
-            "run --brief again",
+            "the brief does not carry exactly one plan hash matching the plan: "
+            "the plan text changed since the brief was made, or the brief has "
+            "no plan hash or more than one; run --brief again",
             follow,
         )
 
@@ -661,11 +670,14 @@ def _correct(
         try:
             root = paths.runtime_dir(env)
             paths.ensure_private_dir(root, root=root)
-            message = root / f"gapcheck-fix-{os.getpid()}-{secrets.token_hex(3)}.md"
-            fd = os.open(message, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            candidate = root / f"gapcheck-fix-{os.getpid()}-{secrets.token_hex(3)}.md"
+            fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            message = candidate
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 stream.write(CORRECTION.format(problems=result["parse_error"]))
         except (OSError, paths.RuntimeDirError) as error:
+            # The run stays open, so the lead can still send the correction.
+            details["correction"] = {"turn": None, "exit": 69}
             raise CommandError(
                 69, str(error), exits.line(69, "runtime") or ""
             ) from error
@@ -988,6 +1000,13 @@ def main(
                 file=err,
             )
         details = result["run"]
+        if problem and details and details["correction"] and not details["closed"]:
+            later = _correction_follow(command, details, environment, args.json)
+            print(
+                f"WARNING: the run {details['id']} stays open for a correction; "
+                f"once that is fixed: {later.removeprefix('next: ')}",
+                file=err,
+            )
         if details and details["close_error"]:
             print(
                 f"WARNING: the run {details['id']} stays open: "
@@ -1001,7 +1020,7 @@ def main(
                 if code == exits.PREPARATION_FAILED
                 else problem.follow
                 if problem
-                else _correction_follow(command, details, environment)
+                else _correction_follow(command, details, environment, args.json)
                 if details and details["correction"] and not details["closed"]
                 else _follow(
                     command,
