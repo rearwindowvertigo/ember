@@ -31,7 +31,14 @@ from PySide6.QtWidgets import (
 
 from ember import paths, prune, sandbox
 from ember.app import icons, state, theme
-from ember.app.flows import FlowItem, PanelItem, plan_wave
+from ember.app.flows import (
+    FlowItem,
+    FlowRun,
+    PanelItem,
+    plan_wave,
+    review_number,
+    review_run_id,
+)
 from ember.app.runs import DONE, FINISHED_LIMIT, LIVE
 from ember.app.screens.common import (
     FittingRow,
@@ -39,7 +46,6 @@ from ember.app.screens.common import (
     chain_tab_order,
     discard,
     engine_name,
-    inline,
     plural,
     screen_header,
     scrolled,
@@ -52,6 +58,7 @@ from ember.app.widgets import (
     Badge,
     Card,
     ElidedLabel,
+    IconButton,
     Picker,
     StateView,
     button,
@@ -135,70 +142,17 @@ TASK_WORDS = {
         "dropped",
     )
 }
+REVIEW_ACTION_STATUSES = {
+    "accept": ("accepted", "merging", "merged"),
+    "fix": ("reviewing", "pending"),
+    "stop": ("stopped",),
+}
 PANEL_BADGES = {
     "running": ("Running", "info"),
     "done": ("Done", "success"),
     "incomplete": ("Incomplete", "incomplete"),
     "gone": ("Failed", "danger"),
 }
-
-
-def flow_title(flow: Mapping[str, Any]) -> str:
-    """Return "Flow · <repository> · <tasks> · <merged>/<tasks> merged"."""
-    tasks = flow["tasks"]
-    folder = PurePosixPath(flow["dir"]).name or flow["dir"]
-    merged = sum(task["status"] == "merged" for task in tasks)
-    return (
-        f"Flow · {folder} · {plural(len(tasks), 'task')} · {merged}/{len(tasks)} merged"
-    )
-
-
-def flow_detail(flow: Mapping[str, Any]) -> str:
-    """Return the flow branch, active plan wave and any reason."""
-    text = f"ember/flow/{flow['id']}"
-    wave = plan_wave(flow)
-    if wave is not None:
-        text += f" · wave {wave[0]} of {wave[1]}"
-    return text + (f" · {flow['reason']}" if flow.get("reason") else "")
-
-
-def task_line(flow: Mapping[str, Any], task: Mapping[str, Any]) -> str:
-    """Return the task's status, round and selected writer."""
-    worker = task["writer"] or flow["writer"]
-    word = TASK_WORDS.get(task["status"], task["status"])
-    return (
-        f"{task['id']} · {word} · round {task['round']} · "
-        f"{engine_name(worker['engine'])} · {worker['model']}"
-    )
-
-
-def review_line(task: Mapping[str, Any]) -> str | None:
-    """Return the last review's verdict and finding counts, if reviewed."""
-    reviews = task["reviews"]
-    if not reviews:
-        return None
-    last = reviews[-1]
-    verdict = last.get("verdict", "unreadable")
-    return (
-        f"{plural(len(reviews), 'review')} · last {verdict} · "
-        f"{last.get('must', 0)} must, {last.get('should', 0)} should, "
-        f"{last.get('lead', 0)} lead"
-    )
-
-
-def panel_title(panel: Mapping[str, Any]) -> str:
-    """Return the panel member and answer counts."""
-    members = panel["members"]
-    answered = sum(member["status"] == "answered" for member in members)
-    return (
-        f"Panel · {plural(len(members), 'member')} · {answered}/{len(members)} answered"
-    )
-
-
-def panel_detail(item: PanelItem) -> str:
-    """Return the panel's repository folder."""
-    folder = PurePosixPath(item.record["dir"]).name or item.record["dir"]
-    return folder
 
 
 def newest_check_log(folder: Path) -> Path | None:
@@ -223,7 +177,7 @@ def member_line(member: Mapping[str, Any]) -> str:
     seconds = "-" if member["seconds"] is None else str(round(member["seconds"]))
     speed = f" · {member['speed']}" if member.get("speed") else ""
     return (
-        f"{member['n']}. {engine_name(member['engine'])} · {member['model']} · "
+        f"{engine_name(member['engine'])} · {member['model']} · "
         f"{member['effort'] or 'default'}{speed} · "
         f"{member['status'].capitalize()} · {seconds}s"
     )
@@ -239,31 +193,6 @@ def elapsed(seconds: float) -> str:
     return f"{minutes} min {secs} s" if minutes else f"{secs} s"
 
 
-def _clock(stamp: float) -> str:
-    moment = datetime.datetime.fromtimestamp(stamp)
-    return f"{moment.hour:02d}:{moment.minute:02d}"
-
-
-def span_text(started: float, ended: float | None, now: float | None = None) -> str:
-    """Return a record's times for its detail line.
-
-    An ended record reads "08:17 to 08:33"; its duration shows in the time
-    column. A live one reads "started 08:01 · 4 min 12 s". The start names
-    its day only when it falls on an earlier day than the end, or than now
-    while live: "yesterday 23:50 to 00:10".
-    """
-    now = time.time() if now is None else now
-    last = now if ended is None else ended
-    start_day = datetime.datetime.fromtimestamp(started).date()
-    if start_day < datetime.datetime.fromtimestamp(last).date():
-        start = inline(when(started, now))
-    else:
-        start = _clock(started)
-    if ended is None:
-        return f"started {start} · {elapsed(now - started)}"
-    return f"{start} to {_clock(ended)}"
-
-
 def took(seconds: float) -> str:
     """Return a finished duration: "45 s", "2 min 5 s", or "1 h 12 min" from an hour."""
     total = max(0, int(seconds))
@@ -272,11 +201,6 @@ def took(seconds: float) -> str:
     if hours:
         return f"{hours} h {minutes} min"
     return f"{minutes} min {secs} s" if minutes else f"{secs} s"
-
-
-def end_text(started: float, ended: float | None) -> str:
-    """Return the right column's text: "Elapsed 2 min 5 s", or "" while live."""
-    return "" if ended is None else f"Elapsed {took(ended - started)}"
 
 
 def worker_line(run: Run) -> str:
@@ -294,12 +218,6 @@ def branch_text(run: Run) -> str:
     return "read-only" if run.read_only or not run.branch else run.branch
 
 
-def run_title(run: Run) -> str:
-    """Return "Run · <subject>", or "Run · <worker>" for a run without one."""
-    subject = " ".join(run.subject.split())
-    return f"Run · {subject}" if subject else f"Run · {worker_line(run)}"
-
-
 def run_ended(run: Run) -> float | None:
     """Return when an ended run ended, or `None` while it is live."""
     if run.status not in DONE:
@@ -307,44 +225,11 @@ def run_ended(run: Run) -> float | None:
     return run.updated_at if run.ended_at is None else run.ended_at
 
 
-def run_result(run: Run) -> str:
-    """Return what a run produced so far, or why it failed.
-
-    Live: "turn 2 · 1 commit" or "turn 2 · read-only". Ended: "3 commits" or
-    "read-only". Failed: its last reason.
-    """
-    if run.status == record.FAILED:
-        return run.last_reason or "No reason recorded"
-    work = "read-only" if run.read_only else plural(len(run.commits), "commit")
-    return work if run.status in DONE else f"turn {run.turn} · {work}"
-
-
-def run_detail(run: Run, now: float | None = None) -> str:
-    """Return "<worker> · <repository folder> · <result> · <times>".
-
-    Parent waits come first: the lead's awaited flow answer, or the flow or
-    panel that must resume to collect the run. Otherwise the worker leads
-    the line when the title holds the run's subject.
-    """
-    folder = PurePosixPath(run.repo).name or run.repo
-    times = span_text(run.started_at, run_ended(run), now)
-    worker = f"{worker_line(run)} · " if run.subject.strip() else ""
-    detail = f"{worker}{folder} · {run_result(run)} · {times}"
-    state = record.parent_state(run)
-    if state.state == record.PARENT_LEAD:
-        return f"Waiting for Claude's answer to flow {state.id} · {detail}"
-    wait = record.parent_wait(state, now)
-    return f"{sentence(wait)} · {detail}" if wait else detail
-
-
 def parent_label(parent: FlowItem | PanelItem) -> str:
-    """Return a parent's type and first fact: "Panel · 7 members", "Flow · ember"."""
-    title = (
-        flow_title(parent.record)
-        if isinstance(parent, FlowItem)
-        else panel_title(parent.record)
-    )
-    return " · ".join(title.split(" · ")[:2])
+    """Describe a parent in a worker's details and denial reports."""
+    if isinstance(parent, PanelItem):
+        return f"Panel · {plural(len(parent.record['members']), 'member')}"
+    return _name(parent, None)
 
 
 def run_parents(parents: list[FlowItem | PanelItem]) -> dict[str, FlowItem | PanelItem]:
@@ -362,35 +247,6 @@ MISSING_FILES = {
     "Check logs": "the flow has run no repository check yet.",
 }
 """Why each flow or panel file button has nothing to open yet."""
-
-CODE_ROWS = ("Run", "Repository", "Branch")
-"""Run record rows whose values are a run id, a path or a branch, in `type-code`."""
-
-
-def record_rows(run: Run, now: float | None = None) -> list[tuple[str, str]]:
-    """Return a run's record as label and value rows."""
-    return [
-        ("Run", run.id),
-        ("Subject", run.subject),
-        ("Engine", worker_line(run)),
-        ("Repository", run.repo),
-        ("Branch", branch_text(run)),
-        ("Sandbox", run.sandbox),
-        (
-            "Turns and commits",
-            f"{plural(run.turn, 'turn')}, {plural(len(run.commits), 'commit')}",
-        ),
-        ("Started", when(run.started_at, now)),
-        ("Ended", _ended_text(run, now)),
-        ("Last exit", "None" if run.last_exit is None else str(run.last_exit)),
-        ("Last reason", run.last_reason or "None"),
-    ]
-
-
-def _ended_text(run: Run, now: float | None) -> str:
-    if run.ended_at is not None:
-        return when(run.ended_at, now)
-    return "Not yet" if run.status in LIVE else "Not recorded"
 
 
 def unreadable_line(runs: int, flows: int = 0, panels: int = 0) -> str:
@@ -443,19 +299,15 @@ def sections(
     A live worker whose parent has ended is a top-level row, so it shows in
     Live even when its parent is not among the shown Finished items.
     """
-    owners: dict[str, str] = {}
+    owners = run_parents(parents)
     children: dict[str, list[Run]] = {item_id(parent): [] for parent in parents}
-    ended = {item_id(parent) for parent in parents if item_ended(parent)}
-    for parent in sorted(parents, key=item_started):
-        for run_id in parent.run_ids:
-            owners.setdefault(run_id, item_id(parent))
     top: list[Item] = list(parents)
     for run in sorted(runs, key=item_started):
         owner = owners.get(run.id)
-        if owner is None or (owner in ended and not item_ended(run)):
+        if owner is None or (item_ended(owner) and not item_ended(run)):
             top.append(run)
         else:
-            children[owner].append(run)
+            children[item_id(owner)].append(run)
     live = sorted((item for item in top if not item_ended(item)), key=item_started)
     finished = sorted(
         (item for item in top if item_ended(item)), key=item_end_key, reverse=True
@@ -467,18 +319,10 @@ def matches_filters(
     item: Item, children: list[Run], kind: str, status: str, engine: str
 ) -> bool:
     """Match a top-level row's type, chip and readable workers' engines."""
-    if isinstance(item, Run):
-        item_kind = "Run"
-        chip = run_badge(item)[0]
-        workers = [item]
-    else:
-        item_kind = "Flow" if isinstance(item, FlowItem) else "Panel"
-        badges = FLOW_BADGES if isinstance(item, FlowItem) else PANEL_BADGES
-        chip = badges["gone" if item.gone else item.record["status"]][0]
-        workers = children
+    workers = [item] if isinstance(item, Run) else children
     return (
-        (kind == "all" or kind == item_kind)
-        and (status == "all" or status == chip)
+        (kind == "all" or kind == _kind(item))
+        and (status == "all" or status == _badge(item)[0])
         and (engine == "all" or any(run.engine == engine for run in workers))
     )
 
@@ -608,372 +452,468 @@ def _chip_width() -> int:
 _COLUMNS: list[int] = []
 
 
-class _ExpandableRow(QWidget):
-    """An expand button, chip, text, time, actions and a body.
+COLUMN_NAMES = ("Expand", "Status", "Name", "Progress", "Worker", "Time", "Action")
+COLUMN_GAP = 4
+EXPAND_WIDTH = 49
+DETAIL_INDENT = EXPAND_WIDTH + COLUMN_GAP
+CODE_ROWS = ("Id", "Repository", "Branch")
 
-    The columns have fixed widths so rows line up. The title starts with the
-    row's type (Run, Flow or Panel). The title and detail lines each show
-    one line, cut with an ellipsis, with the whole text in their tooltips; a
-    third such line shows a question. The expand button and the chip are
-    centred on the text lines.
-    """
 
-    def __init__(self, item_id: str, kind: str, what: str) -> None:
-        """Build the shared header and body layout."""
+def _columns(cells: Sequence[QWidget]) -> QHBoxLayout:
+    """Lay out the headings and each record using the same column widths."""
+    layout = QHBoxLayout()
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(COLUMN_GAP)
+    widths = (EXPAND_WIDTH, _chip_width(), 34, 70, 45, 54, 44)
+    stretches = (0, 0, 6, 2, 3, 2, 0)
+    for cell, width, stretch in zip(cells, widths, stretches, strict=True):
+        if stretch:
+            cell.setMinimumWidth(width)
+        else:
+            cell.setFixedWidth(width)
+        layout.addWidget(cell, stretch, Qt.AlignmentFlag.AlignVCenter)
+    return layout
+
+
+def _column_header() -> QWidget:
+    header = QWidget()
+    labels = [ElidedLabel(name) for name in COLUMN_NAMES]
+    for label in labels:
+        label.setFont(theme.font("caption"))
+        label.setProperty("role", "secondary")
+    header.setLayout(_columns(labels))
+    return header
+
+
+def _name(item: Item, worker: FlowRun | None) -> str:
+    if isinstance(item, Run):
+        subject = " ".join(item.subject.split())
+        if worker is not None:
+            if worker.role == "reviewer" and worker.round is None and subject:
+                return f"Run · {subject}"
+            action = "Review" if worker.role == "reviewer" else "Write"
+            suffix = "" if worker.round is None else f", round {worker.round}"
+            return f"Run · {action}: {worker.task}{suffix}"
+        return f"Run · {subject or worker_line(item)}"
+    folder = PurePosixPath(item.record["dir"]).name or item.record["dir"]
+    return f"{_kind(item)} · {folder}"
+
+
+def _kind(item: Item) -> str:
+    if isinstance(item, Run):
+        return "Run"
+    return "Flow" if isinstance(item, FlowItem) else "Panel"
+
+
+def _badge(item: Item) -> tuple[str, str]:
+    if isinstance(item, Run):
+        return run_badge(item)
+    table = FLOW_BADGES if isinstance(item, FlowItem) else PANEL_BADGES
+    status = item.record["status"]
+    return table.get("gone" if item.gone else status, (status, "neutral"))
+
+
+def _progress_worker(item: Item) -> tuple[str, str]:
+    if isinstance(item, Run):
+        return "read-only" if item.read_only else f"turn {item.turn}", item.model
+    if isinstance(item, FlowItem):
+        tasks = item.record["tasks"]
+        merged = sum(task["status"] == "merged" for task in tasks)
+        return f"{merged}/{len(tasks)} merged", item.record["writer"]["model"]
+    members = item.record["members"]
+    answered = sum(member["status"] == "answered" for member in members)
+    return f"{answered}/{len(members)} answered", plural(len(members), "member")
+
+
+def _finished_at(item: Item) -> float | None:
+    if isinstance(item, Run):
+        return run_ended(item)
+    data = item.record
+    if item_ended(item) and data["ended_at"] is None:
+        return data["updated_at"]
+    return data["ended_at"]
+
+
+def _review_result(review: Mapping[str, Any]) -> str:
+    return (
+        f"{review.get('must', 0)} must, {review.get('should', 0)} should, "
+        f"{review.get('lead', 0)} lead"
+    )
+
+
+def _task_worker(task: Mapping[str, Any]) -> str | None:
+    """Return the run that owns the task's current status and reason."""
+    if task["reviewer_run"]:
+        return task["reviewer_run"]
+    # Lead answers clear the review action when they start a new attempt.
+    action = task.get("review_action")
+    statuses = REVIEW_ACTION_STATUSES.get(action, ()) if isinstance(action, str) else ()
+    if task["reviews"] and task["status"] in statuses:
+        latest = task["reviews"][-1]
+        if review_number(latest) == task["round"] + 1:
+            return review_run_id(latest)
+    return task["writer_run"]
+
+
+def _task_status(task: Mapping[str, Any]) -> str:
+    return TASK_WORDS.get(task["status"], task["status"])
+
+
+def _run_rows(
+    run: Run, owner: FlowItem | PanelItem | None, worker: FlowRun | None
+) -> list[tuple[str, str]]:
+    rows = [
+        ("Branch", branch_text(run)),
+        (
+            "Turns and commits",
+            f"{plural(run.turn, 'turn')}, {plural(len(run.commits), 'commit')}",
+        ),
+        ("Last exit", "None" if run.last_exit is None else str(run.last_exit)),
+        ("Last reason", run.last_reason or "None"),
+        ("Subject", run.subject),
+        ("Engine", worker_line(run)),
+        ("Sandbox", run.sandbox),
+    ]
+    if owner is not None:
+        rows.append(("Parent", f"{parent_label(owner)} · {item_id(owner)}"))
+    state = record.parent_state(run)
+    if state.state == record.PARENT_LEAD:
+        rows.append(("Wait", f"Waiting for Claude's answer to flow {state.id}"))
+    elif wait := record.parent_wait(state):
+        rows.append(("Wait", sentence(wait)))
+    if worker is not None and isinstance(owner, FlowItem):
+        rows.extend([("Task", worker.task), ("Role", worker.role.capitalize())])
+        if worker.round is not None:
+            rows.append(("Round", str(worker.round)))
+        task = next(
+            (task for task in owner.record["tasks"] if task["id"] == worker.task),
+            None,
+        )
+        if task is not None:
+            if task["subject"] != run.subject:
+                rows.append(("Task subject", task["subject"]))
+            if _task_worker(task) == run.id:
+                rows.append(("Task status", _task_status(task)))
+                if task["reason"]:
+                    rows.append(("Task reason", task["reason"]))
+        if worker.review is not None:
+            rows.extend(
+                [
+                    ("Verdict", str(worker.review.get("verdict") or "unreadable")),
+                    ("Findings", _review_result(worker.review)),
+                ]
+            )
+    return rows
+
+
+def _flow_rows(item: FlowItem, workers: Sequence[Run]) -> list[tuple[str, str]]:
+    flow = item.record
+    wave = plan_wave(flow)
+    rows = [
+        ("Branch", f"ember/flow/{flow['id']}"),
+        ("Wave", f"{wave[0]} of {wave[1]}" if wave else "None"),
+        ("Passes", str(flow["wave"])),
+    ]
+    if item.gone:
+        rows.append(("Runner", "Runner gone"))
+    if flow.get("reason"):
+        rows.append(("Reason", flow["reason"]))
+    readable = {run.id for run in workers}
+    for task in flow["tasks"]:
+        facts = []
+        if _task_worker(task) not in readable:
+            worker = task["writer"] or flow["writer"]
+            facts.extend(
+                (
+                    task["subject"],
+                    f"{_task_status(task)} · round {task['round']} · "
+                    f"{engine_name(worker['engine'])} · {worker['model']}",
+                )
+            )
+            if task["reason"]:
+                facts.append(task["reason"])
+        for review in task["reviews"]:
+            if review_run_id(review) not in readable:
+                round_number = review_number(review)
+                title = (
+                    "Review" if round_number is None else f"Review round {round_number}"
+                )
+                facts.append(
+                    f"{title} · {review.get('verdict') or 'unreadable'} · "
+                    f"{_review_result(review)}"
+                )
+        if facts:
+            rows.append((f"Task {task['id']}", "\n".join(facts)))
+    return rows
+
+
+def _panel_rows(item: PanelItem) -> list[tuple[str, str]]:
+    rows = [("Question", item.question)] if item.question else []
+    if item.gone:
+        rows.append(("Process", "Panel process gone"))
+    for member in item.record["members"]:
+        facts = [member_line(member)]
+        if member["reason"]:
+            facts.append(member["reason"])
+        if member["changed"]:
+            facts.append("Changed: " + ", ".join(member["changed"]))
+        rows.append((f"Member {member['n']}", "\n".join(facts)))
+    for index, omitted in enumerate(item.record["left_out"], 1):
+        rows.append((f"Left out {index}", f"{omitted['value']}: {omitted['reason']}"))
+    return rows
+
+
+class _OverviewRow(QWidget):
+    """The columns, details, action bar and child layout of any Overview item."""
+
+    def __init__(self, item: Item, screen: OverviewScreen) -> None:
+        """Build a row whose widgets can be reused across reloads."""
         super().__init__()
-        self._item_id = item_id
-        self._kind = kind
-        self._what = what
+        self.item = item
+        self.overview = screen
+        self.id = item_id(item)
+        self.group: QVBoxLayout | None = None
+        self.owner: FlowItem | PanelItem | None = None
+        self.worker: FlowRun | None = None
+        self.readable_workers: Sequence[Run] = ()
+        self.child_rows: dict[str, _OverviewRow] = {}
         self.expanded = False
         outer = QVBoxLayout(self)
-        self.outer = outer
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(12)
-        header = QHBoxLayout()
-        header.setSpacing(12)
+
         self.expand_button = button("", "secondary", size="sm")
         self.expand_button.setFixedWidth(theme.CONTROL_SM)
-        header.addWidget(self.expand_button, 0, Qt.AlignmentFlag.AlignVCenter)
-        chip_column = QWidget()
-        chip_column.setFixedWidth(_chip_width())
-        chip_layout = QHBoxLayout(chip_column)
-        chip_layout.setContentsMargins(0, 0, 0, 0)
+        self.expand_button.clicked.connect(lambda: screen._toggle_row(self))
         self.badge = Badge("", "neutral")
-        chip_layout.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignLeft)
-        chip_layout.addStretch(1)
-        header.addWidget(chip_column, 0, Qt.AlignmentFlag.AlignVCenter)
-        lines = QVBoxLayout()
-        lines.setSpacing(2)
         self.title_label = ElidedLabel()
         self.title_label.setFont(theme.font("label"))
-        self.detail_label = ElidedLabel()
-        self.detail_label.setFont(theme.font("caption"))
-        self.detail_label.setProperty("role", "secondary")
-        lines.addWidget(self.title_label)
-        lines.addWidget(self.detail_label)
-        header.addLayout(lines, 1)
-        self.time_label = QLabel()
-        self.time_label.setProperty("role", "secondary")
-        header.addWidget(self.time_label, 0, Qt.AlignmentFlag.AlignTop)
-        self.action_box = QHBoxLayout()
-        header.addLayout(self.action_box)
-        outer.addLayout(header)
-        self.body = QVBoxLayout()
-        self.body.setContentsMargins(theme.CONTROL_SM + 12, 0, 0, 0)
-        outer.addLayout(self.body)
+        self.progress_label = ElidedLabel()
+        self.worker_label = ElidedLabel()
+        self.time_label = ElidedLabel()
+        for label in (self.progress_label, self.worker_label, self.time_label):
+            label.setFont(theme.font("caption"))
+            label.setProperty("role", "secondary")
+
+        name = f"Open terminal for run {self.id}"
+        self.open_button = IconButton("terminal", name, color="text-primary")
+        self.open_button.clicked.connect(self._open_terminal)
+        self.columns = _columns(
+            [
+                self._cell(self.expand_button),
+                self._cell(self.badge),
+                self.title_label,
+                self.progress_label,
+                self.worker_label,
+                self.time_label,
+                self._cell(self.open_button),
+            ]
+        )
+        outer.addLayout(self.columns)
+        self.body = QWidget()
+        body = QVBoxLayout(self.body)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(12)
+        detail_box = QWidget()
+        detail_layout = QVBoxLayout(detail_box)
+        detail_layout.setContentsMargins(DETAIL_INDENT, 0, 0, 0)
+        self.details = QWidget()
+        self.grid = QGridLayout(self.details)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setHorizontalSpacing(16)
+        self.grid.setVerticalSpacing(4)
+        self.grid.setColumnStretch(1, 1)
+        self.detail_labels: dict[str, tuple[QLabel, QLabel]] = {}
+        detail_layout.addWidget(self.details)
+
+        actions = QHBoxLayout()
+        detail_layout.addLayout(actions)
+        self.file_buttons: dict[str, QPushButton] = {}
+        self.file_paths: dict[str, Path | None] = {}
+        self.file_note = ToneLine("warning")
+        self.file_note.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        detail_layout.addWidget(self.file_note)
+        self.detail_terminal: QPushButton | None = None
+        if isinstance(item, Run):
+            self.detail_terminal = button("Open terminal", "secondary", size="sm")
+            self.detail_terminal.setAccessibleName(name)
+            self.detail_terminal.clicked.connect(self._open_terminal)
+            actions.addWidget(self.detail_terminal)
+        else:
+            names = (
+                ("Briefs", "Check logs") if isinstance(item, FlowItem) else ("Summary",)
+            )
+            for action in names:
+                link = button(action, "secondary", size="sm")
+                link.setAccessibleName(f"{action} for {_kind(item).lower()} {self.id}")
+                link.clicked.connect(
+                    lambda _checked=False, selected=action: self._open_file(selected)
+                )
+                actions.addWidget(link)
+                self.file_buttons[action] = link
+        actions.addStretch()
+
+        body.addWidget(detail_box)
+        self.nested = QVBoxLayout()
+        self.nested.setSpacing(16)
+        body.addLayout(self.nested)
+        outer.addWidget(self.body)
+        self.body.hide()
         self._draw_arrow()
         theme.signals.changed.connect(self._draw_arrow)
 
-    def set_expanded(self, expanded: bool) -> None:
-        """Store the expansion state and redraw the arrow."""
-        self.expanded = expanded
+    @staticmethod
+    def _cell(widget: QWidget) -> QWidget:
+        cell = QWidget()
+        layout = QHBoxLayout(cell)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addStretch()
+        return cell
+
+    def set_item(
+        self,
+        item: Item,
+        owner: FlowItem | PanelItem | None,
+        workers: Sequence[Run],
+    ) -> None:
+        """Update the columns and any displayed details for this record."""
+        self.item = item
+        self.owner = owner
+        self.readable_workers = workers
+        self.worker = (
+            owner.workers.get(self.id) if isinstance(owner, FlowItem) else None
+        )
+        text, tone = _badge(item)
+        if (text, tone) != (self.badge.text(), self.badge.tone()):
+            self.badge.set_tone(tone, text)
+        progress, worker = _progress_worker(item)
+        for label, value in (
+            (self.title_label, _name(item, self.worker)),
+            (self.progress_label, progress),
+            (self.worker_label, worker),
+        ):
+            label.setText(value)
+            label.setToolTip(value)
+        live = isinstance(item, Run) and item.status in LIVE
+        self.open_button.setVisible(live)
+        if self.detail_terminal is not None:
+            self.detail_terminal.setVisible(live)
+        self.update_elapsed()
+        if self.expanded:
+            self._draw_details()
+
+    def show_details(self, shown: bool) -> None:
+        """Set the row's expansion and close its children when collapsing."""
+        if shown == self.expanded:
+            return
+        self.expanded = shown
+        if shown:
+            self._draw_details()
+        else:
+            for child in self.child_rows.values():
+                child.show_details(False)
+        self.body.setVisible(shown)
         self._draw_arrow()
 
     def _draw_arrow(self, *_args: object) -> None:
-        """Draw the expansion icon and its accessible description."""
         name = "chevron-down" if self.expanded else "chevron-right"
         self.expand_button.setIcon(icons.icon(name, theme.color("text-secondary"), 16))
         verb = "Hide" if self.expanded else "Show"
         self.expand_button.setAccessibleName(
-            f"{verb} {self._what} of {self._kind} {self._item_id}"
+            f"{verb} details of {_kind(self.item).lower()} {self.id}"
         )
-
-
-class _Row(_ExpandableRow):
-    """The shared header of a live or finished run; expanded, its record."""
-
-    def __init__(self, run: Run) -> None:
-        """Build a run row without drawing its values."""
-        self.run = run
-        self.nested = False
-        self.parent_label = ""
-        self.details: QWidget | None = None
-        self.detail_values: tuple[tuple[str, str], ...] = ()
-        super().__init__(run.id, "run", "details")
-
-    def set_nested(self, nested: bool) -> None:
-        """Mark the row as nested under a flow or panel; it draws the same."""
-        self.nested = nested
-
-    def draw_time(self, now: float | None = None) -> None:
-        """Draw the detail line and the right column's Elapsed time."""
-        ended = run_ended(self.run)
-        detail = run_detail(self.run, now)
-        if self.parent_label:
-            detail = f"{self.parent_label} · {detail}"
-        self.detail_label.setText(detail)
-        self.time_label.setText(end_text(self.run.started_at, ended))
-
-    def set_run(self, run: Run) -> None:
-        """Store the run and draw its badge."""
-        self.run = run
-        text, tone = run_badge(run)
-        self.badge.set_tone(tone, text)
-        if self.details is not None and tuple(record_rows(run)) != self.detail_values:
-            self._drop_details()
-            self._add_details()
-
-    def show_details(self, shown: bool) -> None:
-        """Show or hide the run's record."""
-        if shown and self.details is None:
-            self._add_details()
-        elif not shown and self.details is not None:
-            self._drop_details()
-        self.set_expanded(shown)
-
-    def _add_details(self) -> None:
-        details = QWidget()
-        grid = QGridLayout(details)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(16)
-        grid.setVerticalSpacing(4)
-        rows = record_rows(self.run)
-        for row, (label, value) in enumerate(rows):
-            name = QLabel(label)
-            name.setProperty("role", "secondary")
-            text = QLabel(value)
-            text.setTextFormat(Qt.TextFormat.PlainText)
-            text.setWordWrap(True)
-            text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            if label in CODE_ROWS and value not in ("read-only", "None"):
-                text.setFont(theme.font("code"))
-            grid.addWidget(name, row, 0, Qt.AlignmentFlag.AlignTop)
-            grid.addWidget(text, row, 1)
-        grid.setColumnStretch(1, 1)
-        self.body.addWidget(details)
-        self.details = details
-        self.detail_values = tuple(rows)
-
-    def _drop_details(self) -> None:
-        discard(self.details, self.body)
-        self.details = None
-        self.detail_values = ()
-
-
-class _LiveRow(_Row):
-    """A live run's row; expanded, it shows the run's record."""
-
-    def __init__(self, run: Run, open_terminal: Callable[[str], None]) -> None:
-        super().__init__(run)
-        self.open_button = button("Open terminal", "secondary", size="sm")
-        set_icon(
-            self.open_button, icons.icon("terminal", theme.color("text-primary"), 16)
-        )
-        self.open_button.clicked.connect(lambda: open_terminal(self.run.id))
-        self.action_box.addWidget(self.open_button)
-        self.set_run(run)
-
-    def set_run(self, run: Run) -> None:
-        super().set_run(run)
-        self.title_label.setText(run_title(run))
-        self.update_elapsed()
-        self.open_button.setAccessibleDescription(f"Open run {run.id} in a terminal")
 
     def update_elapsed(self, now: float | None = None) -> None:
-        self.draw_time(now)
-
-
-class _FinishedRow(_Row):
-    """A finished run's row; expanded, it shows the run's record."""
-
-    def __init__(self, run: Run) -> None:
-        super().__init__(run)
-        self.shown_values: tuple[object, ...] = ()
-        self.set_run(run)
-
-    @staticmethod
-    def values(run: Run) -> tuple[object, ...]:
-        """Return everything the row shows of a run, expanded or not."""
-        return (
-            run.status,
-            run_title(run),
-            run_detail(run),
-            end_text(run.started_at, run_ended(run)),
-            tuple(record_rows(run)),
+        """Show live elapsed time or the completed duration."""
+        started = item_started(self.item)[0]
+        ended = _finished_at(self.item)
+        value = (
+            elapsed((time.time() if now is None else now) - started)
+            if ended is None
+            else took(ended - started)
         )
+        self.time_label.setText(value)
+        self.time_label.setToolTip(value)
 
-    def set_run(self, run: Run) -> None:
-        """Show a run's record; nothing is redrawn when no shown value changed."""
-        values = self.values(run)
-        self.run = run
-        if values == self.shown_values:
-            return
-        self.shown_values = values
-        super().set_run(run)
-        self.title_label.setText(run_title(run))
-        self.draw_time()
-
-
-class _RecordRow(_ExpandableRow):
-    """A flow or panel row whose expanded body survives unrelated changes."""
-
-    def __init__(self, item: FlowItem | PanelItem, screen: OverviewScreen) -> None:
-        """Create a record row with details and nested worker rows."""
-        self.item = item
-        self.live_count = 0
-        self.run_count = 0
-        self.collapsed_runs = False
-        self.overview = screen
-        kind = "flow" if isinstance(item, FlowItem) else "panel"
-        super().__init__(item.record["id"], kind, "details")
-        self.details: QWidget | None = None
-        self.file_buttons: dict[str, QPushButton] = {}
-        self.file_note = ToneLine("warning")
-        self.file_paths: dict[str, Path | None] = {}
-        self.shown_values: tuple[object, ...] = ()
-        self.base_detail = ""
-        self.nested_box = QWidget()
-        self.nested = QVBoxLayout(self.nested_box)
-        self.nested.setContentsMargins(theme.CONTROL_SM + 12, 0, 0, 0)
-        self.nested.setSpacing(16)
-        self.outer.addWidget(self.nested_box)
-        self.set_item(item)
-
-    def entries(self) -> list[tuple[str, bool]]:
-        """Return body lines with their secondary style flag."""
-        raise NotImplementedError
-
-    def set_item(self, item: FlowItem | PanelItem) -> None:
-        """Draw changed values and refresh available file buttons."""
-        self.item = item
-        data = item.record
+    def _detail_rows(self) -> list[tuple[str, str]]:
+        item = self.item
+        repo = item.repo if isinstance(item, Run) else item.record["dir"]
+        ended = item.ended_at if isinstance(item, Run) else item.record["ended_at"]
+        ended_text = (
+            when(ended)
+            if ended is not None
+            else ("Not recorded" if item_ended(item) else "Not yet")
+        )
+        shared = [
+            ("Id", self.id),
+            ("Repository", repo),
+            ("Started", when(item_started(item)[0])),
+            ("Ended", ended_text),
+        ]
+        if isinstance(item, Run):
+            return shared + _run_rows(item, self.owner, self.worker)
         if isinstance(item, FlowItem):
-            badges = FLOW_BADGES
-            title, detail = flow_title(data), flow_detail(data)
-        else:
-            badges = PANEL_BADGES
-            title, detail = panel_title(data), panel_detail(item)
-        badge = badges.get(
-            "gone" if item.gone else data["status"], (data["status"], "neutral")
-        )
-        # The chip shows the status; the detail adds only what it does not.
-        parts = []
-        if item.gone:
-            parts.append(
-                "runner gone" if isinstance(item, FlowItem) else "panel process gone"
-            )
-        if self.live_count:
-            parts.append(plural(self.live_count, "live run"))
-        if self.collapsed_runs and self.run_count:
-            parts.append(plural(self.run_count, "run"))
-        detail = " · ".join([*parts, detail])
-        self.base_detail = detail
-        entries = self.entries()
-        values = (
-            badge,
-            title,
-            detail,
-            data["started_at"],
-            data["ended_at"],
-            tuple(entries),
-        )
-        self.update_elapsed()
-        if values == self.shown_values:
-            if self.expanded:
-                self._refresh_files()
-            return
-        self.shown_values = values
-        self.badge.set_tone(badge[1], badge[0])
-        self.title_label.setText(title)
-        if self.expanded:
-            self.show_details(False)
-            self.show_details(True)
+            return shared + _flow_rows(item, self.readable_workers)
+        return shared + _panel_rows(item)
 
-    def update_elapsed(self, now: float | None = None) -> None:
-        """Redraw the times without rebuilding the body."""
-        data = self.item.record
-        ended = data["ended_at"]
-        if ended is None and data["status"] in (
-            "done",
-            "failed",
-            "incomplete",
-            "cancelled",
-        ):
-            ended = data["updated_at"]
-        times = span_text(data["started_at"], ended, now)
-        self.detail_label.setText(f"{self.base_detail} · {times}")
-        self.time_label.setText(end_text(data["started_at"], ended))
-
-    def show_details(self, shown: bool) -> None:
-        """Expand or collapse the selectable body and its file buttons."""
-        if self.details is not None:
-            discard(self.details, self.body)
-            self.details = None
-        self.file_buttons = {}
-        self.file_paths = {}
-        if shown:
-            details = QWidget()
-            layout = QVBoxLayout(details)
-            layout.setContentsMargins(0, 0, 0, 0)
-            for text, secondary in self.entries():
-                line = QHBoxLayout()
-                label = QLabel(text)
-                label.setTextFormat(Qt.TextFormat.PlainText)
-                label.setWordWrap(True)
-                policy = label.sizePolicy()
-                policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
-                label.setSizePolicy(policy)
-                label.setTextInteractionFlags(
+    def _draw_details(self) -> None:
+        rows = self._detail_rows()
+        previous = self.detail_labels
+        current = {}
+        for index, (key, value) in enumerate(rows):
+            pair = previous.pop(key, None)
+            if pair is None:
+                name = QLabel(key)
+                name.setProperty("role", "secondary")
+                name.setWordWrap(True)
+                text = QLabel()
+                text.setTextFormat(Qt.TextFormat.PlainText)
+                text.setWordWrap(True)
+                text.setTextInteractionFlags(
                     Qt.TextInteractionFlag.TextSelectableByMouse
                 )
-                if secondary:
-                    label.setProperty("role", "secondary")
-                line.addWidget(label, 1)
-                layout.addLayout(line)
-            actions = QHBoxLayout()
-            names = (
-                ("Briefs", "Check logs")
-                if isinstance(self.item, FlowItem)
-                else ("Summary",)
-            )
-            for name in names:
-                link = button(name, "secondary", size="sm")
-                link.clicked.connect(
-                    lambda _checked=False, selected=name: self._open_file(selected)
-                )
-                actions.addWidget(link)
-                self.file_buttons[name] = link
-            actions.addStretch()
-            layout.addLayout(actions)
-            self.file_note = ToneLine("warning")
-            policy = self.file_note.sizePolicy()
-            policy.setHorizontalPolicy(QSizePolicy.Policy.Ignored)
-            policy.setHeightForWidth(True)
-            self.file_note.setSizePolicy(policy)
-            layout.addWidget(self.file_note)
+                if key in CODE_ROWS:
+                    text.setFont(theme.font("code"))
+                pair = (name, text)
+            name, text = pair
+            if text.text() != value:
+                selection = text.selectedText()
+                text.setText(value)
+                if selection and (start := value.find(selection)) >= 0:
+                    text.setSelection(start, len(selection))
+            cell = self.grid.itemAtPosition(index, 0)
+            if cell is None or cell.widget() is not name:
+                self.grid.addWidget(name, index, 0, Qt.AlignmentFlag.AlignTop)
+                self.grid.addWidget(text, index, 1)
+            current[key] = pair
+        for pair in previous.values():
+            for label in pair:
+                discard(label, self.grid)
+        self.detail_labels = current
+        if self.file_buttons:
             self._refresh_files()
-            self.body.addWidget(details)
-            self.details = details
-        self.set_expanded(shown)
-        self.show_nested()
 
-    def show_nested(self) -> None:
-        """Show nested runs, except in Finished while the row is collapsed.
-
-        A Finished parent with a live nested run keeps its runs shown.
-        """
-        self.nested_box.setVisible(not self.collapsed_runs or self.expanded)
+    def _open_terminal(self) -> None:
+        self.overview.context.open_run_terminal(self.id)
 
     def _refresh_files(self) -> None:
-        """Check targets only while drawing expanded details."""
+        """Check the targets of the expanded row's file actions."""
         env = self.overview.context.env
         if isinstance(self.item, FlowItem):
-            folder = flow_record.folder(self.item.record["id"], env)
+            folder = flow_record.folder(self.id, env)
             briefs = folder / "briefs"
             self.file_paths = {
                 "Briefs": briefs if briefs.is_dir() else None,
                 "Check logs": newest_check_log(folder),
             }
         else:
-            summary = panel_record.folder(self.item.record["id"], env) / "summary.md"
+            summary = panel_record.folder(self.id, env) / "summary.md"
             self.file_paths = {"Summary": summary if summary.is_file() else None}
 
     def _open_file(self, name: str) -> None:
-        """Open the selected file URL, or say under the buttons why it did not open.
-
-        The buttons stay enabled; a file or folder that is not there yet, or a
-        viewer that refused the file, is named in the line under them.
-        """
         self._refresh_files()
         path = self.file_paths[name]
         if path is None:
@@ -982,44 +922,6 @@ class _RecordRow(_ExpandableRow):
             self.file_note.show_text(None)
         else:
             self.file_note.show_text(f"No viewer opened {path}.")
-
-
-class _FlowRow(_RecordRow):
-    """A flow with task status and review details."""
-
-    def entries(self) -> list[tuple[str, bool]]:
-        """Return the runner pass count and each task's lines in plan order."""
-        result: list[tuple[str, bool]] = [(f"passes {self.item.record['wave']}", True)]
-        for task in self.item.record["tasks"]:
-            result.append((task_line(self.item.record, task), False))
-            if task["reason"]:
-                result.append((task["reason"], True))
-            review = review_line(task)
-            if review:
-                result.append((review, True))
-        return result
-
-
-class _PanelRow(_RecordRow):
-    """A panel with member answers, omissions and a Summary button."""
-
-    def entries(self) -> list[tuple[str, bool]]:
-        """Return the question, then member details, then omissions."""
-        result: list[tuple[str, bool]] = []
-        data = self.item.record
-        question = self.item.question if isinstance(self.item, PanelItem) else ""
-        if question:
-            result.append(("Question", False))
-            result.append((question, True))
-        for member in data["members"]:
-            result.append((member_line(member), False))
-            if member["reason"]:
-                result.append((member["reason"], True))
-            if member["changed"]:
-                result.append(("Changed: " + ", ".join(member["changed"]), True))
-        for omitted in data["left_out"]:
-            result.append((f"Left out {omitted['value']}: {omitted['reason']}", True))
-        return result
 
 
 def _place(layout: QVBoxLayout, rows: Sequence[QWidget]) -> None:
@@ -1033,15 +935,17 @@ def _place(layout: QVBoxLayout, rows: Sequence[QWidget]) -> None:
         row.show()
 
 
-def _card(title: str) -> tuple[Card, QVBoxLayout, QLabel]:
+def _card(title: str) -> tuple[Card, QVBoxLayout, QLabel, QWidget]:
     card, layout = titled_card(title)
     empty = QLabel()
     empty.setProperty("role", "muted")
     layout.addWidget(empty)
+    header = _column_header()
+    layout.addWidget(header)
     rows = QVBoxLayout()
     rows.setSpacing(16)
     layout.addLayout(rows)
-    return card, rows, empty
+    return card, rows, empty, header
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1202,10 +1106,9 @@ class OverviewScreen(QWidget):
         )
         self.records_alert.hide()
         layout.addWidget(self.records_alert)
-        self.flow_rows: dict[str, _RecordRow] = {}
-        self.panel_rows: dict[str, _RecordRow] = {}
-
-        self.live_card, self.live_rows_layout, self.live_empty = _card("Live")
+        self.live_card, self.live_rows_layout, self.live_empty, self.live_header = (
+            _card("Live")
+        )
         self.live_empty.setText("Nothing running")
         self.live_empty.setProperty("role", "secondary")
         live_layout = self.live_card.layout()
@@ -1224,9 +1127,12 @@ class OverviewScreen(QWidget):
         live_layout.insertLayout(0, live_header)
         live_layout.addWidget(self.unreadable_alert)
         layout.addWidget(self.live_card)
-        self.finished_card, self.finished_rows_layout, self.finished_empty = _card(
-            "Finished"
-        )
+        (
+            self.finished_card,
+            self.finished_rows_layout,
+            self.finished_empty,
+            self.finished_header,
+        ) = _card("Finished")
         self.finished_empty.setText("No finished runs, flows or panels yet.")
         finished_layout = self.finished_card.layout()
         assert isinstance(finished_layout, QVBoxLayout)
@@ -1292,12 +1198,10 @@ class OverviewScreen(QWidget):
         layout.addWidget(self.finished_card)
         layout.addStretch(1)
 
-        self.live_rows: dict[str, _LiveRow] = {}
-        self.finished_rows: dict[str, _FinishedRow] = {}
-        self._reading_order: list[_ExpandableRow] = []
+        self.live_rows: dict[str, _OverviewRow] = {}
+        self.finished_rows: dict[str, _OverviewRow] = {}
+        self._rows: dict[str, _OverviewRow] = {}
         self._parents: dict[str, FlowItem | PanelItem] = {}
-        self.expanded_live: str | None = None
-        self.expanded_finished: str | None = None
         self._stale = True
 
         self._elapsed = QTimer(self)
@@ -1354,11 +1258,12 @@ class OverviewScreen(QWidget):
             *self.records.flows(),
             *self.records.panels(),
         ]
-        live, finished, children = sections(runs.runs(), parents)
+        records = runs.runs()
+        live, finished, children = sections(records, parents)
         self._parents = run_parents(parents)
         self.check_denials()
         workers: dict[str, list[Run]] = {item_id(parent): [] for parent in parents}
-        for run in runs.runs():
+        for run in records:
             owner = self._parents.get(run.id)
             if owner is not None:
                 workers[item_id(owner)].append(run)
@@ -1404,7 +1309,8 @@ class OverviewScreen(QWidget):
         error = runs.error()
         self.unreadable_alert.setVisible(unreadable > 0 and error is None)
         if error is not None:
-            self.collapse_live()
+            for row in self.live_rows.values():
+                row.show_details(False)
             self._show_state()
             self.state_view.show_error(read_failure(error), self.retry_runs)
             return
@@ -1418,7 +1324,7 @@ class OverviewScreen(QWidget):
         self.state_view.hide()
         self.live_card.show()
         self.finished_card.show()
-        self._draw_sections(live, finished, children)
+        self._draw_sections(live, finished, children, workers)
         self._chain_focus()
 
     def toggle_finished_list(self) -> None:
@@ -1551,84 +1457,34 @@ class OverviewScreen(QWidget):
         self._update_clear()
 
     def _draw_sections(
-        self, live: list[Item], finished: list[Item], children: dict[str, list[Run]]
+        self,
+        live: list[Item],
+        finished: list[Item],
+        children: Mapping[str, list[Run]],
+        workers: Mapping[str, list[Run]],
     ) -> None:
-        """Reuse rows and place every worker in its parent's section.
-
-        A top-level worker of an ended parent names that parent first on its
-        detail line.
-        """
-        shown_runs = [item for item in [*live, *finished] if isinstance(item, Run)]
-        parents = [item for item in [*live, *finished] if not isinstance(item, Run)]
-        for parent in parents:
-            shown_runs.extend(children[item_id(parent)])
-        self._draw_live([run for run in shown_runs if run.status in LIVE])
-        self._draw_finished([run for run in shown_runs if run.status in DONE])
-        top_ids = {item.id for item in [*live, *finished] if isinstance(item, Run)}
-        for run in shown_runs:
-            row = self._run_row(run)
-            owner = self._parents.get(run.id) if run.id in top_ids else None
-            label = parent_label(owner) if owner is not None else ""
-            if label != row.parent_label:
-                row.parent_label = label
-                row.draw_time()
-        for item in parents:
-            rows = self.flow_rows if isinstance(item, FlowItem) else self.panel_rows
-            key = item_id(item)
-            row = rows.get(key)
-            if row is None:
-                row = (
-                    _FlowRow(item, self)
-                    if isinstance(item, FlowItem)
-                    else _PanelRow(item, self)
-                )
-                row.expand_button.clicked.connect(
-                    lambda _checked=False, selected=row, group=rows: (
-                        self._toggle_record(selected, group)
-                    )
-                )
-                rows[key] = row
-            row.live_count = sum(run.status in LIVE for run in children[key])
-            row.run_count = len(children[key])
-            row.collapsed_runs = item_ended(item) and row.live_count == 0
-            row.set_item(item)
-            nested_rows = [self._run_row(run) for run in children[key]]
-            for nested_row in nested_rows:
-                nested_row.set_nested(True)
-            _place(row.nested, nested_rows)
-            row.show_nested()
-        self._reading_order = []
-        for items, layout, empty in (
-            (live, self.live_rows_layout, self.live_empty),
-            (finished, self.finished_rows_layout, self.finished_empty),
-        ):
-            top_rows: list[QWidget] = []
-            for item in items:
-                if isinstance(item, Run):
-                    row = self._run_row(item)
-                    row.set_nested(False)
-                    self._reading_order.append(row)
-                else:
-                    row = (
-                        self.flow_rows
-                        if isinstance(item, FlowItem)
-                        else self.panel_rows
-                    )[item_id(item)]
-                    self._reading_order.append(row)
-                    self._reading_order.extend(
-                        self._run_row(run) for run in children[item_id(item)]
-                    )
-                top_rows.append(row)
-            _place(layout, top_rows)
-            empty.setVisible(not items)
-        # Surviving workers have moved out of parents that are no longer shown.
-        parent_ids = {item_id(item) for item in parents}
-        for rows in (self.flow_rows, self.panel_rows):
-            for key in list(rows):
-                if key not in parent_ids:
-                    row = rows.pop(key)
-                    row.setParent(None)
-                    row.deleteLater()
+        """Place top-level rows and only their assigned children."""
+        shown = {item_id(item) for item in (*live, *finished)}
+        wanted = shown | {run.id for key in shown for run in children.get(key, ())}
+        for key in self._rows.keys() - wanted:
+            row = self._rows.pop(key)
+            discard(row, row.group)
+        self.live_rows = self._draw_card(
+            live,
+            children,
+            workers,
+            self.live_rows_layout,
+            self.live_empty,
+            self.live_header,
+        )
+        self.finished_rows = self._draw_card(
+            finished,
+            children,
+            workers,
+            self.finished_rows_layout,
+            self.finished_empty,
+            self.finished_header,
+        )
         error = self.records.error()
         self.records_alert.setVisible(error is not None)
         if error is not None:
@@ -1636,67 +1492,77 @@ class OverviewScreen(QWidget):
             self.records_alert.title_label.setText(text)
             self.records_alert.setAccessibleName(text)
 
-    def _run_row(self, run: Run) -> _Row:
-        """Return a shown run's row by its own status."""
-        return (
-            self.live_rows[run.id] if run.status in LIVE else self.finished_rows[run.id]
+    def _draw_card(
+        self,
+        items: Sequence[Item],
+        children: Mapping[str, list[Run]],
+        workers: Mapping[str, list[Run]],
+        layout: QVBoxLayout,
+        empty: QLabel,
+        header: QWidget,
+    ) -> dict[str, _OverviewRow]:
+        has_expanded = any(
+            row is not None and row.expanded and row.group is layout
+            for row in (self._rows.get(item_id(item)) for item in items)
         )
+        rows = {}
+        for item in items:
+            key = item_id(item)
+            row = self._draw_row(
+                item,
+                layout,
+                self._parents.get(key),
+                workers.get(key, []),
+                keep_expansion=not has_expanded and not isinstance(item, Run),
+            )
+            has_expanded |= row.expanded
+            if not isinstance(item, Run):
+                row.child_rows = {
+                    run.id: self._draw_row(run, row.nested, item)
+                    for run in children[key]
+                }
+                _place(row.nested, list(row.child_rows.values()))
+            rows[key] = row
+        _place(layout, list(rows.values()))
+        empty.setVisible(not rows)
+        header.setVisible(bool(rows))
+        return rows
 
-    def _toggle_record(self, row: _RecordRow, rows: Mapping[str, _RecordRow]) -> None:
-        """Expand one row in its card, or collapse the already expanded row."""
+    def _draw_row(
+        self,
+        item: Item,
+        group: QVBoxLayout,
+        owner: FlowItem | PanelItem | None,
+        workers: Sequence[Run] = (),
+        *,
+        keep_expansion: bool = False,
+    ) -> _OverviewRow:
+        key = item_id(item)
+        row = self._rows.get(key)
+        if row is None:
+            row = _OverviewRow(item, self)
+            self._rows[key] = row
+        elif row.group is not group:
+            if not keep_expansion:
+                row.show_details(False)
+            if row.group is not None:
+                row.group.removeWidget(row)
+        row.group = group
+        row.set_item(item, owner, workers)
+        return row
+
+    def _toggle_row(self, row: _OverviewRow) -> None:
+        """Expand one top-level row per card and one child under that row."""
         shown = not row.expanded
-        for other in rows.values():
-            if other.expanded:
-                other.show_details(False)
+        if shown:
+            for other in self._rows.values():
+                if other.group is row.group and other.expanded:
+                    other.show_details(False)
         row.show_details(shown)
         self._chain_focus()
 
-    def _draw_live(self, live: list[Run]) -> None:
-        wanted = {run.id for run in live}
-        if self.expanded_live is not None and self.expanded_live not in wanted:
-            self.collapse_live()
-        for run_id in [key for key in self.live_rows if key not in wanted]:
-            row = self.live_rows.pop(run_id)
-            discard(row, self.live_rows_layout)
-        for run in live:
-            row = self.live_rows.get(run.id)
-            if row is None:
-                row = _LiveRow(run, self.context.open_run_terminal)
-                row.expand_button.clicked.connect(
-                    lambda _checked=False, key=run.id: self.toggle_live(key)
-                )
-                self.live_rows[run.id] = row
-            else:
-                row.set_run(run)
-
-    def _draw_finished(self, finished: list[Run]) -> None:
-        """Draw the finished rows, reusing each run's row.
-
-        A row is redrawn only when a value it shows changed, so focus, an
-        expanded record and selected text survive a reload.
-        """
-        wanted = {run.id for run in finished}
-        if self.expanded_finished not in wanted:
-            self.expanded_finished = None
-        for run_id in [key for key in self.finished_rows if key not in wanted]:
-            discard(self.finished_rows.pop(run_id), self.finished_rows_layout)
-        for run in finished:
-            row = self.finished_rows.get(run.id)
-            if row is None:
-                row = _FinishedRow(run)
-                row.expand_button.clicked.connect(
-                    lambda _checked=False, key=run.id: self.toggle_finished(key)
-                )
-                self.finished_rows[run.id] = row
-            else:
-                row.set_run(run)
-        self.finished_rows = {run.id: self.finished_rows[run.id] for run in finished}
-        expanded = self.finished_rows.get(self.expanded_finished or "")
-        if expanded is not None and expanded.details is None:
-            expanded.show_details(True)
-
     def _chain_focus(self) -> None:
-        """Keep Tab in reading order through alerts, records and runs."""
+        """Keep Tab in reading order through alerts, rows, and expanded bodies."""
         chain: list[QWidget] = []
         for alert in self.sandbox_alerts.values():
             chain.extend(alert.buttons)
@@ -1704,7 +1570,9 @@ class OverviewScreen(QWidget):
             chain.extend((notice.runs_toggle, *notice.buttons))
         if not self.records_alert.isHidden():
             chain.extend(self.records_alert.buttons)
-        filters: list[QWidget] = [
+        for row in self.live_rows.values():
+            self._row_controls(row, chain)
+        chain.extend(
             control
             for control in (
                 self.finished_toggle,
@@ -1714,61 +1582,28 @@ class OverviewScreen(QWidget):
                 self.clear_button,
             )
             if control.isVisibleTo(self)
-        ]
-        for row in self._reading_order:
-            if row._item_id in self._shown_finished and filters:
-                chain.extend(filters)
-                filters = []
-            chain.append(row.expand_button)
-            if isinstance(row, _LiveRow):
-                chain.append(row.open_button)
-            elif isinstance(row, _RecordRow):
-                chain.extend(row.file_buttons.values())
-        chain.extend(filters)
+        )
+        for row in self.finished_rows.values():
+            self._row_controls(row, chain)
         chain_tab_order(chain)
+
+    @staticmethod
+    def _row_controls(row: _OverviewRow, chain: list[QWidget]) -> None:
+        chain.append(row.expand_button)
+        if not row.open_button.isHidden():
+            chain.append(row.open_button)
+        if row.expanded:
+            if row.detail_terminal is not None and not row.detail_terminal.isHidden():
+                chain.append(row.detail_terminal)
+            chain.extend(row.file_buttons.values())
+            for child in row.child_rows.values():
+                OverviewScreen._row_controls(child, chain)
 
     def _update_elapsed(self) -> None:
         now = time.time()
-        for row in self.live_rows.values():
-            row.update_elapsed(now)
-        for item in (*self.flow_rows.values(), *self.panel_rows.values()):
-            if item.item.record["ended_at"] is None:
-                item.update_elapsed(now)
-
-    # Expanding
-
-    def toggle_live(self, run_id: str) -> None:
-        """Expand a live row with its record, or collapse it; one at a time."""
-        if self.expanded_live == run_id:
-            self.collapse_live()
-            return
-        self.collapse_live()
-        row = self.live_rows.get(run_id)
-        if row is None:
-            return
-        self.expanded_live = run_id
-        row.show_details(True)
-
-    def collapse_live(self) -> None:
-        """Collapse the expanded live row."""
-        run_id, self.expanded_live = self.expanded_live, None
-        if run_id is not None and run_id in self.live_rows:
-            self.live_rows[run_id].show_details(False)
-
-    def toggle_finished(self, run_id: str) -> None:
-        """Expand a finished row with its record, or collapse it; one at a time."""
-        previous = self.expanded_finished
-        if previous is not None and previous in self.finished_rows:
-            self.finished_rows[previous].show_details(False)
-        if previous == run_id:
-            self.expanded_finished = None
-            return
-        row = self.finished_rows.get(run_id)
-        if row is None:
-            self.expanded_finished = None
-            return
-        self.expanded_finished = run_id
-        row.show_details(True)
+        for row in self._rows.values():
+            if row.isVisible() and _finished_at(row.item) is None:
+                row.update_elapsed(now)
 
     def check_denials(self) -> None:
         """Show undismissed denials except startup files from recorded turns."""
