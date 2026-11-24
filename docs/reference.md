@@ -5131,9 +5131,15 @@ The chevron and type columns sit together. The other columns are 14 pixels
 apart. Expand, Type, Status and Button are sized to the chevron button,
 the widest type label, the widest status chip and the Terminal button.
 Name takes the remaining space. The table reserves 170 pixels for Name
-while Worker, Progress, Effort and Time can shrink to their heading
-widths. Name can then shrink to 160 pixels before the table scrolls
-horizontally. Long text ends with an ellipsis.
+while Worker, Progress, Effort and Time shrink in that order to their
+heading widths. Name can then shrink to 160 pixels. If the table still
+needs room, it hides Effort, then Worker, then Progress, removing each
+heading and its cells together. Name can shrink further once all three
+are hidden. The table fits the card without horizontal scrolling and
+restores columns as space allows. Long text ends with an ellipsis.
+Expanded details show Progress, the run's Engine or flow's Writer with
+its model and effort, and the panel's member count, overall effort and
+individual member models and efforts.
 
 | Column | Heading | Run | Flow | Panel |
 |---|---|---|---|---|

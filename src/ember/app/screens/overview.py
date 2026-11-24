@@ -15,7 +15,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import QEvent, QObject, QSize, QSizeF, Qt, QTimer, QUrl
+from PySide6.QtCore import QSize, QSizeF, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QDesktopServices,
     QFontMetrics,
@@ -207,11 +207,11 @@ def took(seconds: float) -> str:
     return f"{minutes} min {secs} s" if minutes else f"{secs} s"
 
 
-def worker_line(run: Run) -> str:
-    """Return the engine and model followed by the recorded effort and speed."""
+def worker_line(run: Run, *, show_default_effort: bool = False) -> str:
+    """Return the engine, model, effort if recorded or requested, and speed."""
     parts = [engine_name(run.engine), run.model]
-    if run.effort:
-        parts.append(run.effort)
+    if run.effort or show_default_effort:
+        parts.append(run.effort or "default")
     if run.speed:
         parts.append(run.speed)
     return " · ".join(parts)
@@ -490,23 +490,26 @@ class _ColumnWidths:
     minimum: tuple[int, ...]
     preferred: tuple[int, ...]
 
-    def minimum_width(self) -> int:
-        """Return the table width at which horizontal scrolling starts."""
-        return sum(self.minimum) + COLUMN_GAP * (len(COLUMN_NAMES) - 2)
-
-    def fit(self, viewport_width: int) -> tuple[int, ...]:
-        """Reserve room for Name and give elapsed time priority as space shrinks."""
-        extra = sum(self.preferred) - sum(self.minimum)
-        needed = self.minimum_width() + extra + (NAME_PREFERRED_WIDTH - NAME_MIN_WIDTH)
-        excess = needed - viewport_width
-        if excess <= 0:
-            return self.preferred
+    def fit(self, available_width: int) -> tuple[int, ...]:
+        """Shrink to the heading widths, then hide optional columns as needed."""
         widths = list(self.preferred)
+        name_reserve = NAME_PREFERRED_WIDTH - NAME_MIN_WIDTH
+        needed = sum(widths) + COLUMN_GAP * (len(widths) - 2) + name_reserve
+        excess = max(0, needed - available_width)
         for heading in ("Worker", "Progress", "Effort", "Time"):
             index = COLUMN_NAMES.index(heading)
             reduction = min(excess, widths[index] - self.minimum[index])
             widths[index] -= reduction
             excess -= reduction
+        excess -= name_reserve
+        for heading in ("Effort", "Worker", "Progress"):
+            if excess <= 0:
+                break
+            index = COLUMN_NAMES.index(heading)
+            excess -= widths[index] + COLUMN_GAP
+            widths[index] = 0
+        if excess > 0:
+            widths[COLUMN_NAMES.index("Name")] = max(0, NAME_MIN_WIDTH - excess)
         return tuple(widths)
 
 
@@ -584,12 +587,16 @@ class _RowColumns(QHBoxLayout):
         """Apply widths shared by every row and stretch Name into the spare space."""
         if self._widths == widths:
             return
-        self._widths = widths
-        for heading, cell, width in zip(COLUMN_NAMES, self.cells, widths, strict=True):
+        for index, (heading, cell, width) in enumerate(
+            zip(COLUMN_NAMES, self.cells, widths, strict=True)
+        ):
             if heading == "Name":
                 cell.setMinimumWidth(width)
             else:
                 cell.setFixedWidth(width)
+                if width == 0 or (self._widths and self._widths[index] == 0):
+                    cell.setVisible(width > 0)
+        self._widths = widths
 
 
 def _column_header(widths: tuple[int, ...]) -> QWidget:
@@ -717,7 +724,7 @@ def _run_rows(
         ("Last exit", "None" if run.last_exit is None else str(run.last_exit)),
         ("Last reason", run.last_reason or "None"),
         ("Subject", run.subject),
-        ("Engine", worker_line(run)),
+        ("Engine", worker_line(run, show_default_effort=True)),
         ("Sandbox", run.sandbox),
     ]
     if owner is not None:
@@ -755,10 +762,16 @@ def _run_rows(
 def _flow_rows(item: FlowItem, workers: Sequence[Run]) -> list[tuple[str, str]]:
     flow = item.record
     wave = plan_wave(flow)
+    writer = flow["writer"]
     rows = [
         ("Branch", f"ember/flow/{flow['id']}"),
         ("Wave", f"{wave[0]} of {wave[1]}" if wave else "None"),
         ("Passes", str(flow["wave"])),
+        (
+            "Writer",
+            f"{engine_name(writer['engine'])} · {writer['model']} · "
+            f"{writer['effort'] or 'default'}",
+        ),
     ]
     if item.gone:
         rows.append(("Runner", "Runner gone"))
@@ -937,6 +950,9 @@ class _OverviewRow(QWidget):
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(12)
         self.detail_box = QWidget()
+        self.detail_box.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         detail_layout = QVBoxLayout(self.detail_box)
         detail_layout.setContentsMargins(DETAIL_INDENT, 0, 0, 0)
         self.details = QWidget()
@@ -977,7 +993,7 @@ class _OverviewRow(QWidget):
                 self.file_buttons[action] = link
         actions.addStretch()
 
-        body.addWidget(self.detail_box, 0, Qt.AlignmentFlag.AlignLeft)
+        body.addWidget(self.detail_box)
         self.nested = QVBoxLayout()
         self.nested.setSpacing(16)
         body.addLayout(self.nested)
@@ -1087,17 +1103,19 @@ class _OverviewRow(QWidget):
             if ended is not None
             else ("Not recorded" if item_ended(item) else "Not yet")
         )
+        progress, worker, effort = _progress_worker_effort(item)
         shared = [
             ("Id", self.id),
             ("Repository", repo),
             ("Started", when(item_started(item)[0])),
             ("Ended", ended_text),
+            ("Progress", progress),
         ]
         if isinstance(item, Run):
             return shared + _run_rows(item, self.owner, self.worker)
         if isinstance(item, FlowItem):
             return shared + _flow_rows(item, self.readable_workers)
-        return shared + _panel_rows(item)
+        return shared + [("Worker", worker), ("Effort", effort)] + _panel_rows(item)
 
     def _draw_details(self) -> None:
         rows = self._detail_rows()
@@ -1166,57 +1184,24 @@ def _place(layout: QVBoxLayout, rows: Sequence[QWidget]) -> None:
         row.show()
 
 
-class _RowTable(QScrollArea):
-    """Fit the row columns and scroll horizontally below their minimum width."""
+class _RowTable(QWidget):
+    """Fit the headings and rows to the available width in their card."""
 
-    def __init__(self, content: QWidget, widths: _ColumnWidths) -> None:
+    def __init__(self, widths: _ColumnWidths) -> None:
         super().__init__()
         self._widths = widths
-        self.setFrameShape(QScrollArea.Shape.NoFrame)
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.setWidgetResizable(True)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setWidget(content)
-        content.setAutoFillBackground(False)
-        self.viewport().setAutoFillBackground(False)
-        self.horizontalScrollBar().rangeChanged.connect(self._fit_height)
-
-    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: D102, N802
-        handled = super().eventFilter(watched, event)
-        if watched is self.widget() and event.type() in (
-            QEvent.Type.LayoutRequest,
-            QEvent.Type.Resize,
-        ):
-            self._fit_height()
-        return handled
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
     def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: D102, N802
         super().resizeEvent(event)
-        self.fit_columns()
-        self._fit_height()
+        if event.size().width() != event.oldSize().width():
+            self.fit_columns()
 
     def fit_columns(self) -> None:
-        """Fit all headings and rows against the viewport's width."""
-        viewport_width = self.viewport().width()
-        widths = self._widths.fit(viewport_width)
+        """Apply the table's fitted widths to every heading and row."""
+        widths = self._widths.fit(self.width())
         for columns in self.findChildren(_RowColumns):
             columns.set_widths(widths)
-        for row in self.findChildren(_OverviewRow):
-            row.detail_box.setFixedWidth(viewport_width)
-        content = self.widget()
-        if content is not None:
-            content.setFixedWidth(max(viewport_width, self._widths.minimum_width()))
-
-    def _fit_height(self) -> None:
-        content = self.widget()
-        if content is None:
-            return
-        height = content.heightForWidth(content.width())
-        if height < 0:
-            height = content.sizeHint().height()
-        bar = self.horizontalScrollBar()
-        self.setFixedHeight(height + (bar.sizeHint().height() if bar.maximum() else 0))
 
 
 def _card(
@@ -1228,8 +1213,8 @@ def _card(
     empty = QLabel()
     empty.setProperty("role", "muted")
     layout.addWidget(empty)
-    content = QWidget()
-    table_layout = QVBoxLayout(content)
+    table = _RowTable(widths)
+    table_layout = QVBoxLayout(table)
     table_layout.setContentsMargins(0, 0, 0, 0)
     table_layout.setSpacing(layout.spacing())
     header = _column_header(widths.minimum)
@@ -1237,7 +1222,6 @@ def _card(
     rows = QVBoxLayout()
     rows.setSpacing(16)
     table_layout.addLayout(rows)
-    table = _RowTable(content, widths)
     layout.addWidget(table)
     return card, rows, empty, header, table
 

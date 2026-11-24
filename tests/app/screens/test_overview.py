@@ -384,6 +384,7 @@ def test_finished_details(
         "Repository",
         "Started",
         "Ended",
+        "Progress",
         "Branch",
         "Turns and commits",
         "Last exit",
@@ -393,6 +394,7 @@ def test_finished_details(
         "Sandbox",
     ]
     assert rows["Id"] == DONE_B
+    assert rows["Progress"] == "turn 1"
     assert rows["Sandbox"] == "bubblewrap"
     assert rows["Turns and commits"] == "1 turn, 0 commits"
     assert rows["Last exit"] == "3"
@@ -716,6 +718,7 @@ def test_flow_details_and_nested_runs(
     context.runs.reload()
     qtbot.waitUntil(lambda: len(context.runs.runs()) == 2)
     screen = screen_for(context, qtbot)
+    screen.resize(500, 900)
     assert screen.live_card.isVisible()
     assert screen.finished_empty.isVisible()
     row = screen.live_rows[FLOW]
@@ -726,19 +729,25 @@ def test_flow_details_and_nested_runs(
     assert row.worker_label.text() == "test-model"
     assert row.effort_label.text() == "high"
     assert row.open_button.isHidden()
+    qtbot.waitUntil(row.progress_label.isHidden)
     assert all(not child.isVisible() for child in row.child_rows.values())
     qtbot.mouseClick(row.expand_button, Qt.MouseButton.LeftButton)
     values = detail_rows(row)
-    assert list(values)[:6] == [
+    assert list(values)[:9] == [
         "Id",
         "Repository",
         "Started",
         "Ended",
+        "Progress",
         "Branch",
         "Wave",
+        "Passes",
+        "Writer",
     ]
     assert values["Id"] == FLOW
     assert values["Branch"] == f"ember/flow/{FLOW}"
+    assert values["Progress"] == "1/2 merged"
+    assert values["Writer"] == "Codex · test-model · high"
     assert values["Wave"] == "2 of 2"
     assert values["Passes"] == "12"
     assert values["Reason"] == "Needs an answer"
@@ -1006,6 +1015,7 @@ def test_panel_details(env: dict[str, str], context: AppContext, qtbot: QtBot) -
         left_out=[{"value": "claude:opus", "reason": "engine off"}],
     )
     screen = screen_for(context, qtbot)
+    screen.resize(500, 900)
     row = screen.finished_rows[PANEL]
     assert row.badge.text() == "Incomplete"
     assert row.title_label.text() == "A question"
@@ -1015,6 +1025,7 @@ def test_panel_details(env: dict[str, str], context: AppContext, qtbot: QtBot) -
     assert row.effort_label.text() == "mixed"
     assert row.time_label.text() == "2 min 0 s"
     assert row.open_button.isHidden()
+    qtbot.waitUntil(row.progress_label.isHidden)
     qtbot.mouseClick(row.expand_button, Qt.MouseButton.LeftButton)
     values = detail_rows(row)
     assert list(values) == [
@@ -1022,12 +1033,18 @@ def test_panel_details(env: dict[str, str], context: AppContext, qtbot: QtBot) -
         "Repository",
         "Started",
         "Ended",
+        "Progress",
+        "Worker",
+        "Effort",
         "Question",
         "Member 1",
         "Member 2",
         "Member 3",
         "Left out 1",
     ]
+    assert values["Progress"] == "1/3 answered"
+    assert values["Worker"] == "3 members"
+    assert values["Effort"] == "mixed"
     assert values["Question"] == "A question\nMore"
     assert values["Member 1"] == "Codex · test-model · default · Answered · 12s"
     assert values["Member 2"].splitlines()[1:] == ["No reply", "Changed: a.py"]
@@ -1453,45 +1470,34 @@ def test_long_expanded_values_keep_column_geometry(
     )
     branch = "ember/" + "x" * 1000
     make_panel(env, question=question)
-    write_run(make_run(env, LIVE_A, branch=branch))
+    write_run(make_run(env, LIVE_A, branch=branch, effort=None))
     context.runs.reload()
     qtbot.waitUntil(lambda: len(context.runs.live()) == 1)
     screen = screen_for(context, qtbot)
     screen.resize(width, 480)
     table = screen.live_table
-    viewport = table.viewport()
-    content = table.widget()
-    assert content is not None
-    bar = table.horizontalScrollBar()
     outer = screen.findChild(QScrollArea)
     assert outer is not None
     vertical = outer.verticalScrollBar()
     rows = (screen.live_rows[PANEL], screen.live_rows[LIVE_A])
 
     def geometry() -> list[tuple[int, int]]:
-        cells = [*screen.live_header.findChildren(QLabel)]
-        positions = [
-            (cell.mapTo(viewport, QPoint()).x(), cell.width()) for cell in cells
+        cells = [
+            *screen.live_header.findChildren(QLabel),
+            *(cell for row in rows for cell in row.columns.cells),
         ]
-        for row in rows:
-            positions.extend(
-                (cell.mapTo(viewport, QPoint()).x(), cell.width())
-                for cell in row.columns.cells
-            )
-        return positions
+        return [
+            (cell.mapTo(table, QPoint()).x(), cell.width())
+            for cell in cells
+            if cell.isVisible()
+        ]
 
-    qtbot.waitUntil(
-        lambda: (
-            viewport.width() < width
-            and content.width()
-            == max(viewport.width(), screen.column_widths.minimum_width())
-            and bar.maximum() == content.width() - viewport.width()
-        )
-    )
+    qtbot.wait(30)
+    assert table.width() < width
     expected_columns = geometry()
-    expected_scroll = (bar.minimum(), bar.maximum())
-    assert (bar.maximum() > 0) == (width == 500)
+    assert outer.horizontalScrollBar().maximum() == 0
     assert vertical.maximum() == 0
+    assert rows[1].progress_label.isHidden() == (width == 500)
 
     for row, key, value in zip(
         rows, ("Question", "Branch"), (question, branch), strict=True
@@ -1501,8 +1507,11 @@ def test_long_expanded_values_keep_column_geometry(
         label = row.detail_labels[key][1]
         assert label.isVisible()
         assert label.toPlainText() == value
+        if key == "Branch":
+            assert detail_rows(row)["Engine"] == "Codex · gpt-5 · default"
+            assert detail_rows(row)["Progress"] == "turn 1"
         document = label.document()
-        assert label.mapTo(viewport, QPoint(label.width(), 0)).x() <= viewport.width()
+        assert label.mapTo(table, QPoint(label.width(), 0)).x() <= table.width()
         qtbot.waitUntil(
             lambda label=label: (
                 label.document().size().height() <= label.viewport().height()
@@ -1521,7 +1530,7 @@ def test_long_expanded_values_keep_column_geometry(
                 assert lines.lineCount() == 1
             block = block.next()
         assert not block.isValid()
-        assert (bar.minimum(), bar.maximum()) == expected_scroll
+        assert outer.horizontalScrollBar().maximum() == 0
         assert geometry() == expected_columns
         row.expand_button.click()
         qtbot.waitUntil(lambda: vertical.maximum() == 0)
@@ -2220,13 +2229,11 @@ def test_show_all_is_hidden_when_the_preview_holds_everything(
     assert screen.finished_rows_layout.count() == 2
 
 
-@pytest.mark.parametrize("width", [576, 796, 1100])
 def test_rows_line_up_in_fixed_columns(
     env: dict[str, str],
     context: AppContext,
     qtbot: QtBot,
     qapp: QApplication,
-    width: int,
 ) -> None:
     theme.apply(qapp, "light")
     flow = make_flow(env, status="done", ended_at=1_800_000_900)
@@ -2234,7 +2241,6 @@ def test_rows_line_up_in_fixed_columns(
     flow_record.save(flow, env)
     make_panel(env, members=[make_member(run=LIVE_B)])
     screen = loaded(env, context, qtbot)
-    screen.resize(width, 900)
     panel, flow_row = screen.live_rows[PANEL], screen.finished_rows[FLOW]
     panel.expand_button.click()
     flow_row.expand_button.click()
@@ -2252,31 +2258,49 @@ def test_rows_line_up_in_fixed_columns(
     assert [
         label.text() for label in screen.finished_header.findChildren(QLabel)
     ] == expected
+    layouts = [
+        screen.live_header.layout(),
+        screen.finished_header.layout(),
+        *(row.columns for row in rows),
+    ]
+    table = screen.live_table
+    run = screen.live_rows[LIVE_A]
+    scroll = screen.findChild(QScrollArea)
+    assert scroll is not None
+
+    def check_columns(hidden: tuple[str, ...]) -> None:
+        previous_right = None
+        for index, heading in enumerate(expected):
+            positions = []
+            widths = []
+            for layout in layouts:
+                assert isinstance(layout, overview._RowColumns)
+                cell = layout.cells[index]
+                assert cell.isVisible() == (heading not in hidden), heading
+                if heading in hidden:
+                    continue
+                positions.append(cell.mapTo(screen, QPoint()).x())
+                widths.append(cell.width())
+                if heading != "Name":
+                    assert cell.minimumWidth() == cell.maximumWidth() == cell.width()
+            if heading in hidden:
+                continue
+            assert len(set(positions)) == len(set(widths)) == 1, heading
+            if previous_right is not None:
+                assert positions[0] - previous_right == (0 if index == 1 else 14)
+            previous_right = positions[0] + widths[0]
+        assert scroll.horizontalScrollBar().maximum() == 0
+        assert run.open_button.isVisible()
+        right_edge = run.open_button.mapTo(table, run.open_button.rect().topRight())
+        assert right_edge.x() < table.width()
+
+    screen.resize(1100, 900)
     qtbot.wait(30)
+    qtbot.waitUntil(lambda: check_columns(()))
     for header in (screen.live_header, screen.finished_header):
         assert [
             label.display_text() for label in header.findChildren(overview.ElidedLabel)
         ] == expected
-    previous_right = None
-    for index, heading in enumerate(expected):
-        positions = []
-        widths = []
-        layouts = [
-            screen.live_header.layout(),
-            screen.finished_header.layout(),
-            *(row.columns for row in rows),
-        ]
-        for layout in layouts:
-            assert isinstance(layout, overview._RowColumns)
-            cell = layout.cells[index]
-            positions.append(cell.mapTo(screen, cell.rect().topLeft()).x())
-            widths.append(cell.width())
-            if heading != "Name":
-                assert cell.minimumWidth() == cell.maximumWidth() == cell.width()
-        assert len(set(positions)) == len(set(widths)) == 1, heading
-        if previous_right is not None:
-            assert positions[0] - previous_right == (0 if index == 1 else 14)
-        previous_right = positions[0] + widths[0]
 
     for row in rows:
         kind = "Flow" if row is flow_row else "Panel" if row is panel else "Run"
@@ -2287,14 +2311,13 @@ def test_rows_line_up_in_fixed_columns(
         assert row.type_label.property("role") == "secondary"
         assert row.repo_label.property("role") == "secondary"
 
-    run = screen.live_rows[LIVE_A]
     caption = QFontMetrics(theme.font("caption"))
     assert run.expand_button.width() == run.expand_button.sizeHint().width()
     assert run.columns.cells[1].width() == caption.horizontalAdvance("Panel")
     assert run.columns.cells[2].width() == overview._chip_width()
     assert run.columns.cells[-1].width() == run.open_button.sizeHint().width()
     assert all(row.columns.cells[-1].width() == run.open_button.width() for row in rows)
-    for label, heading, samples in (
+    samples_by_column = (
         (
             run.progress_label,
             "Progress",
@@ -2307,7 +2330,8 @@ def test_rows_line_up_in_fixed_columns(
             ("minimal", "low", "medium", "high", "xhigh", "max", "default", "mixed"),
         ),
         (run.time_label, "Time", ("1 h 30 min", "59 min 59 s")),
-    ):
+    )
+    for label, heading, samples in samples_by_column:
         minimum = caption.horizontalAdvance(heading)
         preferred = max(
             label.fontMetrics().horizontalAdvance(sample) for sample in samples
@@ -2316,46 +2340,50 @@ def test_rows_line_up_in_fixed_columns(
             screen.column_widths.preferred[overview.COLUMN_NAMES.index(heading)]
             == preferred
         )
-        if width < 1100:
-            assert label.width() == minimum
-        else:
-            assert minimum <= label.width() <= preferred
-            if heading in ("Effort", "Time"):
-                assert label.width() == preferred
-                for sample in samples:
-                    label.setText(sample)
-                    assert label.display_text() == sample
-    if width == 576:
-        assert run.title_label.width() == 160
-    elif width == 796:
-        assert 160 < run.title_label.width() < 170
-    for label in (
-        run.title_label,
-        run.repo_label,
-        run.progress_label,
-        run.worker_label,
-        run.effort_label,
-        run.time_label,
-    ):
+        assert minimum <= label.width() <= preferred
+        if heading in ("Effort", "Time"):
+            assert label.width() == preferred
+            for sample in samples:
+                label.setText(sample)
+                assert label.display_text() == sample
+
+    preferred_name = run.title_label.width()
+    assert preferred_name >= 170
+    wide_table_width = table.width()
+    screen.resize(900, 900)
+    qtbot.waitUntil(lambda: table.width() < wide_table_width)
+    window_padding = screen.width() - table.width()
+    full_columns = sum(screen.column_widths.minimum) + 7 * 14
+    available = full_columns
+    hidden: tuple[str, ...] = ()
+    for heading in ("Effort", "Worker", "Progress"):
+        screen.resize(window_padding + available - 1, 900)
+        hidden += (heading,)
+        qtbot.waitUntil(lambda hidden=hidden: check_columns(hidden))
+        assert run.title_label.width() >= 160
+        for label, column, _samples in samples_by_column:
+            if column not in hidden:
+                assert label.width() == caption.horizontalAdvance(column)
+        available -= caption.horizontalAdvance(heading) + 14
+
+    screen.resize(window_padding + available - 10, 900)
+    qtbot.waitUntil(lambda: run.title_label.width() == 150)
+    check_columns(hidden)
+    for label in (run.title_label, run.repo_label, run.time_label):
         label.setText("Very long text " * 20)
         shown = label.display_text()
         assert shown.endswith("…")
         assert label.fontMetrics().horizontalAdvance(shown) <= label.width()
 
-    assert screen.width() == width
-    scroll = screen.findChild(QScrollArea)
-    assert scroll is not None and scroll.horizontalScrollBar().maximum() == 0
-    for table in (screen.live_table, screen.finished_table):
-        assert table.verticalScrollBar().maximum() == 0
-        scrollbar = table.horizontalScrollBar()
-        assert (scrollbar.maximum() > 0) == (width == 576)
-        scrollbar.setValue(scrollbar.maximum())
-    assert (
-        run.open_button.mapTo(
-            screen.live_table.viewport(), run.open_button.rect().bottomRight()
-        ).x()
-        < screen.live_table.viewport().width()
-    )
+    screen.resize(window_padding + full_columns + 5, 900)
+    qtbot.waitUntil(lambda: run.title_label.width() == 165)
+    check_columns(())
+    for label, column, _samples in samples_by_column:
+        assert label.width() == caption.horizontalAdvance(column)
+
+    screen.resize(1100, 900)
+    qtbot.waitUntil(lambda: run.title_label.width() == preferred_name)
+    check_columns(())
 
 
 @pytest.mark.parametrize("mode", theme.MODES)
@@ -2392,10 +2420,9 @@ def test_default_window_leaves_room_for_names_and_uses_card_background(
         (screen.finished_card, screen.finished_table, screen.finished_rows[DONE_A]),
     ):
         assert row.title_label.width() >= 170
-        assert table.horizontalScrollBar().maximum() == 0
-        assert not table.horizontalScrollBar().isVisible()
+        assert not isinstance(table, QScrollArea)
         gap = sum(cell.width() for cell in row.columns.cells[:2]) + 8
-        point = table.viewport().mapTo(card, QPoint(gap, 5))
+        point = table.mapTo(card, QPoint(gap, 5))
         image = card.grab().toImage()
         assert image.pixelColor(point * image.devicePixelRatio()) == theme.color(
             "bg-card"
