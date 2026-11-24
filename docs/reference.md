@@ -2303,6 +2303,7 @@ is refused with code 64.
 |---|---|---|
 | `schema_version` | Omitted | Integer `1` |
 | `dir` | Required | String starting with `/`; existence and checkout checks belong to the command |
+| `title` | Omitted | Non-blank one-line string of at most 100 characters. Saved in the flow record for Overview. |
 | `base` | `HEAD` | Non-blank string |
 | `trailers` | `[]` | List of non-blank strings without CR or LF |
 | `writer`, `reviewer` | Menu row | Objects with required `engine` and `model`, optional `effort`, and no other keys |
@@ -2955,6 +2956,7 @@ refused. `save` updates `updated_at` and atomically replaces `flow.json`.
 | Flow field | Value |
 |---|---|
 | `id`, `plan` | Flow id and absolute source plan path |
+| `title` | Plan title, when supplied |
 | `dir`, `main` | Checkout top and main checkout |
 | `common` | Resolved common git folder at start; null for a record without this field |
 | `base`, `tip` | Resolved base commit and current flow branch tip |
@@ -3251,7 +3253,7 @@ the flow record cannot be read, exit 82 prints the unmerged-tasks line.
 Flow `next:` lines remain in place when workers have pending owner actions;
 the single-run owner wait does not suppress them.
 
-`--status FLOW --json` prints `flow.json` plus `runner_live`, `check_output`
+`--status FLOW --json` prints the status fields from `flow.json` plus `runner_live`, `check_output`
 and `reports` (the done report lines, or `[]`). Text status prints those
 report lines on standard output. JSON includes the full `check_changes`
 history. Text status with replacements prints
@@ -3282,9 +3284,10 @@ Each task's `denied_paths` combines retained and current writer and reviewer
 denials, with the run and turn for each entry. Top-level `denied_paths` is their
 union with a `task` id on each entry; flow listings include this union too.
 No denials gives `[]`. Watch task reports include retained `denied_paths`.
-Text status names each denied path, reason, run and turn. Text prints
-every top-level field except `tasks` and the separately formatted
-`check_output`, `reports` and `check_changes`, then each task's state and reason.
+Text status names each denied path, reason, run and turn. The saved plan
+title is for Overview. Text status prints the top-level status fields,
+formats `check_output`, `reports` and `check_changes` separately, and follows
+them with each task's state and reason.
 `--status` alone lists flows oldest first as
 `<id>  <status>  <n>/<m> merged  <dir>`, or as JSON objects containing `id`,
 `status`, `reason`, `dir`, `branch`, `runner_live`, `merged`, `tasks`
@@ -5123,27 +5126,40 @@ and errors. Closing the message reloads both record models and reapplies
 the filters. Confirmation and result lists scroll within the available
 screen height.
 
-Both cards use one row component for runs, flows, panels and child runs.
-Each nonempty card shows these column headings, aligned with every row.
+Both cards align the same columns for runs, flows, panels and child runs.
+The chevron and type columns sit together. The other columns are 14 pixels
+apart. Expand, Type, Status and Button are sized to the chevron button,
+the widest type label, the widest status chip and the Terminal button.
+Name takes the remaining space. The table reserves 170 pixels for Name
+while Worker, Progress, Effort and Time can shrink to their heading
+widths. Name can then shrink to 160 pixels before the table scrolls
+horizontally. Long text ends with an ellipsis.
 
-| Column | Run | Flow | Panel |
-|---|---|---|---|
-| Expand | Chevron button | Chevron button | Chevron button |
-| Status | Run status chip | Flow status chip | Panel status chip |
-| Name | `Run · <subject>` or the run's worker if it has no subject | `Flow · <repository folder>` | `Panel · <repository folder>` |
-| Progress | `turn <n>` or `read-only` | `<m>/<n> merged` | `<m>/<n> answered` |
-| Worker | Model | Writer model | `1 member` or `<n> members` |
-| Time | Elapsed time | Elapsed time | Elapsed time |
-| Action | Terminal icon button while live | Empty | Empty |
+| Column | Heading | Run | Flow | Panel |
+|---|---|---|---|---|
+| Expand | | Chevron button | Chevron button | Chevron button |
+| Type | | One-person icon with `Run` beneath it | Two-person icon with `Flow` beneath it | Three-person icon with `Panel` beneath it |
+| Status | Status | Run status chip | Flow status chip | Panel status chip |
+| Name | Name | Run subject or the flow worker's role, task and round | Saved plan title, or the first task's subject with ` and <n> more` when more tasks exist | First non-blank question line, or `Panel question unavailable` |
+| Progress | Progress | `turn <n>` or `read-only` | `<m>/<n> merged` | `<m>/<n> answered` |
+| Worker | Worker | Model | Writer model | `1 member` or `<n> members` |
+| Effort | Effort | Recorded effort or `default` | Writer effort or `default` | Shared effort, `mixed` when efforts differ, or `default` when none are recorded |
+| Time | Time | Elapsed time | Elapsed time | Elapsed time |
+| Button | | Secondary `Terminal` button with the terminal icon while live | Empty | Empty |
 
-The Name of a flow worker includes its task and round when recorded, as
-in `Run · Write: <task>, round 1` or `Run · Review: <task>, round 2`.
-A review with no recorded round uses the run's subject if present. The
-worker text used when a run has no subject shows the engine and model,
-followed by recorded effort and speed, separated by ` · `. Visible live
-times update every second, for example `4 min 12 s` or `1 h 5 min 3 s`.
-Finished duration includes seconds under an hour and uses hours and
-minutes from an hour on.
+The Name column's second line gives the main checkout's folder name. A
+run without a recorded main checkout uses its repository folder. A panel
+looks up its main checkout in the background and uses its recorded folder
+when git cannot resolve the checkout. The repository line and the type
+caption use secondary text. The type icons have accessible names `Run`,
+`Flow` and `Panel`.
+
+Flow worker names include `Writer: <task>, round 1` or `Review: <task>,
+round 2`. A review without a recorded round uses the run's subject if
+present. A run without a subject uses its engine and model, followed by
+recorded effort and speed, separated by ` · `. Elapsed times for live and
+finished records include seconds under an hour, for example `4 min 12 s`,
+and show hours and minutes from an hour on, for example `1 h 30 min`.
 
 | Chip | States | Colour |
 |---|---|---|
@@ -5169,7 +5185,8 @@ expanded body shows these parts in order.
 1. **Details grid.** Every row starts with Id, Repository, Started and
    Ended. Ended shows `Not yet` for a live record without an end time and
    `Not recorded` for an ended record without one. Id, Repository and Branch
-   use the code font.
+   use the code font. Values preserve their line breaks and wrap within
+   the visible table width. A token wider than its space wraps across lines.
 
    | Row type | Further details |
    |---|---|
@@ -5196,7 +5213,8 @@ another card or parent. Rows and text selection in expanded details
 survive unrelated reloads. Tab follows the visible controls in reading
 order. The chevron has the accessible name `Show details of <type> <id>`
 or `Hide details of <type> <id>`. Both terminal controls are named
-`Open terminal for run <id>`.
+`Open terminal for run <id>`. The row button has the accessible description
+`Open this run in a terminal.`
 
 Check logs considers only files matching `check-*.log` directly in the flow
 folder. It selects the highest integer `(wave, attempt)` from

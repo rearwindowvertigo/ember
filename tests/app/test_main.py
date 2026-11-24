@@ -276,7 +276,11 @@ def test_dependency_check_replaces_an_update_offer_when_settings_cannot_be_read(
     monkeypatch.setattr(deps, "fetch_text", fetch)
     for parts in _start([], app_env, qtbot):
         context, window = parts.context, parts.window
-        qtbot.waitUntil(lambda window=window: window.update_notice is not None)
+        qtbot.waitUntil(
+            lambda window=window: (
+                (notice := window.update_notice) is not None and notice.isVisible()
+            )
+        )
         offer = window.update_notice
         assert offer is not None and offer.isVisible()
         assert [button.text() for button in offer.buttons] == ["Update", "Dismiss"]
@@ -284,6 +288,13 @@ def test_dependency_check_replaces_an_update_offer_when_settings_cannot_be_read(
 
         with qtbot.waitSignal(context.deps_changed, timeout=5000):
             _check_dependencies(parts, trigger)
+        qtbot.waitUntil(
+            lambda window=window, offer=offer: (
+                (notice := window.update_notice) is not None
+                and notice is not offer
+                and notice.isVisible()
+            )
+        )
 
         assert index_reads == [updates.PACKAGES_URL]
         report = context.deps()

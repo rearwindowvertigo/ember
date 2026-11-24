@@ -207,6 +207,7 @@ def new_flow(
         "id": flow_id,
         choices.OPENCODE_ID_FORMAT: 1,
         "plan": str(plan.path),
+        **({"title": plan.title} if plan.title is not None else {}),
         "plan_waves": [[task.id for task in wave] for wave in waves(plan)],
         "dir": top,
         "main": main,
@@ -293,6 +294,15 @@ def _validate(flow_id: str, flow: object) -> None:
     assert isinstance(flow, dict)
     if flow["id"] != flow_id:
         raise FlowError(flow_id, "flow.json names another flow")
+    if "title" in flow:
+        title = flow["title"]
+        if (
+            not isinstance(title, str)
+            or not title.strip()
+            or len(title) > 100
+            or title.splitlines() != [title]
+        ):
+            raise FlowError(flow_id, "flow.json has an invalid title")
     if flow["status"] not in FLOW_STATUSES:
         raise FlowError(flow_id, "flow.json has an invalid status")
     if "preparation_history" in flow and not isinstance(

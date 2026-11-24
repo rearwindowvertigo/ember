@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from PySide6.QtCore import QFileSystemWatcher, QObject, QTimer, Signal
 
-from ember import paths, prune
+from ember import branches, paths, prune
 from ember.app.tasks import TaskRunner
 from ember.flows import record as flow_record
 from ember.locks import PROC_LOCKS, held_locks, lock_held
@@ -55,13 +55,14 @@ class FlowItem:
 
 @dataclass(frozen=True)
 class PanelItem:
-    """A stored panel, its question and its process lock state."""
+    """A stored panel, its question, main checkout and process lock state."""
 
     record: dict[str, Any]
     question: str
     held: bool | None
     gone: bool
     run_ids: frozenset[str] = field(default_factory=frozenset)
+    main: str | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,26 @@ def _question(path: Path) -> str:
         return path.read_text(encoding="utf-8").strip()
     except OSError, UnicodeError:
         return ""
+
+
+def _panel_main(directory: str, env: Mapping[str, str]) -> str | None:
+    """Read the first checkout listed by git without taking a worktree lock."""
+    if not Path(directory).is_dir():
+        return None
+    try:
+        result = branches._git(
+            directory, "worktree", "list", "--porcelain", "-z", env=env, timeout=5
+        )
+        if result.returncode == 0:
+            first = result.stdout.split("\0\0", 1)[0].split("\0")
+            entry = first[0]
+            if entry.startswith("worktree ") and "bare" not in first:
+                main = entry.removeprefix("worktree ")
+                if main and Path(main).is_dir():
+                    return main
+    except OSError, UnicodeError:
+        pass
+    return None
 
 
 def _round(value: object) -> int | None:
@@ -196,7 +217,7 @@ def _run_history(
 def read(
     env: Mapping[str, str], *, proc_locks: Path = PROC_LOCKS, now: float | None = None
 ) -> Snapshot:
-    """Read records and lock identities without writing or acquiring a lock."""
+    """Read records, panel checkouts and lock identities without taking locks."""
     now = time.time() if now is None else now
     flows, flow_errors = flow_record.list_flows(env)
     panels, panel_errors = panel_record.list_panels(env)
@@ -237,6 +258,11 @@ def read(
                 _run_history(item, events),
             )
         )
+    shown_panels = _selected(panels, ("running",), ENDED_PANEL)
+    main_by_dir = {
+        directory: _panel_main(directory, env)
+        for directory in {item["dir"] for item in shown_panels}
+    }
     panel_items = [
         PanelItem(
             item,
@@ -245,8 +271,9 @@ def read(
             ),
             *state(item, item["status"] == "running"),
             frozenset(prune._run_ids(item)),
+            main=main_by_dir[item["dir"]],
         )
-        for item in _selected(panels, ("running",), ENDED_PANEL)
+        for item in shown_panels
     ]
     root = paths.runs_dir(env)
     watch = [str(root)]
@@ -397,7 +424,9 @@ class FlowsModel(QObject):
                 item.held,
                 item.gone,
                 item.run_ids,
-                item.question if isinstance(item, PanelItem) else item.workers,
+                (item.question, item.main)
+                if isinstance(item, PanelItem)
+                else item.workers,
             )
             for item in [*snapshot.flows, *snapshot.panels]
         ]

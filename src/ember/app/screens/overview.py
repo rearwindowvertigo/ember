@@ -7,6 +7,7 @@ shown.
 import dataclasses
 import datetime
 import json
+import math
 import re
 import stat
 import time
@@ -14,8 +15,16 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QHideEvent
+from PySide6.QtCore import QEvent, QObject, QSize, QSizeF, Qt, QTimer, QUrl
+from PySide6.QtGui import (
+    QDesktopServices,
+    QFontMetrics,
+    QHideEvent,
+    QResizeEvent,
+    QTextCursor,
+    QTextOption,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -25,6 +34,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -58,7 +68,6 @@ from ember.app.widgets import (
     Badge,
     Card,
     ElidedLabel,
-    IconButton,
     Picker,
     StateView,
     button,
@@ -184,17 +193,12 @@ def member_line(member: Mapping[str, Any]) -> str:
 
 
 def elapsed(seconds: float) -> str:
-    """Return a running time to the second: "45 s", "4 min 12 s", "1 h 5 min 3 s"."""
-    total = max(0, int(seconds))
-    hours, rest = divmod(total, 3600)
-    minutes, secs = divmod(rest, 60)
-    if hours:
-        return f"{hours} h {minutes} min {secs} s"
-    return f"{minutes} min {secs} s" if minutes else f"{secs} s"
+    """Return a live duration using the same format as a finished duration."""
+    return took(seconds)
 
 
 def took(seconds: float) -> str:
-    """Return a finished duration: "45 s", "2 min 5 s", or "1 h 12 min" from an hour."""
+    """Return a duration with seconds below an hour and minutes from an hour."""
     total = max(0, int(seconds))
     hours, rest = divmod(total, 3600)
     minutes, secs = divmod(rest, 60)
@@ -229,7 +233,8 @@ def parent_label(parent: FlowItem | PanelItem) -> str:
     """Describe a parent in a worker's details and denial reports."""
     if isinstance(parent, PanelItem):
         return f"Panel · {plural(len(parent.record['members']), 'member')}"
-    return _name(parent, None)
+    directory = parent.record["dir"]
+    return f"Flow · {PurePosixPath(directory).name or directory}"
 
 
 def run_parents(parents: list[FlowItem | PanelItem]) -> dict[str, FlowItem | PanelItem]:
@@ -437,51 +442,163 @@ def _chip_width() -> int:
     It is the widest chip any row can show, so a wider word never moves
     the text column.
     """
-    if not _COLUMNS:
-        chips = [
-            Badge(text, tone)
-            for table in (BADGES, FLOW_BADGES, PANEL_BADGES, WAIT_BADGES)
-            for text, tone in table.values()
-        ]
-        _COLUMNS.append(max(chip.sizeHint().width() for chip in chips))
-        for chip in chips:
-            chip.deleteLater()
-    return _COLUMNS[0]
+    return max(
+        Badge(text, tone).sizeHint().width()
+        for table in (BADGES, FLOW_BADGES, PANEL_BADGES, WAIT_BADGES)
+        for text, tone in table.values()
+    )
 
 
-_COLUMNS: list[int] = []
-
-
-COLUMN_NAMES = ("Expand", "Status", "Name", "Progress", "Worker", "Time", "Action")
-COLUMN_GAP = 4
-EXPAND_WIDTH = 49
-DETAIL_INDENT = EXPAND_WIDTH + COLUMN_GAP
+COLUMN_NAMES = ("", "", "Status", "Name", "Progress", "Worker", "Effort", "Time", "")
+COLUMN_GAP = 14
+NAME_MIN_WIDTH = 160
+NAME_PREFERRED_WIDTH = 170
+DETAIL_INDENT = theme.CONTROL_SM + COLUMN_GAP
+TYPE_ICONS = {"Run": "user", "Flow": "users", "Panel": "users-three"}
+TYPE_ICON_SIZE = 20
+ROW_BUTTON_ICON_SIZE = 16
 CODE_ROWS = ("Id", "Repository", "Branch")
 
 
-def _columns(cells: Sequence[QWidget]) -> QHBoxLayout:
-    """Lay out the headings and each record using the same column widths."""
-    layout = QHBoxLayout()
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(COLUMN_GAP)
-    widths = (EXPAND_WIDTH, _chip_width(), 34, 70, 45, 54, 44)
-    stretches = (0, 0, 6, 2, 3, 2, 0)
-    for cell, width, stretch in zip(cells, widths, stretches, strict=True):
-        if stretch:
-            cell.setMinimumWidth(width)
-        else:
-            cell.setFixedWidth(width)
-        layout.addWidget(cell, stretch, Qt.AlignmentFlag.AlignVCenter)
-    return layout
+def _expand_control() -> QPushButton:
+    """Make the chevron button with no extra horizontal padding."""
+    control = button("", "ghost", size="sm")
+    control.setStyleSheet("QPushButton { padding: 0; }")
+    control.setIconSize(QSize(ROW_BUTTON_ICON_SIZE, ROW_BUTTON_ICON_SIZE))
+    control.setIcon(
+        icons.icon("chevron-right", theme.color("text-secondary"), ROW_BUTTON_ICON_SIZE)
+    )
+    control.setFixedSize(control.sizeHint())
+    return control
 
 
-def _column_header() -> QWidget:
+def _terminal_control() -> QPushButton:
+    """Make the Terminal button with its icon and secondary button style."""
+    control = button("Terminal", "secondary", size="sm")
+    control.setIconSize(QSize(ROW_BUTTON_ICON_SIZE, ROW_BUTTON_ICON_SIZE))
+    control.setIcon(
+        icons.icon("terminal", theme.color("text-primary"), ROW_BUTTON_ICON_SIZE)
+    )
+    control.setFixedSize(control.sizeHint())
+    return control
+
+
+@dataclasses.dataclass(frozen=True)
+class _ColumnWidths:
+    """Minimum and preferred widths for the aligned columns."""
+
+    minimum: tuple[int, ...]
+    preferred: tuple[int, ...]
+
+    def minimum_width(self) -> int:
+        """Return the table width at which horizontal scrolling starts."""
+        return sum(self.minimum) + COLUMN_GAP * (len(COLUMN_NAMES) - 2)
+
+    def fit(self, viewport_width: int) -> tuple[int, ...]:
+        """Reserve room for Name and give elapsed time priority as space shrinks."""
+        extra = sum(self.preferred) - sum(self.minimum)
+        needed = self.minimum_width() + extra + (NAME_PREFERRED_WIDTH - NAME_MIN_WIDTH)
+        excess = needed - viewport_width
+        if excess <= 0:
+            return self.preferred
+        widths = list(self.preferred)
+        for heading in ("Worker", "Progress", "Effort", "Time"):
+            index = COLUMN_NAMES.index(heading)
+            reduction = min(excess, widths[index] - self.minimum[index])
+            widths[index] -= reduction
+            excess -= reduction
+        return tuple(widths)
+
+
+def _column_widths() -> _ColumnWidths:
+    """Measure headings, controls and representative values at the row fonts."""
+    caption = QFontMetrics(theme.font("caption"))
+    body = QFontMetrics(theme.font("body"))
+    fixed = (
+        _expand_control().sizeHint().width(),
+        max(TYPE_ICON_SIZE, *(caption.horizontalAdvance(kind) for kind in TYPE_ICONS)),
+        _chip_width(),
+        NAME_MIN_WIDTH,
+        0,
+        0,
+        0,
+        0,
+        _terminal_control().sizeHint().width(),
+    )
+    minimum = tuple(
+        max(width, caption.horizontalAdvance(heading))
+        for heading, width in zip(COLUMN_NAMES, fixed, strict=True)
+    )
+    samples = {
+        "Progress": ("6/6 merged", "8/8 answered", "read-only", "turn 99"),
+        "Worker": (
+            "gpt-5",
+            "opus",
+            "openrouter/x",
+            "test-model",
+            "gpt-6.2-astra",
+            "8 members",
+        ),
+        "Effort": (
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "default",
+            "mixed",
+        ),
+        "Time": ("1 h 30 min", "59 min 59 s"),
+    }
+    sample_widths = {
+        heading: max(body.horizontalAdvance(text) for text in values)
+        for heading, values in samples.items()
+    }
+    preferred = tuple(
+        max(floor, sample_widths.get(heading, 0))
+        for heading, floor in zip(COLUMN_NAMES, minimum, strict=True)
+    )
+    return _ColumnWidths(minimum, preferred)
+
+
+class _RowColumns(QHBoxLayout):
+    """Lay out the headings or a record using the table's current widths."""
+
+    def __init__(self, cells: Sequence[QWidget], widths: tuple[int, ...]) -> None:
+        super().__init__()
+        self.cells = tuple(cells)
+        self._widths: tuple[int, ...] = ()
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(COLUMN_GAP)
+        leading = QHBoxLayout()
+        leading.setSpacing(0)
+        for cell in self.cells[:2]:
+            leading.addWidget(cell, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.addLayout(leading)
+        for heading, cell in zip(COLUMN_NAMES[2:], self.cells[2:], strict=True):
+            self.addWidget(cell, int(heading == "Name"), Qt.AlignmentFlag.AlignVCenter)
+        self.set_widths(widths)
+
+    def set_widths(self, widths: tuple[int, ...]) -> None:
+        """Apply widths shared by every row and stretch Name into the spare space."""
+        if self._widths == widths:
+            return
+        self._widths = widths
+        for heading, cell, width in zip(COLUMN_NAMES, self.cells, widths, strict=True):
+            if heading == "Name":
+                cell.setMinimumWidth(width)
+            else:
+                cell.setFixedWidth(width)
+
+
+def _column_header(widths: tuple[int, ...]) -> QWidget:
     header = QWidget()
     labels = [ElidedLabel(name) for name in COLUMN_NAMES]
     for label in labels:
         label.setFont(theme.font("caption"))
         label.setProperty("role", "secondary")
-    header.setLayout(_columns(labels))
+    header.setLayout(_RowColumns(labels, widths))
     return header
 
 
@@ -490,13 +607,34 @@ def _name(item: Item, worker: FlowRun | None) -> str:
         subject = " ".join(item.subject.split())
         if worker is not None:
             if worker.role == "reviewer" and worker.round is None and subject:
-                return f"Run · {subject}"
-            action = "Review" if worker.role == "reviewer" else "Write"
+                return subject
+            action = "Review" if worker.role == "reviewer" else "Writer"
             suffix = "" if worker.round is None else f", round {worker.round}"
-            return f"Run · {action}: {worker.task}{suffix}"
-        return f"Run · {subject or worker_line(item)}"
-    folder = PurePosixPath(item.record["dir"]).name or item.record["dir"]
-    return f"{_kind(item)} · {folder}"
+            return f"{action}: {worker.task}{suffix}"
+        return subject or worker_line(item)
+    if isinstance(item, PanelItem):
+        return next(
+            (line.strip() for line in item.question.splitlines() if line.strip()),
+            "Panel question unavailable",
+        )
+    if title := item.record.get("title"):
+        return title
+    tasks = item.record["tasks"]
+    if not tasks:
+        return item.record["id"]
+    return tasks[0]["subject"] + (
+        f" and {len(tasks) - 1} more" if len(tasks) > 1 else ""
+    )
+
+
+def _repository_name(item: Item) -> str:
+    if isinstance(item, Run):
+        directory = item.repo if item.main is None else item.main
+    elif isinstance(item, FlowItem):
+        directory = item.record["main"]
+    else:
+        directory = item.main or item.record["dir"]
+    return PurePosixPath(directory).name or directory
 
 
 def _kind(item: Item) -> str:
@@ -513,16 +651,24 @@ def _badge(item: Item) -> tuple[str, str]:
     return table.get("gone" if item.gone else status, (status, "neutral"))
 
 
-def _progress_worker(item: Item) -> tuple[str, str]:
+def _progress_worker_effort(item: Item) -> tuple[str, str, str]:
     if isinstance(item, Run):
-        return "read-only" if item.read_only else f"turn {item.turn}", item.model
+        progress = "read-only" if item.read_only else f"turn {item.turn}"
+        return progress, item.model, item.effort or "default"
     if isinstance(item, FlowItem):
         tasks = item.record["tasks"]
         merged = sum(task["status"] == "merged" for task in tasks)
-        return f"{merged}/{len(tasks)} merged", item.record["writer"]["model"]
+        writer = item.record["writer"]
+        return (
+            f"{merged}/{len(tasks)} merged",
+            writer["model"],
+            writer["effort"] or "default",
+        )
     members = item.record["members"]
     answered = sum(member["status"] == "answered" for member in members)
-    return f"{answered}/{len(members)} answered", plural(len(members), "member")
+    efforts = {member["effort"] for member in members}
+    effort = "mixed" if len(efforts) > 1 else next(iter(efforts), None) or "default"
+    return f"{answered}/{len(members)} answered", plural(len(members), "member"), effort
 
 
 def _finished_at(item: Item) -> float | None:
@@ -663,6 +809,48 @@ def _panel_rows(item: PanelItem) -> list[tuple[str, str]]:
     return rows
 
 
+class _DetailValue(QTextEdit):
+    """Selectable plain text that wraps without setting the table width."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._value = ""
+        self.setReadOnly(True)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.setFrameShape(QTextEdit.Shape.NoFrame)
+        self.setStyleSheet("QTextEdit { background: transparent; }")
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.document().setDocumentMargin(0)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(self.fontMetrics().height())
+        self.document().documentLayout().documentSizeChanged.connect(self._fit_height)
+
+    def set_value(self, value: str) -> None:
+        """Set the text and retain selected text still present in the value."""
+        if value == self._value:
+            return
+        self._value = value
+        selection = self.textCursor().selection().toPlainText()
+        self.setPlainText(value)
+        plain = self.toPlainText()
+        if selection and (start := plain.find(selection)) >= 0:
+            cursor = self.textCursor()
+            cursor.setPosition(len(plain[:start].encode("utf-16-le")) // 2)
+            cursor.setPosition(
+                len(plain[: start + len(selection)].encode("utf-16-le")) // 2,
+                QTextCursor.MoveMode.KeepAnchor,
+            )
+            self.setTextCursor(cursor)
+
+    def _fit_height(self, size: QSizeF) -> None:
+        self.setFixedHeight(math.ceil(size.height()))
+
+    def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: D102, N802
+        event.ignore()
+
+
 class _OverviewRow(QWidget):
     """The columns, details, action bar and child layout of any Overview item."""
 
@@ -682,40 +870,74 @@ class _OverviewRow(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(12)
 
-        self.expand_button = button("", "secondary", size="sm")
-        self.expand_button.setFixedWidth(theme.CONTROL_SM)
+        self.expand_button = _expand_control()
         self.expand_button.clicked.connect(lambda: screen._toggle_row(self))
+        kind = _kind(item)
+        self.type_icon = QLabel()
+        self.type_icon.setAccessibleName(kind)
+        self.type_label = ElidedLabel(kind)
+        self.type_label.setFont(theme.font("caption"))
+        self.type_label.setProperty("role", "secondary")
+        self.type_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        type_cell = QWidget()
+        type_layout = QVBoxLayout(type_cell)
+        type_layout.setContentsMargins(0, 0, 0, 0)
+        type_layout.setSpacing(2)
+        type_layout.addWidget(self.type_icon, 0, Qt.AlignmentFlag.AlignHCenter)
+        type_layout.addWidget(self.type_label)
+
         self.badge = Badge("", "neutral")
         self.title_label = ElidedLabel()
         self.title_label.setFont(theme.font("label"))
+        self.repo_label = ElidedLabel()
+        self.repo_label.setFont(theme.font("caption"))
+        self.repo_label.setProperty("role", "secondary")
+        name_cell = QWidget()
+        name_layout = QVBoxLayout(name_cell)
+        name_layout.setContentsMargins(0, 0, 0, 0)
+        name_layout.setSpacing(2)
+        name_layout.addWidget(self.title_label)
+        name_layout.addWidget(self.repo_label)
+
         self.progress_label = ElidedLabel()
         self.worker_label = ElidedLabel()
+        self.effort_label = ElidedLabel()
         self.time_label = ElidedLabel()
-        for label in (self.progress_label, self.worker_label, self.time_label):
-            label.setFont(theme.font("caption"))
-            label.setProperty("role", "secondary")
+        for label in (
+            self.progress_label,
+            self.worker_label,
+            self.effort_label,
+            self.time_label,
+        ):
+            label.setFont(theme.font("body"))
 
         name = f"Open terminal for run {self.id}"
-        self.open_button = IconButton("terminal", name, color="text-primary")
+        self.open_button = _terminal_control()
+        self.open_button.setAccessibleName(name)
+        self.open_button.setAccessibleDescription("Open this run in a terminal.")
+        self.open_button.setToolTip(name)
         self.open_button.clicked.connect(self._open_terminal)
-        self.columns = _columns(
+        self.columns = _RowColumns(
             [
-                self._cell(self.expand_button),
+                self.expand_button,
+                type_cell,
                 self._cell(self.badge),
-                self.title_label,
+                name_cell,
                 self.progress_label,
                 self.worker_label,
+                self.effort_label,
                 self.time_label,
                 self._cell(self.open_button),
-            ]
+            ],
+            screen.column_widths.minimum,
         )
         outer.addLayout(self.columns)
         self.body = QWidget()
         body = QVBoxLayout(self.body)
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(12)
-        detail_box = QWidget()
-        detail_layout = QVBoxLayout(detail_box)
+        self.detail_box = QWidget()
+        detail_layout = QVBoxLayout(self.detail_box)
         detail_layout.setContentsMargins(DETAIL_INDENT, 0, 0, 0)
         self.details = QWidget()
         self.grid = QGridLayout(self.details)
@@ -723,7 +945,7 @@ class _OverviewRow(QWidget):
         self.grid.setHorizontalSpacing(16)
         self.grid.setVerticalSpacing(4)
         self.grid.setColumnStretch(1, 1)
-        self.detail_labels: dict[str, tuple[QLabel, QLabel]] = {}
+        self.detail_labels: dict[str, tuple[QLabel, _DetailValue]] = {}
         detail_layout.addWidget(self.details)
 
         actions = QHBoxLayout()
@@ -755,7 +977,7 @@ class _OverviewRow(QWidget):
                 self.file_buttons[action] = link
         actions.addStretch()
 
-        body.addWidget(detail_box)
+        body.addWidget(self.detail_box, 0, Qt.AlignmentFlag.AlignLeft)
         self.nested = QVBoxLayout()
         self.nested.setSpacing(16)
         body.addLayout(self.nested)
@@ -763,6 +985,8 @@ class _OverviewRow(QWidget):
         self.body.hide()
         self._draw_arrow()
         theme.signals.changed.connect(self._draw_arrow)
+        self._draw_row_icons()
+        theme.signals.changed.connect(self._draw_row_icons)
 
     @staticmethod
     def _cell(widget: QWidget) -> QWidget:
@@ -789,11 +1013,13 @@ class _OverviewRow(QWidget):
         text, tone = _badge(item)
         if (text, tone) != (self.badge.text(), self.badge.tone()):
             self.badge.set_tone(tone, text)
-        progress, worker = _progress_worker(item)
+        progress, worker, effort = _progress_worker_effort(item)
         for label, value in (
             (self.title_label, _name(item, self.worker)),
+            (self.repo_label, _repository_name(item)),
             (self.progress_label, progress),
             (self.worker_label, worker),
+            (self.effort_label, effort),
         ):
             label.setText(value)
             label.setToolTip(value)
@@ -820,10 +1046,24 @@ class _OverviewRow(QWidget):
 
     def _draw_arrow(self, *_args: object) -> None:
         name = "chevron-down" if self.expanded else "chevron-right"
-        self.expand_button.setIcon(icons.icon(name, theme.color("text-secondary"), 16))
+        self.expand_button.setIcon(
+            icons.icon(name, theme.color("text-secondary"), ROW_BUTTON_ICON_SIZE)
+        )
         verb = "Hide" if self.expanded else "Show"
         self.expand_button.setAccessibleName(
             f"{verb} details of {_kind(self.item).lower()} {self.id}"
+        )
+
+    def _draw_row_icons(self, *_args: object) -> None:
+        self.type_icon.setPixmap(
+            icons.pixmap(
+                TYPE_ICONS[_kind(self.item)],
+                theme.color("text-secondary"),
+                TYPE_ICON_SIZE,
+            )
+        )
+        self.open_button.setIcon(
+            icons.icon("terminal", theme.color("text-primary"), ROW_BUTTON_ICON_SIZE)
         )
 
     def update_elapsed(self, now: float | None = None) -> None:
@@ -869,21 +1109,12 @@ class _OverviewRow(QWidget):
                 name = QLabel(key)
                 name.setProperty("role", "secondary")
                 name.setWordWrap(True)
-                text = QLabel()
-                text.setTextFormat(Qt.TextFormat.PlainText)
-                text.setWordWrap(True)
-                text.setTextInteractionFlags(
-                    Qt.TextInteractionFlag.TextSelectableByMouse
-                )
+                text = _DetailValue()
                 if key in CODE_ROWS:
                     text.setFont(theme.font("code"))
                 pair = (name, text)
             name, text = pair
-            if text.text() != value:
-                selection = text.selectedText()
-                text.setText(value)
-                if selection and (start := value.find(selection)) >= 0:
-                    text.setSelection(start, len(selection))
+            text.set_value(value)
             cell = self.grid.itemAtPosition(index, 0)
             if cell is None or cell.widget() is not name:
                 self.grid.addWidget(name, index, 0, Qt.AlignmentFlag.AlignTop)
@@ -935,17 +1166,80 @@ def _place(layout: QVBoxLayout, rows: Sequence[QWidget]) -> None:
         row.show()
 
 
-def _card(title: str) -> tuple[Card, QVBoxLayout, QLabel, QWidget]:
+class _RowTable(QScrollArea):
+    """Fit the row columns and scroll horizontally below their minimum width."""
+
+    def __init__(self, content: QWidget, widths: _ColumnWidths) -> None:
+        super().__init__()
+        self._widths = widths
+        self.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.setWidgetResizable(True)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setWidget(content)
+        content.setAutoFillBackground(False)
+        self.viewport().setAutoFillBackground(False)
+        self.horizontalScrollBar().rangeChanged.connect(self._fit_height)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: D102, N802
+        handled = super().eventFilter(watched, event)
+        if watched is self.widget() and event.type() in (
+            QEvent.Type.LayoutRequest,
+            QEvent.Type.Resize,
+        ):
+            self._fit_height()
+        return handled
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: D102, N802
+        super().resizeEvent(event)
+        self.fit_columns()
+        self._fit_height()
+
+    def fit_columns(self) -> None:
+        """Fit all headings and rows against the viewport's width."""
+        viewport_width = self.viewport().width()
+        widths = self._widths.fit(viewport_width)
+        for columns in self.findChildren(_RowColumns):
+            columns.set_widths(widths)
+        for row in self.findChildren(_OverviewRow):
+            row.detail_box.setFixedWidth(viewport_width)
+        content = self.widget()
+        if content is not None:
+            content.setFixedWidth(max(viewport_width, self._widths.minimum_width()))
+
+    def _fit_height(self) -> None:
+        content = self.widget()
+        if content is None:
+            return
+        height = content.heightForWidth(content.width())
+        if height < 0:
+            height = content.sizeHint().height()
+        bar = self.horizontalScrollBar()
+        self.setFixedHeight(height + (bar.sizeHint().height() if bar.maximum() else 0))
+
+
+def _card(
+    title: str, widths: _ColumnWidths
+) -> tuple[Card, QVBoxLayout, QLabel, QWidget, _RowTable]:
     card, layout = titled_card(title)
+    margins = layout.contentsMargins()
+    layout.setContentsMargins(16, margins.top(), 16, margins.bottom())
     empty = QLabel()
     empty.setProperty("role", "muted")
     layout.addWidget(empty)
-    header = _column_header()
-    layout.addWidget(header)
+    content = QWidget()
+    table_layout = QVBoxLayout(content)
+    table_layout.setContentsMargins(0, 0, 0, 0)
+    table_layout.setSpacing(layout.spacing())
+    header = _column_header(widths.minimum)
+    table_layout.addWidget(header)
     rows = QVBoxLayout()
     rows.setSpacing(16)
-    layout.addLayout(rows)
-    return card, rows, empty, header
+    table_layout.addLayout(rows)
+    table = _RowTable(content, widths)
+    layout.addWidget(table)
+    return card, rows, empty, header, table
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1078,6 +1372,16 @@ class OverviewScreen(QWidget):
         self.context = context
         self.records = context.flows
         layout = scrolled(self)
+        area = self.findChild(QScrollArea)
+        assert area is not None
+        bar = area.verticalScrollBar()
+        # Let the bar use the screen's right padding so it cannot resize the tables.
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        area.setViewportMargins(0, 0, -bar.sizeHint().width(), 0)
+        bar.setStyleSheet("QScrollBar::handle:disabled { background: transparent; }")
+        bar.rangeChanged.connect(lambda start, end: bar.setEnabled(start != end))
+        bar.setEnabled(bar.minimum() != bar.maximum())
+        self.column_widths = _column_widths()
         self.subtitle = screen_header(layout, self.TITLE)
         self.subtitle.hide()
 
@@ -1106,9 +1410,13 @@ class OverviewScreen(QWidget):
         )
         self.records_alert.hide()
         layout.addWidget(self.records_alert)
-        self.live_card, self.live_rows_layout, self.live_empty, self.live_header = (
-            _card("Live")
-        )
+        (
+            self.live_card,
+            self.live_rows_layout,
+            self.live_empty,
+            self.live_header,
+            self.live_table,
+        ) = _card("Live", self.column_widths)
         self.live_empty.setText("Nothing running")
         self.live_empty.setProperty("role", "secondary")
         live_layout = self.live_card.layout()
@@ -1132,7 +1440,8 @@ class OverviewScreen(QWidget):
             self.finished_rows_layout,
             self.finished_empty,
             self.finished_header,
-        ) = _card("Finished")
+            self.finished_table,
+        ) = _card("Finished", self.column_widths)
         self.finished_empty.setText("No finished runs, flows or panels yet.")
         finished_layout = self.finished_card.layout()
         assert isinstance(finished_layout, QVBoxLayout)
@@ -1475,7 +1784,7 @@ class OverviewScreen(QWidget):
             workers,
             self.live_rows_layout,
             self.live_empty,
-            self.live_header,
+            self.live_table,
         )
         self.finished_rows = self._draw_card(
             finished,
@@ -1483,7 +1792,7 @@ class OverviewScreen(QWidget):
             workers,
             self.finished_rows_layout,
             self.finished_empty,
-            self.finished_header,
+            self.finished_table,
         )
         error = self.records.error()
         self.records_alert.setVisible(error is not None)
@@ -1499,7 +1808,7 @@ class OverviewScreen(QWidget):
         workers: Mapping[str, list[Run]],
         layout: QVBoxLayout,
         empty: QLabel,
-        header: QWidget,
+        table: _RowTable,
     ) -> dict[str, _OverviewRow]:
         has_expanded = any(
             row is not None and row.expanded and row.group is layout
@@ -1525,7 +1834,9 @@ class OverviewScreen(QWidget):
             rows[key] = row
         _place(layout, list(rows.values()))
         empty.setVisible(not rows)
-        header.setVisible(bool(rows))
+        table.setVisible(bool(rows))
+        if rows:
+            table.fit_columns()
         return rows
 
     def _draw_row(

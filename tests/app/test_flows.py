@@ -16,6 +16,7 @@ from ember.flows import lock
 from ember.flows import record as flow_record
 from ember.flows.plan import Plan, Task, Worker
 from ember.panels import record as panel_record
+from runs.stub_engine import git, make_repo  # pyrefly: ignore[missing-import]
 
 FLOW = "flow-20260101-120000-aaaaaa"
 PANEL = "panel-20260101-120000-bbbbbb"
@@ -341,6 +342,42 @@ def test_watch_replace_and_activation(
     with qtbot.waitSignal(model.changed, timeout=5000):
         model.set_active(True)
     assert model.flows()[0].record["status"] == "running"
+    model.set_active(False)
+
+
+def test_panel_main_checkout_is_read_in_background(
+    env: dict[str, str],
+    tmp_path: Path,
+    proc_locks: Path,
+    qtbot: QtBot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_env = env | {
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.invalid",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.invalid",
+    }
+    repo = make_repo(tmp_path, repo_env)
+    linked = tmp_path / "linked checkout"
+    git(repo, "worktree", "add", "--detach", str(linked), env=repo_env)
+    subfolder = linked / "inner"
+    subfolder.mkdir()
+    make_panel(env, dir=str(subfolder))
+
+    read_main = flows._panel_main
+
+    def observed(directory: str, environment: Mapping[str, str]) -> str | None:
+        assert threading.current_thread() is not threading.main_thread()
+        return read_main(directory, environment)
+
+    monkeypatch.setattr(flows, "_panel_main", observed)
+    tasks = TaskRunner()
+    model = flows.FlowsModel(env, tasks, proc_locks=proc_locks)
+    model.set_active(True)
+    qtbot.waitUntil(model.loaded)
+    assert model.panels()[0].main == str(repo)
+    qtbot.waitUntil(lambda: tasks.pending() == 0)
     model.set_active(False)
 
 

@@ -8,7 +8,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from PySide6.QtCore import QEvent, QObject, Qt, QUrl
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QUrl
+from PySide6.QtGui import QFontMetrics, QTextCursor, QTextOption
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -25,6 +26,8 @@ from ember.app import flows, state, theme, tray
 from ember.app.context import AppContext
 from ember.app.screens import overview
 from ember.app.screens.overview import OverviewScreen
+from ember.app.widgets import focus_visible, install_focus_tracking
+from ember.app.window import MainWindow
 from ember.flows import record as flow_record
 from ember.flows.briefs import REVIEW_FIRST
 from ember.panels import record as panel_record
@@ -67,7 +70,15 @@ def screen_for(context: AppContext, qtbot: QtBot) -> OverviewScreen:
 
 
 def write_mix(env: dict[str, str]) -> None:
-    write_run(make_run(env, LIVE_A, status=record.STARTING, started_at=1_800_000_000.0))
+    write_run(
+        make_run(
+            env,
+            LIVE_A,
+            status=record.STARTING,
+            started_at=1_800_000_000.0,
+            main="/home/owner/main-checkout",
+        )
+    )
     write_run(
         make_run(
             env,
@@ -79,6 +90,7 @@ def write_mix(env: dict[str, str]) -> None:
             read_only=True,
             branch=None,
             repo="/home/owner/beta",
+            main=None,
             turn=3,
             started_at=1_800_000_100.0,
         )
@@ -188,6 +200,15 @@ def test_live_header_collapses_when_empty(
     assert empty.text() == "Nothing running"
     assert empty.property("role") == "secondary"
     assert empty.isVisible()
+    layout = screen.live_card.layout()
+    assert layout is not None
+    margins = layout.contentsMargins()
+    qtbot.waitUntil(
+        lambda: (
+            screen.live_card.height()
+            == max(heading.height(), empty.height()) + margins.top() + margins.bottom()
+        )
+    )
     # Font metrics differ between machines, so the centres may differ by 1 px.
     assert (
         abs(
@@ -197,18 +218,18 @@ def test_live_header_collapses_when_empty(
         <= 1
     )
     assert empty.geometry().left() > heading.geometry().right()
-    layout = screen.live_card.layout()
-    assert layout is not None
-    margins = layout.contentsMargins()
-    assert screen.live_card.height() == (
-        max(heading.height(), empty.height()) + margins.top() + margins.bottom()
-    )
 
     write_run(make_run(env, LIVE_A))
     context.runs.reload()
     qtbot.waitUntil(lambda: LIVE_A in screen.live_rows)
     row = screen.live_rows[LIVE_A]
-    qtbot.waitUntil(lambda: row.isVisible() and row.y() > heading.geometry().bottom())
+    qtbot.waitUntil(
+        lambda: (
+            row.isVisible()
+            and row.mapTo(screen.live_card, row.rect().topLeft()).y()
+            > heading.geometry().bottom()
+        )
+    )
     assert not empty.isVisible()
 
 
@@ -224,21 +245,25 @@ def test_rows_and_badges(
         "Waiting for Claude",
         "warning",
     )
-    assert first.title_label.text() == "Run · Add the thing"
+    assert first.title_label.text() == "Add the thing"
     assert first.title_label.font() == theme.font("label")
+    assert first.repo_label.text() == "main-checkout"
+    assert second.repo_label.text() == "beta"
+    assert [row.effort_label.text() for row in (first, second)] == ["high", "default"]
     assert first.progress_label.text() == "turn 1"
     assert second.progress_label.text() == "read-only"
     assert [row.worker_label.text() for row in (first, second)] == ["gpt-5", "opus"]
     first.update_elapsed(1_800_000_012)
     assert first.time_label.text() == "12 s"
-    assert first.open_button.text() == ""
+    assert first.open_button.text() == "Terminal"
+    assert first.open_button.property("kind") == "secondary"
     assert not first.open_button.icon().isNull()
 
     assert list(screen.finished_rows) == [DONE_B, DONE_A]
     failed, closed = screen.finished_rows.values()
     assert (failed.badge.text(), failed.badge.tone()) == ("Failed", "danger")
     assert (closed.badge.text(), closed.badge.tone()) == ("Done", "success")
-    assert closed.title_label.text() == "Run · Fix the bug"
+    assert closed.title_label.text() == "Fix the bug"
     assert closed.progress_label.text() == "turn 1"
     assert closed.worker_label.text() == "openrouter/x"
     assert closed.time_label.text() == "8 min 20 s"
@@ -254,6 +279,33 @@ def test_running_badge(env: dict[str, str], context: AppContext, qtbot: QtBot) -
     assert (row.badge.text(), row.badge.tone()) == ("Running", "info")
     assert screen.subtitle.isHidden()
     assert not screen.finished_empty.isHidden()
+
+
+def test_expand_button_ring_follows_keyboard_focus(
+    env: dict[str, str], context: AppContext, qtbot: QtBot, qapp: QApplication
+) -> None:
+    theme.apply(qapp, "light")
+    install_focus_tracking(qapp).keyboard = False
+    write_run(make_run(env, LIVE_A))
+    context.runs.reload()
+    qtbot.waitUntil(lambda: len(context.runs.live()) == 1)
+    screen = screen_for(context, qtbot)
+    with qtbot.waitActive(screen):
+        screen.activateWindow()
+    row = screen.live_rows[LIVE_A]
+    expand = row.expand_button
+
+    def top_edge() -> str:
+        image = expand.grab().toImage()
+        return image.pixelColor(image.width() // 2, 0).name()
+
+    ring = theme.color("focus-ring").name()
+    assert not focus_visible(expand)
+    assert top_edge() not in (ring, theme.color("border-strong").name())
+    row.open_button.setFocus(Qt.FocusReason.MouseFocusReason)
+    qtbot.keyClick(row.open_button, Qt.Key.Key_Tab, Qt.KeyboardModifier.ShiftModifier)
+    assert focus_visible(expand)
+    assert top_edge() == ring
 
 
 def test_single_expansion(
@@ -364,7 +416,17 @@ def test_open_terminal_calls_the_context(
     screen = loaded(env, context, qtbot)
     row = screen.live_rows[LIVE_B]
     assert row.open_button.accessibleName() == f"Open terminal for run {LIVE_B}"
+    assert row.open_button.accessibleDescription() == "Open this run in a terminal."
+    with qtbot.waitActive(screen):
+        screen.activateWindow()
+    qtbot.waitUntil(
+        lambda: (
+            row.open_button.isVisible()
+            and row.open_button.size() == row.open_button.sizeHint()
+        )
+    )
     qtbot.mouseClick(row.open_button, Qt.MouseButton.LeftButton)
+    assert opened == [LIVE_B]
     row.expand_button.click()
     assert row.detail_terminal is not None and row.detail_terminal.isVisible()
     assert row.detail_terminal.text() == "Open terminal"
@@ -574,8 +636,8 @@ def test_finished_rows_survive_a_live_run_saving(
     screen.finished_rows[DONE_A].expand_button.click()
     details = row.details
     assert details is not None
-    value = details.findChildren(QLabel)[1]
-    value.setSelection(0, 3)
+    value = row.detail_labels["Id"][1]
+    select_detail(value, 3)
     row.expand_button.setFocus()
 
     run = record.load(LIVE_A, env)
@@ -585,7 +647,7 @@ def test_finished_rows_survive_a_live_run_saving(
     )
     assert screen.finished_rows[DONE_A] is row
     assert row.details is details
-    assert value.hasSelectedText()
+    assert value.textCursor().hasSelection()
     assert QApplication.focusWidget() is row.expand_button
     assert row.expanded
 
@@ -600,7 +662,7 @@ def test_finished_row_redraws_when_its_values_change(
     write_run(replace(run, subject="Fix it", updated_at=run.updated_at + 5))
     # The watcher can report the folder change before the new record is in
     # place, so wait for the record the test wrote rather than one signal.
-    qtbot.waitUntil(lambda: row.title_label.text() == "Run · Fix it", timeout=5000)
+    qtbot.waitUntil(lambda: row.title_label.text() == "Fix it", timeout=5000)
     assert screen.finished_rows[DONE_A] is row
     assert detail_rows(row)["Subject"] == "Fix it"
 
@@ -620,7 +682,16 @@ def test_finished_row_redraws_when_its_values_change(
 
 
 def detail_rows(row: overview._OverviewRow) -> dict[str, str]:
-    return {name.text(): value.text() for name, value in row.detail_labels.values()}
+    return {
+        name.text(): value.toPlainText() for name, value in row.detail_labels.values()
+    }
+
+
+def select_detail(value: overview._DetailValue, length: int) -> None:
+    cursor = value.textCursor()
+    cursor.setPosition(0)
+    cursor.setPosition(length, QTextCursor.MoveMode.KeepAnchor)
+    value.setTextCursor(cursor)
 
 
 def test_flow_details_and_nested_runs(
@@ -631,6 +702,8 @@ def test_flow_details_and_nested_runs(
     flow = make_flow(
         env,
         status="stopped",
+        main="/work/main-project",
+        dir="/work/linked-project",
         wave=12,
         reason="Needs an answer",
         plan_waves=[["task-0"], ["task-1"]],
@@ -647,9 +720,11 @@ def test_flow_details_and_nested_runs(
     assert screen.finished_empty.isVisible()
     row = screen.live_rows[FLOW]
     assert row.badge.text() == "Waiting for Claude"
-    assert row.title_label.text() == "Flow · project"
+    assert row.title_label.text() == "Task 0 and 1 more"
+    assert row.repo_label.text() == "main-project"
     assert row.progress_label.text() == "1/2 merged"
     assert row.worker_label.text() == "test-model"
+    assert row.effort_label.text() == "high"
     assert row.open_button.isHidden()
     assert all(not child.isVisible() for child in row.child_rows.values())
     qtbot.mouseClick(row.expand_button, Qt.MouseButton.LeftButton)
@@ -675,7 +750,8 @@ def test_flow_details_and_nested_runs(
         assert child.isVisible()
         assert not child.expanded
     done, live = row.child_rows[DONE_A], row.child_rows[LIVE_A]
-    assert done.title_label.text() == "Run · Write: task-0, round 0"
+    assert done.title_label.text() == "Writer: task-0, round 0"
+    assert done.repo_label.text() == "project"
     assert done.open_button.isHidden()
     done.expand_button.click()
     assert done.body.isVisible()
@@ -742,10 +818,10 @@ def test_flow_history_labels_reviews_and_keeps_unmatched_task_details(
     parent = screen.live_rows[FLOW]
     parent.expand_button.click()
     children = parent.child_rows
-    assert children[DONE_A].title_label.text() == "Run · Write: task-0, round 0"
-    assert children[unlabelled].title_label.text() == "Run · Saved subject"
-    assert children[DONE_B].title_label.text() == "Run · Review: task-0, round 1"
-    assert children[LIVE_A].title_label.text() == "Run · Review: task-0, round 2"
+    assert children[DONE_A].title_label.text() == "Writer: task-0, round 0"
+    assert children[unlabelled].title_label.text() == "Saved subject"
+    assert children[DONE_B].title_label.text() == "Review: task-0, round 1"
+    assert children[LIVE_A].title_label.text() == "Review: task-0, round 2"
     assert "Worktree preparation failed" in detail_rows(parent)["Task task-1"]
     assert "Task task-0" not in detail_rows(parent)
     children[DONE_B].expand_button.click()
@@ -755,7 +831,7 @@ def test_flow_history_labels_reviews_and_keeps_unmatched_task_details(
     second.expand_button.click()
     assert "Verdict" not in detail_rows(second)
     task_name = second.detail_labels["Task"][1]
-    task_name.setSelection(0, len("task-0"))
+    select_detail(task_name, len("task-0"))
 
     write_run(replace(second_run, status=record.CLOSED, ended_at=180, updated_at=180))
     flow["tasks"][0].update(
@@ -781,10 +857,10 @@ def test_flow_history_labels_reviews_and_keeps_unmatched_task_details(
     qtbot.waitUntil(lambda: detail_rows(second).get("Verdict") == "keep")
     qtbot.waitUntil(second.open_button.isHidden)
     assert second.expanded
-    assert second.title_label.text() == "Run · Review: task-0, round 2"
+    assert second.title_label.text() == "Review: task-0, round 2"
     assert detail_rows(second)["Findings"] == "0 must, 1 should, 2 lead"
     assert detail_rows(second)["Task status"] == "Accepted"
-    assert task_name.selectedText() == "task-0"
+    assert task_name.textCursor().selectedText() == "task-0"
     assert "Task task-0" not in detail_rows(parent)
 
 
@@ -871,10 +947,8 @@ def test_historical_reviewer_without_round_uses_saved_subject(
     screen = screen_for(context, qtbot)
     parent = screen.live_rows[FLOW]
     parent.expand_button.click()
-    assert parent.child_rows[DONE_A].title_label.text() == f"Run · {subject}"
-    assert (
-        parent.child_rows[DONE_B].title_label.text() == "Run · Review: task-0, round 2"
-    )
+    assert parent.child_rows[DONE_A].title_label.text() == subject
+    assert parent.child_rows[DONE_B].title_label.text() == "Review: task-0, round 2"
 
 
 @pytest.mark.parametrize("stored_waves", [False, True])
@@ -895,6 +969,28 @@ def test_flow_without_plan_wave_shows_passes_zero(
     assert detail_rows(row)["Passes"] == "0"
 
 
+@pytest.mark.parametrize(
+    ("count", "fields", "expected"),
+    [(1, {}, "Task 0"), (3, {"title": "Refine the Overview"}, "Refine the Overview")],
+)
+def test_flow_name_after_plan_is_gone(
+    env: dict[str, str],
+    context: AppContext,
+    qtbot: QtBot,
+    count: int,
+    fields: dict[str, str],
+    expected: str,
+) -> None:
+    flow = make_flow(env, count=count, **fields)
+    flow["writer"]["effort"] = None
+    flow_record.save(flow, env)
+    (flow_record.folder(FLOW, env) / flow_record.PLAN_NAME).unlink()
+    screen = screen_for(context, qtbot)
+    row = screen.live_rows[FLOW]
+    assert row.title_label.text() == expected
+    assert row.effort_label.text() == "default"
+
+
 def test_panel_details(env: dict[str, str], context: AppContext, qtbot: QtBot) -> None:
     make_panel(
         env,
@@ -902,7 +998,9 @@ def test_panel_details(env: dict[str, str], context: AppContext, qtbot: QtBot) -
         ended_at=220,
         members=[
             make_member(1, status="answered", seconds=12.2),
-            make_member(2, status="failed", reason="No reply", changed=["a.py"]),
+            make_member(
+                2, status="failed", effort="high", reason="No reply", changed=["a.py"]
+            ),
             make_member(3, status="timed out", run=LIVE_A),
         ],
         left_out=[{"value": "claude:opus", "reason": "engine off"}],
@@ -910,9 +1008,11 @@ def test_panel_details(env: dict[str, str], context: AppContext, qtbot: QtBot) -
     screen = screen_for(context, qtbot)
     row = screen.finished_rows[PANEL]
     assert row.badge.text() == "Incomplete"
-    assert row.title_label.text() == "Panel · project"
+    assert row.title_label.text() == "A question"
+    assert row.repo_label.text() == "project"
     assert row.progress_label.text() == "1/3 answered"
     assert row.worker_label.text() == "3 members"
+    assert row.effort_label.text() == "mixed"
     assert row.time_label.text() == "2 min 0 s"
     assert row.open_button.isHidden()
     qtbot.mouseClick(row.expand_button, Qt.MouseButton.LeftButton)
@@ -934,6 +1034,39 @@ def test_panel_details(env: dict[str, str], context: AppContext, qtbot: QtBot) -
     assert values["Left out 1"] == "claude:opus: engine off"
     assert not row.child_rows
     assert row.file_buttons["Summary"].isVisible()
+
+
+@pytest.mark.parametrize(
+    ("missing", "effort", "shown"),
+    [
+        (True, None, "default"),
+        (False, "xhigh", "xhigh"),
+    ],
+)
+def test_panel_without_question(
+    env: dict[str, str],
+    context: AppContext,
+    qtbot: QtBot,
+    tmp_path: Path,
+    missing: bool,
+    effort: str | None,
+    shown: str,
+) -> None:
+    directory = tmp_path / "not-a-checkout"
+    directory.mkdir()
+    make_panel(
+        env,
+        dir=str(directory),
+        question=" \n \t",
+        members=[make_member(1, effort=effort), make_member(2, effort=effort)],
+    )
+    if missing:
+        (panel_record.folder(PANEL, env) / panel_record.QUESTION_NAME).unlink()
+    screen = screen_for(context, qtbot)
+    row = screen.live_rows[PANEL]
+    assert row.title_label.text() == "Panel question unavailable"
+    assert row.repo_label.text() == directory.name
+    assert row.effort_label.text() == shown
 
 
 def test_newest_check_log(tmp_path: Path) -> None:
@@ -1108,7 +1241,7 @@ def test_record_rows_survive_other_changes_and_refresh_workers(
     if destination_expanded:
         panel_row.expand_button.click()
     selected = row.detail_labels["Reason"][1]
-    selected.setSelection(0, 7)
+    select_detail(selected, 7)
     other["status"] = "stopped"
     flow_record.save(other, env)
     qtbot.waitUntil(
@@ -1123,12 +1256,12 @@ def test_record_rows_survive_other_changes_and_refresh_workers(
     qtbot.waitUntil(lambda: LIVE_A in row.child_rows)
     assert not panel_row.child_rows
     assert "Task task-0" not in detail_rows(row)
-    assert selected.selectedText() == "Current"
+    assert selected.textCursor().selectedText() == "Current"
     flow["reason"] = "A new Current reason"
     flow_record.save(flow, env)
-    qtbot.waitUntil(lambda: selected.text() == flow["reason"])
+    qtbot.waitUntil(lambda: selected.toPlainText() == flow["reason"])
     assert row.detail_labels["Reason"][1] is selected
-    assert selected.selectedText() == "Current"
+    assert selected.textCursor().selectedText() == "Current"
     shutil.rmtree(paths.runs_dir(env) / LIVE_A)
     context.runs.reload()
     qtbot.waitUntil(lambda: not row.child_rows)
@@ -1297,11 +1430,101 @@ def test_record_keyboard_order_and_long_text(
     assert screen.width() == 900
     assert not flow_row.title_label.wordWrap()
     assert flow_row.file_buttons["Briefs"].accessibleName() == f"Briefs for flow {FLOW}"
-    assert flow_row.detail_labels["Reason"][1].wordWrap()
-    assert child.detail_labels["Task reason"][1].wordWrap()
+    assert flow_row.detail_labels["Reason"][1].wordWrapMode() == (
+        QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere
+    )
+    assert child.detail_labels["Task reason"][1].wordWrapMode() == (
+        QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere
+    )
     panel_row.expand_button.click()
     assert not flow_row.expanded and not child.isVisible()
-    assert panel_row.detail_labels["Question"][1].wordWrap()
+    assert panel_row.detail_labels["Question"][1].wordWrapMode() == (
+        QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere
+    )
+
+
+@pytest.mark.parametrize("width", [500, 900])
+def test_long_expanded_values_keep_column_geometry(
+    env: dict[str, str], context: AppContext, qtbot: QtBot, width: int
+) -> None:
+    path = "/work/project/" + "x" * 1000 + "/input.txt"
+    question = (
+        f"Which files need review?\nInspect {path} first.\nExplain the next step."
+    )
+    branch = "ember/" + "x" * 1000
+    make_panel(env, question=question)
+    write_run(make_run(env, LIVE_A, branch=branch))
+    context.runs.reload()
+    qtbot.waitUntil(lambda: len(context.runs.live()) == 1)
+    screen = screen_for(context, qtbot)
+    screen.resize(width, 480)
+    table = screen.live_table
+    viewport = table.viewport()
+    content = table.widget()
+    assert content is not None
+    bar = table.horizontalScrollBar()
+    outer = screen.findChild(QScrollArea)
+    assert outer is not None
+    vertical = outer.verticalScrollBar()
+    rows = (screen.live_rows[PANEL], screen.live_rows[LIVE_A])
+
+    def geometry() -> list[tuple[int, int]]:
+        cells = [*screen.live_header.findChildren(QLabel)]
+        positions = [
+            (cell.mapTo(viewport, QPoint()).x(), cell.width()) for cell in cells
+        ]
+        for row in rows:
+            positions.extend(
+                (cell.mapTo(viewport, QPoint()).x(), cell.width())
+                for cell in row.columns.cells
+            )
+        return positions
+
+    qtbot.waitUntil(
+        lambda: (
+            viewport.width() < width
+            and content.width()
+            == max(viewport.width(), screen.column_widths.minimum_width())
+            and bar.maximum() == content.width() - viewport.width()
+        )
+    )
+    expected_columns = geometry()
+    expected_scroll = (bar.minimum(), bar.maximum())
+    assert (bar.maximum() > 0) == (width == 500)
+    assert vertical.maximum() == 0
+
+    for row, key, value in zip(
+        rows, ("Question", "Branch"), (question, branch), strict=True
+    ):
+        row.expand_button.click()
+        qtbot.waitUntil(lambda: vertical.maximum() > 0)
+        label = row.detail_labels[key][1]
+        assert label.isVisible()
+        assert label.toPlainText() == value
+        document = label.document()
+        assert label.mapTo(viewport, QPoint(label.width(), 0)).x() <= viewport.width()
+        qtbot.waitUntil(
+            lambda label=label: (
+                label.document().size().height() <= label.viewport().height()
+            )
+        )
+        assert label.horizontalScrollBar().maximum() == 0
+        assert label.verticalScrollBar().maximum() == 0
+        block = document.begin()
+        for line in value.splitlines():
+            assert block.text() == line
+            lines = block.layout()
+            assert lines is not None and lines.lineCount() >= 1
+            if path in line or line == branch:
+                assert lines.lineCount() > 1
+            else:
+                assert lines.lineCount() == 1
+            block = block.next()
+        assert not block.isValid()
+        assert (bar.minimum(), bar.maximum()) == expected_scroll
+        assert geometry() == expected_columns
+        row.expand_button.click()
+        qtbot.waitUntil(lambda: vertical.maximum() == 0)
 
 
 @pytest.mark.parametrize("mode", ["light", "dark"])
@@ -1333,7 +1556,7 @@ def test_cancelled_parent_moves_live_workers_to_live_with_their_controls(
         assert item is not None
         assert item.widget() is row
         assert row.badge.text() == "Incomplete" and row.badge.tone() == "incomplete"
-        assert row.title_label.text().startswith("Flow · ")
+        assert row.title_label.text() == "Task 0 and 1 more"
         row.expand_button.click()
         assert detail_rows(row)["Reason"] == "Owner stopped it"
         assert not row.child_rows
@@ -1546,7 +1769,7 @@ def test_flow_status_chips(
     screen = screen_for(context, qtbot)
     row = screen._rows[FLOW]
     assert (row.badge.text(), row.badge.tone()) == (text, tone)
-    assert row.title_label.text() == "Flow · project"
+    assert row.title_label.text() == "Task 0 and 1 more"
 
 
 def test_finished_filters_combine_and_persist(
@@ -1997,10 +2220,15 @@ def test_show_all_is_hidden_when_the_preview_holds_everything(
     assert screen.finished_rows_layout.count() == 2
 
 
-@pytest.mark.parametrize("width", [576, 1000])
+@pytest.mark.parametrize("width", [576, 796, 1100])
 def test_rows_line_up_in_fixed_columns(
-    env: dict[str, str], context: AppContext, qtbot: QtBot, width: int
+    env: dict[str, str],
+    context: AppContext,
+    qtbot: QtBot,
+    qapp: QApplication,
+    width: int,
 ) -> None:
+    theme.apply(qapp, "light")
     flow = make_flow(env, status="done", ended_at=1_800_000_900)
     flow["tasks"][0]["writer_run"] = DONE_A
     flow_record.save(flow, env)
@@ -2017,7 +2245,7 @@ def test_rows_line_up_in_fixed_columns(
         *flow_row.child_rows.values(),
     ]
     qtbot.waitUntil(lambda: all(row.isVisible() for row in rows))
-    expected = ["Expand", "Status", "Name", "Progress", "Worker", "Time", "Action"]
+    expected = ["", "", "Status", "Name", "Progress", "Worker", "Effort", "Time", ""]
     assert [
         label.text() for label in screen.live_header.findChildren(QLabel)
     ] == expected
@@ -2029,7 +2257,8 @@ def test_rows_line_up_in_fixed_columns(
         assert [
             label.display_text() for label in header.findChildren(overview.ElidedLabel)
         ] == expected
-    for index in range(len(expected)):
+    previous_right = None
+    for index, heading in enumerate(expected):
         positions = []
         widths = []
         layouts = [
@@ -2038,17 +2267,156 @@ def test_rows_line_up_in_fixed_columns(
             *(row.columns for row in rows),
         ]
         for layout in layouts:
-            assert layout is not None
-            item = layout.itemAt(index)
-            assert item is not None
-            cell = item.widget()
-            assert cell is not None
+            assert isinstance(layout, overview._RowColumns)
+            cell = layout.cells[index]
             positions.append(cell.mapTo(screen, cell.rect().topLeft()).x())
             widths.append(cell.width())
-        assert len(set(positions)) == len(set(widths)) == 1, expected[index]
+            if heading != "Name":
+                assert cell.minimumWidth() == cell.maximumWidth() == cell.width()
+        assert len(set(positions)) == len(set(widths)) == 1, heading
+        if previous_right is not None:
+            assert positions[0] - previous_right == (0 if index == 1 else 14)
+        previous_right = positions[0] + widths[0]
+
+    for row in rows:
+        kind = "Flow" if row is flow_row else "Panel" if row is panel else "Run"
+        assert row.type_label.text() == row.type_icon.accessibleName() == kind
+        icon = row.type_icon.pixmap()
+        assert icon is not None and not icon.isNull()
+        assert row.type_label.font() == theme.font("caption")
+        assert row.type_label.property("role") == "secondary"
+        assert row.repo_label.property("role") == "secondary"
+
+    run = screen.live_rows[LIVE_A]
+    caption = QFontMetrics(theme.font("caption"))
+    assert run.expand_button.width() == run.expand_button.sizeHint().width()
+    assert run.columns.cells[1].width() == caption.horizontalAdvance("Panel")
+    assert run.columns.cells[2].width() == overview._chip_width()
+    assert run.columns.cells[-1].width() == run.open_button.sizeHint().width()
+    assert all(row.columns.cells[-1].width() == run.open_button.width() for row in rows)
+    for label, heading, samples in (
+        (
+            run.progress_label,
+            "Progress",
+            ("6/6 merged", "8/8 answered", "read-only", "turn 99"),
+        ),
+        (run.worker_label, "Worker", ("gpt-6.2-astra", "openrouter/x", "8 members")),
+        (
+            run.effort_label,
+            "Effort",
+            ("minimal", "low", "medium", "high", "xhigh", "max", "default", "mixed"),
+        ),
+        (run.time_label, "Time", ("1 h 30 min", "59 min 59 s")),
+    ):
+        minimum = caption.horizontalAdvance(heading)
+        preferred = max(
+            label.fontMetrics().horizontalAdvance(sample) for sample in samples
+        )
+        assert (
+            screen.column_widths.preferred[overview.COLUMN_NAMES.index(heading)]
+            == preferred
+        )
+        if width < 1100:
+            assert label.width() == minimum
+        else:
+            assert minimum <= label.width() <= preferred
+            if heading in ("Effort", "Time"):
+                assert label.width() == preferred
+                for sample in samples:
+                    label.setText(sample)
+                    assert label.display_text() == sample
+    if width == 576:
+        assert run.title_label.width() == 160
+    elif width == 796:
+        assert 160 < run.title_label.width() < 170
+    for label in (
+        run.title_label,
+        run.repo_label,
+        run.progress_label,
+        run.worker_label,
+        run.effort_label,
+        run.time_label,
+    ):
+        label.setText("Very long text " * 20)
+        shown = label.display_text()
+        assert shown.endswith("…")
+        assert label.fontMetrics().horizontalAdvance(shown) <= label.width()
+
     assert screen.width() == width
     scroll = screen.findChild(QScrollArea)
     assert scroll is not None and scroll.horizontalScrollBar().maximum() == 0
+    for table in (screen.live_table, screen.finished_table):
+        assert table.verticalScrollBar().maximum() == 0
+        scrollbar = table.horizontalScrollBar()
+        assert (scrollbar.maximum() > 0) == (width == 576)
+        scrollbar.setValue(scrollbar.maximum())
+    assert (
+        run.open_button.mapTo(
+            screen.live_table.viewport(), run.open_button.rect().bottomRight()
+        ).x()
+        < screen.live_table.viewport().width()
+    )
+
+
+@pytest.mark.parametrize("mode", theme.MODES)
+def test_default_window_leaves_room_for_names_and_uses_card_background(
+    env: dict[str, str],
+    context: AppContext,
+    qtbot: QtBot,
+    qapp: QApplication,
+    mode: str,
+) -> None:
+    theme.apply(qapp, mode)
+    write_mix(env)
+    context.runs.reload()
+    qtbot.waitUntil(lambda: len(context.runs.runs()) == 4)
+    with qtbot.waitSignal(context.settings_changed):
+        context.reload_settings()
+    proc_locks = Path(env["HOME"]) / "proc-locks"
+    proc_locks.write_text("")
+    context.flows._proc_locks = proc_locks
+    context.flows.set_active(True)
+    qtbot.waitUntil(context.flows.loaded)
+    window = MainWindow(context, has_tray=False, quit_app=lambda: None)
+    qtbot.addWidget(window)
+    window.show()
+    assert (window.width(), window.height()) == (1100, 720)
+    screen = window.screen_widget("overview")
+    assert isinstance(screen, OverviewScreen)
+    qtbot.waitUntil(
+        lambda: LIVE_A in screen.live_rows and DONE_A in screen.finished_rows
+    )
+
+    for card, table, row in (
+        (screen.live_card, screen.live_table, screen.live_rows[LIVE_A]),
+        (screen.finished_card, screen.finished_table, screen.finished_rows[DONE_A]),
+    ):
+        assert row.title_label.width() >= 170
+        assert table.horizontalScrollBar().maximum() == 0
+        assert not table.horizontalScrollBar().isVisible()
+        gap = sum(cell.width() for cell in row.columns.cells[:2]) + 8
+        point = table.viewport().mapTo(card, QPoint(gap, 5))
+        image = card.grab().toImage()
+        assert image.pixelColor(point * image.devicePixelRatio()) == theme.color(
+            "bg-card"
+        )
+    live = screen.live_rows[LIVE_A]
+    for effort in (
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "default",
+        "mixed",
+    ):
+        live.effort_label.setText(effort)
+        assert live.effort_label.display_text() == effort
+    live.update_elapsed(1_800_000_000 + 5432)
+    assert live.time_label.display_text() == "1 h 30 min"
+    assert live.open_button.width() == live.open_button.sizeHint().width()
+    assert live.open_button.isVisible()
 
 
 def test_nested_runs_are_oldest_first(
@@ -2092,7 +2460,9 @@ def test_elapsed() -> None:
     assert overview.elapsed(0) == "0 s"
     assert overview.elapsed(45.9) == "45 s"
     assert overview.elapsed(252) == "4 min 12 s"
-    assert overview.elapsed(3600) == "1 h 0 min 0 s"
+    assert overview.elapsed(3599) == "59 min 59 s"
+    assert overview.elapsed(3600) == "1 h 0 min"
+    assert overview.elapsed(5432) == "1 h 30 min"
     assert overview.elapsed(-5) == "0 s"
     assert overview.took(4350) == "1 h 12 min"
 
@@ -2137,10 +2507,10 @@ def test_a_run_without_a_subject_keeps_its_worker_in_the_title(
     qtbot.waitUntil(lambda: len(context.runs.runs()) == 1)
     screen = screen_for(context, qtbot)
     row = screen.live_rows[LIVE_A]
-    assert row.title_label.text() == f"Run · Codex · {run.model} · low · fast"
+    assert row.title_label.text() == f"Codex · {run.model} · low · fast"
     write_run(replace(run, subject="Fix the\nbug"))
     context.runs.reload()
-    qtbot.waitUntil(lambda: row.title_label.text() == "Run · Fix the bug")
+    qtbot.waitUntil(lambda: row.title_label.text() == "Fix the bug")
 
 
 def _write_denial(

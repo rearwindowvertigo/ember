@@ -71,6 +71,7 @@ def test_creation(flow: dict[str, Any], created: Path, env: dict[str, str]) -> N
         created / record.PLAN_NAME
     ).read_text() == '{"dir": "/example", "tasks": []}\n'
     assert record.load(flow["id"], env) == flow
+    assert "title" not in flow
     (event,) = record.read_events(flow["id"], env)
     assert (
         event["seq"] == 1 and event["kind"] == "flow" and event["status"] == "starting"
@@ -419,6 +420,10 @@ def test_broken_json(
     ("key", "value"),
     [
         ("status", "unknown"),
+        ("title", "  "),
+        ("title", "two\nlines"),
+        ("title", "A" * 101),
+        ("title", None),
         ("common", 42),
         ("wave", True),
         ("plan_waves", None),

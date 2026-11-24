@@ -449,6 +449,10 @@ def test_claim_refused(env: dict[str, str], plan_file: Path, claim_state: str) -
 def test_start(
     tmp_path: Path, env: dict[str, str], plan_file: Path, repo: Path
 ) -> None:
+    title = "Refine Overview rows"
+    source = json.loads(plan_file.read_text())
+    source["title"] = title
+    plan_file.write_text(json.dumps(source))
     code, out, err = invoke(env, "--plan", str(plan_file), "--start")
     assert code == 0, err
     flow_id = out.splitlines()[0].split()[1]
@@ -459,6 +463,7 @@ def test_start(
         f"worktree {current['worktree']}",
     ]
     assert current["status"] == "starting"
+    assert current["title"] == title
     assert current["common"] == str((repo / ".git").resolve())
     assert current["base_branch"] == git(repo, "branch", "--show-current", env=env)
     assert current["writer"]["effort_frozen"] is True
@@ -480,6 +485,15 @@ def test_start(
         "same model: writer and reviewer both resolve to codex gpt-5",
         f"next: emb flow --watch {flow_id} --json",
     ]
+    plan_file.unlink()
+    (record.folder(flow_id, env) / record.PLAN_NAME).unlink()
+    assert record.load(flow_id, env)["title"] == title
+    code, out, err = invoke(env, "--status", flow_id, "--json")
+    assert code == 0, err
+    assert "title" not in json.loads(out)
+    code, out, err = invoke(env, "--status", flow_id)
+    assert code == 0, err
+    assert "title:" not in out
 
 
 @pytest.mark.parametrize("reviewer", ["codex:other@low", "claude:gpt-5@low"])

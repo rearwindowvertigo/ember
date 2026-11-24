@@ -1626,9 +1626,10 @@ def _wait_status(flow: dict[str, Any], env: Mapping[str, str]) -> None:
 def _status(
     flow_id: str, as_json: bool, env: Mapping[str, str], out: TextIO, err: TextIO
 ) -> None:
-    """Print one complete record or an oldest-first summary of all flows."""
+    """Print one flow's status fields or an oldest-first summary of all flows."""
     if flow_id:
         flow = _load(flow_id, env)
+        flow.pop("title", None)
         flow["runner_live"] = lock.live(flow_id, env)
         flow["check_output"] = _check_output(flow_id, env)
         flow["reports"] = _done_reports(flow)

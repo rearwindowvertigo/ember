@@ -18,6 +18,12 @@
       "type": "string",
       "pattern": "^/"
     },
+    "title": {
+      "type": "string",
+      "pattern": "^(?=[\\s\\S]*\\S)[^\\r\\n\\u000b\\u000c\\u001c-\\u001e\\u0085\\u2028\\u2029]*$(?![\\s\\S])",
+      "description": "a non-blank one-line string",
+      "maxLength": 100
+    },
     "base": {
       "type": "string",
       "pattern": "\\S",
