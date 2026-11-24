@@ -16,15 +16,19 @@ after Quit Ember or when the running app takes over, 64 for a usage error and
 `emb flow` uses the codes in `ember.flows.command`.
 `emb panel` uses the codes in `ember.panels.command`.
 `emb prune` exits 0 on success, 1 on a failure and 64 for invalid arguments.
+
+With `--json`, a command that exits non-zero having printed nothing on
+standard output prints one error object there; see `_json_error`.
 """
 
 import argparse
 import contextlib
 import json
+import re
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, NoReturn
+from typing import Any, NoReturn, TextIO, cast
 
 from ember import __version__, branches, choices, db, deps, ground, holds, skill
 from ember.engines import models, status
@@ -1150,10 +1154,77 @@ def _run_skill(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
     return EX_OK
 
 
+class _Watched:
+    """Pass writes through to a stream, noting whether any text was written."""
+
+    def __init__(self, stream: TextIO) -> None:
+        """Wrap `stream`."""
+        self.stream = stream
+        self.written = False
+        self.parts: list[str] = []
+
+    def write(self, text: str) -> int:
+        """Write `text` to the wrapped stream and keep a copy."""
+        if text:
+            self.written = True
+            self.parts.append(text)
+        return self.stream.write(text)
+
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401 - any stream attribute
+        """Delegate every other attribute to the wrapped stream."""
+        return getattr(self.stream, name)
+
+
+_MESSAGE = re.compile(r"emb(?: [a-z-]+)*: (.*)")
+_ACTIONS = ("next:", "owner:", "report:")
+
+
+def _json_error(code: int, diagnostics: str) -> dict[str, Any]:
+    """Build the error object for a failed `--json` command.
+
+    `messages` holds each `emb <command>: <message>` line without its prefix,
+    `actions` each `next:`, `owner:` and `report:` line as printed, and
+    `warnings` each `WARNING:` line without its prefix, all in printed
+    order. Other standard error lines, such as a usage line, are left out.
+    """
+    messages: list[str] = []
+    actions: list[str] = []
+    warnings: list[str] = []
+    for line in diagnostics.splitlines():
+        if line.startswith(_ACTIONS):
+            actions.append(line)
+        elif line.startswith("WARNING: "):
+            warnings.append(line.removeprefix("WARNING: "))
+        elif match := _MESSAGE.fullmatch(line):
+            messages.append(match.group(1))
+    return {
+        "error": {
+            "exit": code,
+            "messages": messages,
+            "actions": actions,
+            "warnings": warnings,
+        }
+    }
+
+
+def _wants_json(argv: Sequence[str]) -> bool:
+    """Report whether `--json` is among the options, before any `--`."""
+    for word in argv:
+        if word == "--":
+            return False
+        if word == "--json":
+            return True
+    return False
+
+
 def main(
     argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = None
 ) -> int:
     """Run `emb` with the given arguments.
+
+    With `--json`, a non-zero exit that printed nothing on standard output
+    prints `_json_error`'s object there; standard error is unchanged. A
+    command that printed JSON before failing keeps its own output.
 
     Args:
         argv: Arguments after the program name; `None` reads `sys.argv`.
@@ -1162,6 +1233,33 @@ def main(
     Returns:
         The exit code.
     """
+    words = list(sys.argv[1:] if argv is None else argv)
+    if not _wants_json(words):
+        return _main(words, env)
+    real_out, real_err = sys.stdout, sys.stderr
+    out, err = _Watched(real_out), _Watched(real_err)
+    sys.stdout, sys.stderr = cast(TextIO, out), cast(TextIO, err)
+    code: int | None = None
+    try:
+        code = _main(words, env)
+        return code
+    except SystemExit as error:
+        code = (
+            error.code
+            if isinstance(error.code, int)
+            else 0
+            if error.code is None
+            else 1
+        )
+        raise
+    finally:
+        sys.stdout, sys.stderr = real_out, real_err
+        if code and not out.written:
+            print(json.dumps(_json_error(code, "".join(err.parts)), indent=2))
+
+
+def _main(argv: Sequence[str], env: Mapping[str, str] | None) -> int:
+    """Parse `argv` and run the command it names."""
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None:

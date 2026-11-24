@@ -5479,3 +5479,33 @@ These are the exit codes of `emb choices` and `emb engines`; `emb run`,
 | 75 | Stale generation or busy database |
 | 77 | An owner option without a terminal |
 | 78 | Unsupported settings database schema |
+
+### Errors with `--json`
+
+Every command given `--json` that exits non-zero without printing anything
+on standard output prints one error object there, indented by two spaces.
+This covers usage errors too. Standard error is unchanged. A command that
+printed its own JSON before failing, such as `emb gapcheck` at exit 81,
+keeps that output and prints no error object. `--json` counts only before
+a `--` argument.
+
+```json
+{
+  "error": {
+    "exit": 64,
+    "messages": ["plan.tasks[1].subject: at most 72 characters"],
+    "actions": ["next: emb flow --help"],
+    "warnings": []
+  }
+}
+```
+
+| Field | Value |
+|---|---|
+| `exit` | The exit code |
+| `messages` | Each `emb <command>: <message>` line of standard error, without the prefix |
+| `actions` | Each `next:`, `owner:` and `report:` line of standard error, as printed |
+| `warnings` | Each `WARNING:` line of standard error, without the prefix |
+
+Lists keep the order of standard error. Other standard error lines, such
+as argparse's usage line, are left out.
