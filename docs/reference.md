@@ -5127,14 +5127,16 @@ the filters. Confirmation and result lists scroll within the available
 screen height.
 
 Both cards align the same columns for runs, flows, panels and child runs.
+Each table has a 1-pixel divider beneath its column headings in the card
+border colour. The divider spans the table and appears with the headings.
 The chevron and type columns sit together. The other columns are 14 pixels
 apart. Expand, Type, Status and Button are sized to the chevron button,
 the widest type label, the widest status chip and the Terminal button.
-Name takes the remaining space. The table reserves 170 pixels for Name
-while Worker, Progress, Effort and Time shrink in that order to their
-heading widths. Name can then shrink to 160 pixels. If the table still
-needs room, it hides Effort, then Worker, then Progress, removing each
-heading and its cells together. Name can shrink further once all three
+The chevron is a round secondary button, 32 pixels wide and high. Name takes
+the remaining space. The table reserves 160 pixels for Name while Worker,
+Progress, Effort and Time shrink in that order to their heading widths. If
+the table still needs room, it hides Effort, then Worker, then Progress,
+removing each heading and its cells together. Name can shrink once all three
 are hidden. The table fits the card without horizontal scrolling and
 restores columns as space allows. Long text ends with an ellipsis.
 Expanded details show Progress, the run's Engine or flow's Writer with

@@ -20,6 +20,8 @@ from PySide6.QtGui import (
     QDesktopServices,
     QFontMetrics,
     QHideEvent,
+    QPainter,
+    QPaintEvent,
     QResizeEvent,
     QTextCursor,
     QTextOption,
@@ -452,7 +454,7 @@ def _chip_width() -> int:
 COLUMN_NAMES = ("", "", "Status", "Name", "Progress", "Worker", "Effort", "Time", "")
 COLUMN_GAP = 14
 NAME_MIN_WIDTH = 160
-NAME_PREFERRED_WIDTH = 170
+NAME_PREFERRED_WIDTH = NAME_MIN_WIDTH
 DETAIL_INDENT = theme.CONTROL_SM + COLUMN_GAP
 TYPE_ICONS = {"Run": "user", "Flow": "users", "Panel": "users-three"}
 TYPE_ICON_SIZE = 20
@@ -461,14 +463,13 @@ CODE_ROWS = ("Id", "Repository", "Branch")
 
 
 def _expand_control() -> QPushButton:
-    """Make the chevron button with no extra horizontal padding."""
-    control = button("", "ghost", size="sm")
-    control.setStyleSheet("QPushButton { padding: 0; }")
+    """Make the round chevron button."""
+    control = button("", "secondary", size="sm")
     control.setIconSize(QSize(ROW_BUTTON_ICON_SIZE, ROW_BUTTON_ICON_SIZE))
     control.setIcon(
         icons.icon("chevron-right", theme.color("text-secondary"), ROW_BUTTON_ICON_SIZE)
     )
-    control.setFixedSize(control.sizeHint())
+    control.setFixedSize(theme.CONTROL_SM, theme.CONTROL_SM)
     return control
 
 
@@ -491,12 +492,14 @@ class _ColumnWidths:
     preferred: tuple[int, ...]
 
     def fit(self, available_width: int) -> tuple[int, ...]:
-        """Shrink to the heading widths, then hide optional columns as needed."""
+        """Fit the optional columns and give Name the remaining width."""
         widths = list(self.preferred)
         name_reserve = NAME_PREFERRED_WIDTH - NAME_MIN_WIDTH
         needed = sum(widths) + COLUMN_GAP * (len(widths) - 2) + name_reserve
-        excess = max(0, needed - available_width)
+        excess = needed - available_width
         for heading in ("Worker", "Progress", "Effort", "Time"):
+            if excess <= 0:
+                break
             index = COLUMN_NAMES.index(heading)
             reduction = min(excess, widths[index] - self.minimum[index])
             widths[index] -= reduction
@@ -508,8 +511,7 @@ class _ColumnWidths:
             index = COLUMN_NAMES.index(heading)
             excess -= widths[index] + COLUMN_GAP
             widths[index] = 0
-        if excess > 0:
-            widths[COLUMN_NAMES.index("Name")] = max(0, NAME_MIN_WIDTH - excess)
+        widths[COLUMN_NAMES.index("Name")] = max(0, NAME_MIN_WIDTH - excess)
         return tuple(widths)
 
 
@@ -518,7 +520,7 @@ def _column_widths() -> _ColumnWidths:
     caption = QFontMetrics(theme.font("caption"))
     body = QFontMetrics(theme.font("body"))
     fixed = (
-        _expand_control().sizeHint().width(),
+        theme.CONTROL_SM,
         max(TYPE_ICON_SIZE, *(caption.horizontalAdvance(kind) for kind in TYPE_ICONS)),
         _chip_width(),
         NAME_MIN_WIDTH,
@@ -579,24 +581,25 @@ class _RowColumns(QHBoxLayout):
         for cell in self.cells[:2]:
             leading.addWidget(cell, 0, Qt.AlignmentFlag.AlignVCenter)
         self.addLayout(leading)
-        for heading, cell in zip(COLUMN_NAMES[2:], self.cells[2:], strict=True):
-            self.addWidget(cell, int(heading == "Name"), Qt.AlignmentFlag.AlignVCenter)
+        for cell in self.cells[2:]:
+            self.addWidget(cell, 0, Qt.AlignmentFlag.AlignVCenter)
         self.set_widths(widths)
 
     def set_widths(self, widths: tuple[int, ...]) -> None:
-        """Apply widths shared by every row and stretch Name into the spare space."""
+        """Apply the table's exact widths to every cell."""
         if self._widths == widths:
             return
         for index, (heading, cell, width) in enumerate(
             zip(COLUMN_NAMES, self.cells, widths, strict=True)
         ):
-            if heading == "Name":
-                cell.setMinimumWidth(width)
-            else:
-                cell.setFixedWidth(width)
-                if width == 0 or (self._widths and self._widths[index] == 0):
-                    cell.setVisible(width > 0)
+            cell.setFixedWidth(width)
+            if heading != "Name" and (
+                width == 0 or (self._widths and self._widths[index] == 0)
+            ):
+                cell.setVisible(width > 0)
         self._widths = widths
+        # Child geometry changes can leave this nested layout's widths cached.
+        self.invalidate()
 
 
 def _column_header(widths: tuple[int, ...]) -> QWidget:
@@ -1184,6 +1187,19 @@ def _place(layout: QVBoxLayout, rows: Sequence[QWidget]) -> None:
         row.show()
 
 
+class _HeaderDivider(QWidget):
+    """The one-pixel hairline between the table heading and its rows."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setFixedHeight(1)
+        theme.signals.changed.connect(self.update)
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: D102, N802
+        painter = QPainter(self)
+        painter.fillRect(event.rect(), theme.color("border"))
+
+
 class _RowTable(QWidget):
     """Fit the headings and rows to the available width in their card."""
 
@@ -1216,9 +1232,10 @@ def _card(
     table = _RowTable(widths)
     table_layout = QVBoxLayout(table)
     table_layout.setContentsMargins(0, 0, 0, 0)
-    table_layout.setSpacing(layout.spacing())
+    table_layout.setSpacing(layout.spacing() // 2)
     header = _column_header(widths.minimum)
     table_layout.addWidget(header)
+    table_layout.addWidget(_HeaderDivider())
     rows = QVBoxLayout()
     rows.setSpacing(16)
     table_layout.addLayout(rows)

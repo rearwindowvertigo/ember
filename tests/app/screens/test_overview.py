@@ -142,6 +142,14 @@ def test_empty(context: AppContext, qtbot: QtBot) -> None:
     assert screen.finished_empty.isVisible()
     assert screen.live_card.isVisible()
     assert screen.finished_card.isVisible()
+    for table, header in (
+        (screen.live_table, screen.live_header),
+        (screen.finished_table, screen.finished_header),
+    ):
+        divider = table.findChild(overview._HeaderDivider)
+        assert divider is not None
+        assert not header.isVisible()
+        assert not divider.isVisible()
 
 
 def test_tmp_volume_warning_follows_run_reloads(
@@ -301,11 +309,16 @@ def test_expand_button_ring_follows_keyboard_focus(
 
     ring = theme.color("focus-ring").name()
     assert not focus_visible(expand)
-    assert top_edge() not in (ring, theme.color("border-strong").name())
+    assert top_edge() != ring
     row.open_button.setFocus(Qt.FocusReason.MouseFocusReason)
     qtbot.keyClick(row.open_button, Qt.Key.Key_Tab, Qt.KeyboardModifier.ShiftModifier)
     assert focus_visible(expand)
     assert top_edge() == ring
+    row.open_button.setFocus(Qt.FocusReason.MouseFocusReason)
+    qtbot.mouseClick(expand, Qt.MouseButton.LeftButton)
+    assert expand.hasFocus()
+    assert not focus_visible(expand)
+    assert top_edge() != ring
 
 
 def test_single_expansion(
@@ -2281,14 +2294,14 @@ def test_rows_line_up_in_fixed_columns(
                     continue
                 positions.append(cell.mapTo(screen, QPoint()).x())
                 widths.append(cell.width())
-                if heading != "Name":
-                    assert cell.minimumWidth() == cell.maximumWidth() == cell.width()
+                assert cell.minimumWidth() == cell.maximumWidth() == cell.width()
             if heading in hidden:
                 continue
             assert len(set(positions)) == len(set(widths)) == 1, heading
             if previous_right is not None:
                 assert positions[0] - previous_right == (0 if index == 1 else 14)
             previous_right = positions[0] + widths[0]
+        assert previous_right == table.mapTo(screen, QPoint(table.width(), 0)).x()
         assert scroll.horizontalScrollBar().maximum() == 0
         assert run.open_button.isVisible()
         right_edge = run.open_button.mapTo(table, run.open_button.rect().topRight())
@@ -2312,7 +2325,7 @@ def test_rows_line_up_in_fixed_columns(
         assert row.repo_label.property("role") == "secondary"
 
     caption = QFontMetrics(theme.font("caption"))
-    assert run.expand_button.width() == run.expand_button.sizeHint().width()
+    assert run.expand_button.width() == run.expand_button.height() == theme.CONTROL_SM
     assert run.columns.cells[1].width() == caption.horizontalAdvance("Panel")
     assert run.columns.cells[2].width() == overview._chip_width()
     assert run.columns.cells[-1].width() == run.open_button.sizeHint().width()
@@ -2348,7 +2361,7 @@ def test_rows_line_up_in_fixed_columns(
                 assert label.display_text() == sample
 
     preferred_name = run.title_label.width()
-    assert preferred_name >= 170
+    assert preferred_name >= 160
     wide_table_width = table.width()
     screen.resize(900, 900)
     qtbot.waitUntil(lambda: table.width() < wide_table_width)
@@ -2376,14 +2389,52 @@ def test_rows_line_up_in_fixed_columns(
         assert label.fontMetrics().horizontalAdvance(shown) <= label.width()
 
     screen.resize(window_padding + full_columns + 5, 900)
-    qtbot.waitUntil(lambda: run.title_label.width() == 165)
-    check_columns(())
+    qtbot.waitUntil(lambda: check_columns(()))
+    assert run.title_label.width() == 160
     for label, column, _samples in samples_by_column:
-        assert label.width() == caption.horizontalAdvance(column)
+        extra = 5 if column == "Time" else 0
+        assert label.width() == caption.horizontalAdvance(column) + extra
+
+    full_preferred = sum(screen.column_widths.preferred) + 7 * 14
+    screen.resize(window_padding + full_preferred + 5, 900)
+    qtbot.waitUntil(lambda: check_columns(()))
+    assert run.title_label.width() == 165
 
     screen.resize(1100, 900)
-    qtbot.waitUntil(lambda: run.title_label.width() == preferred_name)
-    check_columns(())
+    qtbot.waitUntil(lambda: check_columns(()))
+    assert run.title_label.width() == preferred_name
+
+
+def test_header_dividers_span_both_tables_in_both_themes(
+    env: dict[str, str], context: AppContext, qtbot: QtBot, qapp: QApplication
+) -> None:
+    screen = loaded(env, context, qtbot)
+    tables = (
+        (screen.live_table, screen.live_header, next(iter(screen.live_rows.values()))),
+        (
+            screen.finished_table,
+            screen.finished_header,
+            next(iter(screen.finished_rows.values())),
+        ),
+    )
+    for mode in theme.MODES:
+        theme.apply(qapp, mode)
+        for table, header, first_row in tables:
+            divider = table.findChild(overview._HeaderDivider)
+            assert divider is not None
+            assert header.isVisible() and divider.isVisible()
+            rect = divider.geometry()
+            assert (rect.x(), rect.width(), rect.height()) == (0, table.width(), 1)
+            above = rect.top() - header.geometry().bottom() - 1
+            below = first_row.geometry().top() - rect.bottom() - 1
+            assert above == below > 0
+            image = table.grab(rect).toImage()
+            border = theme.color("border")
+            assert all(
+                image.pixelColor(x, y) == border
+                for x in range(image.width())
+                for y in range(image.height())
+            )
 
 
 @pytest.mark.parametrize("mode", theme.MODES)
@@ -2419,7 +2470,7 @@ def test_default_window_leaves_room_for_names_and_uses_card_background(
         (screen.live_card, screen.live_table, screen.live_rows[LIVE_A]),
         (screen.finished_card, screen.finished_table, screen.finished_rows[DONE_A]),
     ):
-        assert row.title_label.width() >= 170
+        assert row.title_label.width() >= 160
         assert not isinstance(table, QScrollArea)
         gap = sum(cell.width() for cell in row.columns.cells[:2]) + 8
         point = table.mapTo(card, QPoint(gap, 5))
@@ -2444,6 +2495,24 @@ def test_default_window_leaves_room_for_names_and_uses_card_background(
     assert live.time_label.display_text() == "1 h 30 min"
     assert live.open_button.width() == live.open_button.sizeHint().width()
     assert live.open_button.isVisible()
+
+    expand = live.expand_button
+    assert expand.property("kind") == "secondary"
+    assert expand.styleSheet() == ""
+    for expanded in (False, True):
+        assert live.expanded == expanded
+        card = screen.live_card
+        rect = expand.rect().translated(expand.mapTo(card, QPoint()))
+        image = card.grab(rect).toImage()
+        for corner in (
+            image.rect().topLeft(),
+            image.rect().topRight(),
+            image.rect().bottomLeft(),
+            image.rect().bottomRight(),
+        ):
+            assert image.pixelColor(corner) == theme.color("bg-card")
+        assert image.pixelColor(image.width() // 2, 0) != theme.color("bg-card")
+        expand.click()
 
 
 def test_nested_runs_are_oldest_first(
