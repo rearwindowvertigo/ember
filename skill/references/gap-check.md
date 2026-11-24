@@ -89,8 +89,12 @@ Read the JSON or text before starting work. Check `parse_error`,
 `uncovered_steps` and `unknown_steps`: any error or missing or unknown
 step leaves the check incomplete. With `--previous`, a missing or unknown
 earlier gap disposition also leaves it incomplete. Empty gap lists and
-zero counts are valid only with coverage of every expected step. Exit 81: follow `next:`
-to obtain a complete reply. On a `WARNING:` about a missing failure model,
+zero counts are valid only with coverage of every expected step. When a
+reviewer run's reply is invalid, Ember sends that run one correction turn
+before it reports exit 81, and the run stays open if the reply is still
+invalid. Exit 81: follow `next:`. When it names `emb run --send` on the
+reviewer run, write that message yourself, naming each problem in
+`parse_error`. On a `WARNING:` about a missing failure model,
 add it and check again. Follow printed lines as SKILL.md step 6 says. For a CLI reviewer's
 denied paths, inspect its run status and report them as `references/sandbox-and-exits.md`
 (Denied paths) says.

@@ -1970,7 +1970,7 @@ message forms:
 - `<path>: unknown earlier id <id>`
 - `<path>: duplicate disposition for <id>`
 - `<path>: unanswered gap <id> cannot be settled`
-- `reopened gap <id> needs exactly one new gap naming it`
+- `reopened gap <id> needs exactly one new gap with earlier set to <id>`
 - `gap <id> is <status> but a new gap names it as earlier`
 
 A schema path starts at `$`, with fields and zero-based array indices,
@@ -2098,7 +2098,7 @@ with `--previous`, and reads `  none` when nothing is settled. A nonempty
 | `next_id` | Next unused gap number; repeat checks continue from this number |
 | `dispositions` | Earlier active and settled gap ids, each with `status` and `reason` |
 | `reviewer` | `engine`, `model`, `effort`, `speed` (null when absent from the run) and `source`; values come from the run record, and `source` is `fallback` when the run was on a worker of the fallback list, `option` when `--engine` was given, otherwise `menu` |
-| `run` | `id`, `reply` (absolute reply path or null), `exit` (the start's exit), `closed` and `close_error` (null or a reason) |
+| `run` | `id`, `reply` (absolute path of the reply the result was read from, or null), `exit` (the start's exit), `closed`, `close_error` (null or a reason) and `correction` (null, or the correction turn's `turn`, null when it did not start, and `exit`) |
 | `steps` | Covered steps, each with `step`, `title` and `gaps`; each gap has `id`, `gap`, `harm`, `why`, `default`, `earlier` (an earlier gap id or null), `answer` (null until the lead records one) and `ask_owner` |
 | `settled` | Earlier gaps with a `settled` disposition, their original step and title, gap fields and answer |
 | `closed` | Closed history with original gap fields, step, title, answer if present, and closure reason |
@@ -2127,6 +2127,30 @@ A non-zero run exit keeps the run open. Its follow-up names
 reply file exists; otherwise it names a new gap check. An unreadable
 existing reply exits 66. A successful turn with no reply file exits 81.
 
+When a successful turn's reply has a `parse_error`, the check sends the
+open reviewer session one correction turn before closing it. The message
+is `Ember cannot read your reply: <parse_error>.`, followed by a request
+for the whole JSON object again. The result is then read from the
+correction turn's reply. A valid corrected reply closes the run and
+exits 0. The `next:` lines of a successful correction turn are not
+printed; the gap check prints its own action.
+
+When the corrected reply is still invalid, or the correction turn could
+not be sent or failed, the run stays open and the check exits 81 or the
+correction turn's exit. Re-reading the same reply gives the same result,
+so the action names a new turn of the open run, where `<n>` is the run's
+current turn:
+`next: emb run --send <run> --message-file <a message naming each problem>, then emb gapcheck --plan <plan> --reply <run folder>/turn-<n+1>.md --brief-file <run folder>/brief.md`.
+After a correction turn that failed or was refused, the line starts
+`next: once the run's lines above are settled, `. A correction turn still
+waiting to be collected gives
+`next: emb run --recover <run>, then emb gapcheck --plan <plan> --reply <run folder>/turn-<n>.md --brief-file <run folder>/brief.md`.
+With `--json`, the `emb gapcheck` part ends with `--json`. When the
+correction message cannot be written (exit 69), the run stays open,
+`parse_error` holds the reply's problems and then the write error, and
+`WARNING: the run <run> stays open for a correction; once that is fixed: <action>`
+names the same action.
+
 A reviewer run that a provider error ends at exit 73 is closed, and the
 check is repeated on the entry of `provider.fallback` that applies, with
 `WARNING: the gap check reviewer <engine> <model> failed (<kind>); starting <engine> <model> from the fallback list`
@@ -2145,7 +2169,7 @@ or when the run cannot be closed, the run's exit 73 is the check's exit.
 | 69 | Git is unavailable, the runtime folder cannot be used, or the run exits 69 | `owner: install git`, the run's runtime-folder instruction, or the run's line |
 | 74 | Interrupted by `SIGINT`, `SIGTERM` or `SIGHUP`, or an answer cannot be written | The run's recovery line when a run exists, then a gap check action; `next: ls -l <result>` for an answer write failure |
 | 79 | Reviewer worktree preparation failed before its session started | Diagnostic names the log; `next:` repeats the original gap check invocation |
-| 81 | Invalid reply, incomplete earlier-gap dispositions or links, missing or unknown steps, or a successful run without a reply file | `next: emb gapcheck --plan <plan> --reply <reply> --brief-file <saved brief>` after fixing the reply, or a new check |
+| 81 | Invalid reply, incomplete earlier-gap dispositions or links, missing or unknown steps, or a successful run without a reply file | After a correction turn, `next: emb run --send <run> --message-file <a message naming each problem>, then emb gapcheck --plan <plan> --reply <run folder>/turn-<n+1>.md --brief-file <saved brief>`; otherwise `next: emb gapcheck --plan <plan> --reply <reply> --brief-file <saved brief>` after fixing the reply, or a new check |
 | Other | The run's exit from the `emb run` table | The run's line, then a gap check action |
 
 ## `emb flow`
