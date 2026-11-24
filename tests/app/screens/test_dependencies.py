@@ -1,6 +1,7 @@
 import datetime
 import threading
 import time
+from collections.abc import Collection
 from dataclasses import replace
 
 import pytest
@@ -90,6 +91,15 @@ SAMPLE = (
     ),
     _component("codex", deps.CURRENT, group="apps", label="Codex"),
     _component(
+        "ember",
+        deps.UPDATE_AVAILABLE,
+        group="apps",
+        label="Ember",
+        installed="0.32.0",
+        newest="0.33.0-1",
+        note="Update Ember in the app or with apt.",
+    ),
+    _component(
         "pyside6",
         deps.UPDATE_AVAILABLE,
         group="libraries",
@@ -136,7 +146,7 @@ def test_groups_and_order(
 ) -> None:
     widget, _context, _calls = _screen(env, qtbot, monkeypatch, _report(*SAMPLE))
     assert widget.order() == [
-        ("apps", ["claude-desktop", "codex"]),
+        ("apps", ["ember", "claude-desktop", "codex"]),
         ("system", ["git", "bubblewrap", "python3", "bash", "tmux"]),
         ("libraries", ["pyside6"]),
     ]
@@ -183,6 +193,11 @@ def test_tiles_for_every_status(
     assert desktop.versions.isHidden()
     assert desktop.note is not None
     assert desktop.note.text() == "Not installed."
+    ember = tiles["ember"]
+    assert ember.label.text() == "Ember"
+    assert ember.versions.text() == "Installed 0.32.0 · Newest 0.33.0-1"
+    assert ember.note is not None
+    assert ember.note.text() == "Update Ember in the app or with apt."
     assert tiles["pyside6"].note is not None
     assert tiles["pyside6"].note.text() == "Updates with the next Ember release."
 
@@ -465,9 +480,9 @@ def test_sidebar_count_follows_deps_changed(
     report = _report(*SAMPLE)
     context._deps = report
     context.deps_changed.emit(report)
-    assert window.nav["dependencies"].count() == report.counts() == 4
+    assert window.nav["dependencies"].count() == report.counts() == 5
     assert widget.subtitle.text().startswith(
-        "2 updates available, 2 items missing and 1 check failed."
+        "3 updates available, 2 items missing and 1 check failed."
     )
     assert screen_module.ordered(report)[0][0] == "apps"
     failed_skill = replace(
@@ -479,7 +494,7 @@ def test_sidebar_count_follows_deps_changed(
     report = _report(*SAMPLE, failed_skill)
     context._deps = report
     context.deps_changed.emit(report)
-    assert window.nav["dependencies"].count() == report.counts() == 5
+    assert window.nav["dependencies"].count() == report.counts() == 6
 
 
 def test_check_now_without_a_report_shows_one_spinner(
@@ -499,7 +514,9 @@ def test_an_earlier_read_keeps_the_check_spinner(
     gates = {False: threading.Event(), True: threading.Event()}
     asked: list[bool] = []
 
-    def read(_env: object, *, installed: bool, newest: str) -> deps.DepsReport:
+    def read(
+        _env: object, *, installed: bool, newest: str, exclude: Collection[str] = ()
+    ) -> deps.DepsReport:
         asked.append(installed)
         gates[installed].wait(5)
         if installed:
@@ -508,6 +525,8 @@ def test_an_earlier_read_keeps_the_check_spinner(
 
     monkeypatch.setattr(deps, "read", read)
     context = AppContext(env)
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        context.reload_settings()
     widget = DependenciesScreen(context)
     qtbot.addWidget(widget)
     widget.show()
