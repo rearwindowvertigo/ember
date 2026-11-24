@@ -2146,7 +2146,8 @@ After a correction turn that failed or was refused, the line starts
 waiting to be collected gives
 `next: emb run --recover <run>, then emb gapcheck --plan <plan> --reply <run folder>/turn-<n>.md --brief-file <run folder>/brief.md`.
 With `--json`, the `emb gapcheck` part ends with `--json`. When the
-correction message cannot be written (exit 69), the run stays open and
+correction message cannot be written (exit 69), the run stays open,
+`parse_error` holds the reply's problems and then the write error, and
 `WARNING: the run <run> stays open for a correction; once that is fixed: <action>`
 names the same action.
 

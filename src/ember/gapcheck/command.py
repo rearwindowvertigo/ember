@@ -800,6 +800,7 @@ def _run(
     }
     result["run"] = details
     problem = None
+    reasons = None
     try:
         run = record.load(run_id, env)
         result["reviewer"] = {
@@ -818,6 +819,7 @@ def _run(
         _collect(run, document, earlier, result, details)
         if code == 0 and details["reply"] is not None and result["parse_error"]:
             # One correction turn while the session is open; see `_correct`.
+            reasons = result["parse_error"]
             offset = len(errors.getvalue())
             try:
                 code = _correct(run_id, result, details, document, earlier, env, core)
@@ -834,6 +836,9 @@ def _run(
     except CommandError as error:
         problem = error
         result["parse_error"] = str(error)
+        if details["correction"] == {"turn": None, "exit": 69}:
+            # The reply's own problems still need the correction turn.
+            result["parse_error"] = f"{reasons}; {error}"
     except record.RecordError as error:
         problem = CommandError(1, str(error), f"next: emb run --status {run_id}")
         result["parse_error"] = str(error)
@@ -1000,7 +1005,13 @@ def main(
                 file=err,
             )
         details = result["run"]
-        if problem and details and details["correction"] and not details["closed"]:
+        if (
+            problem
+            and details
+            and details["correction"]
+            and details["correction"]["exit"] == 69
+            and details["correction"]["turn"] is None
+        ):
             later = _correction_follow(command, details, environment, args.json)
             print(
                 f"WARNING: the run {details['id']} stays open for a correction; "

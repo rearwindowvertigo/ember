@@ -881,6 +881,44 @@ def test_unwritable_correction_keeps_the_run_open(
     run = record.load(data["run"]["id"], env)
     assert run.status != record.CLOSED and run.turn == 1
     assert f"WARNING: the run {run.id} stays open for a correction" in err
+    assert data["parse_error"].startswith("the reply is not a JSON object; ")
+    assert "No space left on device" in data["parse_error"]
+
+
+def test_unreadable_corrected_reply_names_that_reply(
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    reply_file: Path,
+    driver: StubDriver,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reply_file.write_text("no JSON")
+    real_read = command._read_file
+
+    def read(path: Path) -> str:
+        if path.name == "turn-2.md":
+            raise command.CommandError(66, "cannot read", f"next: ls -l {path}")
+        return real_read(path)
+
+    monkeypatch.setattr(command, "_read_file", read)
+    code, out, err = invoke(
+        env,
+        plan_file,
+        "--dir",
+        str(repo),
+        "--engine",
+        "codex",
+        "--model",
+        "m",
+        "--json",
+        driver=driver,
+    )
+    data = json.loads(out)
+    assert code == 66 and data["run"]["correction"] == {"turn": 2, "exit": 0}
+    assert "stays open for a correction" not in err
+    assert err.splitlines()[-1].startswith("next: ls -l ")
+    assert err.splitlines()[-1].endswith("turn-2.md")
 
 
 def test_interrupt_while_waiting_keeps_the_run(
