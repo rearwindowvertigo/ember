@@ -186,8 +186,8 @@ def review_brief(
     """
     parts = [
         REVIEW_FIRST.format(task=task.id, round=round, flow=flow_id),
-        f"You review task {task.id} of a flow. The writer's work is in your "
-        "working folder, on its branch.",
+        f"You review task {task.id} of a flow. Your working folder is a "
+        f"detached checkout of the writer's commit {head}.",
         "## Task\n\n" + indent(task.subject + "\n\n" + task.task, "    "),
         "## Files\n\n" + indent(_files(task.files, wave_files), "    "),
         "## Writer limits\n\n" + _LIMITS + "\n\n"

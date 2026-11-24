@@ -795,7 +795,11 @@ def _flow_rows(item: FlowItem, workers: Sequence[Run]) -> list[tuple[str, str]]:
             if task["reason"]:
                 facts.append(task["reason"])
         for review in task["reviews"]:
-            if review_run_id(review) not in readable:
+            run_id = review_run_id(review)
+            worker = item.workers.get(run_id) if run_id is not None else None
+            if run_id not in readable or (
+                worker is not None and worker.review is not review
+            ):
                 round_number = review_number(review)
                 title = (
                     "Review" if round_number is None else f"Review round {round_number}"

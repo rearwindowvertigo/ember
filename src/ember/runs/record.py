@@ -141,7 +141,7 @@ class Run:
     """The current turn's reply file, once collected."""
 
     expected_head: str | None
-    """The branch tip before the current turn; `None` for a read-only run."""
+    """The expected checkout tip, including a flow reviewer after advancement."""
 
     started_at: float
     """When the run started."""
@@ -200,6 +200,9 @@ class Run:
     detached: bool = False
     """Whether Ember owns a detached worktree for this read-only run."""
 
+    preserve_ignored: bool = False
+    """Whether cleanup must keep ignored files in the review checkout."""
+
     last_screen_change_at: float | None = None
     """When a wait loop last observed a changed screen, or None before activity."""
 
@@ -239,7 +242,7 @@ class Run:
         Returns:
             The stored record with tuples as lists and the full OpenCode model
             id marker. Empty preparation, start arguments, run links and speed
-            are omitted.
+            are omitted, as is an inactive checkout preservation flag.
         """
         result: dict[str, Any] = {}
         for item in fields(self):
@@ -252,6 +255,7 @@ class Run:
                 "continues",
                 "fallback_from",
                 "speed",
+                "preserve_ignored",
             ):
                 continue
             result[item.name] = list(value) if isinstance(value, tuple) else value
@@ -277,6 +281,7 @@ _TYPES: dict[str, tuple[tuple[type, ...], bool]] = {
     "main": (_STR, True),
     "common": (_STR, True),
     "detached": ((bool,), False),
+    "preserve_ignored": ((bool,), False),
     "scoped": ((bool,), False),
     "last_screen_change_at": ((int, float), True),
     "parent": ((dict,), True),
@@ -671,6 +676,7 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
         "main": None,
         "common": None,
         "detached": False,
+        "preserve_ignored": False,
         "scoped": False,
         "last_screen_change_at": None,
         "parent": None,
@@ -862,6 +868,7 @@ def _flow_runs(flow: Mapping[str, Any]) -> set[str]:
             task.get("reviewer_run"),
             effect.get("run"),
             effect.get("preparation_run"),
+            effect.get("reviewer_run"),
         ):
             if isinstance(value, str):
                 found.add(value)

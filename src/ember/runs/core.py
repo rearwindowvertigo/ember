@@ -9,7 +9,7 @@ folder (`ember.paths.worktree_path`), outside every repository, on the branch
 `ember/<engine>/<id>` cut from the named checkout's `HEAD`. The run record
 keeps the worktree's resolved path. A read-only run works in a writable
 detached worktree and has no commit step. Closing it removes its clean
-worktree, including ignored build and test files.
+worktree. An incomplete checkout advance protects ignored files from removal.
 The core never pushes, merges, rebases or deletes a branch.
 """
 
@@ -260,7 +260,7 @@ class StartOptions:
     """Open a terminal window on the session."""
 
     base: str | None = None
-    """A saved commit for a panel member; `None` uses the checkout's HEAD."""
+    """A saved commit for a read-only run; `None` uses the checkout's HEAD."""
 
     fallback_avoid: tuple[tuple[str, str], ...] = ()
     """`(engine, model)` pairs a fallback for this run must not use, such as
@@ -282,6 +282,20 @@ class StartOptions:
 
     parent: dict[str, Any] | None = None
     """The starting command from `record.parent()`; `None` for `emb run` itself."""
+
+
+@dataclass(frozen=True)
+class ReviewFollowUp:
+    """The saved inputs for one automatic flow review turn."""
+
+    flow: str
+    previous_turn: int
+    previous_head: str
+    head: str
+
+
+class ReviewUnavailableError(Exception):
+    """The reviewed turn is settled, but a follow-up cannot use its checkout."""
 
 
 @dataclass(frozen=True)
@@ -1298,10 +1312,10 @@ class Core:
         """Return the options of the fallback worker when the worker is held.
 
         A held model or engine is passed over while its hold lasts, when the
-        owner's fallback list names a worker that applies. A panel member,
-        which has a saved base, runs as named.
+        owner's fallback list names a worker that applies. A panel member
+        runs as named.
         """
-        if options.base is not None:
+        if (options.parent or {}).get("command") == "panel":
             return None
         hold = holds.find(worker.engine, worker.model, self.env)
         if hold is None:
@@ -1499,6 +1513,14 @@ class Core:
                 run = self._prepare(run, preparation_command, stop)
             # The new worktree can hold a tracked .codex/config.toml.
             self._check_codex_config(run.engine, run.sandbox, run.worktree, common)
+            if run.read_only and (run.parent or {}).get("command") == "flow":
+                assert run.base is not None
+                try:
+                    worktrees.verify_detached(run, run.base)
+                except (OSError, UnicodeError) as error:
+                    raise RunError(
+                        exits.WORKTREE_FAILED, str(error), dir=run.worktree, run=run.id
+                    ) from error
         if run.sandbox == sandbox.NONE:
             self._warn(sandbox.none_warning(run.engine))
         with self._engine_calls(run, "starting"):
@@ -1678,9 +1700,7 @@ class Core:
             owner_denied=(),
             answered_at=None,
             reply=None,
-            expected_head=None
-            if run.read_only
-            else (run.expected_head if turn > 1 else run.base),
+            expected_head=run.expected_head if run.read_only or turn > 1 else run.base,
         )
 
     def _save_screen_baseline(self, run: Run, turn: int) -> None:
@@ -1961,6 +1981,16 @@ class Core:
                     self._stop_if_closed(run)
                     if self._retry_cancel_path(run).exists():
                         return previous
+                    if run.read_only and run.expected_head:
+                        self._review_admit(run)
+                        self._check_foreign(run, driver, "send")
+                        try:
+                            worktrees.verify_detached(run, run.expected_head)
+                        except (OSError, UnicodeError) as error:
+                            return TurnOutcome(
+                                engines.FAILED,
+                                reason=f"cannot retry the review: {error}",
+                            )
                     try:
                         text = (run.folder / f"turn-{run.turn}.prompt.md").read_text(
                             encoding="utf-8"
@@ -2829,7 +2859,14 @@ class Core:
 
     # Commands on a run
 
-    def send(self, run_id: str, message_file: str, *, force: bool = False) -> int:
+    def send(
+        self,
+        run_id: str,
+        message_file: str,
+        *,
+        force: bool = False,
+        review: ReviewFollowUp | None = None,
+    ) -> int:
         """Send a message into a run's session and wait for its turn.
 
         Args:
@@ -2837,6 +2874,7 @@ class Core:
             message_file: The file holding the message.
             force: Send even when the session holds messages Ember did not
                 send; every other check still applies.
+            review: The saved heads and turn of a follow-up flow review.
 
         Returns:
             The exit code.
@@ -2844,6 +2882,7 @@ class Core:
         Raises:
             RunError: The message cannot be sent, or the turn did not end
                 with exit 0.
+            ReviewUnavailableError: A follow-up can start in a new session.
         """
         try:
             text = Path(message_file).read_text(encoding="utf-8")
@@ -2858,11 +2897,25 @@ class Core:
         self._load(run_id)
         with self._turn_lock(run_id):
             run = self._load(run_id)
+            if review is not None and self._review_already_sent(run, review, text):
+                if run.status == record.CLOSED:
+                    return exits.OK  # The flow reads the saved collected reply.
+                return self._recover(run)
             if run.status == record.CLOSED:
+                if review is not None:
+                    raise ReviewUnavailableError(f"{run_id} is closed")
                 raise RunError(
                     exits.SESSION_GONE, f"{run_id} is closed", "send", run=run_id
                 )
-            if self._session_state(run_id) != LIVE:
+            if review is not None:
+                with self._engine_calls(run, "send"):
+                    if not tmux.exists(run_id, env=self.env) or tmux.pane_dead(
+                        run_id, env=self.env
+                    ):
+                        raise ReviewUnavailableError(
+                            f"the session of {run_id} has ended"
+                        )
+            elif self._session_state(run_id) != LIVE:
                 raise RunError(
                     exits.SESSION_GONE,
                     f"the session of {run_id} has ended",
@@ -2877,7 +2930,7 @@ class Core:
                     "busy",
                     run=run_id,
                 )
-            if force:
+            if force and review is None:
                 with contextlib.suppress(engines.DriverError, tmux.TmuxError):
                     driver.accept_input(run)
             else:
@@ -2900,10 +2953,14 @@ class Core:
                     "busy",
                     run=run_id,
                 )
+            if review is not None:
+                run = self._advance_review(run, review)
             started = time.monotonic()
             turn = run.turn + 1
             if run.read_only:
                 self._save_snapshot(run, turn)
+            if review is not None:
+                self._review_admit(run)
             previous = {
                 "status": run.status,
                 "turn": run.turn,
@@ -2920,27 +2977,102 @@ class Core:
                 with self._engine_calls(run, "send"):
                     driver.send(run, text)
             except RunError as error:
+                if review is not None:
+                    error.variant = "uncertain"
                 # An uncertain prompt keeps the new turn pending for recovery.
                 changes = (
                     {}
-                    if isinstance(error.__cause__, DeliveryUncertainError)
+                    if review is not None
+                    or isinstance(error.__cause__, DeliveryUncertainError)
                     else previous
                 )
                 self._record_exit(
-                    run, error.code, str(error), last_variant=error.variant, **changes
+                    run,
+                    error.code,
+                    str(error),
+                    last_variant=error.variant,
+                    **changes,
                 )
                 error.context.setdefault("run", run_id)
                 raise
             except KeyboardInterrupt as error:
                 message = f"interrupted while sending to {run_id}"
+                variant = "uncertain" if review is not None else "send"
                 self._record_exit(
-                    run, exits.INTERRUPTED, message, last_variant="send", **previous
+                    run,
+                    exits.INTERRUPTED,
+                    message,
+                    last_variant=variant,
+                    **({} if review is not None else previous),
                 )
                 raise RunError(
-                    exits.INTERRUPTED, message, "send", run=run_id
+                    exits.INTERRUPTED, message, variant, run=run_id
                 ) from error
             (run.folder / HOOK_REFUSAL_NAME).unlink(missing_ok=True)
             return self._turn(run, driver, started, None)
+
+    def _review_already_sent(self, run: Run, review: ReviewFollowUp, text: str) -> bool:
+        """Identify the exact pending turn, or require a settled previous turn."""
+        parent = run.parent or {}
+        if (
+            not run.read_only
+            or not run.detached
+            or parent.get("command") != "flow"
+            or parent.get("id") != review.flow
+        ):
+            raise RunError(
+                exits.REFUSED,
+                f"cannot verify {run.id} as this flow's reviewer",
+                run=run.id,
+            )
+        if run.owner_wait or run.last_variant == "uncertain":
+            raise RunError(
+                exits.REFUSED,
+                f"{run.id} needs the lead before continuing the review",
+                run=run.id,
+            )
+        if run.turn == review.previous_turn and run.turn_state == record.COLLECTED:
+            if run.last_exit not in (None, exits.OK):
+                raise RunError(
+                    exits.REFUSED, f"the last turn of {run.id} failed", run=run.id
+                )
+            return False
+        if (
+            run.turn == review.previous_turn + 1
+            and run.expected_head == review.head
+            and (run.status != record.CLOSED or run.turn_state == record.COLLECTED)
+        ):
+            prompt = run.folder / f"turn-{run.turn}.prompt.md"
+            with contextlib.suppress(OSError, UnicodeError):
+                if prompt.read_text(encoding="utf-8") == text:
+                    return True
+        raise RunError(
+            exits.REFUSED,
+            f"cannot reconcile review turn {review.previous_turn + 1} of {run.id}",
+            run=run.id,
+        )
+
+    def _review_admit(self, run: Run) -> None:
+        """Check flow admission immediately before advancing or delivering."""
+        if self.prepare_stop is not None and self.prepare_stop.is_set():
+            raise RunError(exits.INTERRUPTED, "the runner is stopping", run=run.id)
+        if self.admit is not None:
+            self.admit(run)
+
+    def _advance_review(self, run: Run, review: ReviewFollowUp) -> Run:
+        """Verify and advance the detached worktree while holding the turn lock."""
+        self._review_admit(run)
+        with self._worktree_lock(Path(run.common or run.repo)):
+            # Preserve ignored files if the runner stops during the advance.
+            run = self._update(run, preserve_ignored=True)
+            current = run.expected_head or run.base
+            if current is None or current not in (review.previous_head, review.head):
+                raise ReviewUnavailableError(f"the recorded head of {run.id} changed")
+            try:
+                worktrees.advance_detached(run, current, review.head)
+            except (OSError, UnicodeError) as error:
+                raise ReviewUnavailableError(str(error)) from error
+            return self._update(run, expected_head=review.head, preserve_ignored=False)
 
     def recover(self, run_id: str) -> int:
         """Collect a turn that ended while no command waited, or wait for it.
@@ -2957,24 +3089,28 @@ class Core:
         self._load(run_id)
         with self._turn_lock(run_id):
             run = self._load(run_id)
-            if run.status == record.CLOSED:
-                raise RunError(exits.SESSION_GONE, f"{run_id} is closed", run=run_id)
-            started = time.monotonic()
-            if run.turn_state == record.SENT:
-                driver = self._driver(run.engine)
-                self._warn(f"emb run: waiting for turn {run.turn} of {run_id}")
-                return self._turn(run, driver, started, None)
-            if self._needs_collection(run):
-                driver = self._driver(run.engine)
-                reply = self._read_reply(run)
-                with self._collection(run, started) as started:
-                    outcome = self._recovered_outcome(run, reply)
-                    return self._finish(run, driver, outcome, started, None)
-            self._warn(
-                f"emb run: nothing to recover in {run_id}: "
-                f"turn {run.turn} is {run.turn_state or 'not started'}"
-            )
-            return exits.OK
+            return self._recover(run)
+
+    def _recover(self, run: Run) -> int:
+        """Collect the current turn while holding the command lock."""
+        if run.status == record.CLOSED:
+            raise RunError(exits.SESSION_GONE, f"{run.id} is closed", run=run.id)
+        started = time.monotonic()
+        if run.turn_state == record.SENT:
+            driver = self._driver(run.engine)
+            self._warn(f"emb run: waiting for turn {run.turn} of {run.id}")
+            return self._turn(run, driver, started, None)
+        if self._needs_collection(run):
+            driver = self._driver(run.engine)
+            reply = self._read_reply(run)
+            with self._collection(run, started) as started:
+                outcome = self._recovered_outcome(run, reply)
+                return self._finish(run, driver, outcome, started, None)
+        self._warn(
+            f"emb run: nothing to recover in {run.id}: "
+            f"turn {run.turn} is {run.turn_state or 'not started'}"
+        )
+        return exits.OK
 
     def _needs_collection(self, run: Run) -> bool:
         """Return whether commit handling or result completion remains."""
@@ -3118,15 +3254,20 @@ class Core:
                 self._remove_run_tmp(run)
                 self._say(f"closed {run_id}")
                 return exits.OK
-            if run.status == record.FAILED and run.turn_state == record.SENT:
+            if run.turn_state == record.SENT and (
+                run.last_variant == "uncertain" or run.status == record.FAILED
+            ):
                 attempts = self._saved_outcome(run).get("attempts", [])
                 uncertain = (
                     attempts and attempts[-1]["sending"] and not attempts[-1]["sent"]
                 )
                 # The recorded reason also preserves uncertainty when retry
                 # attempt details are unavailable in an older run record.
-                if uncertain or run.last_reason == (
-                    "capacity retry delivery is uncertain; ask the lead"
+                if (
+                    uncertain
+                    or run.last_variant == "uncertain"
+                    or run.last_reason
+                    == ("capacity retry delivery is uncertain; ask the lead")
                 ):
                     raise RunError(
                         exits.REFUSED,
@@ -3215,7 +3356,15 @@ class Core:
             self._warn(f"WARNING: run {run.id}: {error}")
 
     def _remove_detached(self, run: Run, *, command_locked: bool = False) -> None:
-        unstarted = run.preparation is not None and run.turn == 0
+        unstarted = (
+            run.preparation is not None
+            and run.turn == 0
+            and (
+                (run.parent or {}).get("command") != "flow"
+                or not run.read_only
+                or run.preparation["state"] != "ok"
+            )
+        )
         if not unstarted and (not run.read_only or not run.detached):
             return
         command_lock = (

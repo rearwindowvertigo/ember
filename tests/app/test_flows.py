@@ -515,6 +515,21 @@ def test_flow_run_history(env: dict[str, str], proc_locks: Path) -> None:
         "task-0", "reviewer", 2, second
     )
 
+    flow["tasks"][0].update(
+        reviewer_run="first-review",
+        reviews=[first],
+        review_send={
+            "file": "review.md",
+            "previous_turn": 1,
+            "previous_head": "old",
+            "head": "fixed",
+        },
+    )
+    flow_record.save(flow, env)
+    item = flows.read(env, proc_locks=proc_locks).flows[0]
+    assert item.workers["first-review"] == flows.FlowRun("task-0", "reviewer", 2)
+    assert item.record["tasks"][0]["reviews"] == [first]
+
 
 def test_event_only_change_and_atomic_replacement(
     env: dict[str, str], proc_locks: Path, qtbot: QtBot

@@ -932,9 +932,9 @@ are kept, the command exits 79, and the diagnostic names the log. A run's
 `next:` line gives a new start with the original options and its saved
 brief. Gap checks print the original `emb gapcheck` invocation; panels
 print a fresh `emb panel` invocation; flows print `emb flow --resume <id>`.
-`emb run --send` and `--recover` never run preparation. Closing a run with
-preparation and no worker turn removes its owned worktree, including
-preparation changes; an editing branch remains.
+`emb run --send` and `--recover` never run preparation. Closing an
+unstarted run after a preparation failure removes its owned worktree and
+preparation changes. An editing branch remains.
 
 Timeout, cancellation, interruption and shutdown end the whole preparation
 process group. A later resume, close or prune ends a recorded group left
@@ -1058,18 +1058,22 @@ session that holds messages Ember did not send or whose history cannot be
 checked, with the line `--send` prints. It ends the
 session and keeps an editing run's worktree and branch, except that a run
 with preparation and no worker turn has its owned worktree removed,
-including preparation changes. Its branch remains. It removes a clean
-read-only run's detached worktree with `git worktree remove`. A detached
-worktree with tracked changes or untracked non-ignored files, or a `HEAD`
-different from its recorded base, is kept with its recorded path. After a
-forced close ends the session, a clean detached worktree is removed even
+including preparation changes. Its branch remains. An unstarted flow
+reviewer whose preparation passed uses the detached worktree checks.
+Close removes a clean detached worktree with `git worktree remove`. It
+checks `HEAD` against `expected_head` when set, otherwise against `base`.
+Tracked changes, untracked non-ignored files or a different `HEAD` keep
+the worktree and its recorded path. After a forced close ends the
+session, a clean detached worktree is removed even
 when the turn is still recorded as sent or its delivery is uncertain.
 Closing a run whose worktree is kept still succeeds and
 prints a warning with the reason. For a changed worktree the warning names
 `git worktree remove --force <path>` to discard it;
 `--force` does not execute that command. Locked worktrees or removal
-failures also produce warnings and retain the path. A worktree whose only
-new files are ignored is removed. Closing an already closed run tries
+failures also produce warnings and retain the path. Ordinary cleanup
+removes ignored build and dependency files with the checkout. If Ember
+recorded protection for a flow review checkout, ignored files also keep
+that checkout and its recorded path. Closing an already closed run tries
 detached-worktree removal again. Read-only records without
 `detached` keep their source checkouts. Before ending the session Ember
 records every process under the session's pane; after, it sends SIGTERM to
@@ -1155,6 +1159,7 @@ UTC. It is also the tmux session's name.
 | `speed` | string, optional | Codex tier at start, `standard` or `fast`. Absent for other engines and in older records. Send, recovery and capacity retries use the recorded tier. |
 | `read_only` | boolean | Whether the run reviews without a branch or Ember commits |
 | `detached` | boolean | Whether Ember owns a detached review worktree; false for a record without this field |
+| `preserve_ignored` | boolean, optional | Whether close and prune keep this flow review checkout when ignored files are present |
 | `scoped` | boolean | Whether the worker session uses its own systemd user scope, `ember-run-<id>.scope`; false for fallback runs and records without this field |
 | `repo` | string | The top of the checkout `--dir` is in |
 | `main` | string or null | The main checkout at start; null for a bare repository or a record without this field |
@@ -1176,7 +1181,7 @@ UTC. It is also the tmux session's name.
 | `turn` | integer | The current turn; 0 before the first message |
 | `turn_state` | string or null | `sent`, `collected` or `committed` for the current turn |
 | `reply` | string or null | The current turn's reply file, once collected |
-| `expected_head` | string or null | The branch tip before the current turn, then its commit; null for a read-only run |
+| `expected_head` | string or null | The branch tip before the current turn, then its commit. For a continued flow reviewer, the expected detached checkout tip. Otherwise null for a read-only run |
 | `started_at` | number | Seconds since the epoch |
 | `updated_at` | number | Seconds since the epoch |
 | `ended_at` | number or null | When the session ended |
@@ -1498,10 +1503,11 @@ and the runs reached from it through `fallback_from`.
 A start whose worker is held starts on the entry that applies and prints
 `WARNING: <engine>[ <model>] is held after <kind> until <HH:MM>; starting <engine> <model> from the fallback list`.
 With no entry that applies it starts on the held worker. A panel member
-starts as named. A start with `--fallback-from` counts the workers of that
-run and of the runs it replaced as failed. When a hold's time is up, the
-next start uses the first choice again; Ember starts no run of its own to
-test it.
+starts as named. A fresh flow reviewer uses the applicable fallback and
+keeps the recorded writer commit. A start with `--fallback-from` counts
+the workers of that run and of the runs it replaced as failed. When a hold
+ends, the next start uses the first choice again. Ember starts no run of
+its own to test the hold.
 
 When an entry applies at exit 73 of a run's first turn, or of a start
 whose brief was not taken, the `next:` line is
@@ -2471,10 +2477,11 @@ state change is saved under the runner's record mutex. Dependencies are
 recomputed transitively after merges and before the runner ends.
 
 Each job starts a writer in a new editing run from the flow tip, checks its
-committed changes, and starts a fresh read-only review in the writer's
-worktree. The run id is saved as soon as Core prints it. Must findings
-within the round budget go back to the same writer as a fix message;
-another fresh review follows. Immediately before sending a correction the
+committed changes, and starts a read-only review of the writer's commit.
+The run id is saved as soon as Core prints it. Must findings within the
+round budget go back to the same writer as a fix message. The automatic
+review after the fix uses the same reviewer session when it can continue.
+Immediately before sending a correction the
 runner reads and saves the branch's actual tip, message file and target
 turn. It compares the resulting tip against that saved tip, including on
 recovery, and supplies it as the next review's fix base. Lead corrections
@@ -2599,10 +2606,10 @@ merge, resets and cleans the flow worktree, and reconciles merging tasks
 using the same containment rules as `emb merge`. A reachable commit's
 `Ember-Task-Tip` identifies the task squash commit. Recovered merges set
 `check_pending`. Writer metadata comes from its run record; recovered
-turns receive the same change checks as uninterrupted turns. A missing
-review id starts a new review; a completed or closed review is read from
-its saved reply. Scheduled corrections reconcile the target turn before
-another send. Answer effects and their consumption marker are saved
+turns receive the same change checks as uninterrupted turns. A completed
+review is read from its saved reply, including after its run closes.
+Scheduled corrections and automatic reviews reconcile their target turn
+before another send. Answer effects and their consumption marker are saved
 together, and pending closes can be repeated after a crash.
 
 A flow waiting on stopped or conflicting tasks ends `stopped`, with no
@@ -2613,13 +2620,33 @@ Flow folders, check logs and briefs remain on disk.
 
 ### Reviews
 
-Each flow review is a fresh read-only run in its own detached worktree at
-the writer's committed `HEAD`. Uncommitted edits in the writer's worktree
-produce start warnings and are absent from the review tree. The review run
-is closed without `--force` after its reply is read, removing its clean
-detached worktree. Changed worktrees and their recorded paths are kept
-with a warning naming the explicit discard command. A refused close leaves
-the run open and is reported by the runner.
+The first review and each explicit `--review` start a fresh read-only run
+in a detached worktree at the recorded writer commit. Uncommitted writer
+edits produce start warnings and are absent from the review tree. After an
+automatic writer fix, Ember checks that the reviewer is idle and owns the
+registered detached checkout at its expected commit, with a clean index
+and worktree. It advances that checkout to the fixed commit without
+overwriting ignored files. It then sends the next review brief in the
+same session. Each round records its own verdict, reviewer turn and commit.
+
+Before delivery, an ended reviewer session or a checkout that cannot be
+advanced safely can be replaced with a fresh review of the same fixed
+commit. A turn awaiting an owner decision, foreign input, a refused close
+or uncertain delivery leaves the task stopped for the lead. On resume,
+Ember collects a recorded follow-up turn or sends it if the previous turn
+is still current and the checkout can be verified. Cancellation leaves
+the recorded worker sessions available for inspection or resume.
+
+Ember closes the reviewer without force when the review is terminal or
+the writer fix stops the task. A clean checkout is removed at the run's
+expected `HEAD`, including ignored build and dependency files. The run's
+`base` remains the first commit it reviewed. Ember records protection for
+ignored files before advancing a checkout or retiring the reviewer. This
+keeps local evidence if an advance fails, the reviewer exits before it can
+advance, or the runner stops before retirement finishes. A verified advance
+clears the protection. A protected checkout with ignored files keeps its
+recorded path on close and prune. A refused close leaves the run open and
+is reported by the runner.
 
 The writer brief starts with the task's commit subject and preserves the
 task text as written. It lists the task's files, the other tasks' files in
@@ -2999,7 +3026,8 @@ refused. `save` updates `updated_at` and atomically replaces `flow.json`.
 | `branch`, `worktree` | Writer branch and worktree, or null |
 | `task_base`, `head` | Starting flow tip and latest reviewed task head, or null |
 | `round` | Fix rounds in the current budget; initially 0 |
-| `reviews` | Entries with `round` (fix rounds), `review_round` (one-based round from the review brief), `run`, `verdict`, `must`, `should`, `lead`, `at`, `outside_files` (validated reply entries); verdict is `pass`, `fix` or `unreadable`; entries may omit `review_round` or `outside_files` |
+| `reviews` | Entries with `round` (fix rounds), `review_round` (one-based round from the review brief), `run`, `turn`, `head`, `verdict`, `must`, `should`, `lead`, `at` and `outside_files` (validated reply entries). Verdict is `pass`, `fix` or `unreadable`. Older entries may omit `review_round`, `turn`, `head` or `outside_files` |
+| `review_send` | When present, the pending follow-up review's `file`, `previous_turn`, `previous_head` and target `head` |
 | `findings` | Latest findings and retained earlier `should` and `lead` findings; each records `round` (one-based round from the review brief) and `run` (reviewer run id); older findings may omit them |
 | `changed_files`, `outside_files` | Last turn's changed paths and paths outside its declarations |
 | `entry` | Next operation: `write`, `send`, `review` or null |
@@ -4117,10 +4145,12 @@ deletion command is still listed, without a worktree-removal step.
 Prune deletes no branch or tmux session. Editing worktrees whose git
 folder still exists are retained. An ended read-only run's owned detached
 worktree is removed when clean, including its git registration and ignored
-build and test files. Tracked changes, untracked non-ignored files or a
-`HEAD` different from its recorded base keep both
-worktree and record, with the explicit `git worktree remove --force <path>`
-command in the error. A locked detached worktree is also kept.
+build, test and dependency files. Tracked changes, untracked non-ignored
+files or a `HEAD` different from `expected_head` when set, otherwise from
+`base`, keep both worktree and record. Ignored files also keep both when
+the flow review checkout has recorded protection. The error for changes
+names `git worktree remove --force <path>` as the explicit discard
+command. A locked detached worktree is also kept.
 
 For other worktrees, when removing a record, prune also removes a worktree
 it names if no open
@@ -4221,11 +4251,13 @@ Removal checks the reloaded record under the run command and record locks.
 Sent turns, uncertain delivery, collected writing turns and live sessions
 keep the worktree with the reason, except that a closed read-only run's
 detached worktree can be removed despite a recorded sent turn.
-Clean detached worktrees are removed; changed or locked ones are kept. A changed
-worktree's reason names `git worktree remove --force <path>`; cleanup does
-not run it. Records retain their worktree paths. With `--branch`, only
-`BRANCH` is handled; detached read-only worktrees are excluded. Older
-read-only records without `detached` keep their source checkouts.
+Cleanup uses the same detached `HEAD` and file checks as close, including
+recorded protection for ignored files. It removes clean worktrees and
+keeps changed or locked ones. The reason for a changed worktree names
+`git worktree remove --force <path>` as the explicit discard command.
+Records retain their worktree paths.
+With `--branch`, cleanup handles only `BRANCH`. Older read-only records
+without `detached` keep their source checkouts.
 
 `--claim ID` handles only branches whose run or flow record has exactly
 that claim id, and applies the same filter to detached read-only worktrees.
@@ -5199,7 +5231,7 @@ expanded body shows these parts in order.
    | Row type | Further details |
    |---|---|
    | Run | Branch, Turns and commits, Last exit, Last reason, Subject, Engine and Sandbox. Engine shows the engine, model and recorded effort and speed. Parent and Wait appear when applicable. Flow worker details include the task, role and recorded round, plus applicable task status, reason, review verdict and findings. |
-   | Flow | Branch, Wave and Passes, plus recorded reasons and runner state when applicable. Task and review details appear on their readable worker runs. The flow grid shows task and review details whose worker records are unavailable. |
+   | Flow | Branch, Wave and Passes, plus recorded reasons and runner state when applicable. Task and latest review details appear on their readable worker runs. The flow grid shows earlier rounds of a reused reviewer and details whose worker records are unavailable. |
    | Panel | Question, member rows with worker, status, duration and any reason or changed paths, and Left out rows for omitted members. |
 
    Wait can show `Waiting for Claude's answer to flow <id>` or a message
