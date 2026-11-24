@@ -117,15 +117,25 @@ def env(tmp_path: Path) -> dict[str, str]:
 
 @pytest.fixture(autouse=True)
 def _collect_on_gui_thread() -> Iterator[None]:
-    """Wait for pool tasks, deliver their events, then collect garbage.
+    """Turn off automatic collection, then collect on the GUI thread after.
 
     Qt objects left in reference cycles must be freed on the GUI thread, not
-    by a garbage collection that happens to run on a pool thread.
+    by a garbage collection that happens to run on a pool thread. The app's
+    `Collector` turns automatic collection off for the same reason; tests
+    that build widgets without it get the same guard here. After the test,
+    the fixture waits for pool tasks, delivers their events, collects, and
+    restores the previous automatic collection state.
     """
-    yield
-    QThreadPool.globalInstance().waitForDone(10_000)
-    QCoreApplication.processEvents()
-    gc.collect()
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        QThreadPool.globalInstance().waitForDone(10_000)
+        QCoreApplication.processEvents()
+        gc.collect()
+        if enabled:
+            gc.enable()
 
 
 class _WindowShows(QObject):

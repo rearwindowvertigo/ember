@@ -73,3 +73,8 @@ def test_stop_restores_previous_state(qapp: QApplication, enabled: bool) -> None
             gc.enable()
         else:
             gc.disable()
+
+
+def test_app_tests_run_without_automatic_collection() -> None:
+    """The app test fixture keeps collection on the GUI thread, as the app does."""
+    assert not gc.isenabled()
