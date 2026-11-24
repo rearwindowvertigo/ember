@@ -89,21 +89,102 @@ plan with `ember.flows.plan`; it has no canned dry-run fixture.
   `/usr/bin/python3.14`, `uv`, `dpkg-deb`, `objdump`, and the packages the
   `.deb` depends on (`python3 packaging/deb/build_deb.py --depends` lists
   them). Its exit codes: 0 built; 1 a build command failed; 64 usage error;
-  65 the version in `pyproject.toml` is not `X.Y.Z`; 66 `skill/SKILL.md` is
-  missing; 69 a tool is missing; 70 a Qt library or module file is missing or
-  unreadable, a Qt library needs a library that no package in `Depends`
-  provides, or a staged file holds the staging path.
+  65 the version in `pyproject.toml` is not `X.Y.Z`; 66 `skill/SKILL.md` or
+  the archive public key is missing; 69 a tool is missing; 70 a Qt library
+  or module file is missing or unreadable, a Qt library needs a library that
+  no package in `Depends` provides, or a staged file holds the staging path.
 - When Release Please creates a release, the `deb` job of
   `.github/workflows/release-please.yml` checks out the release tag on
   `ubuntu-26.04`, runs `make deb`, prints the file's SHA-256 and attaches
   `ember_<version>_amd64.deb` to the GitHub release.
 - The workflow's manual run, with the tag as its `tag` input, rebuilds the
-  file from that tag and replaces the attached one.
+  file from that tag. It uploads the .deb if the release has no asset with
+  that name. If the asset exists, the job downloads it and compares its
+  SHA-256 with the rebuild. Matching files leave the existing asset in
+  place and the job succeeds. A changed digest requires a new version.
+  An unreadable asset fails the job.
 - Without the job, `make deb` on Ubuntu 26.04 builds the file in `dist/`, and
   `gh release upload v<version> dist/ember_<version>_amd64.deb` attaches it.
-- The owner installs a release in an empty folder with three commands, in
-  this order:
 
-  1. `gh release download v<version> --repo rearwindowvertigo/ember --pattern '*.deb'`
-  2. `sudo apt install ./ember_<version>_amd64.deb`
-  3. `emb skill install`
+## The apt repository
+
+GitHub Pages serves Ember's signed apt repository at
+<https://rearwindowvertigo.github.io/ember/apt/>. It holds the three highest
+published stable versions for `stable/main` on `amd64`. The package installs
+`/etc/apt/sources.list.d/ember.sources` with `Signed-By` set to
+`/usr/share/keyrings/ember-archive-keyring.asc`.
+
+The `publish-apt` job runs after a successful `deb` job, for both a release
+created by Release Please and a manual rebuild. It checks out the workflow's
+revision, selects the three highest stable version tags after entering its
+concurrency group, and downloads their .deb assets with `gh`. The group
+queues publication jobs through deployment. Each `deb` job runs independently.
+The publish job imports the `APT_SIGNING_KEY` Actions secret into a temporary
+`GNUPGHOME` and uses the committed
+`packaging/apt/ember-archive-keyring.asc` to verify the build.
+
+`packaging/apt/build_repo.py` takes an input folder of .debs and a new or
+empty output folder. It uses `dpkg` version ordering and `apt-ftparchive`
+from `apt-utils` to generate `Packages` and `Release`. It gzip-compresses
+the same `Packages` bytes, writes a clear-signed copy of `Release` to
+`InRelease` and an armored detached signature to `Release.gpg`, and
+copies the public key to the root of the apt tree. It checks both signatures
+in a separate keyring containing the committed public key before returning
+the tree for deployment.
+
+```sh
+python3 packaging/apt/build_repo.py \
+  --input debs --out site/apt --gnupghome "$GNUPGHOME" \
+  --key-id "$fingerprint" --public-key packaging/apt/ember-archive-keyring.asc
+```
+
+The job uploads `site/` as a Pages artifact and deploys it to the
+`github-pages` environment. In the repository's **Settings → Pages**,
+set **Build and deployment → Source** to **GitHub Actions**. The
+repository is available without signing in once the GitHub repository
+is public (#362).
+
+### Signing key
+
+Before the first release with apt, create an Ed25519 signing key that
+expires after two years. The release job signs in batch mode, so the
+key in its secret has an empty passphrase. List its fingerprint and use
+the full fingerprint in the export commands.
+
+```sh
+gpg --batch --pinentry-mode loopback --passphrase '' \
+  --quick-generate-key 'Ember Archive Signing' ed25519 sign 2y
+gpg --list-secret-keys --fingerprint 'Ember Archive Signing'
+```
+
+```sh
+fingerprint=FULL_KEY_FINGERPRINT
+gpg --armor --export "$fingerprint" > packaging/apt/ember-archive-keyring.asc
+gpg --batch --armor --export-secret-keys "$fingerprint" | gh secret set APT_SIGNING_KEY
+```
+
+Commit the armored public key at `packaging/apt/ember-archive-keyring.asc`.
+The package build needs this file. Keep the private key in `APT_SIGNING_KEY`.
+
+Before expiry, extend the same key for two years with
+`gpg --quick-set-expire "$fingerprint" 2y`. Repeat the two export commands
+to update the committed public key and the Actions secret. Publish a new
+release before the old expiry date so the repository serves the renewed
+key and clients can install the package containing it in time.
+
+### Installing from a release asset
+
+On an installation older than the apt source, install a repository-enabled
+release from its GitHub release asset once. Subsequent upgrades are
+available through apt and the app. Use the same asset commands when the
+apt index cannot be read. In an empty folder, set `version` to the release
+number and run the following commands.
+
+```sh
+version=X.Y.Z
+curl -fLO "https://github.com/rearwindowvertigo/ember/releases/download/v${version}/ember_${version}_amd64.deb"
+sudo apt install "./ember_${version}_amd64.deb"
+```
+
+For a first installation of the Ember skill, run `emb skill install`.
+Package upgrades update the installed skill through its existing link.

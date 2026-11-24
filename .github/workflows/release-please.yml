@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag whose .deb is rebuilt and uploaded, such as v0.1.0
+        description: Release tag whose .deb is rebuilt, such as v0.1.0
         required: true
         type: string
 
@@ -40,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ env.TAG }}
+          ref: refs/tags/${{ env.TAG }}
       - uses: astral-sh/setup-uv@v10.3.3
       - name: Install the packages the .deb depends on
         run: >-
@@ -52,5 +52,88 @@ jobs:
       - name: Attach the .deb to the release
         env:
           GH_TOKEN: ${{ github.token }}
-          CLOBBER: ${{ github.event_name == 'workflow_dispatch' && '--clobber' || '' }}
-        run: gh release upload "$TAG" dist/ember_*_amd64.deb $CLOBBER
+        shell: bash
+        run: |
+          packages=(dist/ember_*_amd64.deb)
+          package=${packages[0]}
+          name=${package##*/}
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            assets=$(gh release view --json assets --jq '.assets[].name' -- "$TAG")
+            if grep -Fxq -- "$name" <<< "$assets"; then
+              published_dir=$(mktemp -d "$RUNNER_TEMP/ember-asset.XXXXXX")
+              trap 'rm -rf -- "$published_dir"' EXIT
+              published="$published_dir/$name"
+              gh release download --pattern "$name" --output "$published" -- "$TAG"
+              rebuilt_hash=$(sha256sum < "$package")
+              published_hash=$(sha256sum < "$published")
+              if [[ "$rebuilt_hash" != "$published_hash" ]]; then
+                echo "The rebuilt .deb differs from the published asset. Release a new version." >&2
+                exit 1
+              fi
+              echo "The rebuilt .deb matches the published asset."
+              exit 0
+            fi
+          fi
+          gh release upload -- "$TAG" "$package"
+
+  publish-apt:
+    needs: deb
+    if: ${{ !cancelled() && needs.deb.result == 'success' }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ember-apt-pages
+      queue: max
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+      - name: Install apt-ftparchive
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends apt-utils
+      - name: Download the newest three stable release packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/ember-debs"
+          tags=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false)
+                  | .tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))' \
+            | LC_ALL=C sort -rV | sed -n '1,3p')
+          if [[ -z "$tags" ]]; then
+            echo "No published stable Ember releases found." >&2
+            exit 1
+          fi
+          while IFS= read -r tag; do
+            gh release download "$tag" --dir "$RUNNER_TEMP/ember-debs" \
+              --pattern "ember_${tag#v}_amd64.deb"
+          done <<< "$tags"
+      - name: Build and verify the signed apt repository
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        shell: bash
+        run: |
+          : "${APT_SIGNING_KEY:?Set the APT_SIGNING_KEY secret before publishing}"
+          export GNUPGHOME
+          GNUPGHOME=$(mktemp -d "$RUNNER_TEMP/ember-apt-sign.XXXXXX")
+          trap 'rm -rf -- "$GNUPGHOME"' EXIT
+          printf '%s\n' "$APT_SIGNING_KEY" | gpg --batch --import
+          unset APT_SIGNING_KEY
+          public_key=packaging/apt/ember-archive-keyring.asc
+          key_id=$(gpg --batch --with-colons --show-keys "$public_key" \
+            | awk -F: '$1 == "fpr" && !found { print $10; found = 1 }')
+          python3 packaging/apt/build_repo.py \
+            --input "$RUNNER_TEMP/ember-debs" --out site/apt \
+            --gnupghome "$GNUPGHOME" --key-id "$key_id" --public-key "$public_key"
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+      - uses: actions/deploy-pages@v4
+        id: deployment
