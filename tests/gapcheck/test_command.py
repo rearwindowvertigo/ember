@@ -233,7 +233,7 @@ def test_usage_errors(
         ("Only prose", "the reply is not a JSON object", [1, 2]),
     ],
 )
-def test_bad_reply_prints_result_and_closes(
+def test_bad_reply_gets_one_correction_and_keeps_the_run_open(
     env: dict[str, str],
     repo: Path,
     plan_file: Path,
@@ -258,9 +258,56 @@ def test_bad_reply_prints_result_and_closes(
     )
     assert code == 81
     data = json.loads(out)
-    assert data["uncovered_steps"] == uncovered and data["run"]["closed"]
+    assert data["uncovered_steps"] == uncovered and not data["run"]["closed"]
+    assert data["run"]["correction"] == {"turn": 2, "exit": 0}
+    run = record.load(data["run"]["id"], env)
+    assert run.status != record.CLOSED and run.turn == 2
+    assert data["run"]["reply"] == str(run.folder / "turn-2.md")
+    sent = (run.folder / "turn-2.prompt.md").read_text()
+    assert sent.startswith("Ember cannot read your reply: ") and message in sent
     assert message in err
-    assert err.splitlines()[-1].startswith("next: emb gapcheck --plan ")
+    actions = [line for line in err.splitlines() if line.startswith("next:")]
+    assert actions == [err.splitlines()[-1]]
+    assert actions[0].startswith(f"next: emb run --send {run.id} --message-file ")
+    assert f"--reply {run.folder / 'turn-3.md'}" in actions[0]
+
+
+def test_correction_that_fixes_the_reply_closes_the_run(
+    env: dict[str, str],
+    repo: Path,
+    plan_file: Path,
+    reply_file: Path,
+    tmp_path: Path,
+) -> None:
+    scripts = tmp_path / "scripts.json"
+    scripts.write_text(json.dumps({"Ember cannot read your reply": f"@reply {VALID}"}))
+    driver = StubDriver(
+        "codex", script_path(env), reply_file=reply_file, scripts=scripts
+    )
+    reply_file.write_text('{"steps": [{"step": 1, "gaps": []}]}')
+    code, out, err = invoke(
+        env,
+        plan_file,
+        "--dir",
+        str(repo),
+        "--engine",
+        "codex",
+        "--model",
+        "m",
+        "--json",
+        driver=driver,
+    )
+    assert code == 0, err
+    data = json.loads(out)
+    assert data["parse_error"] is None and data["uncovered_steps"] == []
+    assert data["run"]["closed"] and data["run"]["correction"] == {
+        "turn": 2,
+        "exit": 0,
+    }
+    run = record.load(data["run"]["id"], env)
+    assert data["run"]["reply"] == str(run.folder / "turn-2.md")
+    assert not any(line.startswith("next:") for line in err.splitlines())
+    assert not list(paths.runtime_dir(env).glob("gapcheck-*.md"))
 
 
 def test_close_refused_keeps_success(
@@ -731,7 +778,7 @@ def test_claim_is_passed_through_and_not_finished(
     assert choices.read("claim-123", env=env) == before
 
 
-def test_invalid_reply_and_refused_close_have_one_gapcheck_action(
+def test_refused_correction_keeps_the_run_with_one_gapcheck_action(
     env: dict[str, str],
     repo: Path,
     plan_file: Path,
@@ -752,12 +799,14 @@ def test_invalid_reply_and_refused_close_have_one_gapcheck_action(
         "--json",
         driver=driver,
     )
-    assert code == 81 and not json.loads(out)["run"]["closed"]
-    actions = [
-        line for line in err.splitlines() if line.startswith("next: emb gapcheck")
-    ]
-    assert len(actions) == 1 and "--reply" in actions[0]
-    assert "WARNING: the run" in err
+    data = json.loads(out)
+    assert code == 75 and not data["run"]["closed"]
+    assert data["run"]["correction"] == {"turn": None, "exit": 75}
+    assert "an owner message" in err
+    run = record.load(data["run"]["id"], env)
+    assert run.turn == 1 and run.status != record.CLOSED
+    assert err.splitlines()[-1].startswith(f"next: emb run --send {run.id} ")
+    assert f"--reply {run.folder / 'turn-2.md'}" in err.splitlines()[-1]
 
 
 def test_interrupt_while_waiting_keeps_the_run(
@@ -1078,6 +1127,57 @@ def test_previous_without_answers_counts_its_gaps_as_unanswered(
     assert code == 0
     assert "    earlier: g1, unanswered" in out
     assert f"settled from {saved}:\n  none\n" in out
+
+
+def test_correction_adds_a_missing_earlier_link_on_a_repeat_run(
+    env: dict[str, str],
+    tmp_path: Path,
+    repo: Path,
+    plan_file: Path,
+    reply_file: Path,
+) -> None:
+    _, first, _ = check_reply(
+        env, plan_file, reply_file, gap_reply(reply_gap("a"), reply_gap("b"))
+    )
+    saved = save_answered(
+        tmp_path / "check-1.json", first, {"g1": "Keep 30 days", "g2": "Stop"}
+    )
+    unlinked = reply_gap("The new step 1 reopens g1")
+    linked = reply_gap("The new step 1 reopens g1", earlier="g1")
+    scripts = tmp_path / "scripts.json"
+    fixed = dispositions(gap_reply(linked), g1="reopened", g2="settled")
+    scripts.write_text(json.dumps({"with earlier set to g1": f"@reply {fixed}"}))
+    reply_file.write_text(
+        dispositions(gap_reply(unlinked), g1="reopened", g2="settled")
+    )
+    driver = StubDriver(
+        "codex", script_path(env), reply_file=reply_file, scripts=scripts
+    )
+    code, out, err = invoke(
+        env,
+        plan_file,
+        "--dir",
+        str(repo),
+        "--engine",
+        "codex",
+        "--model",
+        "m",
+        "--json",
+        "--previous",
+        str(saved),
+        driver=driver,
+    )
+    assert code == 0, err
+    data = json.loads(out)
+    assert data["run"]["correction"] == {"turn": 2, "exit": 0}
+    assert data["run"]["closed"]
+    gaps = data["steps"][0]["gaps"]
+    assert [(item["id"], item["earlier"]) for item in gaps] == [("g3", "g1")]
+    assert [item["id"] for item in data["settled"]] == ["g2"]
+    previous.load(str(saved))  # The first result stays valid history.
+    later = tmp_path / "check-2.json"
+    later.write_text(out)
+    assert previous.load(str(later)).next_id == 4
 
 
 def test_unknown_or_unexpected_earlier_id_is_81(
@@ -2087,6 +2187,8 @@ def test_reply_requires_the_brief_for_the_unchanged_plan(
     assert code == 64 and not out
     assert err.splitlines()[-1].startswith("next: emb gapcheck --plan ")
     assert "--brief > <brief-file>" in err
+    if problem in ("hash", "changed"):
+        assert "the plan text changed since the brief was made" in err
     assert not paths.runs_dir(env).exists()
 
 
@@ -2139,7 +2241,9 @@ def test_run_recovery_names_a_saved_brief_that_verifies(
     assert code == 81
     data = json.loads(out)
     run = record.load(data["run"]["id"], env)
-    recovery = build_parser().parse_args(shlex.split(err.splitlines()[-1][6:])[1:])
+    line = err.splitlines()[-1]
+    assert line.startswith(f"next: emb run --send {run.id} ")
+    recovery = build_parser().parse_args(shlex.split(line.split(", then ")[1])[1:])
     assert recovery.brief_file == str(run.folder / "brief.md")
     assert brief.matches_plan(
         Path(recovery.brief_file).read_text(), plan.load(plan_file)

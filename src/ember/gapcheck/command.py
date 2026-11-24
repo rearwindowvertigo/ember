@@ -2,8 +2,9 @@
 
 With `--previous`, an earlier result's gaps and answers go to the reviewer,
 and the reviewer accounts for each active and settled gap. Settled answers
-and closed history are carried into the new result. Exit 81 reports an
-invalid or incomplete reply.
+and closed history are carried into the new result. An invalid reply from
+a run gets one correction turn in the open session; exit 81 reports a reply
+that is still invalid or incomplete, and keeps that run open.
 Answer mode exits 64 for invalid options or ids, 65 for an invalid
 result, 66 for an unreadable file and 74 for a write failure. Other exits
 use the run's codes. The command never creates or finishes a
@@ -46,6 +47,13 @@ GIT_LOCATION = (
 REVIEWER_LINE = (
     "owner: name the reviewer for this gap check, "
     "or set Gap check reviewer on the Team screen"
+)
+CORRECTION = (
+    "Ember cannot read your reply: {problems}.\n"
+    "\n"
+    "Reply again with the whole JSON object in the format the task gave: "
+    "every step with its gaps and, with earlier gaps, every disposition. "
+    "Change only what the problems above name.\n"
 )
 
 
@@ -458,6 +466,32 @@ def _follow(
     )
 
 
+def _correction_follow(
+    command: str, details: Mapping[str, Any], env: Mapping[str, str]
+) -> str:
+    """Name the action for an open run whose reply a correction did not fix.
+
+    Re-reading the same reply cannot change the result, so the line names a
+    new turn of the open run, or the correction turn still to finish.
+    """
+    run_id = details["id"]
+    folder = record.run_dir(run_id, env)
+    brief_path = shlex.quote(str(folder / "brief.md"))
+    correction = details["correction"]
+    turn = correction["turn"]
+    if correction["exit"] and turn is not None:
+        reply_path = shlex.quote(str(folder / f"turn-{turn}.md"))
+        return (
+            f"next: once turn {turn} of {run_id} ends, "
+            f"{command} --reply {reply_path} --brief-file {brief_path}"
+        )
+    reply_path = shlex.quote(str(folder / f"turn-{(turn or 1) + 1}.md"))
+    return (
+        f"next: emb run --send {run_id} --message-file <a message naming each "
+        f"problem>, then {command} --reply {reply_path} --brief-file {brief_path}"
+    )
+
+
 def verify_brief(document: plan.Plan, path: str | None, command: str) -> None:
     """Require the saved review brief to carry the current plan's hash.
 
@@ -476,7 +510,11 @@ def verify_brief(document: plan.Plan, path: str | None, command: str) -> None:
         ) from error
     if not brief.matches_plan(text, document):
         raise CommandError(
-            64, "the brief has no matching plan hash; run --brief again", follow
+            64,
+            "the brief's plan hash does not match the plan: the plan text "
+            "changed since the brief was made, or the brief has no plan hash; "
+            "run --brief again",
+            follow,
         )
 
 
@@ -568,6 +606,82 @@ def _fallback(
     return options, row["engine"], tried
 
 
+def _collect(
+    run: record.Run,
+    document: plan.Plan,
+    earlier: previous.Previous | None,
+    result: dict[str, Any],
+    details: dict[str, Any],
+) -> None:
+    """Read the run's current reply into the result when the reply exists.
+
+    Raises:
+        CommandError: The reply exists but cannot be read (exit 66).
+    """
+    candidate = Path(run.reply) if run.reply else run.folder / f"turn-{run.turn}.md"
+    # A missing reply differs from an existing reply that cannot be read.
+    try:
+        candidate.stat()
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise CommandError(
+            66,
+            f"cannot read the reply {candidate}: {error}",
+            f"next: ls -l {shlex.quote(str(candidate))}",
+        ) from error
+    details["reply"] = str(candidate)
+    result.update(_read_reply(_read_file(candidate), document, earlier))
+
+
+def _correct(
+    run_id: str,
+    result: dict[str, Any],
+    details: dict[str, Any],
+    document: plan.Plan,
+    earlier: previous.Previous | None,
+    env: Mapping[str, str],
+    core: Core,
+) -> int:
+    """Send the reviewer one turn naming the reply's problems, then read again.
+
+    The run's session is still open, so the reviewer corrects its own reply.
+    `details["correction"]` records the turn and its exit. After exit 0 the
+    result holds the new reply's fields, valid or not.
+
+    Returns:
+        The exit of the correction turn.
+
+    Raises:
+        CommandError: The message cannot be written (exit 69) or the new
+            reply cannot be read (exit 66).
+    """
+    message: Path | None = None
+    try:
+        try:
+            root = paths.runtime_dir(env)
+            paths.ensure_private_dir(root, root=root)
+            message = root / f"gapcheck-fix-{os.getpid()}-{secrets.token_hex(3)}.md"
+            fd = os.open(message, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(CORRECTION.format(problems=result["parse_error"]))
+        except (OSError, paths.RuntimeDirError) as error:
+            raise CommandError(
+                69, str(error), exits.line(69, "runtime") or ""
+            ) from error
+        path = str(message)
+        with _stop_signals_interrupt():
+            code = core.execute(lambda: core.send(run_id, path))
+    finally:
+        if message is not None:
+            message.unlink(missing_ok=True)
+    run = record.load(run_id, env)
+    details["correction"] = {"turn": run.turn if run.turn > 1 else None, "exit": code}
+    if code == 0:
+        _collect(run, document, earlier, result, details)
+    return code
+
+
 def _run(
     args: argparse.Namespace,
     document: plan.Plan,
@@ -586,7 +700,9 @@ def _run(
     `sources` are the read files listed in the brief. A run that a provider
     error ends at exit 73 is closed and repeated on the worker of the
     owner's fallback list while an entry applies; `failed` holds the workers
-    that failed before.
+    that failed before. A successful turn whose reply is invalid gets one
+    correction turn; the run is closed only when no correction was sent or
+    the corrected reply is valid.
     """
     output, errors = io.StringIO(), io.StringIO()
     temporary: Path | None = None
@@ -668,6 +784,7 @@ def _run(
         "exit": code,
         "closed": False,
         "close_error": None,
+        "correction": None,
     }
     result["run"] = details
     problem = None
@@ -686,28 +803,30 @@ def _run(
             if args.engine is not None
             else "menu",
         }
-        candidate = Path(run.reply) if run.reply else run.folder / "turn-1.md"
-        # A missing reply differs from an existing reply that cannot be read.
-        try:
-            candidate.stat()
-        except FileNotFoundError:
-            pass
-        except OSError as error:
-            raise CommandError(
-                66,
-                f"cannot read the reply {candidate}: {error}",
-                f"next: ls -l {shlex.quote(str(candidate))}",
-            ) from error
-        else:
-            details["reply"] = str(candidate)
-            result.update(_read_reply(_read_file(candidate), document, earlier))
+        _collect(run, document, earlier, result, details)
+        if code == 0 and details["reply"] is not None and result["parse_error"]:
+            # One correction turn while the session is open; see `_correct`.
+            offset = len(errors.getvalue())
+            try:
+                code = _correct(run_id, result, details, document, earlier, env, core)
+            finally:
+                diagnostics = errors.getvalue()[offset:]
+                if code == 0:
+                    # The gap check prints the one action after a correction.
+                    diagnostics = "".join(
+                        line
+                        for line in diagnostics.splitlines(keepends=True)
+                        if not line.startswith("next:")
+                    )
+                err.write(diagnostics)
     except CommandError as error:
         problem = error
         result["parse_error"] = str(error)
     except record.RecordError as error:
         problem = CommandError(1, str(error), f"next: emb run --status {run_id}")
         result["parse_error"] = str(error)
-    if code == 0:
+    correction = details["correction"]
+    if code == 0 and (correction is None or result["parse_error"] is None):
         offset = len(errors.getvalue())
         close_code = core.execute(lambda: core.close(run_id))
         close_error = errors.getvalue()[offset:]
@@ -882,6 +1001,8 @@ def main(
                 if code == exits.PREPARATION_FAILED
                 else problem.follow
                 if problem
+                else _correction_follow(command, details, environment)
+                if details and details["correction"] and not details["closed"]
                 else _follow(
                     command,
                     reply_path,

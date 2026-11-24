@@ -277,7 +277,8 @@ def _dispositions(
         count = links.count(identity)
         if status == "reopened" and count != 1:
             problems.append(
-                f"reopened gap {identity} needs exactly one new gap naming it"
+                f"reopened gap {identity} needs exactly one new gap "
+                f"with earlier set to {identity}"
             )
         elif status != "reopened" and count:
             problems.append(

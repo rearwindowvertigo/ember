@@ -139,6 +139,28 @@
             "null"
           ],
           "minLength": 1
+        },
+        "correction": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "turn",
+            "exit"
+          ],
+          "properties": {
+            "turn": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "exit": {
+              "type": "integer"
+            }
+          }
         }
       }
     },
