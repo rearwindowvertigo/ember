@@ -56,7 +56,10 @@ on an existing folder.
 When `prepare.state` is `unset` and the repository needs an install before
 its checks (for example, it has a lock file such as `package-lock.json`),
 propose a preparation command to the owner at most once per repository per
-conversation. Point first to Settings, Worktree preparation, Add repository:
+conversation. Introduce it as “Optional local setting for future worktrees.”
+Before giving setup steps, say whether the current task needs the command.
+Setting it now does not prepare an already-running worker's worktree.
+Point first to Settings, Worktree preparation, Add repository:
 choose the main checkout and enter the command. Second, give an exact
 `emb choices --set 'worktree.prepare=<JSON object>'` command for the owner's
 terminal, built from the current `worktree.prepare` mapping in the choices
@@ -418,8 +421,10 @@ its branch when it has one. Every worker with a branch gets one of the
 three verdicts, because only Keep work merges.
 
 For an editing run with commits the order is verify, review, report, merge,
-then finish as merge's `next:` line says; the merge closes the run. Park a
-read-only run or a run without commits with `emb run --close <run>` when its
+then finish as merge's `next:` line says; the merge closes the run. Keep a
+standalone reviewer open while the writer addresses its findings (see
+`references/runs.md`, Correct, inspect, collect). After the final verdict, park it.
+Park a read-only run or a run without commits with `emb run --close <run>` when its
 `next:` line names it. Park a discarded run with `emb run --close <run>`
 although its `next:` line names verify and merge: do not follow that line,
 because Discard work is not merged (step 9). Park only a run this session
