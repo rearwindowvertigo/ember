@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.1](https://github.com/rearwindowvertigo/ember/compare/v0.34.0...v0.34.1) (2026-11-25)
+
+
+### Documentation
+
+* **skill:** clarify standalone re-review and worktree preparation ([1920282](https://github.com/rearwindowvertigo/ember/commit/19202829b654f9b0501592e5fd11ef77581a5862))
+
 ## [0.34.0](https://github.com/rearwindowvertigo/ember/compare/v0.33.0...v0.34.0) (2026-11-24)
 
 
