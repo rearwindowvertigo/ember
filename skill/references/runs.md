@@ -175,6 +175,15 @@ non-Ember trailers and records the verdict and worker tip. Run records live in
 - `--recover <run>` waits for a sent turn, then collects and commits it, or
   commits a collected one. A commit already made is recorded, not repeated.
 
+For a standalone read-only reviewer checking a writer's correction, keep
+the reviewer open. `--send` continues its conversation, but its detached
+checkout stays at the commit where it started. In the follow-up message,
+give the actual previous and corrected writer commit IDs. Ask the reviewer
+to check its earlier findings and the fix with `git diff <previous> <corrected>`
+and read a corrected file with `git show <corrected>:<path>`. Its working
+files and tests still reflect the original checkout. Close the reviewer
+after the final verdict.
+
 `--send` refuses with 75 when the session holds messages Ember did not
 send, with `Claude asks the owner` in the message. Ask the owner about
 those messages with one direct question, such as whether to send anyway.
