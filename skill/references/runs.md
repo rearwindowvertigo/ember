@@ -4,8 +4,8 @@
 
 The start command is in SKILL.md step 6. Start options: `--model`, `--effort`, `--read-only`, `--read <path>`
 (repeatable), `--trailer <line>` (repeatable; none by default), `--claim`,
-`--window`, `--dry-run` (`--json` for an object), `--announce`, `--benchmark-cost`
-and `--owner-choice`. Do not call `codex`,
+`--window`, `--dry-run` (`--json` for an object), `--announce`, `--benchmark-cost`,
+`--owner-choice` and `--retry-of`. Do not call `codex`,
 `opencode` or `claude` directly: Ember owns the worktree, the sandbox, the
 commits and the run record.
 
@@ -65,15 +65,20 @@ requests publication of the choice in the conversation. Use a separate
 foreground tool call. After a successful preview, start with the same
 options except the three preview-only flags. The start verifies the posted
 notice and uses it once. A changed brief, worker or checkout commit needs a
-new notice. When retrying a refused preparation for an automatic start,
-preview and announce with the saved brief and options named in the retry
-command before starting again. If Ember cannot verify publication, report
-the refusal. Do not substitute shell output.
+new notice. If Ember cannot verify publication, report the refusal. Do not
+substitute shell output.
 
-For a fixed or owner-chosen worker, copy the ordinary preview's complete
-worker line verbatim into chat before the start tool call. Use
-`--owner-choice` on both calls when a model comes directly from the owner's
-request or answer.
+When you use the fixed Team worker as saved, copy the ordinary preview's
+complete worker line verbatim into chat before the start tool call.
+
+When the owner names a model or changes the effort for the fixed Team
+worker, run the exact preview by itself in the foreground. Pass
+`--owner-choice` on the preview and start when the owner chose the model.
+An effort-only change keeps the Team model and passes the requested effort.
+After the preview succeeds, name the resolved engine, exact model, effort
+and any speed in plain language before the start tool call. If it differs
+from the Team pair, say that the owner chose it instead. Keep CLI flags and
+option-source annotations out of the chat message.
 
 ## What a start checks
 
@@ -123,11 +128,24 @@ Ignored dependency and build files are allowed. Changed paths are named;
 an editing worker turn commits with `git add -A`. On failure no worker
 session starts for that run, exit 79 names the log, and the record and
 worktree stay. Inspect the log and follow the printed `next:` retry: a
-new start with the original options and saved brief, the original gap
-check, a fresh panel, or `emb flow --resume <id>`. `--send` and `--recover`
-never rerun preparation. Closing a run with preparation but no worker turn
-removes its owned worktree, including changes left by preparation; its
-editing branch stays.
+new start with the saved brief, the original gap check, a fresh panel, or
+`emb flow --resume <id>`. For a single-worker retry, keep the saved brief,
+claim and `--retry-of <run>` when printed. Keep an explicit owner model
+choice or a still-applicable provider fallback. Otherwise use the current
+Team row to preview the retry:
+
+- If Team lets the lead choose, preview and publish a fresh
+  notice with `--dry-run --announce` as above.
+- If Team says Ask each time, recommend a pair and wait for the owner.
+  Use `--owner-choice` after the owner chooses a model.
+- If Team fixes the model and effort, use the current engine and omit any
+  old automatic `--model` and `--effort`. If the owner changed only the
+  effort and Team still names the same model, keep the requested effort.
+  Preview the worker and announce it as above.
+
+`--send` and `--recover` never rerun preparation. Closing a run with
+preparation but no worker turn removes its owned worktree, including
+changes left by preparation; its editing branch stays.
 
 Timeout, cancellation, interruption and shutdown end the whole preparation
 process group. Resume, close and prune end a recorded group left behind.

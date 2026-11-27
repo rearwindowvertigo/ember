@@ -55,25 +55,29 @@ _OPENCODE_ID = re.compile(r"[^/\s]+/[^\s]+")
 
 Fetch = Callable[[str, float], Any]
 
-_CACHE_WRITES = ContextVar("model_cache_writes", default=True)
+_CACHE_POLICY = ContextVar("model_cache_policy", default="refresh")
 
 
 @contextlib.contextmanager
-def without_cache_writes() -> Iterator[None]:
+def without_cache_writes(*, saved_only: bool = False) -> Iterator[None]:
     """Disable model cache writes for nested lookups in the current context.
 
-    Lookups still read caches, refresh them from their sources and fall back
-    on discovery failures. The scope applies to lookups through drivers and
-    restores the previous policy on exit. Other threads keep their policy.
+    Lookups can still discover models unless saved_only is set. The scope
+    applies through drivers and restores the previous policy on exit. Other
+    threads keep their policy.
+
+    Args:
+        saved_only: Use saved model lists regardless of age and skip discovery.
 
     Yields:
         Nothing.
     """
-    token = _CACHE_WRITES.set(False)
+    policy = "saved" if saved_only or _CACHE_POLICY.get() == "saved" else "read-only"
+    token = _CACHE_POLICY.set(policy)
     try:
         yield
     finally:
-        _CACHE_WRITES.reset(token)
+        _CACHE_POLICY.reset(token)
 
 
 @dataclass(frozen=True)
@@ -574,8 +578,14 @@ def list_models(
         return _claude_list(at)
     env = os.environ if env is None else env
     path = cache_path(engine, env)
-    payload = status.load_cache_file(path)
-    held = _read_cache(payload)
+    policy = _CACHE_POLICY.get()
+    try:
+        payload = status.load_cache_file(path)
+        held = _read_cache(payload)
+    except OverflowError, RecursionError:
+        if policy != "saved":
+            raise
+        payload, held = None, None
     cached_integrations: tuple[Integration, ...] = ()
     legacy = False
     if engine == "opencode" and held is not None and isinstance(payload, dict):
@@ -613,6 +623,10 @@ def list_models(
                     Integration(item["id"], item["name"], item.get("login"))
                     for item in entries
                 )
+    if policy == "saved":
+        if held is None:
+            return ModelList((), CACHE, None, None)
+        return ModelList(held[1], CACHE, held[0], None, cached_integrations)
     if held is not None and not legacy and not refresh and 0 <= at - held[0] < MAX_AGE:
         return ModelList(held[1], CACHE, held[0], None, cached_integrations)
     found: tuple[Model, ...] = ()
@@ -631,7 +645,7 @@ def list_models(
         reason = f"OpenCode model list: {error}"
     if reason is None:
         result = ModelList(found, CLI, at, None, integrations)
-        if _CACHE_WRITES.get():
+        if policy == "refresh":
             payload = {**result.to_json(), "format_version": CACHE_VERSION}
             with contextlib.suppress(OSError):
                 status.save_cache_file(path, payload, env)

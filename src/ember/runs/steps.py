@@ -4,6 +4,7 @@ import shlex
 import sqlite3
 import subprocess
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 
 from ember import db, skill
 from ember.runs import exits, record
@@ -55,6 +56,7 @@ def derive(
             ),
             retry=retry_start(run),
             fallback=fallback,
+            source=run.fallback_from,
         )
         if run.answered_at is not None and text and text.startswith("owner:"):
             text = "next: " + (
@@ -98,29 +100,51 @@ def retry_start(run: Run) -> str:
         argv.extend(("--read", path))
     for trailer in run.trailers:
         argv.extend(("--trailer", trailer))
-    if run.claim is not None:
-        argv.extend(("--claim", run.claim))
+    for flag, value in (
+        ("--claim", run.claim),
+        ("--continue-run", run.continues),
+        ("--fallback-from", run.fallback_from),
+        ("--retry-of", run.id if run.selection_origin is not None else None),
+    ):
+        if value is not None:
+            argv.extend((flag, value))
+    if run.selection_origin == record.SELECTION_OWNER:
+        argv.append("--owner-choice")
     return shlex.join(argv)
 
 
-def fallback_start(run: Run, kind: str) -> str | None:
-    """Return the start of the fallback worker for a run a provider error ended.
+@dataclass(frozen=True)
+class ProviderFallback:
+    """The owner's applicable replacement worker and any work it continues."""
 
-    The worker is the entry of the owner's fallback list that applies now.
-    An editing run with commits is continued on its branch; any other run
-    starts again from the saved brief.
+    engine: str
+    model: str
+    effort: str | None
+    continue_run: str | None
 
-    Args:
-        run: The failed run.
-        kind: The failure's provider kind.
 
-    Returns:
-        The `emb run` command, or `None` when no entry applies or the
-        settings cannot be read.
-    """
+def applicable_fallback(run: Run) -> ProviderFallback | None:
+    """Resolve the current fallback for a first-turn single-worker failure."""
+    if (
+        run.last_exit != exits.PROVIDER_ERROR
+        or run.turn not in (0, 1)
+        or run.parent is not None
+        or run.status not in (record.FAILED, record.CLOSED)
+        or run.turn_state == record.SENT
+        or exit_variant(run) == "uncertain"
+        or run.last_reason == "capacity retry delivery is uncertain; ask the lead"
+    ):
+        return None
+
     from ember import choices, holds
 
     try:
+        turns, _ = record.turn_results(run)
+        outcome = turns[-1] if turns else {}
+        attempts = outcome.get("attempts", [])
+        if attempts and attempts[-1]["sending"] and not attempts[-1]["sent"]:
+            return None
+        kind = outcome.get("provider_kind") or "outage"
         answers = choices.read(None, env=run.env)["answers"]
         # Every worker that failed on this job counts, so a chain of
         # fallbacks ends when the list is used up.
@@ -129,21 +153,36 @@ def fallback_start(run: Run, kind: str) -> str | None:
             for earlier in record.linked(run, "fallback_from")
         ]
         row = holds.replacement(
-            answers, [*failed, (run.engine, run.model, kind)], env=run.env
+            answers,
+            [*failed, (run.engine, run.model, kind)],
+            env=run.env,
         )
     except Exception:  # noqa: BLE001 - an exit line never fails on the settings
         return None
     if row is None:
         return None
-    argv = ["emb", "run", "--engine", row["engine"], "--model", row["model"]]
-    if row["effort"] is not None:
-        argv.extend(("--effort", row["effort"]))
+    return ProviderFallback(
+        engine=row["engine"],
+        model=row["model"],
+        effort=row["effort"],
+        continue_run=run.id if not run.read_only and record.work_tip(run) else None,
+    )
+
+
+def fallback_start(run: Run) -> str | None:
+    """Return the start command when the owner's provider fallback applies."""
+    fallback = applicable_fallback(run)
+    if fallback is None:
+        return None
+    argv = ["emb", "run", "--engine", fallback.engine, "--model", fallback.model]
+    if fallback.effort is not None:
+        argv.extend(("--effort", fallback.effort))
     argv.extend(("--dir", run.repo, "--task-file", str(run.folder / record.BRIEF_NAME)))
     argv.extend(("--fallback-from", run.id))
     if run.read_only:
         argv.append("--read-only")
-    elif record.work_tip(run):
-        argv.extend(("--continue-run", run.id))
+    if fallback.continue_run is not None:
+        argv.extend(("--continue-run", fallback.continue_run))
     for path in run.read:
         argv.extend(("--read", path))
     for trailer in run.trailers:
@@ -183,17 +222,10 @@ def shown_variant(run: Run) -> tuple[str | None, str | None]:
         The variant for `exits.line` and `exits.report`, and the fallback
         start command when the variant is `fallback`.
     """
-    variant = exit_variant(run)
-    if (
-        run.last_exit == exits.PROVIDER_ERROR
-        and variant != "uncertain"
-        and run.turn <= 1
-        and run.parent is None
-    ):
-        fallback = fallback_start(run, record.provider_kind(run))
-        if fallback is not None:
-            return "fallback", fallback
-    return variant, None
+    fallback = fallback_start(run)
+    if fallback is not None:
+        return "fallback", fallback
+    return exit_variant(run), None
 
 
 def _merged(run: Run) -> bool:

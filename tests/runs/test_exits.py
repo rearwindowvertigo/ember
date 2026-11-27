@@ -32,6 +32,17 @@ def test_preparation_failure_names_log_and_new_start() -> None:
     ) == ("next: inspect /run/prepare.log, then emb run --task-file /brief")
 
 
+def test_refused_retry_names_the_owner_or_the_fixed_preview() -> None:
+    assert exits.line(exits.REFUSED, "retry_ask") == (
+        "next: ask the owner to choose the worker, then preview the retry "
+        "with --owner-choice"
+    )
+    command = "emb run --engine codex --retry-of run-id --dry-run"
+    assert exits.line(exits.REFUSED, "retry_fixed", preview=command) == (
+        f"next: {command}"
+    )
+
+
 def test_placeholders_and_blanks() -> None:
     assert exits.line(124, run="codex-1") == (
         "next: emb run --recover codex-1 "

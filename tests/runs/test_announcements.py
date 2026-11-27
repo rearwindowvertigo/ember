@@ -23,7 +23,11 @@ WORKER = WorkerSelection(
 
 @pytest.fixture
 def env(tmp_path: Path) -> dict[str, str]:
-    return {"XDG_RUNTIME_DIR": str(tmp_path), "CLAUDE_CODE_ENTRYPOINT": "cli"}
+    return {
+        "XDG_RUNTIME_DIR": str(tmp_path),
+        "CLAUDE_CODE_ENTRYPOINT": "cli",
+        "CLAUDE_CODE_SESSION_ID": "lead-session",
+    }
 
 
 def test_claude_requires_notice_in_the_transcript(
@@ -40,7 +44,7 @@ def test_claude_requires_notice_in_the_transcript(
         "hook_event_name": "PostToolUse",
         "tool_name": "Bash",
         "transcript_path": str(transcript),
-        "session_id": "lead-session",
+        "session_id": env["CLAUDE_CODE_SESSION_ID"],
         "tool_use_id": "preview-tool",
         "tool_response": {"stdout": json.dumps({"announcement": marker})},
     }
@@ -150,7 +154,7 @@ def test_announcement_uses_the_saved_cost_for_the_selected_effort(
             "hook_event_name": "PostToolUse",
             "tool_name": "Bash",
             "transcript_path": str(transcript),
-            "session_id": "lead-session",
+            "session_id": env["CLAUDE_CODE_SESSION_ID"],
             "tool_use_id": "preview-tool",
             "tool_response": {"stdout": marker},
         },

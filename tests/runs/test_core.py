@@ -18,6 +18,7 @@ from unittest.mock import Mock
 import pytest
 
 from ember import choices, engines, holds, paths, processes, prune, sandbox, tmux
+from ember.cli import main
 from ember.engines import Driver, LaunchSpec, models, opencode2, status
 from ember.engines.codex import CodexDriver, codex_home
 from ember.engines.opencode import OpenCodeDriver
@@ -102,6 +103,23 @@ def _run_id(out: str) -> str:
     first = out.splitlines()[0]
     assert first.startswith("run ")
     return first.removeprefix("run ")
+
+
+def _use_cli_drivers(monkeypatch: pytest.MonkeyPatch, *drivers: StubDriver) -> None:
+    by_name = {driver.name: driver for driver in drivers}
+    monkeypatch.setattr(engines, "load_driver", lambda name, env: by_name[name])
+    monkeypatch.setattr(core, "POLL_SECONDS", 0.02)
+
+
+def _next_start(err: str) -> list[str]:
+    line = next(line for line in err.splitlines() if ", then emb run " in line)
+    return shlex.split(line.partition(", then emb ")[2])
+
+
+def _with_arg(argv: list[str], flag: str, value: str) -> list[str]:
+    result = argv.copy()
+    result[result.index(flag) + 1] = value
+    return result
 
 
 def _fields(out: str) -> dict[str, str]:
@@ -492,10 +510,57 @@ def test_dry_run_resolves_team_without_creating_launch_artifacts(
     assert git(repo, "worktree", "list", "--porcelain", env=env) == worktrees
 
 
+def _save_catalogue(env: dict[str, str], engine: str, *entries: models.Model) -> None:
+    status.save_cache_file(
+        models.cache_path(engine, env),
+        {
+            "fetched_at": 0,
+            "format_version": models.CACHE_VERSION,
+            "models": [entry.to_json() for entry in entries],
+            "integrations": [],
+        },
+        env,
+    )
+
+
+def _publish_claude_notice(tmp_path: Path, env: dict[str, str], output: str) -> None:
+    transcript = tmp_path / "lead.jsonl"
+    transcript.touch()
+    session_id = env["CLAUDE_CODE_SESSION_ID"]
+    tool = f"preview-{transcript.stat().st_size}"
+    text = announcements.claude_notice(
+        {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "transcript_path": str(transcript),
+            "session_id": session_id,
+            "tool_use_id": tool,
+            "tool_response": {"stdout": output},
+        },
+        env,
+    )
+    assert text is not None
+    with transcript.open("a") as stream:
+        stream.write(json.dumps({
+            "type": "attachment",
+            "sessionId": session_id,
+            "attachment": {
+                "type": "hook_system_message",
+                "hookEvent": "PostToolUse",
+                "toolUseID": tool,
+                "content": text,
+            },
+        }) + "\n")  # fmt: skip
+
+
 def test_automatic_start_checks_the_posted_worker_and_brief(
     tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     env["CLAUDECODE"] = "1"
+    env["CLAUDE_CODE_SESSION_ID"] = "session"
+    _save_catalogue(
+        env, "codex", models.Model("gpt-6.1-sol", "Sol", ("low", "high"), "high")
+    )
     choices.set_settings(
         {
             "shortlist.codex": ["gpt-6.1-sol@high", "gpt-6.1-sol-mini@high"],
@@ -522,36 +587,18 @@ def test_automatic_start_checks_the_posted_worker_and_brief(
     assert (
         _start(run, repo, brief, dry_run=True, announce="Exact tests", **options) == 0
     )
-    output = capsys.readouterr().out
-    transcript = tmp_path / "lead.jsonl"
-    transcript.touch()
-    text = announcements.claude_notice(
-        {
-            "hook_event_name": "PostToolUse",
-            "tool_name": "Bash",
-            "transcript_path": str(transcript),
-            "session_id": "session",
-            "tool_use_id": "preview",
-            "tool_response": {"stdout": output},
-        },
-        env,
-    )
-    assert text is not None
-    transcript.write_text(
-        json.dumps(
-            {
-                "type": "attachment",
-                "sessionId": "session",
-                "attachment": {
-                    "type": "hook_system_message",
-                    "hookEvent": "PostToolUse",
-                    "toolUseID": "preview",
-                    "content": text,
-                },
-            }
-        )
-        + "\n"
-    )
+    _publish_claude_notice(tmp_path, env, capsys.readouterr().out)
+    no_session = env.copy()
+    del no_session["CLAUDE_CODE_SESSION_ID"]
+    for start_env in (
+        dict(no_session, CLAUDE_CODE_SESSION_ID="other-session"),
+        no_session,
+        dict(no_session, CLAUDE_CODE_SESSION_ID=""),
+    ):
+        assert _start(_core(start_env, driver), repo, brief, **options) == exits.REFUSED
+        assert "no published announcement" in capsys.readouterr().err
+        assert not driver.commands
+        assert not paths.runs_dir(start_env).exists()
     assert _start(
         run, repo, _brief(tmp_path, "Another task\n", "other.md"), **options
     ) == (exits.REFUSED)
@@ -569,6 +616,124 @@ def test_automatic_start_checks_the_posted_worker_and_brief(
     assert len(driver.commands) == 1
     assert _start(run, repo, brief, owner_choice=True, **outside) == 0
     assert len(driver.commands) == 2
+
+
+@pytest.mark.parametrize(
+    ("catalogue", "effort", "refusal"),
+    [
+        ("missing", "high", "no saved effort catalogue entry"),
+        ("missing", None, "no saved effort catalogue entry"),
+        ("other-integration", "high", "no saved effort catalogue entry"),
+        ("other-integration", None, "no saved effort catalogue entry"),
+        ("efforts", "low", "does not advertise low effort"),
+        ("efforts", None, "choose an effort"),
+        ("efforts", "high", None),
+        ("no-effort", None, None),
+    ],
+)
+def test_automatic_opencode_effort_uses_exact_saved_catalogue(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    catalogue: str,
+    effort: str | None,
+    refusal: str | None,
+) -> None:
+    env.update(CLAUDECODE="1", CLAUDE_CODE_SESSION_ID="session")
+    model = "openrouter/openai/example"
+    claim = "route-claim"
+    choices.set_settings(
+        {
+            "shortlist.opencode": [model],
+            "single.writer": "auto",
+            "routing.pool": {f"opencode:{model}": {"scores": {}}},
+        },
+        env=env,
+    )
+    choices.claim(claim, env=env)
+    if catalogue != "missing":
+        ident = "openai/example" if catalogue == "other-integration" else model
+        efforts = () if catalogue == "no-effort" else ("high",)
+        _save_catalogue(env, "opencode", models.Model(ident, ident, efforts))
+    worker = _driver(env, "opencode")
+    monkeypatch.setattr(worker, "default_effort", OpenCodeDriver(env).default_effort)
+    _use_cli_drivers(monkeypatch, worker)
+
+    def unexpected(*args: object, **kwargs: object) -> None:
+        pytest.fail("automatic effort selection contacted a catalogue or wrote a cache")
+
+    monkeypatch.setattr(models, "fetch_json", unexpected)
+    monkeypatch.setattr(models, "_run_models", unexpected)
+    monkeypatch.setattr(status, "save_cache_file", unexpected)
+    argv = [
+        "run", "--engine", "opencode", "--model", model, "--claim", claim,
+        "--dir", str(repo), "--task-file", _brief(tmp_path, "Task\n"),
+    ]  # fmt: skip
+    if effort is not None:
+        argv.extend(("--effort", effort))
+    preview = [*argv, "--dry-run", "--announce", "The task only needs a small edit"]
+    if refusal is None:
+        assert main(preview, env=env) == exits.OK
+        _publish_claude_notice(tmp_path, env, capsys.readouterr().out)
+        cache = models.cache_path("opencode", env)
+        saved = cache.read_bytes()
+        cache.unlink()
+        assert main(argv, env=env) == exits.REFUSED
+        assert "emb engines --models opencode" in capsys.readouterr().err
+        assert not worker.commands
+        cache.write_bytes(saved)
+        assert main(argv, env=env) == exits.OK
+        started, _ = worker.commands[0]
+        assert started.model == model
+        assert started.effort == effort
+        return
+
+    for args in (preview, argv):
+        assert main(args, env=env) == exits.REFUSED
+        out, err = capsys.readouterr()
+        assert not out
+        assert model in err and refusal in err
+        assert "emb engines --models opencode" in err
+        assert not announcements.pending(claim, env)
+        assert not worker.commands and not record.list_runs(env)[0]
+
+
+@pytest.mark.parametrize("advertised", [True, False])
+def test_automatic_codex_default_effort_is_resolved_offline(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    advertised: bool,
+) -> None:
+    choices.set_settings(
+        {"single.writer": "auto", "routing.pool": {"codex:gpt-5": {"scores": {}}}},
+        env=env,
+    )
+    choices.claim("route-claim", env=env)
+    default_effort = "high" if advertised else "low"
+    _save_catalogue(
+        env, "codex", models.Model("gpt-5", "GPT-5", ("high",), default_effort)
+    )
+
+    def unexpected(*args: object, **kwargs: object) -> None:
+        pytest.fail("an expired catalogue caused discovery or a cache write")
+
+    monkeypatch.setattr(models, "_read_codex", unexpected)
+    monkeypatch.setattr(status, "save_cache_file", unexpected)
+    assert _start(
+        _core(env, CodexDriver(env)), repo, _brief(tmp_path, "Task\n"),
+        engine="codex", model="gpt-5", claim="route-claim", dry_run=True,
+    ) == (exits.OK if advertised else exits.REFUSED)  # fmt: skip
+    out, err = capsys.readouterr()
+    if advertised:
+        assert "codex gpt-5 · high" in out
+    else:
+        assert "codex:gpt-5 does not advertise low effort" in err
+        assert "emb engines --models codex" in err
 
 
 @pytest.mark.parametrize("connected", [False, True])
@@ -1819,7 +1984,9 @@ def test_missing_files_are_66(
     capsys: pytest.CaptureFixture[str],
     dry_run: bool,
 ) -> None:
-    assert _start(_core(env), repo, str(tmp_path / "none.md"), dry_run=dry_run) == 66
+    missing = tmp_path / "none.md"
+    assert _start(_core(env), repo, str(missing), dry_run=dry_run) == 66
+    assert f"{missing} does not exist" in capsys.readouterr().err
     brief = _brief(tmp_path, "Task\n")
     assert (
         _start(_core(env), repo, brief, read=(str(tmp_path / "gone"),), dry_run=dry_run)
@@ -5012,11 +5179,258 @@ def test_preparation_retry_saves_brief_and_options(
         ("--read", str(tmp_path)),
         ("--trailer", "Reviewed-By: Lead"),
         ("--claim", "prep-claim"),
+        ("--retry-of", run.id),
         ("--stall", "3.0"),
     ):
         assert argv[argv.index(flag) + 1] == value
     assert all(flag in argv for flag in ("--window", "--read-only", "--quiet"))
     assert shlex.join(argv) in output.err
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("policy", ["auto", "ask", "fixed", "same-pair"])
+def test_automatic_preparation_retry_reapplies_current_team_policy(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    legacy: bool,
+    policy: str,
+) -> None:
+    env.update(CLAUDECODE="1", CLAUDE_CODE_SESSION_ID="session")
+    claim = "prep-claim"
+    choices.set_settings(
+        {
+            "single.writer": "auto",
+            "routing.pool": {"claude:opus": {"scores": {}}},
+            "worktree.prepare": {str(repo): "exit 1"},
+        },
+        env=env,
+    )
+    choices.claim(claim, env=env)
+    claude, codex = _driver(env), _driver(env, "codex")
+    _use_cli_drivers(monkeypatch, claude, codex)
+    brief = _brief(tmp_path, "Saved task\n", "brief with spaces.md")
+    start = [
+        "run", "--engine", "claude", "--dir", str(repo), "--task-file", brief,
+        "--claim", claim, "--model", "opus", "--effort", "high",
+    ]  # fmt: skip
+    announce = ["--dry-run", "--announce", "The model covers the writer task"]
+    assert main([*start, *announce], env=env) == exits.OK
+    _publish_claude_notice(tmp_path, env, capsys.readouterr().out)
+
+    prepare = Core._prepare
+
+    def prepare_with_origin(
+        self: Core, run: record.Run, command: str, stop: threading.Event | None
+    ) -> record.Run:
+        assert record.load(run.id, env).selection_origin == record.SELECTION_AUTO
+        return prepare(self, run, command, stop)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Core, "_prepare", prepare_with_origin)
+        assert main(start, env=env) == exits.PREPARATION_FAILED
+    out, err = capsys.readouterr()
+    failed = record.load(_run_id(out), env)
+    retry = _next_start(err)
+    assert tuple(retry) == failed.start_argv[1:]
+    assert retry[retry.index("--retry-of") + 1] == failed.id
+    assert not announcements.pending(claim, env)
+    assert not claude.commands and not codex.commands
+    if legacy:
+        index = retry.index("--retry-of")
+        del retry[index : index + 2]
+        record.save(replace(failed, selection_origin=None, start_argv=("emb", *retry)))
+    assert main(["run", "--close", failed.id], env=env) == exits.OK
+    capsys.readouterr()
+    choices.set_settings(
+        {
+            "worktree.prepare": {str(repo): "true"},
+            "single.writer": {"fixed": "codex:gpt-5", "same-pair": "claude:opus"}.get(
+                policy, policy
+            ),
+        },
+        env=env,
+    )
+
+    if policy == "same-pair" and legacy:
+        assert main(retry, env=env) == exits.OK
+        assert claude.commands[0][0].effort == "high"
+        return
+    assert main(retry, env=env) == exits.REFUSED
+    out, err = capsys.readouterr()
+    assert not out and not claude.commands and not codex.commands
+    expected = ("claude", "opus", "high")
+    if policy == "auto":
+        assert "no published announcement" in err
+        assert main([*retry, *announce], env=env) == exits.OK
+        _publish_claude_notice(tmp_path, env, capsys.readouterr().out)
+    elif policy == "ask":
+        assert "ask the owner to choose the worker" in err
+        assert main([*retry, "--dry-run"], env=env) == exits.REFUSED
+        capsys.readouterr()
+        retry = [*_with_arg(retry, "--model", "sonnet"), "--owner-choice"]
+        expected = ("claude", "sonnet", "high")
+        assert main([*retry, "--dry-run"], env=env) == exits.OK
+        assert "sonnet · high" in capsys.readouterr().out
+    else:
+        preview = shlex.split(err.splitlines()[-1].removeprefix("next: emb "))
+        engine = "codex" if policy == "fixed" else "claude"
+        if policy == "fixed":
+            expected = ("codex", "gpt-5", "high")
+        assert preview[preview.index("--engine") + 1] == engine
+        assert preview[preview.index("--retry-of") + 1] == failed.id
+        assert "--model" not in preview and "--effort" not in preview
+        assert main(preview, env=env) == exits.OK
+        assert f"{expected[0]} {expected[1]} · {expected[2]}" in capsys.readouterr().out
+        retry = [arg for arg in preview if arg != "--dry-run"]
+
+    assert main(retry, env=env) == exits.OK
+    ((started, _),) = claude.commands + codex.commands
+    assert (started.engine, started.model, started.effort) == expected
+    if policy == "auto":
+        assert main(retry, env=env) == exits.REFUSED
+        assert "no published announcement" in capsys.readouterr().err
+    if policy == "fixed":
+        # An unrelated explicit start is not a legacy retry, even for this claim.
+        assert main(start, env=env) == exits.OK
+        assert claude.commands[0][0].model == "opus"
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_fixed_preparation_retry_keeps_its_saved_effort_override(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    read_only: bool,
+) -> None:
+    role = "single.reviewer" if read_only else "single.writer"
+    choices.set_settings(
+        {
+            role: "claude:opus",
+            "shortlist.claude": ["opus@high", "sonnet@low"],
+            "worktree.prepare": {str(repo): "exit 1"},
+        },
+        env=env,
+    )
+    choices.claim("prep-claim", env=env)
+    worker = _driver(env)
+    _use_cli_drivers(monkeypatch, worker)
+    assert _start(
+        _core(env, worker), repo, _brief(tmp_path, "Task\n"),
+        claim="prep-claim", read_only=read_only, effort="low",
+    ) == exits.PREPARATION_FAILED  # fmt: skip
+    out, err = capsys.readouterr()
+    failed = record.load(_run_id(out), env)
+    retry = _next_start(err)
+    assert failed.turn == 0 and failed.selection_origin == record.SELECTION_DIRECT
+    assert failed.model == "opus" and failed.effort == "low"
+    assert "--model" not in retry
+    assert retry[retry.index("--effort") + 1] == "low"
+    assert retry[retry.index("--retry-of") + 1] == failed.id
+
+    choices.set_settings({"worktree.prepare": {str(repo): "true"}}, env=env)
+    assert main(_with_arg(retry, "--effort", "medium"), env=env) == exits.REFUSED
+    assert "now uses the fixed Team worker" in capsys.readouterr().err
+    for unverified in (
+        replace(failed, selection_origin=None),
+        replace(failed, start_argv=()),
+    ):
+        record.save(unverified)
+        assert main(retry, env=env) == exits.REFUSED
+        assert "now uses the fixed Team worker" in capsys.readouterr().err
+    record.save(failed)
+    for selection, message in (
+        ("claude:sonnet", "now uses the fixed Team worker"),
+        ("ask", "now asks the owner to choose"),
+    ):
+        choices.set_settings({role: selection}, env=env)
+        assert main(retry, env=env) == exits.REFUSED
+        assert message in capsys.readouterr().err
+    assert not worker.commands
+
+    choices.set_settings({role: "claude:opus"}, env=env)
+    assert main(retry, env=env) == exits.OK
+    ((started, _),) = worker.commands
+    assert started.read_only == read_only
+    assert (started.engine, started.model, started.effort) == ("claude", "opus", "low")
+
+
+def test_owner_choice_retry_keeps_its_explicit_worker_under_ask(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    choices.set_settings({"worktree.prepare": {str(repo): "exit 1"}}, env=env)
+    choices.claim("prep-claim", env=env)
+    worker = _driver(env)
+    _use_cli_drivers(monkeypatch, worker)
+    assert main([
+        "run", "--engine", "claude", "--model", "sonnet", "--effort", "low",
+        "--owner-choice", "--claim", "prep-claim", "--dir", str(repo),
+        "--task-file", _brief(tmp_path, "Task\n"),
+    ], env=env) == exits.PREPARATION_FAILED  # fmt: skip
+    out, err = capsys.readouterr()
+    failed = record.load(_run_id(out), env)
+    assert failed.selection_origin == record.SELECTION_OWNER
+    choices.set_settings({"single.writer": "ask", "worktree.prepare": {}}, env=env)
+    retry = _next_start(err)
+    assert "--owner-choice" in retry
+    assert main(retry, env=env) == exits.OK
+    assert (worker.commands[0][0].model, worker.commands[0][0].effort) == (
+        "sonnet",
+        "low",
+    )
+
+
+def test_named_preparation_retry_requires_matching_failed_record(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    choices.set_settings({"worktree.prepare": {str(repo): "exit 1"}}, env=env)
+    choices.claim("prep-claim", env=env)
+    choices.claim("other-claim", env=env)
+    worker = _driver(env)
+    _use_cli_drivers(monkeypatch, worker)
+    brief = _brief(tmp_path, "Task\n")
+    assert (
+        _start(_core(env), repo, brief, claim="prep-claim") == exits.PREPARATION_FAILED
+    )
+    out, err = capsys.readouterr()
+    failed = record.load(_run_id(out), env)
+    retry = _next_start(err)
+    choices.set_settings({"worktree.prepare": {}}, env=env)
+    assert main(["run", "--status", failed.id, "--retry-of", failed.id], env=env) == 64
+    assert "--retry-of cannot be used with --status" in capsys.readouterr().err
+    missing = str(tmp_path / "missing.md")
+    assert main(_with_arg(retry, "--task-file", missing), env=env) == exits.REFUSED
+    err = capsys.readouterr().err
+    assert f"cannot read {missing}" in err
+    assert f"next: emb run --status {failed.id}" in err
+    linked = tmp_path / "linked"
+    git(repo, "worktree", "add", "-q", "--detach", str(linked), env=env)
+    for invalid in (
+        _with_arg(retry, "--retry-of", "missing-run"),
+        _with_arg(retry, "--task-file", brief),
+        _with_arg(retry, "--claim", "other-claim"),
+        _with_arg(retry, "--dir", str(linked)),
+        [*retry, "--read-only"],
+    ):
+        assert main(invalid, env=env) == exits.REFUSED
+        assert "next: emb run --status" in capsys.readouterr().err
+    record.save(replace(failed, last_exit=exits.ENGINE_FAILED))
+    assert main(retry, env=env) == exits.REFUSED
+    assert "failed preparation" in capsys.readouterr().err
+    assert not worker.commands
+    assert [run.id for run in record.list_runs(env)[0]] == [failed.id]
 
 
 def test_preparation_lookup_error_refuses_before_artifacts(
@@ -6404,6 +6818,211 @@ def test_a_provider_failure_holds_the_engine_and_names_the_fallback_start(
     assert _core(env).step(run, "live")[1] == lines[-1]
 
 
+@pytest.mark.parametrize("change", ["revoked", "reordered", "effort", "held"])
+def test_fallback_admission_revalidates_the_current_owner_row(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    change: str,
+) -> None:
+    claim = "fall-claim"
+    fallback_list = ["codex:gpt-5", "codex:gpt-mini"]
+    settings: dict[str, object] = {
+        "single.reviewer": "auto",
+        "shortlist.codex": ["gpt-5@high", "gpt-mini@medium"],
+        "provider.fallback": fallback_list,
+    }
+    choices.set_settings(settings, env=env)
+    choices.claim(claim, env=env)
+    claude, codex = _driver(env), _driver(env, "codex")
+    _use_cli_drivers(monkeypatch, claude, codex)
+    marker = tmp_path / "provider-failed"
+    brief = _brief(tmp_path, f"Review\n@provider-once {marker} outage\n")
+    assert main([
+        "run", "--engine", "claude", "--model", "opus", "--owner-choice",
+        "--read-only", "--claim", claim, "--dir", str(repo), "--task-file", brief,
+    ], env=env) == exits.PROVIDER_ERROR  # fmt: skip
+    out, err = capsys.readouterr()
+    failed = record.load(_run_id(out), env)
+    fallback = _next_start(err)
+    assert "--continue-run" not in fallback
+    assert main(["run", "--close", failed.id], env=env) == exits.OK
+    capsys.readouterr()
+    if change == "held":
+        holds.start("codex", "gpt-5", "capacity", 15, env=env)
+    else:
+        changes: dict[str, dict[str, object]] = {
+            "revoked": {"provider.fallback": []},
+            "reordered": {"provider.fallback": fallback_list[::-1]},
+            "effort": {"shortlist.codex": ["gpt-5@low", "gpt-mini@medium"]},
+        }
+        choices.set_settings(changes[change], env=env)
+    for args in (fallback, [*fallback, "--dry-run"]):
+        assert main(args, env=env) == exits.REFUSED
+        out, err = capsys.readouterr()
+        assert not out
+        assert f"next: emb run --status {failed.id}" in err
+    assert not codex.commands
+    assert [run.id for run in record.list_runs(env)[0]] == [failed.id]
+
+    # The restored owner row accepts the closed run and an equivalent brief path.
+    choices.set_settings(settings, env=env)
+    if change == "held":
+        assert holds.release("codex", "gpt-5", env=env)
+    alias = tmp_path / "alias with spaces.md"
+    alias.symlink_to(failed.folder / record.BRIEF_NAME)
+    monkeypatch.chdir(tmp_path)
+    fallback = _with_arg(fallback, "--task-file", f"./{alias.name}")
+    where = fallback.index("--fallback-from")
+    reordered = [fallback[0], *fallback[where : where + 2], *fallback[1:where],
+                 *fallback[where + 2 :]]  # fmt: skip
+    assert main(reordered, env=env) == exits.OK
+    ((run, _),) = codex.commands
+    assert run.read_only and run.claim == claim and run.fallback_from == failed.id
+    assert run.selection_origin == record.SELECTION_FALLBACK
+
+
+def test_fallback_admission_binds_source_brief_checkout_and_continuation(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    choices.set_settings({"provider.fallback": ["codex:gpt-5"]}, env=env)
+    failed, lines = _provider_failure(tmp_path, env, repo, capsys)
+    fallback = _next_start("\n".join(lines))
+    codex = _driver(env, "codex")
+    _use_cli_drivers(monkeypatch, codex)
+    choices.claim("other-claim", env=env)
+    source = failed.folder / record.BRIEF_NAME
+    copy = _brief(tmp_path, source.read_text(), "copy.md")
+    missing = str(tmp_path / "missing.md")
+    assert main(_with_arg(fallback, "--task-file", missing), env=env) == exits.REFUSED
+    err = capsys.readouterr().err
+    assert f"cannot read {missing}" in err
+    assert f"next: emb run --status {failed.id}" in err
+    linked = tmp_path / "linked"
+    git(repo, "worktree", "add", "-q", "--detach", str(linked), env=env)
+    for invalid in (
+        _with_arg(fallback, "--fallback-from", "missing-run"),
+        _with_arg(fallback, "--model", "gpt-mini"),
+        _with_arg(fallback, "--task-file", copy),
+        _with_arg(fallback, "--dir", str(linked)),
+        [*fallback, "--claim", "other-claim"],
+        [*fallback, "--read-only"],
+        fallback[: fallback.index("--continue-run")],
+    ):
+        assert main(invalid, env=env) == exits.REFUSED
+        assert "next: emb run --status" in capsys.readouterr().err
+    for ineligible in (
+        replace(failed, last_exit=0),
+        replace(failed, turn=2),
+        replace(failed, last_variant="uncertain"),
+        replace(
+            failed, last_reason="capacity retry delivery is uncertain; ask the lead"
+        ),
+        replace(failed, turn_state=record.SENT),
+        replace(failed, parent=record.parent("panel")),
+    ):
+        record.save(ineligible)
+        assert main(fallback, env=env) == exits.REFUSED
+        assert f"next: emb run --status {failed.id}" in capsys.readouterr().err
+    record.save(replace(failed, last_variant=None))
+    outcome = record.load_outcome(failed, failed.turn)
+    outcome["attempts"][-1].update(sending=True, sent=False)
+    record.write_private(record.outcome_path(failed, failed.turn), json.dumps(outcome))
+    assert main(fallback, env=env) == exits.REFUSED
+    assert f"next: emb run --status {failed.id}" in capsys.readouterr().err
+    assert not codex.commands
+    assert [run.id for run in record.list_runs(env)[0]] == [failed.id]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_fallback_preparation_retry_uses_the_saved_attempt_and_current_plan(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    legacy: bool,
+) -> None:
+    claude, codex = _driver(env), _driver(env, "codex")
+    _use_cli_drivers(monkeypatch, claude, codex)
+    choices.set_settings({"provider.fallback": ["codex:gpt-5"]}, env=env)
+    marker = tmp_path / "provider-failed"
+    brief = _brief(
+        tmp_path, f"Task\n@write work.txt w\n@provider-once {marker} outage\n"
+    )
+    assert _start(_core(env, claude), repo, brief) == exits.PROVIDER_ERROR
+    out, err = capsys.readouterr()
+    failed = record.load(_run_id(out), env)
+    fallback = _next_start(err)
+    assert main(["run", "--close", failed.id], env=env) == exits.OK
+    capsys.readouterr()
+    choices.set_settings({"worktree.prepare": {str(repo): "exit 1"}}, env=env)
+    assert main(fallback, env=env) == exits.PREPARATION_FAILED
+    out, err = capsys.readouterr()
+    prep_failed = record.load(_run_id(out), env)
+    retry = _next_start(err)
+    assert retry[retry.index("--task-file") + 1] == str(
+        prep_failed.folder / record.BRIEF_NAME
+    )
+    assert prep_failed.fallback_from == prep_failed.continues == failed.id
+    if legacy:
+        index = retry.index("--retry-of")
+        del retry[index : index + 2]
+        record.save(
+            replace(prep_failed, selection_origin=None, start_argv=("emb", *retry))
+        )
+    choices.set_settings({"worktree.prepare": {}, "provider.fallback": []}, env=env)
+    assert main(retry, env=env) == exits.REFUSED
+    assert f"next: emb run --status {failed.id}" in capsys.readouterr().err
+    assert not codex.commands
+    choices.set_settings({"provider.fallback": ["codex:gpt-5"]}, env=env)
+    assert main(retry, env=env) == exits.OK
+    ((run, _),) = codex.commands
+    assert run.fallback_from == run.continues == failed.id
+    assert run.base == failed.commits[-1]
+    saved = (run.folder / record.BRIEF_NAME).read_text()
+    assert saved.count(core.HANDOVER_HEADING) == 1
+
+
+def test_fallback_revoked_during_preparation_reaches_no_driver(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    choices.set_settings({"provider.fallback": ["codex:gpt-5"]}, env=env)
+    failed, lines = _provider_failure(tmp_path, env, repo, capsys)
+    choices.set_settings({"worktree.prepare": {str(repo): "true"}}, env=env)
+    codex = _driver(env, "codex")
+    _use_cli_drivers(monkeypatch, codex)
+    prepare = Core._prepare
+
+    def revoke(
+        self: Core, run: record.Run, command: str, stop: threading.Event | None
+    ) -> record.Run:
+        prepared = prepare(self, run, command, stop)
+        choices.set_settings({"provider.fallback": []}, env=env)
+        return prepared
+
+    monkeypatch.setattr(Core, "_prepare", revoke)
+    assert main(_next_start("\n".join(lines)), env=env) == exits.REFUSED
+    out, err = capsys.readouterr()
+    attempt = record.load(_run_id(out), env)
+    assert attempt.last_exit == exits.REFUSED and attempt.turn == 0
+    assert not codex.commands
+    assert _core(env).step(attempt, core.MISSING)[1] == (
+        f"next: emb run --status {failed.id}"
+    )
+    assert f"next: emb run --status {failed.id}" in err
+
+
 def test_a_start_on_a_held_worker_goes_to_the_fallback_entry(
     tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -6495,7 +7114,7 @@ def test_a_chain_of_fallback_starts_ends_when_the_list_is_used_up(
     )
     first, lines = _provider_failure(tmp_path, env, repo, capsys)
     assert "--engine codex --model gpt-5" in lines[-1]
-    brief = _brief(tmp_path, "Task\n@provider rate limited\n", "again.md")
+    brief = str(first.folder / record.BRIEF_NAME)
     options = {"engine": "codex", "model": "gpt-5", "effort": "high"}
     code = _start(
         _core(env),
@@ -6650,12 +7269,15 @@ def test_a_held_fallback_start_does_not_return_to_a_worker_that_failed(
     holds.start("codex", "gpt-5", "capacity", 15, env=env)
     brief = _brief(tmp_path, "Next\n@reply done\n", "next.md")
     options = {"engine": "codex", "model": "gpt-5", "effort": "high"}
-    assert _start(_core(env), repo, brief, fallback_from=first.id, **options) == 0
+    driver = _driver(env, "codex")
+    assert _start(
+        _core(env, driver), repo, str(first.folder / record.BRIEF_NAME),
+        fallback_from=first.id, continue_run=first.id, **options,
+    ) == exits.REFUSED  # fmt: skip
     out, err = capsys.readouterr()
-    assert record.load(_run_id(out), env).engine == "codex"
-    assert "from the fallback list" not in err
+    assert not out and not driver.commands
+    assert f"next: emb run --status {first.id}" in err
     # A start of another job on the held model takes the released engine.
-    holds.start("codex", "gpt-5", "capacity", 15, env=env)
     assert _start(_core(env), repo, brief, **options) == 0
     out, err = capsys.readouterr()
     assert record.load(_run_id(out), env).engine == "claude"

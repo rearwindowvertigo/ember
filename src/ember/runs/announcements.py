@@ -304,7 +304,13 @@ def _claude_posted(value: dict[str, Any]) -> bool:
 
 def _posted(value: dict[str, Any], env: Mapping[str, str]) -> bool:
     if _claude(env):
-        return value.get("harness") == "claude" and _claude_posted(value)
+        session = env.get("CLAUDE_CODE_SESSION_ID")
+        return (
+            bool(session)
+            and value.get("harness") == "claude"
+            and value.get("session") == session
+            and _claude_posted(value)
+        )
     session = _opencode_session(env)
     if (
         session is None
