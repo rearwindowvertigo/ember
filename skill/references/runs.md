@@ -70,9 +70,10 @@ preview and announce with the saved brief and options named in the retry
 command before starting again. If Ember cannot verify publication, report
 the refusal. Do not substitute shell output.
 
-For a fixed or owner-chosen worker, send the ordinary preview's worker line
-to the owner before starting. Use `--owner-choice` on both calls when a
-model comes directly from the owner's request or answer.
+For a fixed or owner-chosen worker, copy the ordinary preview's complete
+worker line verbatim into chat before the start tool call. Use
+`--owner-choice` on both calls when a model comes directly from the owner's
+request or answer.
 
 ## What a start checks
 

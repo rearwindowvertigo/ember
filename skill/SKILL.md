@@ -227,9 +227,11 @@ resolved, then run the same start without `--dry-run`, `--announce` or
 `--benchmark-cost`, and without waiting for an owner reply. If Ember cannot
 verify the notice, it starts no worker. Report the failure to the owner.
 
-For a fixed or owner-chosen worker, post the ordinary dry run's worker
-line before starting. Pass `--owner-choice` on the preview and start when
-a model comes directly from the owner's request or answer.
+For a fixed or owner-chosen worker, copy the complete ordinary dry-run
+worker line verbatim into chat before the start tool call. Keep the Team
+row, model, effort, any speed and source exactly as printed. Pass
+`--owner-choice` on the preview and start when a model comes directly from
+the owner's request or answer.
 
 When you need a worker choice, use the harness's question tool if
 available. Include the row's `state` and `reason` and, when `auto` cannot
