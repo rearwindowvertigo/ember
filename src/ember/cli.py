@@ -46,8 +46,8 @@ from ember import (
     skill,
 )
 from ember.engines import models, status
+from ember.runs import announcements, exits, record, steps
 from ember.runs import core as run_core
-from ember.runs import exits, record, steps
 
 EX_OK = 0
 EX_USAGE = 64
@@ -185,6 +185,7 @@ _RUN_MODES = (
     "recover",
     "status",
     "answered",
+    "announcement_hook",
 )
 _ALL_RUNS = ""
 
@@ -201,6 +202,21 @@ def _add_run(parser: argparse.ArgumentParser) -> None:
     start.add_argument("--task-file", metavar="FILE", help="the brief")
     start.add_argument(
         "--dry-run", action="store_true", help="check inputs and print the worker"
+    )
+    start.add_argument(
+        "--announce",
+        metavar="REASON",
+        help="with --dry-run: post an automatic worker's task-specific reason",
+    )
+    start.add_argument(
+        "--benchmark-cost",
+        metavar="SERIES:METRIC",
+        help="with --announce: cite this saved benchmark cost",
+    )
+    start.add_argument(
+        "--owner-choice",
+        action="store_true",
+        help="with --claim and --model: the owner directly chose this model",
     )
     start.add_argument("--model", metavar="MODEL", help="the model (default: menu)")
     start.add_argument(
@@ -275,6 +291,12 @@ def _add_run(parser: argparse.ArgumentParser) -> None:
         const=_ALL_RUNS,
         metavar="RUN",
         help="print a run's record, or every run's",
+    )
+    existing.add_argument(
+        "--announcement-hook",
+        action="store_const",
+        const=True,
+        help=argparse.SUPPRESS,
     )
     output = parser.add_argument_group("waiting and output")
     output.add_argument(
@@ -1005,7 +1027,7 @@ def _run_mode(args: argparse.Namespace) -> str:
     """Return the one `emb run` mode the arguments ask for, checking options."""
     given = [mode for mode in _RUN_MODES if getattr(args, mode) is not None]
     if len(given) > 1:
-        options = " and ".join(f"--{mode}" for mode in given)
+        options = " and ".join(f"--{mode.replace('_', '-')}" for mode in given)
         raise UsageError(f"{options} cannot be combined")
     mode = given[0] if given else "start"
     start_only = {
@@ -1022,6 +1044,9 @@ def _run_mode(args: argparse.Namespace) -> str:
         "--continue-run": args.continue_run is not None,
         "--fallback-from": args.fallback_from is not None,
         "--dry-run": args.dry_run,
+        "--announce": args.announce is not None,
+        "--benchmark-cost": args.benchmark_cost is not None,
+        "--owner-choice": args.owner_choice,
     }
     if mode == "start":
         missing = [
@@ -1034,7 +1059,17 @@ def _run_mode(args: argparse.Namespace) -> str:
     else:
         extra = [name for name, present in start_only.items() if present]
         if extra:
-            raise UsageError(f"{', '.join(extra)} cannot be used with --{mode}")
+            raise UsageError(
+                f"{', '.join(extra)} cannot be used with --{mode.replace('_', '-')}"
+            )
+    if args.announce is not None and not (args.dry_run and args.claim and args.model):
+        raise UsageError("--announce needs --dry-run, --claim and --model")
+    if args.benchmark_cost is not None and args.announce is None:
+        raise UsageError("--benchmark-cost needs --announce")
+    if args.owner_choice and (
+        not args.claim or not args.model or args.announce is not None
+    ):
+        raise UsageError("--owner-choice needs --claim and --model, without --announce")
     if (args.message_file is not None) != (mode == "send"):
         raise UsageError("--send and --message-file go together")
     if args.force and mode not in ("close", "send"):
@@ -1052,6 +1087,14 @@ def _run_run(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
         print("next: emb run --help", file=sys.stderr)
         return EX_USAGE
     core = run_core.Core(env, stall_minutes=args.stall, quiet=args.quiet)
+    if mode == "announcement_hook":
+        # Claude runs this hook after each matching Bash call. Only an Ember
+        # announcement preview yields a native system message.
+        with contextlib.suppress(ValueError, OSError, RuntimeError):
+            text = announcements.claude_notice(json.load(sys.stdin), core.env)
+            if text is not None:
+                print(json.dumps({"systemMessage": text}))
+        return EX_OK
     actions: dict[str, Callable[[], int]] = {
         "start": lambda: core.start(
             run_core.StartOptions(
@@ -1069,6 +1112,9 @@ def _run_run(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
                 fallback_from=args.fallback_from,
                 dry_run=args.dry_run,
                 as_json=args.json,
+                announce=args.announce,
+                benchmark_cost=args.benchmark_cost,
+                owner_choice=args.owner_choice,
             )
         ),
         "send": lambda: core.send(args.send, args.message_file, force=args.force),

@@ -93,7 +93,12 @@ subscription quota or a bill for the current task. Ignore any legacy
 Pass the selected model and effort explicitly to the command that starts
 the role. If there is no selected effort, omit the effort option.
 
-Announce an automatic single worker in chat when you choose it, before
-preparing its brief. If Index cost helped choose, name Artificial Analysis
-and USD per Index task. For a flow, use the dry run's worker lines for the
-announcement. Name the gap check reviewer before running it.
+For an automatic single worker, publish the choice with the dry run's
+`--announce` option. Give a task-specific reason, such as “the boundary
+tests cover this two-file edit.” When cost helped choose, pass the series
+key and cost metric from the same evidence row as `--benchmark-cost
+<series>:<metric>`. Copy the complete series key, including any edition.
+For example, `--benchmark-cost artificial-analysis-intelligence-index-5.0:task_usd`
+posts the Artificial Analysis cost in USD per Index task. Omit the option
+if cost did not affect the choice. For a flow, use the dry run's worker
+lines for the announcement. Name the gap check reviewer before running it.

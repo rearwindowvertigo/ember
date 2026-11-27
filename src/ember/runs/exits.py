@@ -106,6 +106,10 @@ LINES: dict[int, str | Mapping[str, str]] = {
     },
     REFUSED: {
         "*": "next: emb run --status {run} (another emb run command is waiting on it)",
+        "announcement": "next: report that no worker started; use --dry-run --announce "
+        "in the lead's conversation before starting",
+        "routing": "next: read Team's current choices; choose an eligible worker "
+        "or ask the owner",
         "busy": RECOVER + " (waits for the turn, then collects it)",
         "close": RECOVER + ", then emb run --close {run}; "
         "or emb run --close {run} --force",

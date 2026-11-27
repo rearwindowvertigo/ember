@@ -4,7 +4,8 @@
 
 The start command is in SKILL.md step 6. Start options: `--model`, `--effort`, `--read-only`, `--read <path>`
 (repeatable), `--trailer <line>` (repeatable; none by default), `--claim`,
-`--window`, `--dry-run` (`--json` for an object). Do not call `codex`,
+`--window`, `--dry-run` (`--json` for an object), `--announce`, `--benchmark-cost`
+and `--owner-choice`. Do not call `codex`,
 `opencode` or `claude` directly: Ember owns the worktree, the sandbox, the
 commits and the run record.
 
@@ -57,11 +58,21 @@ folder, worktree, branch, run record or session and runs no sandbox probe.
 It exits 0 on success or with the failed check's exit code. A later start
 reads the settings again.
 
-Before drafting a brief for a worker you chose in `auto`, tell the owner the
-model, effort and why it fits. Name the benchmark and unit when cost helped
-choose. After the preview, check that
-the worker matches your announcement; for a fixed or owner-chosen worker,
-send the preview's worker line to the owner before starting.
+For an automatic single worker, use `--dry-run --announce '<reason>'` with
+the brief and the selected `--model` and `--effort`. Add `--benchmark-cost
+<series>:<metric>` if a saved benchmark cost helped choose. The preview
+requests publication of the choice in the conversation. Use a separate
+foreground tool call. After a successful preview, start with the same
+options except the three preview-only flags. The start verifies the posted
+notice and uses it once. A changed brief, worker or checkout commit needs a
+new notice. When retrying a refused preparation for an automatic start,
+preview and announce with the saved brief and options named in the retry
+command before starting again. If Ember cannot verify publication, report
+the refusal. Do not substitute shell output.
+
+For a fixed or owner-chosen worker, send the ordinary preview's worker line
+to the owner before starting. Use `--owner-choice` on both calls when a
+model comes directly from the owner's request or answer.
 
 ## What a start checks
 
