@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.35.0](https://github.com/rearwindowvertigo/ember/compare/v0.34.1...v0.35.0) (2026-11-27)
+
+
+### Added
+
+* route workers using benchmark evidence ([5d09291](https://github.com/rearwindowvertigo/ember/commit/5d0929144480198bbf029177b6376635faca532b))
+* support Claude Code and OpenCode as Ember leads ([533d867](https://github.com/rearwindowvertigo/ember/commit/533d86795a8c76d6d1148fb44ffde925192035ad))
+
 ## [0.34.1](https://github.com/rearwindowvertigo/ember/compare/v0.34.0...v0.34.1) (2026-11-25)
 
 
