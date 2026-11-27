@@ -1,4 +1,4 @@
-"""Public benchmark downloads, with a separate result series for each test."""
+"""Benchmark downloads, with a separate result series for each test."""
 
 import csv
 import http.client
@@ -30,6 +30,17 @@ IONWARP_URL = (
     "https://raw.githubusercontent.com/Winding-Labs/ai-code-review-benchmark"
     "/main/data/code-review.csv"
 )
+ARTIFICIAL_ANALYSIS = "artificial-analysis-intelligence-index"
+AA_TITLE = "Artificial Analysis Intelligence Index"
+AA_URL = (
+    "https://artificialanalysis.ai/evaluations/artificial-analysis-intelligence-index"
+)
+AA_API_URL = "https://artificialanalysis.ai/api/v2/language/models/free"
+AA_KEY_URL = "https://artificialanalysis.ai/api-key-management-redirect"
+AA_TERMS_URL = "https://artificialanalysiscdn.com/legal/ProDataPlatformTerms.pdf"
+_AA_EFFORTS = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+)
 
 
 class Observation(TypedDict):
@@ -45,6 +56,8 @@ class Observation(TypedDict):
     trials: NotRequired[int]
     passes: NotRequired[int]
     total_usd: NotRequired[float]
+    model_creator: NotRequired[str]
+    configuration: NotRequired[str]
 
 
 class Metric(TypedDict):
@@ -52,6 +65,12 @@ class Metric(TypedDict):
 
     title: str
     suite: str
+
+
+AA_METRICS = {
+    "intelligence_index": Metric(title="Index score", suite="Intelligence Index"),
+    "task_usd": Metric(title="USD / task", suite="Intelligence Index"),
+}
 
 
 @dataclass(frozen=True)
@@ -71,14 +90,20 @@ class SourceError(ValueError):
     """The download did not contain the expected benchmark results."""
 
 
-def _download(url: str, data: dict[str, str | int] | None = None) -> str:
+def _download(
+    url: str, data: dict[str, str | int] | None = None, *, api_key: str | None = None
+) -> str:
     headers = {"User-Agent": USER_AGENT}
     body = None
     if data is not None:
         headers["Content-Type"] = "application/json"
         body = json.dumps(data).encode()
     request = urllib.request.Request(url, data=body, headers=headers)
+    if api_key is not None:
+        request.add_unredirected_header("X-Api-Key", api_key)
     with urllib.request.urlopen(request, timeout=TIMEOUT) as reply:
+        if api_key is not None and reply.geturl() != url:
+            raise SourceError("the API redirected the request")
         length = reply.headers.get("Content-Length")
         content = reply.read(MAX_BYTES + 1)
     if len(content) > MAX_BYTES:
@@ -344,6 +369,98 @@ def _ionwarp() -> list[Observation]:
             )
         )
     return results
+
+
+def _aa_observation(row: dict[str, Any]) -> Observation | None:
+    name = _text(row["name"], "Artificial Analysis model name")
+    variant = re.fullmatch(r"(.+) \(([^()]+)\)", name)
+    if variant is None:
+        return None
+    effort, _, configuration = variant[2].partition(", ")
+    effort = effort.casefold()
+    if effort == "non-reasoning":
+        effort = "none"
+    if effort not in _AA_EFFORTS or configuration.casefold() not in (
+        "",
+        "default fallback",
+    ):
+        return None
+    metrics = {}
+    score = row["evaluations"]["artificial_analysis_intelligence_index"]
+    if score is not None:
+        metrics["intelligence_index"] = _number(score, "Intelligence Index score")
+    cost = row["artificial_analysis_intelligence_index_cost"]
+    per_task = None if cost is None else cost["cost_per_task"]
+    if per_task is not None:
+        metrics["task_usd"] = _number(per_task["total_cost"], "cost per task")
+    if not metrics:
+        return None
+    creator = row["model_creator"]
+    model = variant[1]
+    result = Observation(model=model, harness=None, effort=effort, metrics=metrics)
+    if creator is not None:
+        result["model_creator"] = _text(creator["name"], "model creator")
+        result["model"] = _model(model, result["model_creator"])
+    if configuration:
+        result["configuration"] = configuration
+    if row["release_date"] is not None:
+        result["model_release_date"] = _text(row["release_date"], "model release date")
+    return result
+
+
+def _artificial_analysis(api_key: str) -> tuple[str, list[Observation]]:
+    results = []
+    seen = set()
+    edition = ""
+    pages = page_size = 0
+    for page in range(1, 21):
+        reply = json.loads(_download(f"{AA_API_URL}?page={page}", api_key=api_key))
+        version = str(_number(reply["intelligence_index_version"], "index version"))
+        if not re.fullmatch(r"\d+\.\d+", version):
+            raise SourceError("invalid index version")
+        pagination = reply["pagination"]
+        rows = _records(reply["data"])
+        if page == 1:
+            edition = version
+            pages = _count(pagination["total_pages"], "page count")
+            page_size = _count(pagination["page_size"], "page size")
+        if (
+            not 1 <= pages <= 20
+            or version != edition
+            or pagination["page"] != page
+            or pagination["total_pages"] != pages
+            or pagination["page_size"] != page_size
+            or pagination["has_more"] is not (page < pages)
+            or not 1 <= len(rows) <= page_size
+            or (page < pages and len(rows) != page_size)
+        ):
+            raise SourceError("inconsistent Artificial Analysis pages")
+        for row in rows:
+            identity = _text(row["id"], "Artificial Analysis model ID")
+            if identity in seen:
+                raise SourceError("duplicate Artificial Analysis model ID")
+            seen.add(identity)
+            if observation := _aa_observation(row):
+                results.append(observation)
+        if page == pages:
+            break
+    if not results:
+        raise SourceError("the download had no effort-level results")
+    return edition, results
+
+
+def read_artificial_analysis(api_key: str) -> tuple[str, list[Observation]]:
+    """Read the complete free-tier index and its published weighted cost per task."""
+    try:
+        return _artificial_analysis(api_key)
+    except urllib.error.HTTPError as error:
+        raise SourceError(f"HTTP {error.code}") from None
+    except (OSError, http.client.HTTPException) as error:
+        raise SourceError("the download failed") from error
+    except SourceError:
+        raise
+    except (ValueError, TypeError, KeyError, IndexError, RecursionError) as error:
+        raise SourceError("unexpected result format") from error
 
 
 _TERMINAL_METRICS = {

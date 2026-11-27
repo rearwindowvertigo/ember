@@ -1,26 +1,33 @@
 """Refresh and read the benchmark evidence for the owner's routing pool."""
 
+import contextlib
 import fcntl
 import hashlib
 import json
 import os
 import re
+import stat
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 from ember import choices, paths
 from ember.benchmark_sources import (
+    AA_METRICS,
+    AA_TITLE,
+    AA_URL,
+    ARTIFICIAL_ANALYSIS,
     SOURCES,
     Metric,
     Observation,
     Source,
     SourceError,
     read,
+    read_artificial_analysis,
 )
-from ember.engines import status
+from ember.engines import models, status
 
 MAX_CHECK_AGE = 30 * 24 * 60 * 60
 FORMAT_VERSION = 1
@@ -47,12 +54,22 @@ class _Snapshot(TypedDict):
     revision: str | None
     error: str | None
     rows: list[Observation]
+    edition: NotRequired[str]
 
 
 type Cache = dict[str, _Snapshot]
+type EffortCatalog = dict[str, dict[str, tuple[str, ...]]]
 
 
-class SourceStatus(TypedDict):
+class _CheckStatus(TypedDict):
+    checked_at: float | None
+    revision: str | None
+    stale: bool
+    result: str
+    error: str | None
+
+
+class SourceStatus(_CheckStatus):
     """The benchmark and the status of its saved download."""
 
     title: str
@@ -61,11 +78,6 @@ class SourceStatus(TypedDict):
     publisher: str
     metrics: dict[str, Metric]
     pricing_basis: str | None
-    checked_at: float | None
-    revision: str | None
-    stale: bool
-    result: str
-    error: str | None
 
 
 class Related(TypedDict):
@@ -73,6 +85,15 @@ class Related(TypedDict):
 
     observation: Observation
     reason: str
+
+
+class ModelReference(TypedDict):
+    """Published model-level evidence by effort, independent of the engine."""
+
+    source: str
+    model: str | None
+    effort_catalog_available: bool
+    efforts: dict[str, Observation | None]
 
 
 class WorkerEvidence(TypedDict):
@@ -84,6 +105,7 @@ class WorkerEvidence(TypedDict):
     matches: dict[str, Observation]
     related: dict[str, Related]
     missing: dict[str, list[str]]
+    model_reference: NotRequired[ModelReference]
 
 
 class Report(TypedDict):
@@ -100,8 +122,83 @@ def cache_path(env: Mapping[str, str] | None = None) -> Path:
     return paths.cache_dir(env) / "benchmarks.json"
 
 
-def _empty() -> _Snapshot:
-    return {"checked_at": None, "revision": None, "error": None, "rows": []}
+def artificial_analysis_directory(env: Mapping[str, str] | None = None) -> Path:
+    """Return the private folder containing the optional account's files."""
+    return paths.config_dir(env) / "artificial-analysis"
+
+
+def _key_path(env: Mapping[str, str] | None) -> Path:
+    return artificial_analysis_directory(env) / "api-key"
+
+
+def _reference_path(env: Mapping[str, str] | None) -> Path:
+    return artificial_analysis_directory(env) / "benchmarks.json"
+
+
+def _valid_key(key: str) -> bool:
+    return re.fullmatch(r"[!-~]{1,512}", key) is not None
+
+
+def _read_key(env: Mapping[str, str] | None) -> str | None:
+    path = _key_path(env)
+    try:
+        info = path.parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
+            raise OSError("the API key directory is not private")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_mode & 0o077
+            or info.st_uid != os.getuid()
+        ):
+            raise OSError("the API key file is not private")
+        key = stream.read(513).decode("ascii")
+    if not _valid_key(key):
+        raise ValueError("invalid API key")
+    return key
+
+
+@contextlib.contextmanager
+def _refresh_lock(env: Mapping[str, str] | None) -> Iterator[None]:
+    path = cache_path(env)
+    paths.ensure_private_dir(path.parent, root=path.parent)
+    fd = paths.open_private_file(path.with_suffix(".lock"), os.O_WRONLY)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RefreshBusyError("a benchmark refresh is already running") from error
+        yield
+    finally:
+        os.close(fd)
+
+
+def configure_artificial_analysis(
+    key: str | None, env: Mapping[str, str] | None = None
+) -> None:
+    """Save or remove the owner's local API key without accessing the network."""
+    if key is not None:
+        key = key.strip()
+        if not _valid_key(key):
+            raise ValueError("Enter an Artificial Analysis API key without spaces.")
+    with _refresh_lock(env):
+        path = _key_path(env)
+        if key is not None:
+            paths.replace_private_file(
+                path, key.encode("ascii"), root=paths.config_dir(env)
+            )
+        elif path.parent.exists() or path.parent.is_symlink():
+            paths.ensure_private_dir(path.parent, root=paths.config_dir(env))
+            _reference_path(env).unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
+
+
+def _empty(error: str | None = None) -> _Snapshot:
+    return {"checked_at": None, "revision": None, "error": error, "rows": []}
 
 
 def _encode(value: object) -> str:
@@ -112,8 +209,7 @@ def _revision(rows: list[Observation]) -> str:
     return hashlib.sha256(_encode(rows).encode()).hexdigest()
 
 
-def read_cache(env: Mapping[str, str] | None = None) -> Cache:
-    """Read the last saved source snapshots locally."""
+def _read_public_cache(env: Mapping[str, str] | None) -> Cache:
     path = cache_path(env)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -134,6 +230,50 @@ def read_cache(env: Mapping[str, str] | None = None) -> Cache:
             except (ValueError, OverflowError) as error:
                 raise CacheError(f"invalid {key} snapshot in {path}") from error
     return result
+
+
+def _read_reference(
+    env: Mapping[str, str] | None,
+) -> tuple[str | None, _Snapshot | None]:
+    try:
+        key = _read_key(env)
+    except OSError, ValueError:
+        return None, _empty("Could not read the local API key.")
+    if key is None:
+        return None, None
+    try:
+        value = json.loads(_reference_path(env).read_text(encoding="utf-8"))
+        snapshot = _read_snapshot(value)
+        if snapshot["rows"]:
+            edition = value.get("edition")
+            if not isinstance(edition, str) or not re.fullmatch(r"\d+\.\d+", edition):
+                raise ValueError("invalid index edition")
+            snapshot["edition"] = edition
+    except FileNotFoundError:
+        snapshot = _empty()
+    except OSError:
+        return None, _empty("Could not read the local benchmark data.")
+    except ValueError, OverflowError, RecursionError:
+        snapshot = _empty("Invalid local benchmark data.")
+    return key, snapshot
+
+
+def read_cache(env: Mapping[str, str] | None = None) -> Cache:
+    """Read the last saved source snapshots, without exposing the optional API key."""
+    snapshots = _read_public_cache(env)
+    _, reference = _read_reference(env)
+    if reference is not None:
+        snapshots[ARTIFICIAL_ANALYSIS] = reference
+    return snapshots
+
+
+def reference_efforts(
+    cache: Cache, env: Mapping[str, str] | None = None
+) -> EffortCatalog:
+    """Read the saved effort lists used to display optional model references."""
+    if ARTIFICIAL_ANALYSIS not in cache:
+        return {}
+    return {engine: models.saved_efforts(engine, env) for engine in status.ENGINES}
 
 
 def _read_snapshot(saved: object) -> _Snapshot:
@@ -223,6 +363,8 @@ def _worker(
     if model not in shortlist:
         return evidence
     for key, snapshot in snapshots.items():
+        if key not in SOURCES:
+            continue
         candidates = _related_rows(snapshot["rows"], engine, model)
         if not candidates:
             continue
@@ -259,15 +401,68 @@ def _worker(
     return evidence
 
 
-def _source_status(
-    source: Source, saved: _Snapshot, now: float, action: str | None
-) -> SourceStatus:
+def _model_reference(
+    row: dict[str, Any],
+    current_effort: str | None,
+    saved_efforts: tuple[str, ...] | None,
+    series: str,
+    published: list[Observation],
+) -> ModelReference:
+    engine, model = row["engine"], row["model"]
+    candidates = _related_rows(published, engine, model)
+    vendor = {"claude": "anthropic", "codex": "openai"}.get(engine)
+    if engine == "opencode" and model.count("/") >= 2:
+        vendor = model.rsplit("/", 2)[1]
+    if vendor:
+        candidates = [
+            (item, version)
+            for item, version in candidates
+            if _model_key(item.get("model_creator", "")) == _model_key(vendor)
+        ]
+    latest = max((version for _, version in candidates), default=())
+    release = [item for item, version in candidates if version == latest]
+    # Use a single named release for all efforts, including for moving aliases.
+    releases = {
+        (_model_key(item["model"]), _model_key(item.get("model_creator", "")))
+        for item in release
+    }
+    dates = {date for item in release if (date := item.get("model_release_date"))}
+    if len(releases) != 1 or len(dates) > 1:
+        release = []
+    efforts = saved_efforts
+    if efforts is None:
+        efforts = () if current_effort is None else (current_effort,)
+    evidence: dict[str, Observation | None] = {}
+    for effort in efforts:
+        matches = [item for item in release if item["effort"] == effort]
+        evidence[effort] = matches[0] if len(matches) == 1 else None
+    return ModelReference(
+        source=series,
+        model=release[0]["model"] if release else None,
+        effort_catalog_available=saved_efforts is not None,
+        efforts=evidence,
+    )
+
+
+def _check_status(saved: _Snapshot, now: float, action: str | None) -> _CheckStatus:
     checked = saved["checked_at"]
     if action is None:
         if saved["error"]:
             action = "retained" if checked is not None else "unavailable"
         else:
             action = "cached" if checked is not None else "not_checked"
+    return _CheckStatus(
+        checked_at=checked,
+        revision=saved["revision"],
+        stale=checked is not None and now - checked >= MAX_CHECK_AGE,
+        result=action,
+        error=saved["error"],
+    )
+
+
+def _source_status(
+    source: Source, saved: _Snapshot, now: float, action: str | None
+) -> SourceStatus:
     return SourceStatus(
         title=source.title,
         edition=source.edition,
@@ -275,11 +470,7 @@ def _source_status(
         publisher=source.publisher,
         metrics=source.metrics,
         pricing_basis=source.pricing_basis,
-        checked_at=checked,
-        revision=saved["revision"],
-        stale=checked is not None and now - checked >= MAX_CHECK_AGE,
-        result=action,
-        error=saved["error"],
+        **_check_status(saved, now, action),
     )
 
 
@@ -297,15 +488,37 @@ def _report(
     snapshots: Mapping[str, _Snapshot],
     now: float,
     actions: Mapping[str, str],
+    efforts: EffortCatalog,
 ) -> Report:
     sources = {
         key: _source_status(source, snapshots.get(key, _empty()), now, actions.get(key))
         for key, source in SOURCES.items()
     }
-    workers = {
-        worker["value"]: _worker(answers, worker, snapshots)
-        for worker in choices.routing_rows(answers)
-    }
+    rows = choices.routing_rows(answers)
+    workers = {worker["value"]: _worker(answers, worker, snapshots) for worker in rows}
+    reference = snapshots.get(ARTIFICIAL_ANALYSIS)
+    if reference is not None:
+        edition = reference.get("edition")
+        series = f"{ARTIFICIAL_ANALYSIS}-{edition}" if edition else ARTIFICIAL_ANALYSIS
+        sources[series] = SourceStatus(
+            title=AA_TITLE,
+            edition=edition or "unknown",
+            url=AA_URL,
+            publisher="Artificial Analysis",
+            metrics=AA_METRICS,
+            pricing_basis="Publisher's weighted API inference cost per Index task",
+            **_check_status(reference, now, actions.get(ARTIFICIAL_ANALYSIS)),
+        )
+        for row in rows:
+            worker = workers[row["value"]]
+            if worker["shortlisted"]:
+                worker["model_reference"] = _model_reference(
+                    row,
+                    worker["effort"],
+                    efforts.get(row["engine"], {}).get(row["model"]),
+                    series,
+                    reference["rows"],
+                )
     if not workers:
         return Report(
             status="empty_pool", summary=EMPTY_POOL, sources=sources, workers={}
@@ -326,6 +539,24 @@ def _report(
         f"{covered}/{len(workers)} pool workers have a matching result; "
         f"{costs}/{len(workers)} have a matching benchmark cost."
     )
+    if reference is not None:
+        variants = [
+            observation
+            for worker in workers.values()
+            if "model_reference" in worker
+            for observation in worker["model_reference"]["efforts"].values()
+        ]
+        scores = sum(
+            row is not None and "intelligence_index" in row["metrics"]
+            for row in variants
+        )
+        priced = sum(
+            row is not None and "task_usd" in row["metrics"] for row in variants
+        )
+        summary += (
+            f" Artificial Analysis: {scores}/{len(variants)} listed efforts "
+            f"have an Index score; {priced}/{len(variants)} have a cost."
+        )
     return Report(status=outcome, summary=summary, sources=sources, workers=workers)
 
 
@@ -336,23 +567,65 @@ def cached(
     now: float | None = None,
 ) -> Report:
     """Match the saved benchmarks to the current pool, without network access."""
-    return report(answers, read_cache(env), now=now)
+    cache = read_cache(env)
+    return report(answers, cache, efforts=reference_efforts(cache, env), now=now)
 
 
 def report(
     answers: Mapping[str, Mapping[str, Any]],
     cache: Cache,
     *,
+    efforts: EffortCatalog | None = None,
     now: float | None = None,
 ) -> Report:
     """Project an already loaded cache onto the current routing pool."""
-    return _report(answers, cache, time.time() if now is None else now, {})
+    checked_at = time.time() if now is None else now
+    return _report(answers, cache, checked_at, {}, efforts or {})
+
+
+def _refresh_reference(
+    env: Mapping[str, str] | None, key: str, previous: _Snapshot
+) -> tuple[_Snapshot, str]:
+    snapshot: _Snapshot
+    try:
+        edition, downloaded = read_artificial_analysis(key)
+        rows = sorted(downloaded, key=_encode)
+        revision = _revision(rows)
+        snapshot = _Snapshot(
+            edition=edition,
+            checked_at=time.time(),
+            revision=revision,
+            error=None,
+            rows=rows,
+        )
+    except SourceError as error:
+        snapshot = {**previous, "error": str(error)}
+    try:
+        paths.replace_private_file(
+            _reference_path(env),
+            _encode(snapshot).encode("utf-8"),
+            root=paths.config_dir(env),
+        )
+    except OSError:
+        snapshot = {**previous, "error": "Could not save the local benchmark data."}
+    if snapshot["error"]:
+        return snapshot, "retained" if snapshot["rows"] else "unavailable"
+    unchanged = snapshot["revision"] == previous["revision"] and snapshot.get(
+        "edition"
+    ) == previous.get("edition")
+    return snapshot, "unchanged" if unchanged else "updated"
 
 
 def _refresh(path: Path, env: Mapping[str, str] | None) -> tuple[Cache, dict[str, str]]:
-    snapshots = read_cache(env)
+    snapshots = _read_public_cache(env)
+    api_key, reference = _read_reference(env)
     actions = {}
     with ThreadPoolExecutor(max_workers=4) as pool:
+        reference_job = (
+            pool.submit(_refresh_reference, env, api_key, reference)
+            if api_key is not None and reference is not None
+            else None
+        )
         jobs = {key: pool.submit(read, source) for key, source in SOURCES.items()}
         for key, job in jobs.items():
             previous = snapshots.get(key, _empty())
@@ -370,14 +643,18 @@ def _refresh(path: Path, env: Mapping[str, str] | None) -> tuple[Cache, dict[str
             actions[key] = (
                 "unchanged" if previous["revision"] == revision else "updated"
             )
-    status.save_cache_file(
-        path, {"format_version": FORMAT_VERSION, "sources": snapshots}, env
-    )
+        status.save_cache_file(
+            path, {"format_version": FORMAT_VERSION, "sources": snapshots}, env
+        )
+        if reference_job is not None:
+            reference, actions[ARTIFICIAL_ANALYSIS] = reference_job.result()
+    if reference is not None:
+        snapshots[ARTIFICIAL_ANALYSIS] = reference
     return snapshots, actions
 
 
 def refresh(env: Mapping[str, str] | None = None) -> Report:
-    """Refresh supported public results and report coverage of the current pool.
+    """Refresh public and opted-in results and report coverage of the current pool.
 
     A refresh is serialized with other refreshes and publishes whole series.
     It reads standing choices but does not claim or write any settings.
@@ -388,21 +665,18 @@ def refresh(env: Mapping[str, str] | None = None) -> Report:
     answers = reply["answers"]
     if not answers[choices.ROUTING_POOL]["value"]:
         return cached(answers, env)
-    path = cache_path(env)
-    paths.ensure_private_dir(path.parent, root=path.parent)
-    fd = paths.open_private_file(path.with_suffix(".lock"), os.O_WRONLY)
-    try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise RefreshBusyError("a benchmark refresh is already running") from error
-        snapshots, actions = _refresh(path, env)
-    finally:
-        os.close(fd)
-    reply = choices.read(env=env)
-    if reply["source_error"]:
-        raise choices.InvalidChoiceError("; ".join(reply["errors"]))
-    return _report(reply["answers"], snapshots, time.time(), actions)
+    with _refresh_lock(env):
+        snapshots, actions = _refresh(cache_path(env), env)
+        reply = choices.read(env=env)
+        if reply["source_error"]:
+            raise choices.InvalidChoiceError("; ".join(reply["errors"]))
+        return _report(
+            reply["answers"],
+            snapshots,
+            time.time(),
+            actions,
+            reference_efforts(snapshots, env),
+        )
 
 
 def lines(report: Report) -> list[str]:

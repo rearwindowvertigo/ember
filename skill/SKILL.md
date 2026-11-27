@@ -54,9 +54,12 @@ use the command directly from the lead session, with no run or claim. The
 request authorizes the refresh. Ember downloads, validates, matches and saves
 the data. Read the command's reply; report what updated, which setups have
 no match or no cost, and any sources that failed, including whether Ember
-kept their previous results. If it reports `empty_pool`, point the owner
-to Team's Routing pool. If the reply has an `error` object, report it. Do not
-look up substitute numbers, edit Team settings, or retry automatically.
+kept their previous results. If `model_reference` is present, report Index
+score and cost coverage across its listed efforts and identify missing
+efforts or metrics. Keep this coverage separate from harness matches. If it
+reports `empty_pool`, point the owner to Team's Routing pool. If the reply
+has an `error` object, report it. Do not look up substitute numbers, edit
+Team settings, or retry automatically.
 
 ## One run
 

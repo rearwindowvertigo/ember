@@ -18,7 +18,6 @@ import json
 import math
 import os
 import re
-import secrets
 import shlex
 import shutil
 import subprocess
@@ -599,19 +598,9 @@ def save_cache_file(path: Path, value: object, env: Mapping[str, str] | None) ->
     Raises:
         OSError: The folder or the file cannot be written.
     """
-    root = paths.cache_dir(env)
-    paths.ensure_private_dir(path.parent, root=root)
-    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}")
-    content = json.dumps(value).encode("utf-8")
-    fd = paths.open_private_file(temporary, os.O_WRONLY | os.O_EXCL)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    paths.replace_private_file(
+        path, json.dumps(value).encode("utf-8"), root=paths.cache_dir(env)
+    )
 
 
 def cached(env: Mapping[str, str] | None = None) -> dict[str, EngineStatus] | None:

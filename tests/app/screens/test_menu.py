@@ -5,7 +5,14 @@ from typing import Any
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QLabel,
+    QLineEdit,
+    QTableWidget,
+    QWidget,
+)
 from pytestqt.qtbot import QtBot
 
 from ember import benchmarks, choices, db
@@ -465,6 +472,80 @@ def test_routing_pool_shows_a_cli_refresh_and_labels_a_changed_effort(
     assert updated not in _texts(screen)
     assert f"Related · {updated} (GPT-5 · Codex · high)" in _texts(screen)
     assert "No matching benchmark for this setup." in _texts(screen)
+
+
+def test_team_accepts_a_masked_key_and_shows_the_effort_matrix(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unavailable() -> list[Observation]:
+        raise SourceError("fixture unavailable")
+
+    for key, source in SOURCES.items():
+        monkeypatch.setitem(SOURCES, key, replace(source, read=unavailable))
+    calls: list[str] = []
+
+    def reference(key: str) -> tuple[str, list[Observation]]:
+        calls.append(key)
+        return "5.0", [
+            Observation(
+                model="Claude Opus 5.5",
+                model_creator="Anthropic",
+                harness=None,
+                effort="medium",
+                configuration="Default Fallback",
+                metrics={"intelligence_index": 55, "task_usd": 1.25},
+            )
+        ]
+
+    monkeypatch.setattr(benchmarks, "read_artificial_analysis", reference)
+    choices.set_settings(
+        {**SHORTLISTS, "routing.pool": {"claude:opus": {"scores": {}}}}, env=env
+    )
+    _context, screen = _screen(env, qtbot)
+    assert screen.aa_matrix.isHidden()
+
+    def enter(dialog: QDialog) -> int:
+        field = dialog.findChild(QLineEdit)
+        assert field is not None and field.echoMode() == QLineEdit.EchoMode.Password
+        assert field.text() == ""
+        field.setText("fixture-key")
+        return QDialog.DialogCode.Accepted
+
+    with monkeypatch.context() as patch:
+        patch.setattr(QDialog, "exec", enter)
+        screen.aa_key.click()
+    qtbot.waitUntil(lambda: screen.aa_status.text().startswith("API key saved."))
+    assert not calls
+
+    benchmarks.refresh(env)
+    qtbot.waitUntil(lambda: not screen.aa_status.text())
+    assert calls == ["fixture-key"]
+    assert screen.aa_matrix.isEnabled()
+
+    def matrix(dialog: QDialog) -> int:
+        table = dialog.findChild(QTableWidget)
+        assert table is not None
+
+        def cell(row: int, column: int) -> str:
+            item = table.item(row, column)
+            assert item is not None
+            return item.text()
+
+        assert table.rowCount() == 5
+        assert cell(0, 2) == "low"
+        assert cell(0, 3) == cell(0, 4) == ""
+        assert cell(1, 1) == "Claude Opus 5.5 · Default Fallback"
+        assert cell(1, 2) == "medium (preferred)"
+        assert cell(1, 3) == "55"
+        assert cell(1, 4) == "1.2500"
+        return QDialog.DialogCode.Rejected
+
+    with monkeypatch.context() as patch:
+        patch.setattr(QDialog, "exec", matrix)
+        screen.aa_matrix.click()
+    screen.aa_remove.click()
+    qtbot.waitUntil(screen.aa_matrix.isHidden)
+    assert calls == ["fixture-key"]
 
 
 @pytest.mark.parametrize("value", ["1", "3", "4"])

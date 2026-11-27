@@ -159,7 +159,7 @@ def _add_benchmarks(parser: argparse.ArgumentParser) -> None:
         dest="benchmark_action", metavar="<action>", required=True
     )
     for action, help_text in (
-        ("refresh", "download and save the supported public benchmark results"),
+        ("refresh", "download and save public and opted-in benchmark results"),
         ("status", "show saved benchmark evidence for the routing pool, offline"),
     ):
         subparser = actions.add_parser(action, help=help_text, description=help_text)

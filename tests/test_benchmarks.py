@@ -2,14 +2,23 @@ import fcntl
 import json
 import os
 from dataclasses import replace
+from email.message import Message
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
+from urllib.request import Request
 
 import pytest
 
-from ember import benchmarks, choices, paths
-from ember.benchmark_sources import SOURCES, Observation, SourceError
+from ember import benchmark_sources, benchmarks, choices, paths
+from ember.benchmark_sources import (
+    ARTIFICIAL_ANALYSIS,
+    SOURCES,
+    Observation,
+    SourceError,
+)
 from ember.cli import main
+from ember.engines import models, status
 
 TB41 = "terminal-bench-4.1"
 TB21 = "terminal-bench-2.1"
@@ -298,3 +307,189 @@ def test_concurrent_refresh_cannot_replace_the_cache(
     assert code == 75
     assert reply["error"]["messages"] == ["a benchmark refresh is already running"]
     assert not path.exists()
+
+
+def test_artificial_analysis_is_opt_in_and_retains_its_last_success(
+    pool: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def unexpected(key: str) -> tuple[str, list[Observation]]:
+        pytest.fail("Artificial Analysis was called without an opted-in refresh")
+
+    monkeypatch.setattr(benchmarks, "read_artificial_analysis", unexpected)
+    for key in SOURCES:
+        _source(monkeypatch, key)
+    exact = Observation(
+        model="GPT-6.2 Sol", harness="Codex", effort="max", metrics={"resolution": 60}
+    )
+    _source(monkeypatch, TB41, exact)
+    _, default = _run("refresh", pool, capsys)
+    assert set(default["sources"]) == set(SOURCES)
+    assert "model_reference" not in default["workers"][WORKER]
+
+    choice_snapshot = choices.snapshot(env=pool)
+    benchmarks.configure_artificial_analysis(" fixture-key ", pool)
+    directory = benchmarks.artificial_analysis_directory(pool)
+    assert directory.stat().st_mode & 0o777 == 0o700
+    assert (directory / "api-key").stat().st_mode & 0o777 == 0o600
+    _, waiting = _run("status", pool, capsys)
+    assert waiting["sources"][ARTIFICIAL_ANALYSIS]["result"] == "not_checked"
+
+    observation = Observation(
+        model="GPT-6.2 Sol",
+        model_creator="OpenAI",
+        harness=None,
+        effort="max",
+        metrics={"intelligence_index": 57, "task_usd": 1.2345},
+    )
+
+    def reference(key: str) -> tuple[str, list[Observation]]:
+        assert key == "fixture-key"
+        return "5.0", [observation]
+
+    monkeypatch.setattr(benchmarks, "read_artificial_analysis", reference)
+    code, refreshed = _run("refresh", pool, capsys)
+    assert code == 0
+    series = f"{ARTIFICIAL_ANALYSIS}-5.0"
+    source = refreshed["sources"][series]
+    assert source["result"] == "updated"
+    assert source["edition"] == "5.0" and source["publisher"] == "Artificial Analysis"
+    assert source["metrics"]["task_usd"] == {
+        "title": "USD / task",
+        "suite": "Intelligence Index",
+    }
+    assert refreshed["workers"][WORKER]["model_reference"]["efforts"] == {
+        "max": observation
+    }
+    assert refreshed["workers"][WORKER]["matches"] == {TB41: exact}
+    cache = directory / "benchmarks.json"
+    assert cache.stat().st_mode & 0o777 == 0o600
+    assert "fixture-key" not in cache.read_text()
+    assert ARTIFICIAL_ANALYSIS not in benchmarks.cache_path(pool).read_text()
+
+    def rejected(request: Request, *, timeout: float) -> None:
+        assert request.get_header("X-api-key") == "replacement-key"
+        message = "reject replacement-key"
+        raise HTTPError(request.full_url, 401, message, Message(), None)
+
+    benchmarks.configure_artificial_analysis("replacement-key", pool)
+    monkeypatch.setattr(
+        benchmarks,
+        "read_artificial_analysis",
+        benchmark_sources.read_artificial_analysis,
+    )
+    monkeypatch.setattr(benchmark_sources.urllib.request, "urlopen", rejected)
+    _, failed = _run("refresh", pool, capsys)
+    assert failed["sources"][series]["result"] == "retained"
+    assert failed["sources"][series]["error"] == "HTTP 401"
+    assert failed["sources"][series]["checked_at"] == source["checked_at"]
+    assert "replacement-key" not in json.dumps(failed)
+    assert choices.snapshot(env=pool) == choice_snapshot
+
+    monkeypatch.setattr(benchmarks, "read_artificial_analysis", unexpected)
+    saved = benchmarks.cached(
+        choices.read(env=pool)["answers"],
+        pool,
+        now=source["checked_at"] + benchmarks.MAX_CHECK_AGE,
+    )
+    assert saved["sources"][series]["stale"]
+    assert saved["workers"][WORKER]["model_reference"]["efforts"]["max"] == observation
+    benchmarks.configure_artificial_analysis(None, pool)
+    assert not cache.exists() and not (directory / "api-key").exists()
+    _, disabled = _run("status", pool, capsys)
+    assert set(disabled["sources"]) == set(SOURCES)
+
+
+def test_artificial_analysis_projects_supported_efforts_for_one_release(
+    pool: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deepseek = "deepseek/deepseek-v4.1-flash-1017"
+    deepseek_worker = f"opencode:openrouter/{deepseek}"
+    choices.set_settings(
+        {
+            "shortlist.claude": ["opus@high"],
+            "shortlist.opencode": [f"openrouter/{deepseek}@max"],
+            "routing.pool": {
+                WORKER: {"scores": {}},
+                "claude:opus": {"scores": {}},
+                deepseek_worker: {"scores": {}},
+            },
+            "fast.codex": ["gpt-6.2-sol"],
+            "engine.claude": "off",
+        },
+        env=pool,
+    )
+    for engine, model in (
+        ("codex", models.Model("gpt-6.2-sol", "Sol", ("low", "max", "ultra"))),
+        ("opencode", models.Model(deepseek, "Flash 1017", ("none", "low", "max"))),
+    ):
+        status.save_cache_file(
+            models.cache_path(engine, pool),
+            {"fetched_at": 0, "models": [model.to_json()]},
+            pool,
+        )
+    baseline = {"intelligence_index": 50, "task_usd": 0.8}
+    codex = Observation(
+        model="GPT-6.2 Sol",
+        model_creator="OpenAI",
+        harness=None,
+        effort="max",
+        metrics=baseline,
+    )
+    opus = Observation(
+        model="Claude Opus 5.5",
+        model_creator="Anthropic",
+        harness=None,
+        effort="high",
+        metrics=baseline,
+        configuration="Default Fallback",
+    )
+    flash = Observation(
+        model="DeepSeek V4.1 Flash 1017",
+        model_creator="DeepSeek",
+        harness=None,
+        effort="none",
+        metrics={"task_usd": 0},
+    )
+    rows: list[Observation] = [
+        codex,
+        {**codex, "effort": "low", "metrics": {"intelligence_index": 0}},
+        {**codex, "effort": "ultra"},
+        {**codex, "effort": "ultra", "configuration": "Default Fallback"},
+        opus,
+        {**opus, "model": "Claude Opus 5.4", "effort": "max"},
+        flash,
+        {**flash, "model": "DeepSeek V4.1 Flash", "effort": "max"},
+        {**flash, "model_creator": "Other", "effort": "low"},
+    ]
+    for key in SOURCES:
+        _source(monkeypatch, key)
+    _source(
+        monkeypatch, TB41, {**codex, "harness": "Codex", "metrics": {"resolution": 60}}
+    )
+    benchmarks.configure_artificial_analysis("fixture-key", pool)
+    monkeypatch.setattr(
+        benchmarks, "read_artificial_analysis", lambda key: ("5.0", rows)
+    )
+    report = benchmarks.refresh(pool)
+    codex_evidence = report["workers"][WORKER]
+    assert (
+        "3/11 listed efforts have an Index score; 3/11 have a cost" in report["summary"]
+    )
+    assert codex_evidence["effort"] == "max" and codex_evidence["speed"] == "fast"
+    assert not codex_evidence["matches"]
+    assert "Fast" in codex_evidence["related"][TB41]["reason"]
+    assert codex_evidence["model_reference"]["efforts"] == {
+        "low": rows[1],
+        "max": codex,
+        "ultra": None,
+    }
+    opus_ref = report["workers"]["claude:opus"]["model_reference"]
+    assert (
+        opus_ref["model"] == "Claude Opus 5.5" and opus_ref["effort_catalog_available"]
+    )
+    assert opus_ref["efforts"] == dict.fromkeys(models.CLAUDE_EFFORTS) | {"high": opus}
+    deepseek_ref = report["workers"][deepseek_worker]["model_reference"]
+    assert deepseek_ref["effort_catalog_available"]
+    assert deepseek_ref["efforts"] == {"none": flash, "low": None, "max": None}
