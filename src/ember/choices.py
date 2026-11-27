@@ -21,7 +21,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NotRequired, TypedDict
 
 from ember import db, skill
 from ember.engines import status
@@ -44,6 +44,16 @@ SPEEDS = ("standard", "fast")
 SANDBOXED = ("codex", "opencode", "claude")
 """The engines with a `sandbox.<engine>` switch, in display order."""
 MENU_KEYS = ("single.writer", "single.reviewer")
+AUTO = "auto"
+"""The value of a single-task worker row that lets the lead choose."""
+ROUTING_POOL = "routing.pool"
+ROUTING_CAPABILITIES = {
+    "implementation": "Implementation",
+    "codebase": "Codebase understanding",
+    "review": "Code review",
+    "terminal": "Terminal and tools",
+    "reasoning": "Reasoning",
+}
 SAME = "same"
 """The value of a derived worker row that follows its single-task row."""
 DERIVED_KEYS = {
@@ -295,8 +305,8 @@ def _menu_value(value: object) -> None:
     if not isinstance(value, str):
         _fail(f"{value!r} is not a string")
         return
-    if value != "ask" and _split_menu(value) is None:
-        _fail(f"{value!r} is not ask or <engine>:<model>")
+    if value not in ("ask", AUTO) and _split_menu(value) is None:
+        _fail(f"{value!r} is not ask, {AUTO} or <engine>:<model>")
 
 
 def _derived_value(value: object) -> None:
@@ -305,6 +315,46 @@ def _derived_value(value: object) -> None:
         return
     if value != SAME and _split_menu(value) is None:
         _fail(f"{value!r} is not same or <engine>:<model>")
+
+
+class RoutingEntry(TypedDict):
+    """The owner's optional evidence for an approved worker."""
+
+    scores: dict[str, float]
+    notes: NotRequired[str]
+
+
+def _routing_pool(value: object) -> None:
+    if not isinstance(value, dict):
+        raise InvalidChoiceError("not a JSON object of models to routing entries")
+    for model, entry in value.items():
+        if not isinstance(model, str) or _split_menu(model) is None:
+            _fail(f"{model!r} is not <engine>:<model>")
+        if not isinstance(entry, dict) or not (
+            {"scores"} <= entry.keys() <= {"scores", "notes", "usage"}
+        ):
+            _fail(f"{model!r} needs scores, with optional notes")
+            continue
+        # Accept pool entries saved before benchmark costs replaced the usage scale.
+        if "usage" in entry:
+            usage = entry["usage"]
+            if type(usage) is not int or not 1 <= usage <= 10:
+                _fail(f"{model!r} legacy usage must be an integer from 1 to 10")
+        if not isinstance(entry.get("notes", ""), str):
+            _fail(f"{model!r} notes must be text")
+        scores = entry["scores"]
+        if not isinstance(scores, dict):
+            _fail(f"{model!r} scores must be a JSON object")
+            continue
+        for capability, score in scores.items():
+            if capability not in ROUTING_CAPABILITIES:
+                _fail(f"{model!r} has unknown capability {capability!r}")
+            if (
+                not isinstance(score, (int, float))
+                or isinstance(score, bool)
+                or not 0 <= score <= 100
+            ):
+                _fail(f"{model!r} {capability} score must be a number from 0 to 100")
 
 
 def _panel_members(value: object) -> None:
@@ -387,12 +437,24 @@ def _worktree_prepare(value: object) -> None:
         seen.add(resolved)
 
 
-def _prepare_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    """Refuse repeated JSON keys before they are reduced to a mapping."""
-    value = dict(pairs)
-    if len(value) != len(pairs):
-        raise InvalidChoiceError("worktree.prepare: a checkout path is listed twice")
-    return value
+def _parse_object(name: str, text: str) -> object:
+    """Read a setting's JSON, retaining duplicate keys as errors."""
+
+    def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value = dict(pairs)
+        if len(value) != len(pairs):
+            duplicate = (
+                "a checkout path is listed twice"
+                if name == "worktree.prepare"
+                else "a model or entry field is listed twice"
+            )
+            raise InvalidChoiceError(f"{name}: {duplicate}")
+        return value
+
+    try:
+        return json.loads(text, object_pairs_hook=unique)
+    except json.JSONDecodeError as error:
+        raise InvalidChoiceError(f"{name} is not valid JSON") from error
 
 
 def _constant(value: object) -> Default:
@@ -493,6 +555,19 @@ def _keys() -> dict[str, Key]:
         )
         for engine in ENGINES
     ]
+    keys.append(
+        Key(
+            ROUTING_POOL,
+            _STANDING,
+            _routing_pool,
+            _constant({}),
+            pattern=(
+                "a JSON object of shortlisted <engine>:<model> to entries with "
+                "a scores object (capability values 0–100, may be empty) "
+                "and optional notes"
+            ),
+        )
+    )
     for role in ("writer", "reviewer"):
         keys.append(
             Key(
@@ -500,7 +575,7 @@ def _keys() -> dict[str, Key]:
                 _ALL,
                 _menu_value,
                 _constant("ask"),
-                pattern="ask or <engine>:<model> from that engine's shortlist",
+                pattern=f"ask, {AUTO} or <engine>:<model> from that engine's shortlist",
             )
         )
         keys.append(
@@ -678,10 +753,10 @@ def parse_value(name: str, text: str) -> object:
         text: The text after `=`; lists are comma-separated. `sandbox.read`
             and `sandbox.hidden_notices` also accept a JSON string list for
             paths containing commas.
-            `worktree.prepare` accepts a JSON object.
+            `worktree.prepare` and `routing.pool` accept JSON objects.
 
     Returns:
-        A string, a list of strings, or a checkout-to-command object.
+        A string, a list of strings, or a settings object.
 
     Raises:
         InvalidChoiceError: The key is unknown or its JSON value is not valid.
@@ -689,11 +764,8 @@ def parse_value(name: str, text: str) -> object:
     key = KEYS.get(name)
     if key is None:
         raise InvalidChoiceError(f"unknown key {name!r}")
-    if name == "worktree.prepare":
-        try:
-            value = json.loads(text, object_pairs_hook=_prepare_object)
-        except json.JSONDecodeError as error:
-            raise InvalidChoiceError("worktree.prepare is not valid JSON") from error
+    if name in ("worktree.prepare", ROUTING_POOL):
+        value = _parse_object(name, text)
         validate_value(name, value)
         return value
     if name in PATH_LISTS and text.startswith("["):
@@ -918,10 +990,13 @@ def menu_row(
     if value == "ask":
         row.update(state="ask", reason="asks at each run")
         return row
+    if value == AUTO:
+        row.update(state=AUTO, reason="the lead chooses from the routing pool")
+        return row
     member = _member_row(answers, value, connected)
     row.update(member)
     if row["state"] == "invalid":
-        row.update(state="invalid", reason="not ask or <engine>:<model>")
+        row.update(reason=f"not ask, {AUTO} or <engine>:<model>")
     if row["engine"] == "claude":
         row["run_as"] = answers[f"{name}_as"]["value"]
     return row
@@ -997,6 +1072,17 @@ def _member_row(
         return row
     row["effort"] = models[model]
     return row
+
+
+def routing_rows(
+    answers: Mapping[str, Mapping[str, Any]],
+    connected: Mapping[str, bool] | None = None,
+) -> list[dict[str, Any]]:
+    """Pair each saved routing entry with its current model status and effort."""
+    return [
+        {**_member_row(answers, model, connected), **entry}
+        for model, entry in answers[ROUTING_POOL]["value"].items()
+    ]
 
 
 ENGINE_WIDE_KINDS = ("usage_limit", "outage")
@@ -1129,6 +1215,7 @@ BRIEF_ANSWER_KEYS = (
     "single.reviewer_as",
     "multi.runs_as",
     "panel.members",
+    ROUTING_POOL,
 )
 """The picker answers a brief reply keeps, so each value's layer is known."""
 BRIEF_MENU_KEYS = ("single.writer", "single.reviewer", "multi.runs_as", "panel.members")
@@ -1407,6 +1494,14 @@ def _check_shortlisted(
         for value in _string_list(values.get("provider.fallback", []))
         if value not in kept
     )
+    pool = values.get(ROUTING_POOL)
+    if isinstance(pool, dict):
+        kept_pool = stored.get(ROUTING_POOL)
+        entries.extend(
+            (ROUTING_POOL, value)
+            for value in pool
+            if not isinstance(kept_pool, dict) or value not in kept_pool
+        )
     if "fast.codex" in values:
         kept_fast = set(_string_list(stored.get("fast.codex", [])))
         entries.extend(
@@ -1415,7 +1510,7 @@ def _check_shortlisted(
             if model not in kept_fast
         )
     for name, value in entries:
-        if not isinstance(value, str) or value in ("ask", SAME):
+        if not isinstance(value, str) or value in ("ask", AUTO, SAME):
             continue
         parts = _split_menu(value)
         if parts is None:
@@ -1610,13 +1705,14 @@ def allowed_values(answers: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
 
     Returns:
         Key to `{"values": [...]}` for keys with a fixed set of values, or
-        `{"pattern": ...}` for the others. Worker menu keys list `ask` and
-        every shortlisted `<engine>:<model>`; `panel.members` omits `ask`.
+        `{"pattern": ...}` for the others. Worker menu keys list `ask`,
+        `auto` and every shortlisted `<engine>:<model>`; `panel.members`
+        lists only shortlisted models.
     """
     result: dict[str, Any] = {}
     for name, key in KEYS.items():
         if name in MENU_KEYS or name == "panel.members":
-            options = ["ask"] if name in MENU_KEYS else []
+            options = ["ask", AUTO] if name in MENU_KEYS else []
             for engine in ENGINES:
                 shortlist = answers[f"shortlist.{engine}"]["value"]
                 options += [

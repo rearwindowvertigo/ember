@@ -113,13 +113,15 @@ def invoke(
     return code, out.getvalue(), err.getvalue()
 
 
-def test_full_check_explicit_options_with_ask_rows(
+@pytest.mark.parametrize("policy", ["ask", "auto"])
+def test_full_check_explicit_options_with_unresolved_policy(
     env: dict[str, str],
     repo: Path,
     plan_file: Path,
     driver: StubDriver,
+    policy: str,
 ) -> None:
-    choices.set_settings({"single.reviewer": "ask", "single.writer": "ask"}, env=env)
+    choices.set_settings({"single.reviewer": policy}, env=env)
     code, out, err = invoke(
         env,
         plan_file,
@@ -166,7 +168,7 @@ def test_reviewer_from_menu(
     assert json.loads(out)["reviewer"]["source"] == "menu"
 
 
-@pytest.mark.parametrize("state", ["ask", "not shortlisted", "engine off"])
+@pytest.mark.parametrize("state", ["ask", "auto", "not shortlisted", "engine off"])
 def test_unusable_row_starts_nothing(
     env: dict[str, str],
     repo: Path,
@@ -176,13 +178,18 @@ def test_unusable_row_starts_nothing(
     choices.set_settings({"single.reviewer": "codex:gpt-5"}, env=env)
     changes: dict[str, dict[str, object]] = {
         "ask": {"single.reviewer": "ask"},
+        "auto": {"single.reviewer": "auto"},
         "not shortlisted": {"shortlist.codex": []},
         "engine off": {"engine.codex": "off"},
     }
     choices.set_settings(changes[state], env=env)
     code, out, err = invoke(env, plan_file, "--dir", str(repo))
     assert code == 64 and not out
-    assert state in err and command.REVIEWER_LINE in err
+    assert state in err
+    if state == "auto":
+        assert "next: choose a model for the gap check" in err and "owner:" not in err
+    else:
+        assert command.REVIEWER_LINE in err
     assert not paths.runs_dir(env).exists()
 
 

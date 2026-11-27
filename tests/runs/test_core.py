@@ -1798,6 +1798,7 @@ def test_invalid_trailer_is_64(
     [
         ({"engine.claude": "off"}, {}, "claude is switched off"),
         ({"single.writer": "ask"}, {}, "menu row single.writer is ask"),
+        ({"single.writer": "auto"}, {}, "menu row single.writer is auto"),
         ({"single.writer": "codex:gpt-5"}, {}, "names codex, not claude"),
         ({"single.writer_as": "subagent"}, {}, "runs as a subagent inside Claude"),
         ({}, {"effort": "extreme"}, "does not take the effort 'extreme'"),

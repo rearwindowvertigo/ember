@@ -769,7 +769,7 @@ class Core:
                 raise RunError(
                     exits.USAGE,
                     f"menu row {name} is {row['state']}: {row['reason']}",
-                    "menu",
+                    "auto" if row["state"] == choices.AUTO else "menu",
                     row=name,
                 )
             if row["engine"] != engine:

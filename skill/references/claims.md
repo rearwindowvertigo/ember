@@ -7,15 +7,16 @@ Each key in `answers` is `{"value", "layer"}`, with `layer` one of
 the key wins, and an `ask` in a higher layer wins too. A `--brief` reply
 keeps the picker answers (`single.writer`, `single.reviewer`,
 `single.writer_as`, `single.reviewer_as`, `multi.runs_as` and
-`panel.members`) and the `engine.<name>` and `shortlist.<name>` answers.
+`panel.members`) and the `engine.<name>`, `shortlist.<name>` and
+`routing.pool` answers.
 A menu row has no layer: read the layer of a row's value from its answer,
 and of its `run_as` from the `_as` answer.
 
-The menu has four rows. `single.writer` and `single.reviewer` each hold
+The brief menu has four rows. `single.writer` and `single.reviewer` each hold
 `value`, `state`, `engine`, `model`, `effort`, `run_as` and `reason`:
 
-- `state` is `set`, `ask`, `invalid`, `engine off`, `not connected` or
-  `not shortlisted`, checked in that order.
+- `state` is `set`, `ask`, `auto`, `invalid`, `engine off`, `not connected`
+  or `not shortlisted`. `ask` and `auto` name no model.
 - `effort` is the effort in the model's shortlist entry; none means none.
 - `run_as` is `cli` or `subagent` for a `claude` row, `null` otherwise.
 - `reason` is `null` for `set`, and says why otherwise.
@@ -23,15 +24,16 @@ The menu has four rows. `single.writer` and `single.reviewer` each hold
 `multi.runs_as` holds `value` (`ask`, `flow` or `workflow`), `state`
 (`set` or `ask`) and `reason`; it names no worker. `panel.members` holds
 `value` (the list), `state` (`empty` or `set`) and `members`, one row per
-entry in the worker row states except `ask`. A `set` list can still hold
+entry in the worker row states except `ask` and `auto`. A `set` list can still hold
 member rows that are not `set`: those members are left out, and each is
 named with its reason. When `panel.members` alone is invalid,
 `source_error` is `true` and `menu` is `null`, but the other settings
 still resolve.
 
-Use only a `set` row. For any other state, ask live with its state and
-reason, among the enabled engines' shortlisted models. A saved value stays
-saved when it cannot run; do not repair settings yourself.
+Use a `set` row as chosen. When `ask` or `auto` applies, follow
+`references/worker-selection.md`. For another state, ask live with its
+state and reason, among the enabled engines' shortlisted models. A saved
+value stays saved when it cannot run; do not repair settings yourself.
 
 `source_error: true` means a stored setting, a claimed copy or the
 pending one-time choice is not valid: `menu` is `null`, every key is at
@@ -40,10 +42,10 @@ its default, and `errors` names the bad values. Treat every picker as
 
 ## One-time choices
 
-A one-time choice applies to the picker keys (`single.writer`,
-`single.reviewer`, `single.writer_as`, `single.reviewer_as`,
-`multi.runs_as` and `panel.members`); every other key is standing only. The owner sets it at a terminal with
-`emb choices --once <key>=<value>`. It expires 24 hours after it is set.
+A one-time choice applies to the picker keys, including either single-task
+role's policy. The pool itself is a standing setting. The owner sets a
+one-time choice at a terminal with `emb choices --once <key>=<value>`.
+It expires 24 hours after it is set.
 A claimed copy reads `gone` 7 days after the claim.
 
 A read without `--id` is a preview: it shows the pending one-time choice

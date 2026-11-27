@@ -21,12 +21,28 @@ Use the owner's named workers as `--writer W` and `--reviewer W` on both
 the dry run and start, where `W` is `<engine>:<model>[@<effort>]`.
 Otherwise resolution uses the plan's `writer` and `reviewer`, then the
 `flow.writer` and `flow.reviewer` rows (Team's Flow writer and Flow
-reviewer, which follow `single.writer` and `single.reviewer` while `same`). Normally leave workers out of
-the plan. Team rows must be `set`; a Claude subagent row exits 64. Ask the
-owner for a CLI worker when the row cannot answer and none was named;
-pass the answer explicitly. After the latest dry run, copy its `writer` and
-`reviewer` announce lines from the text output to the owner, and use those
-same names in reports and pull request text.
+reviewer, which follow `single.writer` and `single.reviewer` while `same`).
+Normally leave workers out of the plan. Read the claimed choices without
+`--brief` for the flow rows. Use a fixed CLI row as set. For an inherited
+`ask` or `auto`, follow `references/worker-selection.md` separately for the
+plan's writer and reviewer and pass the chosen model and effort for each
+unresolved role. A fixed Claude subagent row cannot run in a flow; ask
+before substituting a CLI worker.
+
+When you pass `--reviewer` to resolve the flow's Team policy, add
+`--gapcheck-use-team` to each dry run, including comparisons with
+`--previous`. This keeps the gap check's reviewer policy separate. A
+reviewer already named for the flow by the owner or in the plan also
+applies to the gap check. If the owner names a different gap check
+reviewer, use `--gapcheck-use-team` and pass that reviewer to `emb gapcheck`.
+
+If gap answers materially change the plan's scope or checks, check that
+the chosen pair still fits before the final dry run.
+After the latest dry run, post its `writer` and `reviewer` lines to the
+owner before starting. Append a short task-specific reason to each
+automatically chosen worker's line. Name the benchmark and cost unit
+when benchmark cost helped select the worker. Use
+those same names in reports and pull request text.
 
 Write a JSON plan in the session scratchpad:
 
@@ -163,7 +179,7 @@ emb flow --watch <id> --json
 Start with the same worker options used for the dry run. Keep the flow id,
 branch and worktree from the start output before watching. Do not poll
 `--status` while a watch runs. Follow the printed `next:` and `owner:` lines
-as SKILL.md step 6 says.
+as SKILL.md step 6 says. `--gapcheck-use-team` is a dry-run option.
 
 Start prints the resolved writer and reviewer announce lines on standard
 error, as the text dry run does in its output. Both print

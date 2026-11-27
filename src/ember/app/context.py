@@ -136,6 +136,7 @@ class AppContext(QObject):
                 dict[str, object] | list[str],
                 Callable[[dict[str, Any]], None] | None,
                 Callable[[dict[str, Any] | Exception], None] | None,
+                int | None,
             ]
         ] = deque()
         self._saving = False
@@ -252,7 +253,7 @@ class AppContext(QObject):
             done: Called with the new snapshot after the clear succeeds.
             result: Called once with the new snapshot or the clear's exception.
         """
-        self._save_queue.append((list(keys), done, result))
+        self._save_queue.append((list(keys), done, result, None))
         if not self._saving:
             self._next_save()
 
@@ -262,6 +263,7 @@ class AppContext(QObject):
         done: Callable[[dict[str, Any]], None] | None = None,
         *,
         result: Callable[[dict[str, Any] | Exception], None] | None = None,
+        expect_generation: int | None = None,
     ) -> None:
         """Save standing settings in a task, one save at a time.
 
@@ -280,8 +282,10 @@ class AppContext(QObject):
             values: Key to typed value.
             done: Called with the new snapshot after this save succeeds.
             result: Called once with the new snapshot or this save's exception.
+            expect_generation: Require this exact snapshot generation even if
+                the save is queued, for values derived from that snapshot.
         """
-        self._save_queue.append((values, done, result))
+        self._save_queue.append((values, done, result, expect_generation))
         if not self._saving:
             self._next_save()
 
@@ -291,9 +295,10 @@ class AppContext(QObject):
             self._saving = False
             return
         self._saving = True
-        values, done, result = self._save_queue.popleft()
+        values, done, result, expect = self._save_queue.popleft()
         env = self.env
-        expect = self.settings().get("generation")
+        if expect is None:
+            expect = self.settings().get("generation")
 
         def save() -> dict[str, Any]:
             """Write this save and read its new snapshot."""

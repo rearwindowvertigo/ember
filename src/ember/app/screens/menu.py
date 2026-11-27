@@ -1,7 +1,8 @@
 """The Team screen for worker, planning and provider settings.
 
-Two rows, Writer and Reviewer, each a picker of Ask each time and the
-shortlisted models of every engine that is on, under the engine's name. While
+Writer and Reviewer each offer Ask each time, Let the lead choose and the
+shortlisted models of every engine that is on, under the engine's name. The
+routing pool holds approved models, owner notes and public benchmark evidence. While
 a row holds a Claude model, a row under it picks how that model runs: as a
 CLI or as a subagent. A saved value that the picker no longer offers stays
 chosen, with a warning saying why. A saved model whose engine was not
@@ -21,17 +22,24 @@ Claude Workflows unless it is Flow. Every setting there has a tooltip.
 """
 
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QFileSystemWatcher, QLocale, Qt
+from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
+    QDialog,
+    QFormLayout,
     QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
-from ember import choices, db
+from ember import benchmarks, choices, db
 from ember.app import icons, theme, widgets
 from ember.app.screens.common import (
     ToneLine,
@@ -45,6 +53,7 @@ from ember.app.screens.common import (
     scrolled,
     titled_card,
 )
+from ember.benchmark_sources import Observation
 
 if TYPE_CHECKING:
     from ember.app.context import AppContext
@@ -226,6 +235,13 @@ FALLBACK_HELP = (
     "wrote the work."
 )
 NO_FALLBACK = "No fallback models. A provider error then stops the run for the lead."
+ROUTING_HELP = (
+    "With Let the lead choose, any suitable model in this pool can start "
+    "automatically. The lead uses benchmark results and your notes to "
+    "recommend workers in Ask each time too."
+)
+NO_ROUTING_MODELS = "The lead asks you when the pool has no suitable model."
+ADD_ROUTING_MODEL = "Add model"
 
 
 def when_hint(value: str) -> str:
@@ -247,6 +263,8 @@ RUN_AS = (("cli", "CLI"), ("subagent", "Subagent"))
 ASK = "ask"
 """The menu value of Ask each time."""
 
+AUTO_TEXT = "Let the lead choose"
+
 NO_SHORTLIST = "Shortlist models in Engines to offer them here."
 
 
@@ -262,7 +280,7 @@ def _split(value: object) -> tuple[str, str] | None:
 def offered(
     answers: Mapping[str, Any],
 ) -> list[tuple[str, list[tuple[str, str | None]]]]:
-    """Return what a picker offers besides Ask each time.
+    """Return the models a worker picker offers.
 
     Args:
         answers: The snapshot's resolved answers.
@@ -355,10 +373,10 @@ def orphan(value: object, answers: dict[str, Any]) -> tuple[str, str] | None:
         answers: The snapshot's resolved answers.
 
     Returns:
-        `(picker text, warning)`, or `None` when the value is Ask each time
-        or offered.
+        `(picker text, warning)`, or `None` when the value is a policy or
+        an offered model.
     """
-    if value == ASK:
+    if value in (ASK, choices.AUTO):
         return None
     parts = _split(value)
     if parts is None:
@@ -405,6 +423,131 @@ class _Derived:
         self.warning = ToneLine("warning")
 
 
+class _RoutingDialog(QDialog):
+    """Edit the owner's evidence for a pooled model."""
+
+    def __init__(
+        self, model: str, entry: choices.RoutingEntry | None, parent: QWidget
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Routing pool model")
+        self.setMinimumWidth(440)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+        model_label = label(model)
+        model_label.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(model_label)
+        if entry is None:
+            layout.addWidget(
+                label(
+                    "Adding this model allows the lead to start it automatically "
+                    "with Let the lead choose.",
+                    "secondary",
+                )
+            )
+
+        form = QFormLayout()
+        layout.addLayout(form)
+        form.addRow(label("Owner scores (0–100, optional)."))
+        self.scores: dict[str, QLineEdit] = {}
+        saved = {} if entry is None else entry["scores"]
+        for capability, title in choices.ROUTING_CAPABILITIES.items():
+            field = QLineEdit()
+            field.setAccessibleName(title)
+            field.setPlaceholderText("Unknown")
+            validator = QDoubleValidator(0, 100, -1, field)
+            validator.setLocale(QLocale.c())
+            field.setValidator(validator)
+            if capability in saved:
+                value = saved[capability]
+                field.setText(str(value) if value else "0")
+            self.scores[capability] = field
+            form.addRow(title, field)
+
+        self.notes = QPlainTextEdit()
+        self.notes.setAccessibleName("Owner notes")
+        self.notes.setPlaceholderText("Work this model fits or sources for your scores")
+        self.notes.setFixedHeight(72)
+        self.notes.setTabChangesFocus(True)
+        if entry is not None:
+            self.notes.setPlainText(entry.get("notes", ""))
+        form.addRow("Sources and notes (optional)", self.notes)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = widgets.button("Cancel", "secondary")
+        cancel.clicked.connect(self.reject)
+        self.save_button = widgets.button("Save", "primary")
+        self.save_button.clicked.connect(self.accept)
+        for button in (cancel, self.save_button):
+            buttons.addWidget(button)
+        cancel.setDefault(True)
+        layout.addLayout(buttons)
+        for field in self.scores.values():
+            field.textChanged.connect(self._validate)
+        self._validate()
+
+    def entry(self) -> choices.RoutingEntry | None:
+        """Return entered scores and notes, or None if a field is invalid."""
+        scores: dict[str, float] = {}
+        for capability, field in self.scores.items():
+            text = field.text().strip()
+            if not text:
+                continue
+            if not field.hasAcceptableInput():
+                return None
+            score, ok = QLocale.c().toDouble(text)
+            if not ok:
+                return None
+            scores[capability] = score
+        entry: choices.RoutingEntry = {"scores": scores}
+        notes = self.notes.toPlainText()
+        if notes.strip():
+            entry["notes"] = notes
+        return entry
+
+    def _validate(self) -> None:
+        self.save_button.setEnabled(self.entry() is not None)
+
+
+def _benchmark_line(
+    source: benchmarks.SourceStatus,
+    observation: Observation,
+    reason: str | None = None,
+) -> QLabel:
+    values = [
+        f"{metric['title']} {observation['metrics'][key]:.4g}"
+        for key, metric in source["metrics"].items()
+        if key in observation["metrics"]
+    ]
+    text = f"{source['title']} · {' · '.join(values)}"
+    if reason:
+        setup = " · ".join(
+            (
+                observation["model"],
+                observation["harness"] or "unknown harness",
+                observation["effort"] or "unknown effort",
+            )
+        )
+        text = f"Related · {text} ({setup})"
+    line = label(text, "secondary")
+    line.setTextFormat(Qt.TextFormat.PlainText)
+    detail = [
+        source["url"],
+        f"Publisher: {source['publisher']}",
+        f"Edition: {source['edition']}",
+    ]
+    if (checked := source["checked_at"]) is not None:
+        detail.append(f"Last checked: {datetime.fromtimestamp(checked, UTC):%Y-%m-%d}")
+    if source["pricing_basis"]:
+        detail.append(source["pricing_basis"])
+    if reason:
+        detail.append(reason.capitalize())
+    line.setToolTip("\n".join(detail))
+    return line
+
+
 class _ListSave:
     """Keep a list's controls pending until its saved settings have been read."""
 
@@ -415,13 +558,18 @@ class _ListSave:
         self.refreshing = False
         self.refresh_failed = False
 
-    def save(self, values: list[str]) -> None:
+    def save(self, values: list[str] | dict[str, choices.RoutingEntry]) -> None:
         """Submit one edit while the list is ready."""
         if self.pending:
             return
+        generation = self.screen.context.settings().get("generation")
         self.pending = True
         self.screen._redraw()
-        self.screen.context.save_settings({self.key: values}, result=self._result)
+        self.screen.context.save_settings(
+            {self.key: values},
+            result=self._result,
+            expect_generation=generation if isinstance(values, dict) else None,
+        )
 
     def _result(self, result: dict[str, Any] | Exception) -> None:
         if isinstance(result, db.StaleGenerationError):
@@ -496,6 +644,27 @@ class MenuScreen(QWidget):
         self.open_engines.clicked.connect(lambda: context.show_screen("engines"))
         empty_layout.addWidget(self.open_engines)
         layout.addWidget(self.empty)
+
+        routing_card, routing = titled_card("Routing pool", ROUTING_HELP)
+        self.routing_info = routing_card.findChild(widgets.InfoTip)
+        self.benchmark_summary = label("", "secondary")
+        routing.addWidget(self.benchmark_summary)
+        self.routing_layout = QVBoxLayout()
+        routing.addLayout(self.routing_layout)
+        self.routing_save = _ListSave(self, choices.ROUTING_POOL)
+        self.routing_buttons: list[QPushButton] = []
+        self.add_routing = widgets.Picker()
+        self.add_routing.setAccessibleName("Add routing pool model")
+        self.add_routing.activated.connect(self._add_routing)
+        routing.addWidget(self.add_routing, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(routing_card)
+        self._benchmarks: benchmarks.Cache = {}
+        self._benchmark_read_error = False
+        self._reading_benchmarks = False
+        self._read_benchmarks_again = False
+        self._benchmark_watcher = QFileSystemWatcher(self)
+        self._benchmark_watcher.directoryChanged.connect(self._reload_benchmarks)
+        self._benchmark_watcher.fileChanged.connect(self._reload_benchmarks)
 
         self.derived: dict[str, _Derived] = {}
         self.segments: dict[str, widgets.Segmented] = {}
@@ -628,10 +797,48 @@ class MenuScreen(QWidget):
         context.settings_failed.connect(self._settings_failed)
         theme.signals.changed.connect(self._draw_icons)
         self._redraw()
+        self._reload_benchmarks()
 
     def shown(self) -> None:
         """Called by the window each time the screen becomes current."""
         self._redraw()
+        self._reload_benchmarks()
+
+    def _reload_benchmarks(self, changed: str = "") -> None:
+        # The cache is atomically replaced. Before the first refresh, watch
+        # its closest existing directory so a CLI refresh can create it.
+        watcher = self._benchmark_watcher
+        if changed in watcher.files():
+            watcher.removePath(changed)
+        path = benchmarks.cache_path(self.context.env)
+        target = str(next(p for p in (path, *path.parents) if p.exists()))
+        watched = watcher.files() + watcher.directories()
+        if target not in watched:
+            watcher.addPath(target)
+        other = [item for item in watched if item != target]
+        if other:
+            watcher.removePaths(other)
+        if self._reading_benchmarks:
+            self._read_benchmarks_again = True
+            return
+        self._reading_benchmarks = True
+        self.context.tasks.run(
+            lambda: benchmarks.read_cache(self.context.env),
+            self._benchmarks_loaded,
+            lambda _error: self._benchmarks_loaded(None),
+        )
+
+    def _benchmarks_loaded(self, saved: benchmarks.Cache | None) -> None:
+        self._reading_benchmarks = False
+        failed = saved is None
+        current = self._benchmarks if saved is None else saved
+        if self._benchmark_read_error != failed or self._benchmarks != current:
+            self._benchmark_read_error = failed
+            self._benchmarks = current
+            self._redraw()
+        if self._read_benchmarks_again:
+            self._read_benchmarks_again = False
+            self._reload_benchmarks()
 
     # Drawing
 
@@ -673,12 +880,138 @@ class MenuScreen(QWidget):
             picker.setCurrentIndex(picker.findData(answers[key]["value"]))
             picker.blockSignals(False)
         self.whole.setChecked(answers["flow.whole_review"]["value"] == "on")
+        self._fill_routing(answers, choices.routing_rows(answers, connected))
         self._fill_fallback(answers, choices.fallback_rows(answers, connected))
         self._fill_panel(answers, panel)
         for key, row in self.tip_rows.items():
             row.set_changed(self.context.setting_changed(key))
         align_controls(self.tip_rows.values())
         self._chain_focus()
+
+    def _fill_routing(
+        self, answers: dict[str, Any], entries: list[dict[str, Any]]
+    ) -> None:
+        """Show approved models and their separately sourced benchmark data."""
+        clear_layout(self.routing_layout)
+        self.routing_buttons.clear()
+        report = benchmarks.report(answers, self._benchmarks)
+        self.benchmark_summary.setVisible(bool(entries))
+        self.benchmark_summary.setToolTip("\n".join(benchmarks.lines(report)))
+        checked = [
+            stamp
+            for source in report["sources"].values()
+            if (stamp := source["checked_at"]) is not None
+        ]
+        if self._benchmark_read_error:
+            summary = "Could not read the benchmark cache."
+        elif checked:
+            last_check = datetime.fromtimestamp(max(checked), UTC).date()
+            summary = f"Benchmarks last checked {last_check} UTC. {report['summary']}"
+            if any(source["stale"] for source in report["sources"].values()):
+                summary += " Some sources are due for a refresh."
+            if report["status"] != "ok":
+                summary += " Some sources could not be refreshed."
+        elif report["status"] == "unavailable":
+            summary = "Benchmark sources were unavailable. Ask the lead to refresh."
+        else:
+            summary = "Ask the lead to refresh Ember benchmark data."
+        self.benchmark_summary.setText(summary)
+        if not entries:
+            self.routing_layout.addWidget(label(NO_ROUTING_MODELS, "secondary"))
+        for entry in entries:
+            value = entry["value"]
+            text = member_text(entry)
+            row = widgets.PillRow()
+            title = label(text)
+            title.setTextFormat(Qt.TextFormat.PlainText)
+            row.line.addWidget(title, 1)
+            for caption, action in (
+                ("Edit", self._edit_routing),
+                ("Remove", self._remove_routing),
+            ):
+                button = widgets.button(caption, "secondary", size="sm")
+                button.setAccessibleName(f"{caption} {text}")
+                button.clicked.connect(
+                    lambda _checked=False, action=action, value=value: action(value)
+                )
+                row.line.addWidget(button)
+                self.routing_buttons.append(button)
+            row.setEnabled(not self.routing_save.pending)
+            self.routing_layout.addWidget(row)
+            scores = entry["scores"]
+            owner_scores = " · ".join(
+                f"{title} {scores[capability]:g}"
+                for capability, title in choices.ROUTING_CAPABILITIES.items()
+                if capability in scores
+            )
+            if owner_scores:
+                self.routing_layout.addWidget(
+                    label(f"Owner scores · {owner_scores}", "secondary")
+                )
+            if notes := entry.get("notes"):
+                note = label(notes, "secondary")
+                note.setTextFormat(Qt.TextFormat.PlainText)
+                self.routing_layout.addWidget(note)
+            evidence = report["workers"][value]
+            for key, observation in evidence["matches"].items():
+                self.routing_layout.addWidget(
+                    _benchmark_line(report["sources"][key], observation)
+                )
+            for key, related in evidence["related"].items():
+                self.routing_layout.addWidget(
+                    _benchmark_line(
+                        report["sources"][key],
+                        related["observation"],
+                        related["reason"],
+                    )
+                )
+            if checked and evidence["shortlisted"]:
+                if not evidence["matches"]:
+                    self.routing_layout.addWidget(
+                        label("No matching benchmark for this setup.", "secondary")
+                    )
+                elif not benchmarks.has_cost(evidence):
+                    self.routing_layout.addWidget(
+                        label("No matching benchmark cost for this setup.", "secondary")
+                    )
+            if entry["state"] != "set":
+                warning = ToneLine("warning")
+                self.routing_layout.addWidget(warning)
+                warning.show_text(member_warning(entry))
+        groups = addable(answers, [entry["value"] for entry in entries])
+        self._fill_add_picker(self.add_routing, ADD_ROUTING_MODEL, groups)
+        self.add_routing.setEnabled(bool(groups) and not self.routing_save.pending)
+
+    def _add_routing(self, _index: int) -> None:
+        value = self.add_routing.value()
+        self.add_routing.set_value(None)
+        if isinstance(value, str) and self.add_routing.isEnabled():
+            self._edit_routing(value, adding=True)
+
+    def _edit_routing(self, model: str, *, adding: bool = False) -> None:
+        if self.routing_save.pending:
+            return
+        pool = self.context.setting(choices.ROUTING_POOL)
+        before = pool.get(model)
+        if adding != (before is None):
+            return
+        dialog = _RoutingDialog(model, before, self)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        entry = dialog.entry()
+        dialog.deleteLater()
+        if not accepted or entry is None or entry == before:
+            return
+        current = self.context.setting(choices.ROUTING_POOL)
+        if current.get(model) != before:
+            self.context.error.emit("The model changed. Open it again to edit.")
+            return
+        self.routing_save.save({**current, model: entry})
+
+    def _remove_routing(self, model: str) -> None:
+        pool = self.context.setting(choices.ROUTING_POOL)
+        if model in pool:
+            remaining = {key: entry for key, entry in pool.items() if key != model}
+            self.routing_save.save(remaining)
 
     def _fill_fallback(
         self, answers: dict[str, Any], entries: list[dict[str, Any]]
@@ -834,6 +1167,10 @@ class MenuScreen(QWidget):
             order.append(tips[f"{controls.key}_as"].info)
             order.extend(controls.run_as.buttons())
         order.append(self.open_engines)
+        if self.routing_info is not None:
+            order.append(self.routing_info)
+        order.extend(self.routing_buttons)
+        order.append(self.add_routing)
         order.extend(
             (tips["gapcheck.reviewer"].info, self.derived["gapcheck.reviewer"].picker)
         )
@@ -876,7 +1213,7 @@ class MenuScreen(QWidget):
     def _settings_changed(self, *_args: object) -> None:
         """Redraw settings and retry any failed list refresh."""
         self._settings_read_failed = False
-        for save in (self.panel_save, self.fallback_save):
+        for save in (self.panel_save, self.fallback_save, self.routing_save):
             if save.refresh_failed:
                 save.refresh()
         self._redraw()
@@ -884,7 +1221,7 @@ class MenuScreen(QWidget):
     def _settings_failed(self, *_args: object) -> None:
         """Keep pending lists disabled until their settings can be read."""
         self._settings_read_failed = True
-        for save in (self.panel_save, self.fallback_save):
+        for save in (self.panel_save, self.fallback_save, self.routing_save):
             if save.refreshing:
                 save.refreshing = False
                 save.refresh_failed = True
@@ -901,7 +1238,12 @@ class MenuScreen(QWidget):
         picker.blockSignals(True)
         try:
             picker.clear()
-            picker.add_option("Ask each time", ASK)
+            picker.add_option("Ask each time", ASK, "The lead recommends and waits.")
+            picker.add_option(
+                AUTO_TEXT,
+                choices.AUTO,
+                "The lead starts a suitable routing pool model.",
+            )
             missing = orphan(value, answers)
             if missing is not None:
                 picker.add_option(missing[0], value)

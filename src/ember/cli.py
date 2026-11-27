@@ -16,6 +16,9 @@ after Quit Ember or when the running app takes over, 64 for a usage error and
 `emb flow` uses the codes in `ember.flows.command`.
 `emb panel` uses the codes in `ember.panels.command`.
 `emb prune` exits 0 on success, 1 on a failure and 64 for invalid arguments.
+`emb benchmarks` exits 0 after a read or a refresh with any available source,
+64 for invalid settings or arguments, 69 when every source failed a refresh,
+and uses the settings database codes for local read, write and busy errors.
 
 With `--json`, a command that exits non-zero having printed nothing on
 standard output prints one error object there; see `_json_error`.
@@ -31,7 +34,17 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, NoReturn, TextIO, cast
 
-from ember import __version__, branches, choices, db, deps, ground, holds, skill
+from ember import (
+    __version__,
+    benchmarks,
+    branches,
+    choices,
+    db,
+    deps,
+    ground,
+    holds,
+    skill,
+)
 from ember.engines import models, status
 from ember.runs import core as run_core
 from ember.runs import exits, record, steps
@@ -39,6 +52,7 @@ from ember.runs import exits, record, steps
 EX_OK = 0
 EX_USAGE = 64
 EX_NOINPUT = 66
+EX_UNAVAILABLE = 69
 EX_SOFTWARE = 70
 EX_NOPERM = 77
 
@@ -138,6 +152,18 @@ def _add_engines(parser: argparse.ArgumentParser) -> None:
         metavar="ENGINE",
         help="print ENGINE's model list (codex, opencode or claude)",
     )
+
+
+def _add_benchmarks(parser: argparse.ArgumentParser) -> None:
+    actions = parser.add_subparsers(
+        dest="benchmark_action", metavar="<action>", required=True
+    )
+    for action, help_text in (
+        ("refresh", "download and save the supported public benchmark results"),
+        ("status", "show saved benchmark evidence for the routing pool, offline"),
+    ):
+        subparser = actions.add_parser(action, help=help_text, description=help_text)
+        subparser.add_argument("--json", action="store_true", help="print JSON")
 
 
 def _positive_minutes(text: str) -> float:
@@ -326,6 +352,11 @@ def _add_flow(parser: argparse.ArgumentParser) -> None:
         "--previous",
         metavar="FILE",
         help="an earlier gap check result to compare on --dry-run",
+    )
+    parser.add_argument(
+        "--gapcheck-use-team",
+        action="store_true",
+        help="with --dry-run, keep the Team gap check reviewer with --reviewer",
     )
     parser.add_argument("--start", action="store_true", help="start the flow runner")
     parser.add_argument(
@@ -607,6 +638,12 @@ def build_parser() -> argparse.ArgumentParser:
                 "Show whether Codex, OpenCode and Claude Code are installed, "
                 "signed in and connected, or list one engine's models."
             ),
+        )
+    )
+    _add_benchmarks(
+        subparsers.add_parser(
+            "benchmarks",
+            help="refresh or read benchmark evidence for the routing pool",
         )
     )
     _add_run(
@@ -1147,6 +1184,35 @@ def _run_deps(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
     return EX_OK
 
 
+def _run_benchmarks(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
+    refreshing = args.benchmark_action == "refresh"
+    try:
+        if refreshing:
+            reply = benchmarks.refresh(env)
+        else:
+            settings = choices.read(env=env)
+            if settings["source_error"]:
+                raise choices.InvalidChoiceError("; ".join(settings["errors"]))
+            reply = benchmarks.cached(settings["answers"], env)
+    except (choices.InvalidChoiceError, db.DatabaseError) as error:
+        print(f"emb benchmarks: {error}", file=sys.stderr)
+        return error.exit_code
+    except benchmarks.RefreshBusyError as error:
+        print(f"emb benchmarks: {error}", file=sys.stderr)
+        return db.EX_TEMPFAIL
+    except OSError as error:
+        print(f"emb benchmarks: {error}", file=sys.stderr)
+        return db.EX_IOERR
+    if args.json:
+        print(json.dumps(reply, indent=2))
+    else:
+        for line in benchmarks.lines(reply):
+            print(line)
+    if refreshing and reply["status"] == "unavailable":
+        return EX_UNAVAILABLE
+    return EX_OK
+
+
 def _run_skill(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
     candidates = skill.source_candidates()
     if args.skill_action == "status":
@@ -1307,6 +1373,8 @@ def _main(argv: Sequence[str], env: Mapping[str, str] | None) -> int:
         return _run_choices(args, env)
     if args.command == "engines":
         return _run_engines(args, env)
+    if args.command == "benchmarks":
+        return _run_benchmarks(args, env)
     if args.command == "run":
         return _run_run(args, env)
     if args.command == "gapcheck":

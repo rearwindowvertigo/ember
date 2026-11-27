@@ -90,6 +90,8 @@ def _usage(args: argparse.Namespace) -> str:
             problem = "--plan is required only with --dry-run or --start"
         elif args.previous is not None and mode != "dry_run":
             problem = "--previous needs --dry-run"
+        elif args.gapcheck_use_team and mode != "dry_run":
+            problem = "--gapcheck-use-team needs --dry-run"
         elif mode == "lead" and len(args.lead) > 2:
             problem = "--lead takes a flow and at most one task"
         elif mode == "lead" and len(args.lead) == 1 and not flow_reviewer:
@@ -482,10 +484,10 @@ def _dry_run(
     """Print resolved workers, waves, warnings and the gap check decision.
 
     The gap check command names the flow's reviewer when it was given with
-    `--reviewer` or in the plan; otherwise `emb gapcheck` uses the owner's
-    Gap check reviewer row. The command requests JSON and forwards `--previous`
-    when given. A plan the settings skip gets no command; one they leave to
-    the owner gets the command with `--confirmed`.
+    `--reviewer` or in the plan, unless `--gapcheck-use-team` keeps the
+    Gap check reviewer row in effect. The command requests JSON and forwards
+    `--previous` when given. A plan the settings skip gets no command; one
+    they leave to the owner gets the command with `--confirmed`.
     """
     decision, why = _gapcheck_decision(document, settings)
     changes = None
@@ -511,7 +513,7 @@ def _dry_run(
     ]
     if args.previous is not None and not (changes and changes["recovery"]):
         gapcheck += ["--previous", args.previous]
-    if reviewer.source != "menu":
+    if reviewer.source != "menu" and not args.gapcheck_use_team:
         # A reviewer named for this flow, by option or in the plan, also
         # checks its plan; the Gap check reviewer row covers the rest.
         gapcheck += ["--engine", reviewer.engine, "--model", reviewer.model]

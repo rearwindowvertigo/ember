@@ -5,6 +5,7 @@ description: >-
   Load it before starting any worker:
   `emb run` on Codex, OpenCode or Claude, a Claude subagent or Workflow.
   Load it to run a flow, ask a few models, run a panel, or do a gap check;
+  to fill or refresh Team's benchmark data;
   to review, merge or clean up a worker branch (`ember/<engine>/<id>`,
   `ember/flow/<id>`, `worktree-agent-*`); or to handle an `emb`
   exit or a `report:`, `next:` or `owner:` line. Use it even when the owner
@@ -44,6 +45,18 @@ runs.
 
 Bundled paths (`references/`, `assets/`, `scripts/`) are relative to this
 skill folder.
+
+## Fill or refresh Team benchmarks
+
+When the owner asks to fill or refresh Ember's benchmark data, run
+`emb benchmarks refresh --json` once. This is a Team maintenance action:
+use the command directly from the lead session, with no run or claim. The
+request authorizes the refresh. Ember downloads, validates, matches and saves
+the data. Read the command's reply; report what updated, which setups have
+no match or no cost, and any sources that failed, including whether Ember
+kept their previous results. If it reports `empty_pool`, point the owner
+to Team's Routing pool. If the reply has an `error` object, report it. Do not
+look up substitute numbers, edit Team settings, or retry automatically.
 
 ## One run
 
@@ -90,10 +103,10 @@ including read-only work and choosing no worker.
 Only a claim reply authorizes a one-time answer. `--brief` keeps the claim,
 the skill fields, the `single.writer`, `single.reviewer`, `multi.runs_as`
 and `panel.members` menu rows, the picker answers with their `layer`, and
-the `engine.<name>` and `shortlist.<name>` answers; read without it when a
-step needs another setting. A picker answer's `layer` says whether its
-value is a request, a one-time choice, a setting or the default: name it
-that way to the owner.
+the `engine.<name>`, `shortlist.<name>` and `routing.pool` answers. Read
+without `--brief` for gap check and flow worker rows or other settings. A
+picker answer's `layer` says whether its value is a request, a one-time
+choice, a setting or the default: name it that way to the owner.
 
 Run the claim on its own and check `skill` separately from `claim.status`
 before the next `emb` command or worker choice. On `current`, continue.
@@ -129,16 +142,15 @@ it chooses by the worker table and names its choice in its report.
 
 Run `emb engines --json` for each engine's `state`. Use only engines that
 are on (`engine.<name>` in the answers), `connected`, and that the current
-session can run. Do not choose, withhold or swap workers by cost or usage;
-Ember reads no usage figures. A provider refusal is a run error, not a
-usage reading.
+session can run. For Ask each time and Let the lead choose, use the local
+benchmark evidence as `references/worker-selection.md` describes. Ember
+reads no live subscription usage. Follow the existing provider-error steps
+on a refusal.
 
 | Worker | Good default |
 |---|---|
 | No worker | A few lines in one or two files already open. |
-| Codex, `emb run --engine codex` | Coding, drafting, tests and research; the default. |
-| OpenCode, `emb run --engine opencode` | A model suited to the task from any integration connected in OpenCode; when the owner names it, or as the `report:` line allows after a usage limit. |
-| Claude CLI, `emb run --engine claude` | A requested Claude CLI run. |
+| Codex, OpenCode or Claude CLI, `emb run --engine <engine>` | Coding, drafting, tests and read-only work that the selected model and CLI can do. Codex is the usual recommendation when no evidence distinguishes the candidates. |
 | Claude Code subagent | In Claude Code, work needing tools the CLI workers lack, or read-only work outside a git checkout. |
 | Claude Workflow | In Claude Code with the Workflow tool and the owner's opt-in, two or more tasks. |
 | Flow, `emb flow` | Two or more coding tasks with a writer and a reviewer each, run by Ember in waves. |
@@ -156,8 +168,7 @@ over the row.
 Read `references/flows.md` before a flow and `references/panels.md` before a
 panel.
 
-For research or search, recommend Codex with `--read-only` when it has the
-tools the work needs.
+For research or search with a CLI worker, use `--read-only`.
 
 A small edit (a few lines in one or two files already open) defaults to no
 worker even when `single.writer` is `set`; say so in one line. The run still
@@ -166,34 +177,50 @@ claims, and finishes at once. Work that needs a tool a CLI worker lacks
 subagent if you can start one with the needed tool; otherwise explain the
 limit and offer to do the work in the lead session if you have the tool.
 Editing workers need a git checkout. A `set` row, a claimed choice or the
-owner's request binds; ask before departing from it.
+owner's request binds; ask before departing from it. A claimed policy
+of `ask` or `auto` authorizes that policy for this run.
 
 Use `single.writer` for edits and `single.reviewer` for read-only work.
 For a `claude` row, `run_as` picks `cli` (`emb run --engine claude`) or
 `subagent` inside Claude Code. Check that native tools are available before
 acting on a `subagent` choice. Take engine, model and effort from a `set`
 row: `emb run` with `--engine` alone resolves the row's model and effort.
-Once the brief is written, run `emb run --dry-run` with the start's exact
-options, including its claim, model, effort and read-only options when
-given. On success, copy its standard-output line as the visible announce
-line right before the start, for example:
-`Team, Single tasks Writer: codex gpt-6.1-sol · high · standard (single.writer)`.
-A dry-run refusal starts no worker. For a Claude subagent, name the row,
-model and effort yourself.
+For a Claude subagent, name the row, model and effort yourself.
 
 An explicit worker or model in the owner's request wins over the menu,
 within the gates. Use its named model; otherwise use the job's row when it
-holds the same engine, or ask among that engine's shortlisted models. Say
-model and effort once, with any difference from Team; for `emb run`, the
-dry-run line says it. Do not change the saved menu. With the owner away
+holds the same engine, or ask among that engine's shortlisted models.
+Name any difference from Team when announcing the worker. Do not change
+the saved menu. With the owner away
 or rows not `set`, pass named workers
 explicitly: `emb gapcheck --engine <e> --model <m> --effort <x>`,
 `emb flow --writer <e>:<m>@<x> --reviewer <e>:<m>@<x>`, or repeatable
 `emb panel --member <e>:<m>[@<x>]`. Never set a row to make a command work.
 
-When a row is not `set` and no worker was named, ask using the harness's
-question tool if available.
-Include its `state` and `reason`. Build options from
+When the request did not pick a worker and the row is `ask` (Ask each
+time) or `auto` (Let the lead choose), read
+`references/worker-selection.md`. In `ask`, recommend a model for this
+job and wait. In `auto`, announce and start a suitable eligible pool
+model without asking again.
+Pass `--engine` and `--model` and the resolved `--effort` when there is
+one. If `auto` has no suitable pool model, ask and wait.
+
+For a single worker chosen in `auto`, send one sentence as soon as you
+pick it, before writing its brief. Give its model, effort and task-specific
+reason. If benchmark cost helped you choose, name the benchmark and unit.
+For example:
+
+> I'll use Codex GPT‑6.2 Sol at max effort for this bounded edit; focused tests cover the date boundary, and it cost $1.72 per pass on Terminal-Bench 4.1.
+
+For `emb run`, after writing the brief, run `--dry-run` with the start's
+exact options. A refusal starts no worker. Before starting a fixed or
+owner-chosen worker, post the preview's worker line to the owner. For an
+automatic worker, check that the preview agrees with your announcement.
+The shell output does not announce a choice to the owner.
+
+When you need a worker choice, use the harness's question tool if
+available. Include the row's `state` and `reason` and, when `auto` cannot
+choose, why the pool cannot cover this job. Build options from
 `emb engines --models <engine> --json` and
 the enabled shortlists. Put worker, model and effort in each label; give
 the recommendation in one or two plain sentences and one or two real
@@ -298,7 +325,7 @@ Pass `--claim <id>` on starts and gap checks that accept it.
 
 | Purpose | Command |
 |---|---|
-| Preview and announce | Add `--dry-run` to the start's exact options; copy its line before starting |
+| Preview and announce | Add `--dry-run` to the start's exact options; announce the worker and check it against the preview before starting |
 | Start | `emb run --engine <engine> --dir <repo> --task-file <brief> --claim <id>` (add `--trailer` when supplied or required) |
 | Read-only | Add `--read-only` |
 | Show the owner | Add `--window` at start, or `emb run --attach <run>` later |
@@ -591,8 +618,9 @@ changing the owner's settings. Point the owner to Ember's Team or Settings
 screen (`emb app`), or give the exact command to run at their terminal:
 `emb choices --set <key>=<value>` for a standing setting, or
 `emb choices --once <key>=<value>` for a one-time choice. A
-`single.writer` or `single.reviewer` value is `<engine>:<model>` or `ask`,
-with no effort; an effort comes from the engine's shortlist.
+`single.writer` or `single.reviewer` value is `<engine>:<model>`, `ask`
+or `auto`; an effort comes from the engine's shortlist. The owner manages
+`routing.pool` in Team or with `emb choices --set` at a terminal.
 
 Never run `sudo`, or an install, update or sign-in command, for the owner.
 On an `owner:` line or a missing engine or tool, give the owner the
@@ -619,6 +647,7 @@ finding gets at most one closing sentence, or is left out.
 |---|---|
 | `references/claims.md` | A claim or read reply other than a clean `claimed` or `none`, a lost reply, an `emb choices` exit, or an owner question about one-time choices. |
 | `references/runs.md` | Before the session's first `emb run`; on every non-zero `emb run` exit; before closing a run; when handing the owner a test build from any worker branch, including a flow branch. |
+| `references/worker-selection.md` | When an Ask each time or Let the lead choose row needs a model for a single task, gap check or flow. |
 | `references/sandbox-and-exits.md` | On every non-zero `emb run` exit; on a denied path or an `owner:` line about a path; before giving a worker anything outside its worktree. |
 | `references/claude-agents.md` | For `/ember` in Claude Code, or before using its native subagents or Workflows. |
 | `references/gap-check.md` | Before a flow or a multi-task Claude Workflow starts. |

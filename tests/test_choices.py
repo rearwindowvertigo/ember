@@ -161,6 +161,7 @@ def test_defaults(env: dict[str, str]) -> None:
         "shortlist.codex": [],
         "fast.codex": [],
         "shortlist.opencode": [],
+        "routing.pool": {},
         "single.writer": "ask",
         "single.writer_as": "cli",
         "single.reviewer": "ask",
@@ -397,7 +398,9 @@ def test_ask_in_an_upper_layer_wins(env: dict[str, str]) -> None:
     assert reply["menu"]["single.writer"]["state"] == "ask"
 
 
-@pytest.mark.parametrize("key", ["worker.network", "shortlist.codex", "terminal"])
+@pytest.mark.parametrize(
+    "key", ["worker.network", "shortlist.codex", "terminal", "routing.pool"]
+)
 def test_request_or_once_for_standing_only_key_is_refused(
     env: dict[str, str], key: str
 ) -> None:
@@ -868,11 +871,102 @@ def test_snapshot_lists_allowed_values(env: dict[str, str]) -> None:
     snap = choices.snapshot(env=env)
     assert snap["generation"] == 1
     assert snap["settings"] == {"shortlist.codex": ["gpt-5@high"], "app.theme": "dark"}
-    assert snap["allowed"]["single.writer"] == {"values": ["ask", "codex:gpt-5"]}
+    assert snap["allowed"]["single.writer"] == {
+        "values": ["ask", "auto", "codex:gpt-5"]
+    }
     assert snap["allowed"]["app.theme"] == {"values": ["system", "light", "dark"]}
     assert "pattern" in snap["allowed"]["terminal"]
+    assert "usage" not in snap["allowed"]["routing.pool"]["pattern"]
     assert snap["source_error"] is False
     assert snap["menu"]["single.writer"]["state"] == "ask"
+
+
+def test_claimed_auto_policy_inherits_without_choosing_a_model(
+    env: dict[str, str],
+) -> None:
+    pool = {"codex:gpt-5": {"usage": 10, "scores": {"reasoning": 86.4}}}
+    choices.set_settings(
+        {
+            "shortlist.codex": ["gpt-5@high"],
+            "single.reviewer": "codex:gpt-5",
+            "routing.pool": pool,
+        },
+        env=env,
+    )
+    choices.set_once({"single.reviewer": "auto"}, env=env)
+    claimed = choices.claim("route-claim", env=env)
+    assert _answer(claimed, "single.reviewer") == ("auto", "one-time")
+    assert _answer(choices.brief(claimed), "routing.pool") == (pool, "setting")
+    row = claimed["menu"]["single.reviewer"]
+    assert row["state"] == "auto" and row["model"] is None
+    assert claimed["menu"]["gapcheck.reviewer"] == {**row, "same": True}
+    assert claimed["menu"]["flow.reviewer"] == {**row, "same": True}
+    assert choices.read(env=env)["menu"]["single.reviewer"]["model"] == "gpt-5"
+    requested = choices.read(
+        "route-claim", request={"single.reviewer": "codex:gpt-5"}, env=env
+    )
+    assert requested["menu"]["gapcheck.reviewer"]["model"] == "gpt-5"
+    assert requested["menu"]["gapcheck.reviewer"]["effort"] == "high"
+
+
+def test_routing_pool_checks_new_models_and_retains_unavailable_entries(
+    env: dict[str, str],
+) -> None:
+    pool = {
+        "codex:gpt-5": {"usage": 1, "scores": {"implementation": 0}},
+        "opencode:openrouter/qwen": {"usage": 5, "scores": {}},
+    }
+    with pytest.raises(choices.InvalidChoiceError, match="not on the codex shortlist"):
+        choices.set_settings({"routing.pool": pool}, env=env)
+    choices.set_settings(
+        {
+            "shortlist.codex": ["gpt-5@low"],
+            "shortlist.opencode": ["openrouter/qwen"],
+            "routing.pool": pool,
+        },
+        env=env,
+    )
+    choices.set_settings({"shortlist.codex": ["gpt-5@high"]}, env=env)
+    answers = choices.read(env=env)["answers"]
+    rows = choices.routing_rows(answers, {"codex": True, "opencode": False})
+    assert [(row["state"], row["effort"]) for row in rows] == [
+        ("set", "high"),
+        ("not connected", None),
+    ]
+    assert [row["scores"] for row in rows] == [{"implementation": 0}, {}]
+    choices.set_settings({"shortlist.codex": []}, env=env)
+    answers = choices.read(env=env)["answers"]
+    assert choices.routing_rows(answers)[0]["state"] == "not shortlisted"
+    remaining = {"codex:gpt-5": pool["codex:gpt-5"]}
+    choices.set_settings({"routing.pool": remaining}, env=env)
+    assert _answer(choices.read(env=env), "routing.pool") == (remaining, "setting")
+
+
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [
+        ("[", "not valid JSON"),
+        ('{"codex:gpt-5":{},"codex:gpt-5":{}}', "listed twice"),
+        ('{"codex:gpt-5":{"scores":{"reasoning":1,"reasoning":2}}}', "listed twice"),
+        ('{"gpt-5":{"usage":8,"scores":{}}}', "not <engine>:<model>"),
+        ('{"codex:gpt-5":{"usage":1}}', "needs scores"),
+        ('{"codex:gpt-5":{"usage":2.5,"scores":{}}}', "usage must be"),
+        ('{"codex:gpt-5":{"usage":true,"scores":{}}}', "usage must be"),
+        ('{"codex:gpt-5":{"usage":0,"scores":{}}}', "usage must be"),
+        ('{"codex:gpt-5":{"usage":11,"scores":{}}}', "usage must be"),
+        ('{"codex:gpt-5":{"usage":5,"scores":[]}}', "scores must be a JSON object"),
+        ('{"codex:gpt-5":{"usage":5,"scores":{"latency":3}}}', "unknown capability"),
+        ('{"codex:gpt-5":{"usage":5,"scores":{"reasoning":-1}}}', "score must be"),
+        ('{"codex:gpt-5":{"usage":5,"scores":{"reasoning":101}}}', "score must be"),
+        ('{"codex:gpt-5":{"usage":5,"scores":{"reasoning":true}}}', "score must be"),
+        ('{"codex:gpt-5":{"usage":5,"scores":{"reasoning":null}}}', "score must be"),
+        ('{"codex:gpt-5":{"usage":5,"scores":{"reasoning":NaN}}}', "score must be"),
+        ('{"codex:gpt-5":{"usage":5,"scores":{},"notes":5}}', "notes must be text"),
+    ],
+)
+def test_invalid_routing_pool_json(text: str, problem: str) -> None:
+    with pytest.raises(choices.InvalidChoiceError, match=problem):
+        choices.parse_value("routing.pool", text)
 
 
 # Concurrency

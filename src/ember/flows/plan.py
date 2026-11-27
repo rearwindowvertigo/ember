@@ -10,7 +10,7 @@ from importlib import resources
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ember import citations
+from ember import choices, citations
 from ember.engines import Driver, DriverMissingError, status
 from ember.runs import exits
 
@@ -521,6 +521,8 @@ def resolve(
     row = menu[ROW[role]]
     # A flow row set to `same` reports the single-task row it follows.
     name = f"single.{role}" if row.get("same") else ROW[role]
+    if row["state"] == choices.AUTO:
+        line = f"next: choose a model for the flow's {role} and pass --{role}"
     if row["state"] != "set":
         raise WorkerError(64, f"{name} is {row['state']}: {row['reason']}", line)
     if row["engine"] == "claude" and row.get("run_as") == "subagent":

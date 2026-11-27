@@ -23,6 +23,8 @@ trailer with an apostrophe, join single-quoted pieces with `'\''`.
 - `--model` wins. Otherwise the model comes from the menu row:
   `single.writer`, or `single.reviewer` for `--read-only`. The row must be
   `set` and name the same engine, or the start exits 64 naming the row.
+  When the row is `ask` or `auto`, the lead resolves it for this job and
+  passes the chosen model and effort explicitly.
 - An OpenCode `--model` is the full `<integration>/<model>` id from
   `emb engines --models opencode --json`, such as `anthropic/claude-sonnet-4`
   or `openrouter/deepseek/deepseek-v4.1-flash-1017`. Ember uses it unchanged.
@@ -34,8 +36,8 @@ trailer with an apostrophe, join single-quoted pieces with `'\''`.
 - With a `set` row and no model or effort named by the owner, pass neither
   `--model` nor `--effort`: Ember takes both from the row, and the dry-run
   line ends `(single.writer)`. Pass `--model` for a model the owner named
-  or picked, with `--effort` when that pick carries an effort, such as the
-  shortlist entry `gpt-6.1-sol@high`.
+  or picked, or one you picked in `auto`, with `--effort` when that pick
+  carries an effort, such as the shortlist entry `gpt-6.1-sol@high`.
 
 The dry-run line (SKILL.md step 3) reads like
 `Team, Single tasks Writer: codex gpt-6.1-sol · high · standard (single.writer)`.
@@ -54,6 +56,12 @@ through the commit and main-checkout checks below. It creates no cache
 folder, worktree, branch, run record or session and runs no sandbox probe.
 It exits 0 on success or with the failed check's exit code. A later start
 reads the settings again.
+
+Before drafting a brief for a worker you chose in `auto`, tell the owner the
+model, effort and why it fits. Name the benchmark and unit when cost helped
+choose. After the preview, check that
+the worker matches your announcement; for a fixed or owner-chosen worker,
+send the preview's worker line to the owner before starting.
 
 ## What a start checks
 

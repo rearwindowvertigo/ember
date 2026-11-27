@@ -914,7 +914,11 @@ def gapcheck_replies() -> dict[str, str]:
         for as_json in (False, True):
             out, err = StringIO(), StringIO()
             args = argparse.Namespace(
-                previous=None, claim=None, json=as_json, stall=None
+                previous=None,
+                claim=None,
+                gapcheck_use_team=False,
+                json=as_json,
+                stall=None,
             )
             with patch.object(flow_plan, "warnings", return_value=[]):
                 flows._dry_run(

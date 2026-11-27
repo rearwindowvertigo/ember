@@ -2314,6 +2314,7 @@ def flow_dry_run(args: list[str], variables: dict[str, str]) -> Reply:
                 json=has(args, "--json"),
                 previous=option(args, "--previous"),
                 claim=option(args, "--claim"),
+                gapcheck_use_team=has(args, "--gapcheck-use-team"),
                 stall=None,
             ),
             document,
