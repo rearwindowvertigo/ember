@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.36.1](https://github.com/rearwindowvertigo/ember/compare/v0.36.0...v0.36.1) (2026-11-27)
+
+
+### Fixed
+
+* require a published notice before automatic worker starts ([d16f4bf](https://github.com/rearwindowvertigo/ember/commit/d16f4bf1e6b07e960c39876f56067ad3f9878b2e))
+
 ## [0.36.0](https://github.com/rearwindowvertigo/ember/compare/v0.35.0...v0.36.0) (2026-11-27)
 
 
