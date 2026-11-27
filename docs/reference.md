@@ -602,7 +602,8 @@ warnings described below.
 | `--claim ID` | With a start: read the menu with this claim id |
 | `--window` | With a start: also open a terminal window on the session |
 | `--continue-run RUN` | With an editing start: cut the new run from the branch of this earlier editing run of the same repository and add a note about its work to the brief |
-| `--fallback-from RUN` | With a start: the run that a provider error ended and that this start replaces; its worker, and those of the runs it replaced, are not used again |
+| `--fallback-from RUN` | With a start or its preview: replace a run that ended with a first-turn provider error using the current applicable Team fallback |
+| `--retry-of RUN` | With a start or its preview: retry failed worktree preparation with the run's saved brief, checkout, claim and role |
 | `--send RUN --message-file FILE` | Send `FILE` as the next message and wait for its turn |
 | `--screen RUN` | Print the text of the session's pane |
 | `--interrupt RUN` | Interrupt the current turn, as the engine's driver does it (see Engine drivers) |
@@ -729,8 +730,17 @@ An unset effort is `null` in JSON. The announce line places the Codex speed
 after the effort. For other engines, the JSON `speed` is `null`. A dry run
 reads the settings when it runs. A later start resolves them again.
 
+An owner-chosen model or effort is announced in chat with the resolved
+engine, model, effort and any speed in plain language. The CLI preview
+keeps its option sources.
+
 For a claimed single worker selected through **Let the lead choose**, the
 model must be shortlisted, in the Routing pool and free of provider holds.
+An effective effort must be supported by the exact model in its saved
+catalogue. An OpenCode worker with no effort setting can omit effort when
+its catalogue entry shows no supported efforts. Missing or unsupported
+effort evidence exits 75; `emb engines --models <engine> --refresh`
+checks the current catalogue.
 Preview the exact start with `--dry-run --announce '<task-specific reason>'`.
 When cost helped choose, `--benchmark-cost <series>:<metric>` looks up the
 selected effort in saved results. The notice names the benchmark, edition
@@ -739,11 +749,13 @@ refuses that preview. A successful preview with `--announce` adds an
 `ember announcement:` line, or an `announcement` field with `--json`.
 
 Claude Code publishes the notice through the Ember skill's `PostToolUse`
-hook. OpenCode V2 uses its CLI to post to the current session on the
-shared server. Set `EMBER_OPENCODE_SERVER` to the current server URL if
-running the OpenCode lead on a separate server. The preview and the start
-are separate tool calls. The start verifies publication in the conversation
-and consumes the notice before creating a run record, worktree or session.
+hook. Its Bash start supplies `CLAUDE_CODE_SESSION_ID`, which must match
+the session that published the notice in its transcript. OpenCode V2 uses
+its CLI to post to the current session on the shared server. Set
+`EMBER_OPENCODE_SERVER` to the current server URL if running the OpenCode
+lead on a separate server. The preview and the start are separate tool
+calls. The start verifies publication in the active conversation and
+consumes the notice before creating a run record, worktree or session.
 The claim, resolved worker and speed, brief and checkout commit must match.
 Publication needs no owner reply. A missing or mismatched notice refuses a
 start with exit 75. Every new automatic start, including a retry, needs its
@@ -1066,12 +1078,18 @@ Editing worker turns commit with `git add -A`.
 
 On failure no worker session starts for that run. The record and worktree
 are kept, the command exits 79, and the diagnostic names the log. A run's
-`next:` line gives a new start with the original options and its saved
-brief. Gap checks print the original `emb gapcheck` invocation; panels
+`next:` line gives a new start with the saved brief and `--retry-of <run>`.
+An older retry command can identify its run through the saved brief. A
+claimed retry uses the recorded selection origin and the current Team
+setting: automatic selection needs a fresh notice, **Ask each time**
+needs an owner choice, and a fixed row supplies the current Team pair.
+A recorded effort-only override still applies while Team names the same
+model. An explicitly chosen model or still-applicable fallback keeps its
+approval. Gap checks print the original `emb gapcheck` invocation; panels
 print a fresh `emb panel` invocation; flows print `emb flow --resume <id>`.
-`emb run --send` and `--recover` never run preparation. Closing an
-unstarted run after a preparation failure removes its owned worktree and
-preparation changes. An editing branch remains.
+`emb run --send` and `--recover` never run preparation. Closing an unstarted
+run after a preparation failure removes its owned worktree and preparation
+changes. An editing branch remains.
 
 Timeout, cancellation, interruption and shutdown end the whole preparation
 process group. A later resume, close or prune ends a recorded group left
@@ -1336,6 +1354,7 @@ UTC. It is also the tmux session's name.
 | `subject` | string | The brief's first non-empty line |
 | `preparation` | object or null | Preparation command, `state` (`running`, `ok`, `failed`, `timeout`, `interrupted`, `not-started`), `log`, optional `pid` and `start`; a finished attempt also has `exit`, `seconds`, `left_behind` and `message`; omitted when no preparation ran |
 | `start_argv` | list of strings | The start command with its saved brief, used by the preparation retry line; omitted when empty |
+| `selection_origin` | string | How a single-worker launch selected its worker: `automatic`, `owner_choice`, `fallback`, or `direct`; omitted for an internal start or an older record without this field |
 | `continues` | string | The earlier run whose branch this run was cut from with `--continue-run`; omitted without one |
 | `fallback_from` | string | The run that a provider error ended and that this run replaces, from `--fallback-from`; omitted without one |
 
@@ -1546,10 +1565,10 @@ evidence that no provider error occurred.
 | 72 | Session or window unavailable, or the run was closed | `next: emb run --status <run>`, or a new start |
 | 73 | Capacity retries exhausted or disabled, usage limit or outage, including an engine that ended because it could not reach its provider | `next: emb run --send <run> ...` naming the kind; uncertain resend delivery asks the lead to inspect the session before sending again; for an engine that ended, `next: emb run --close <run>, then` a new start |
 | 74 | Interrupted | `next: emb run --recover <run>`; a cancelled capacity resend collects the saved turn; uncertain delivery asks the lead to inspect the session before sending again; an interrupted send uses `next: emb run --send <run> ...` |
-| 75 | Automatic start lacks a matching published notice or eligible pool model; close refused while a turn runs or is collected but not committed; busy session; another command on the run; or a session holding messages Ember did not send | Publish an automatic notice or choose an eligible pair; `next: emb run --recover <run>` or `--status`; for messages Ember did not send, `next: ask the owner ...` |
+| 75 | Start refused because of the notice, Routing pool, effort, fallback or preparation retry; close refused while a turn runs or is collected but not committed; busy session; another command on the run; or a session holding messages Ember did not send | The `next:` line names the applicable preview, settings, or run status; `next: emb run --recover <run>` for an unfinished turn; for messages Ember did not send, `next: ask the owner ...` |
 | 76 | Branch or `HEAD` moved; nothing committed | `next: git -C <worktree> log --oneline -3` |
 | 77 | `git commit was refused`, or `git add failed` | `next: emb run --send <run> --message-file <file>` sends hook output with the correction for a refused commit; a failed `git add` points to `next: emb run --recover <run>` |
-| 79 | Worktree preparation failed before a worker session started | Diagnostic names the log; `next:` gives a new start with the original options and saved brief |
+| 79 | Worktree preparation failed before a worker session started | Diagnostic names the log; `next:` gives a new start with the saved brief |
 | 80 | The turn ended with no reply | `next: emb run --screen <run>, then emb run --send <run> ...` |
 | 84 | A start, `--send` or `--recover` otherwise succeeded but ends with a pending owner wait | Each pending `owner:` line on standard error, once per invocation |
 | 124 | Stall, or a turn that did not end within 30 seconds of the interrupt of its provider wait; the turn may still be running | `next: emb run --recover <run>` |
@@ -1660,8 +1679,12 @@ that has commits or continues another run adds `--continue-run <run>`. The
 tell the owner which model failed and which runs now. An uncertain resend,
 a later turn, and a run that a flow, a panel or a gap check started keep
 the lines of their own exit. The run's `last_variant` keeps the failure's
-own variant; `emb run --status` prints the fallback lines while the list
-holds an entry that applies.
+own variant; `emb run --status` prints the fallback lines for an open
+failed run while the list holds an entry that applies. The fallback start
+checks its source run, claim, checkout, role, saved brief and continuation.
+It verifies the current applicable fallback before creating the run and
+again after preparation, before starting the session. A removed or changed
+fallback refuses with exit 75.
 
 `--continue-run RUN` cuts the new run's branch and worktree from the tip of
 `RUN`'s branch and keeps `RUN`'s base branch. It appends a section

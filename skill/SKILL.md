@@ -227,18 +227,21 @@ resolved, then run the same start without `--dry-run`, `--announce` or
 `--benchmark-cost`, and without waiting for an owner reply. If Ember cannot
 verify the notice, it starts no worker. Report the failure to the owner.
 
-When a fixed Team row supplies the worker, copy the complete ordinary
+When you use the fixed Team worker as saved, copy the complete ordinary
 dry-run worker line verbatim into chat before the start tool call. Keep
 the Team row, model, effort, any speed and source exactly as printed.
 
-When a model comes directly from the owner's request or answer, pass
-`--owner-choice` on the preview and the start. Run the preview by itself
-in the foreground. After it succeeds, post a plain-language message in
-chat before the start tool call. Name the resolved engine, exact model,
-effort and any speed shown in the preview. If Team has a configured pair
-for the job and the resolved engine, model or effort differs, say that the
-owner chose this worker instead. The choice source is optional otherwise.
-Omit CLI flags and option-source annotations from the chat message.
+When the owner names a model or changes the effort for the fixed Team
+worker, run the exact preview by itself in the foreground. Pass
+`--owner-choice` on the preview and start when the owner chose the model.
+An effort-only change on a fixed Team row keeps that row's model. After the
+preview succeeds, name the resolved engine, exact model, effort and any
+speed in plain language before the start tool call. If it differs from the
+Team pair, say that the owner chose it instead. Keep CLI flags and
+option-source annotations out of the chat message.
+
+Before retrying a failed worktree preparation, read the current Team
+choice with the same claim and follow `references/runs.md`.
 
 When you need a worker choice, use the harness's question tool if
 available. Include the row's `state` and `reason` and, when `auto` cannot
