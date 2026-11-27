@@ -98,7 +98,7 @@ ORPHANED = "orphaned"
 BADGES = {
     record.STARTING: ("Starting", "neutral"),
     record.RUNNING: ("Running", "info"),
-    record.WAITING: ("Waiting for Claude", "warning"),
+    record.WAITING: ("Waiting for the lead", "warning"),
     record.CLOSED: ("Done", "success"),
     record.FAILED: ("Failed", "danger"),
     ORPHANED: ("Orphaned", "warning"),
@@ -131,7 +131,7 @@ FLOW_BADGES = {
     "starting": ("Starting", "neutral"),
     "running": ("Running", "info"),
     "checking": ("Running", "info"),
-    "stopped": ("Waiting for Claude", "warning"),
+    "stopped": ("Waiting for the lead", "warning"),
     "failed": ("Failed", "danger"),
     "done": ("Done", "success"),
     "gone": ("Failed", "danger"),
@@ -734,7 +734,7 @@ def _run_rows(
         rows.append(("Parent", f"{parent_label(owner)} · {item_id(owner)}"))
     state = record.parent_state(run)
     if state.state == record.PARENT_LEAD:
-        rows.append(("Wait", f"Waiting for Claude's answer to flow {state.id}"))
+        rows.append(("Wait", f"Waiting for the lead's answer to flow {state.id}"))
     elif wait := record.parent_wait(state):
         rows.append(("Wait", sentence(wait)))
     if worker is not None and isinstance(owner, FlowItem):

@@ -103,14 +103,15 @@ path before writing the comparison or answer. It holds every available
 reply, including partial replies from failed members. Read it after an
 interruption too if the owner chooses to use the available answers.
 
-Compare in five parts, every part every time; an empty part says
-"none", and with two answers part 3 says "none beyond part 4":
+Use all five parts below as separate headings in your comparison.
+An empty part says "none". With only two answers, keep both parts 3 and 4:
+part 3 says "none beyond part 4", which gives each answer's unique points.
 
-1. What all or most agree on.
-2. Where they disagree.
-3. What only some cover.
-4. What only one says.
-5. What none address.
+1. Agreement: what all or most agree on.
+2. Disagreement: where the answers differ.
+3. Only some: what several, but not all, address.
+4. Only one: what a single answer covers.
+5. None: what no answer addresses.
 
 Then answer the question. Agreement is evidence, not proof. Check the
 claims your answer depends on yourself and say which you checked.

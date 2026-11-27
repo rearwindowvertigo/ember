@@ -8,7 +8,7 @@ Accepted tasks squash into `ember/flow/<id>`, one commit per task under its
 plan `subject`, with the accepted review's recorded verdict in
 `Ember-Verdict` and the worker tip in `Ember-Task-Tip`. Recovery and cleanup
 recognize that tip through the trailer. Dependencies become ready
-after merges into that flow branch. Claude reviews the whole result before
+after merges into that flow branch. The lead reviews the whole result before
 merging it into the session branch. Keep one claim for the flow through
 its gap check, owner answers, verification and merge.
 
@@ -31,7 +31,8 @@ same names in reports and pull request text.
 Write a JSON plan in the session scratchpad:
 
 - `dir`: the absolute checkout path; `base` only when other than `HEAD`.
-- `trailers`: the harness attribution trailer in a list.
+- `trailers`: any attribution trailer supplied by the harness or required by
+  the repository, in a list. Omit the field when there is none.
 - `rounds`: leave it out; the flow then uses the owner's Max review
   rounds row (`flow.review_rounds`), which counts reviews per task. A plan's
   `rounds` counts fix rounds, one fewer than reviews. Set it only for a flow
@@ -99,8 +100,8 @@ Stall after (`flow.stall`) unless you pass `--stall`.
 Write `subject` in the repository's commit convention, with `!` for a
 breaking Conventional Commit: the one `AGENTS.md` or `CONTRIBUTING` states;
 when neither states one, the form of the session branch's recent commit
-subjects, including any prefix or tag they share. Claude Code lists those
-subjects under the recent commits in your starting context; run
+subjects, including any prefix or tag they share. Use the subjects from
+your starting context if present; run
 `git log --oneline -10` in the checkout only when that list is absent, is
 for another repository or branch, or shows no single form. It is the
 task's squash subject and the writer

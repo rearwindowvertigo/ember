@@ -1,9 +1,10 @@
 # Ember
 
-Ember is a Linux desktop application and command-line tool that lets Claude
-lead AI coding workers on one machine. Claude splits the work, Codex, OpenCode
-or Claude workers do it in isolated git worktrees, and Claude reviews and
-merges the result. The owner watches and configures it in the desktop app.
+Ember is a Linux desktop application and command-line tool for coordinating
+AI coding workers on one machine. The lead agent splits the work, Codex,
+OpenCode or Claude Code workers do it in isolated git worktrees, and the lead
+reviews and merges the result. The owner watches and configures it in the
+desktop app.
 
 Work is tracked in GitHub Issues: one issue per bug, feature or task, with
 one type label (`bug`, `feature`, `chore`), one area label (`app`, `cli`,
@@ -66,7 +67,7 @@ Decisions are in `docs/decisions/`. Releases follow `docs/releasing.md`.
 |---|---|
 | `src/ember/` | The Python package: core, engines, runs, flows, the `emb` command and the desktop app |
 | `tests/` | pytest tests |
-| `skill/` | The `ember` skill for Claude Code, with its references and eval cases |
+| `skill/` | The `ember` lead skill, with its references and eval cases |
 | `packaging/` | The `.deb` build, the desktop entry and icons |
 | `docs/design/` | Designs 0001 to 0004 (0.1.0 to 0.5.0), kept as history, and any later design too large for an issue |
 | `docs/decisions/` | Architecture decision records, numbered |

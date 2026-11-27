@@ -3,8 +3,8 @@
 Follow this before every flow and every Claude Workflow of two or more
 tasks. Single runs and panels do not need it. The owner's Team settings
 decide whether a plan is checked (Run the gap check: off, always, from a
-task count, or ask) and which gaps reach the owner (Gaps Claude asks you
-about). Ember applies both; do not decide them yourself.
+task count, or ask) and which gaps reach the owner (Gaps to ask you about).
+Ember applies both; do not decide them yourself.
 
 Use the run's claim after its skill-version check (SKILL.md step 2).
 
@@ -108,7 +108,10 @@ plan).
 ## Claude subagent reviewer
 
 Exit 64 naming the `--brief`/`--reply` route means the reviewer row runs
-as a Claude subagent:
+as a Claude Code subagent. If you cannot run a Claude Code subagent in
+this session, ask the owner before using a CLI reviewer. Pass an approved
+reviewer with explicit `--engine`, `--model` and any `--effort`, keeping the
+original gap check options. In Claude Code with the subagent tool:
 
 1. Print the brief, with `--confirmed` when the owner approved an `ask`
    check:
@@ -131,7 +134,7 @@ For CLI run recovery, use the run's saved brief named by the `next:` line.
 ## Owner answers
 
 Each gap in `steps` carries an `id` and `ask_owner`, from the owner's Gaps
-Claude asks you about. Each gap's level is the `harm` field, with values
+to ask you about setting. Each gap's level is the `harm` field, with values
 `high`, `medium` and `low`. The result has no `severity` field.
 
 Before asking about any gap or recording its answer, check its factual

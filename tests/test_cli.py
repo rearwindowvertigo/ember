@@ -85,6 +85,7 @@ def test_choices_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
     help_text = capsys.readouterr().out
     assert "--expect-generation" in help_text
     assert "--skill X.Y.Z" in help_text
+    assert "--skill-dir DIR" in help_text
 
 
 @pytest.mark.parametrize(
@@ -434,6 +435,8 @@ def test_owner_options_without_terminal_exit_77(
     "argv",
     [
         ["--claim"],
+        ["--claim", "--id", "run-000001", "--skill-dir", "/skill"],
+        ["--claim", "--id", "run-000001", "--skill", "0.12.0", "--skill-dir", "skill"],
         ["--skill", "0.12.0"],
         ["--id", "run-000001", "--skill", "0.12.0"],
         ["--finish", "run-000001", "--skill", "0.12.0"],
@@ -1246,17 +1249,21 @@ def test_skill_help_names_link_and_source(capsys: pytest.CaptureFixture[str]) ->
     out = " ".join(capsys.readouterr().out.split())
     assert "$CLAUDE_CONFIG_DIR/skills/ember" in out
     assert "~/.claude/skills/ember" in out
+    assert "$XDG_CONFIG_HOME/opencode/skills/ember" in out
     assert "/usr/share/ember/skill" in out
     with pytest.raises(SystemExit):
         main(["--help"])
-    assert "install or remove the ember skill for Claude Code" in (
-        capsys.readouterr().out
-    )
+    assert "install, remove or show the ember skill" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
     "argv",
-    [["skill"], ["skill", "nope"], ["skill", "status", "--force"]],
+    [
+        ["skill"],
+        ["skill", "nope"],
+        ["skill", "status", "--force"],
+        ["skill", "install", "--harness", "unknown"],
+    ],
 )
 def test_skill_usage_errors_exit_64(
     argv: list[str], capsys: pytest.CaptureFixture[str]
@@ -1300,6 +1307,35 @@ def test_skill_install_status_uninstall(
     }
     assert main(["skill", "uninstall"], env=env) == 0
     assert capsys.readouterr().out == f"not installed: {link}\n"
+
+
+def test_opencode_native_skill_install_claim_and_uninstall(
+    env: dict[str, str], skill_source: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = Path(env["HOME"])
+    env["XDG_CONFIG_HOME"] = str(home / "config with spaces")
+    link = Path(env["XDG_CONFIG_HOME"]) / "opencode" / "skills" / "ember"
+    document = skill_source / "SKILL.md"
+    document.write_text("---\nname: ember\n---\n\nSkill version: 0.34.1\n")
+    target = ["--harness", "opencode", "--json"]
+    assert main(["skill", "install", *target], env=env) == 0
+    assert json.loads(capsys.readouterr().out)["link"] == str(link)
+    assert not (home / ".claude").exists()
+    assert main(["skill", "status", *target], env=env) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "installed"
+
+    claim = ["--claim", "--id", "run-000001", "--skill-dir", str(link), "--brief"]
+    for version, expected in [("0.34.1", "current"), ("0.34.0", "stale")]:
+        code, data, _ = _run([*claim, "--skill", version], env, capsys)
+        assert code == 0
+        assert (data["claim"]["status"], data["skill"]) == ("none", expected)
+
+    assert main(["skill", "uninstall", *target], env=env) == 0
+    assert json.loads(capsys.readouterr().out)["action"] == "removed"
+    code, data, err = _run([*claim, "--skill", "0.34.1"], env, capsys)
+    assert code == 0 and data["skill"] == "unknown"
+    assert "owner: repair or reinstall the ember skill" in err
+    assert document.is_file()
 
 
 def test_skill_install_refusals(

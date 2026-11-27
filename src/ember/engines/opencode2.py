@@ -106,6 +106,7 @@ def run_config(model: str, read_only: bool, read: Sequence[str] = ()) -> str:
     provider = json.loads(opencode.run_config(model, read_only, read))["provider"]
     permissions = [
         {"action": "question", "resource": "*", "effect": "deny"},
+        {"action": "skill", "resource": "ember", "effect": "deny"},
         *(
             {"action": "shell", "resource": command, "effect": "deny"}
             for command in GIT_DENIED

@@ -20,7 +20,7 @@ from ember.runs.record import Run
 
 RUN_ID = "codex-20261101-120000-abc123"
 THREAD = "thread-0001"
-BRIEF = f"Brief from Claude, the lead, for Ember run {RUN_ID}.\n\nDo the work."
+BRIEF = f"Brief from the lead for Ember run {RUN_ID}.\n\nDo the work."
 
 CAPACITY_MESSAGE = "Selected model is at capacity. Please try a different model."
 CAPACITY_COMPLETE = (
@@ -156,6 +156,7 @@ def _rollout(
     cwd: Path | None = None,
     thread: str = THREAD,
     name: str = "rollout-1.jsonl",
+    heading: str = "Brief from the lead for Ember run {id}.",
 ) -> Path:
     folder = setup.codex_home / "sessions" / "2026" / "11" / "01"
     folder.mkdir(parents=True, exist_ok=True)
@@ -176,9 +177,7 @@ def _rollout(
                     "content": [
                         {
                             "type": "input_text",
-                            "text": "Brief from Claude, the lead, for Ember run "
-                            f"{run_id}."
-                            "\n\nDo the work.",
+                            "text": heading.format(id=run_id) + "\n\nDo the work.",
                         }
                     ],
                 },
@@ -407,7 +406,16 @@ def test_the_first_message_is_pasted_before_the_rollout_exists(
     assert driver.wait(run) == engines.TurnOutcome(engines.DONE, reply="ok")
 
 
-def test_discovery_finds_the_rollout_that_names_the_run(setup: Setup) -> None:
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "Brief from the lead for Ember run {id}.",
+        "Brief from Claude, the lead, for Ember run {id}.",
+    ],
+)
+def test_discovery_finds_the_rollout_that_names_the_run(
+    setup: Setup, heading: str
+) -> None:
     driver, run = _started(setup)
     _rollout(setup, run_id="codex-20261101-120000-ffffff", name="rollout-0.jsonl")
     _rollout(setup, cwd=setup.tmp, name="rollout-2.jsonl")
@@ -415,8 +423,13 @@ def test_discovery_finds_the_rollout_that_names_the_run(setup: Setup) -> None:
     os.utime(old, (1, 1))
     assert driver.wait(run).state == engines.RUNNING
     assert _saved(run) == ("", "")
-    path = _rollout(setup)
-    assert driver.wait(run).state == engines.RUNNING
+    path = _rollout(
+        setup,
+        _line("task_started"),
+        _line("task_complete", last_agent_message="Recovered."),
+        heading=heading,
+    )
+    assert driver.wait(run) == engines.TurnOutcome(engines.DONE, reply="Recovered.")
     assert _saved(run) == (str(path), THREAD)
 
 

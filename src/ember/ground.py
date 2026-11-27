@@ -1,11 +1,11 @@
-"""What Claude reads before choosing a worker, in one call.
+"""What a lead reads before choosing a worker, in one call.
 
-`read` returns the machine, the Claude Code surface, Claude Code's
-`worktree.baseRef` setting and the state of one folder: whether it is in a git
-checkout, the top of that checkout, the branch, whether the tree is dirty, the
-remote, which of `CLAUDE.md` and `AGENTS.md` exist at the top, and Ember's
-worktree preparation setting. Git runs with optional locks off, so reading
-takes no lock and writes nothing.
+`read` returns the machine and the state of one folder: whether it is in a
+git checkout, the top of that checkout, the branch, whether the tree is
+dirty, the remote, which of `CLAUDE.md` and `AGENTS.md` exist at the top,
+and Ember's worktree preparation setting. It also reports the Claude Code
+surface and `worktree.baseRef` for native Claude Code workers. Git runs
+with optional locks off, so reading takes no lock and writes nothing.
 
 A value that cannot be read is `None` with a sibling `<field>_reason` key
 holding the reason.

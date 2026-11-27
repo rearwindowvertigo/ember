@@ -51,7 +51,7 @@ but authorizes no one-time answer. Only the claim's own reply, or a read
 with `--id <id>`, does.
 
 A claimed answer that cannot apply (an engine off or not connected, a
-gate it fails, a worker this surface cannot run) is still used up. Name
+gate it fails, a native mode the current harness cannot run) is still used up. Name
 the value, why it cannot apply, and that it is used up, in the live
 question that replaces it.
 
@@ -62,22 +62,23 @@ The call and its retries are in SKILL.md step 2.
 ### Skill version
 
 The claim reply has `skill`, `loaded_skill_version` and
-`installed_skill_version`. Ember reads the installed skill link's target
-on each claim, including a repeated claim of the same id. SKILL.md step 2
+`installed_skill_version`. Ember reads the skill in `--skill-dir` when given,
+otherwise the default installed link's target, on each claim, including a
+repeated claim of the same id. SKILL.md step 2
 says what to do for each `skill` value:
 
 - `current`: the versions match.
 - `stale`: the versions differ, whether the installed version is newer or
   older. Standard error has `WARNING: the loaded ember skill is <x>; the
   installed skill is <y>` and a `next:` line.
-- `unknown`: the installed link or its Ember skill is missing or
+- `unknown`: the selected installation or its Ember skill is missing or
   unreadable, or its version line is missing, duplicated or malformed.
   `installed_skill_version` is `null`, with a warning and an `owner:`
   repair or reinstall line.
 
 All three outcomes exit 0; they do not change `claim.status`. A malformed
-`--skill` exits 64 before claiming and leaves a pending one-time choice
-unchanged. Use `x.y.z`, with non-negative integer parts and no leading
+`--skill` or `--skill-dir` exits 64 before claiming and leaves a pending
+one-time choice unchanged. Use `x.y.z`, with non-negative integer parts and no leading
 zeros except `0` itself. Without `--skill` there are no skill-version
 fields. Edits between releases with the same version are not detected.
 
@@ -119,10 +120,10 @@ to finish.
 |---|---|---|
 | 0 | Success | Read the reply. |
 | 64 | Usage error, unknown key, invalid value or invalid id | Fix the call: check the id pattern `[a-z0-9][a-z0-9-]{5,63}` and the options. |
-| 74 | The settings database cannot be opened or read | Give the owner the `owner:` line. `emb run` cannot start until it is repaired; meanwhile offer only a Claude subagent or no worker. |
-| 75 | Stale generation, or the database stayed busy for 5 seconds | Retry the same call once with the same id. If it fails again, tell the owner; `emb run` waits, and only a Claude subagent or no worker can be offered meanwhile. |
+| 74 | The settings database cannot be opened or read | Give the owner the `owner:` line. `emb run` cannot start until it is repaired. Offer to proceed without a worker or with a Claude Code subagent if available. |
+| 75 | Stale generation, or the database stayed busy for 5 seconds | Retry the same call once with the same id. If it fails again, give the owner the same options as for exit 74. |
 | 77 | An owner option without a terminal | An owner option was run; it should not have been (SKILL.md, Owner gates). |
-| 78 | The settings database has an unsupported schema | Give the owner the `owner:` line. `emb run` cannot start until it is repaired; meanwhile offer only a Claude subagent or no worker. |
+| 78 | The settings database has an unsupported schema | Give the owner the `owner:` line and the same options as for exit 74. |
 
 ## Owner options
 

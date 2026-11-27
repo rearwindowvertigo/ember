@@ -1,4 +1,4 @@
-"""Ember lets Claude lead AI coding workers on one Linux machine."""
+"""Coordinate AI coding workers on one Linux machine."""
 
 from importlib.metadata import version
 

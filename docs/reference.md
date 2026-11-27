@@ -22,6 +22,7 @@ standard error as `emb choices: <message>`; skill-version warnings use
 | `--id ID` | With a read or `--claim`: use the claim for `ID` | Read reply for `ID` |
 | `--claim --id ID` | Claim the pending one-time choice for `ID` | Read reply |
 | `--skill X.Y.Z` | With `--claim`: compare the loaded skill version with the installed skill | Adds `skill`, `loaded_skill_version` and `installed_skill_version` |
+| `--skill-dir DIR` | With `--skill`: check the skill in this absolute directory instead of the default skill link | |
 | `--brief` | With a read or `--claim`: keep only the `engine.<name>`, `shortlist.<name>`, `single.writer`, `single.reviewer`, `single.writer_as`, `single.reviewer_as`, `multi.runs_as` and `panel.members` keys in `answers` and the `single.writer`, `single.reviewer`, `multi.runs_as` and `panel.members` rows in `menu` (`null` stays `null`); every other field is unchanged | Shortened reply |
 | `--finish ID` | Release the claim for `ID` | `{"claim": {"id", "status": "gone", "was"}, "generation", "errors"}` |
 | `--request KEY=VALUE` | With a read or `--claim`: a request-layer value; repeatable | |
@@ -135,7 +136,7 @@ one of them runs as its single-task row's `_as` value says.
 owner says so. `gapcheck.ask` is the lowest gap harm put to the owner:
 `high`, `medium` (high and medium) or `all`. `flow.parallel` and
 `flow.stall` are the flow's tasks at once and stall minutes when the plan
-and the command give none. `flow.whole_review` records whether Claude runs
+and the command give none. `flow.whole_review` records whether the lead runs
 one whole-flow review before merging a flow. `workflow.agents` and
 `workflow.late` are what the skill follows for a Claude Workflow: the most
 agents at once, and what to do when an agent runs past its deadline.
@@ -182,15 +183,18 @@ names the invalid values, `menu` is `null` and the exit code is 0.
 ### Loaded skill version
 
 `--claim --id ID --skill X.Y.Z` compares the loaded version with the
-`Skill version:` line in `SKILL.md` at the installed skill link's target
-(see `emb skill`). The comparison runs on every claim, including retries
-of a known id. It does not fall back to the source checkout.
+`Skill version:` line in `SKILL.md`. With `--skill-dir`, Ember checks the
+specified directory, such as the native OpenCode skill link or a
+project-local installation. Otherwise it checks the default managed link's
+target (see [`emb skill`](#emb-skill)). The comparison requires `name: ember`
+in the front matter and runs on every claim, including retries of a known
+id. It checks only the selected installation.
 
 | `skill` | When | Standard error |
 |---|---|---|
 | `current` | Both versions match | None |
 | `stale` | Both versions are valid and unequal, newer or older | `WARNING: the loaded ember skill is <x>; the installed skill is <y>`, then `next: reload the ember skill before the next step` |
-| `unknown` | The installed link or its Ember skill is missing or unreadable, or the version line is missing, duplicated or malformed | `WARNING: the installed ember skill version is missing, unreadable or malformed`, then `owner: repair or reinstall the ember skill, then reload it before starting a worker` |
+| `unknown` | The selected installation is missing or unreadable or does not hold the Ember skill with one valid version line | `WARNING: the installed ember skill version is missing, unreadable or malformed`, then `owner: repair or reinstall the ember skill, then reload it before starting a worker` |
 
 All three outcomes exit 0 and keep the claim's result. With `--skill`, the
 reply also has `loaded_skill_version` (the supplied string) and
@@ -201,7 +205,8 @@ reply also has `loaded_skill_version` (the supplied string) and
 `--skill` accepts three dot-separated non-negative integers, without
 leading zeros except `0` itself. An empty or malformed version exits 64
 before the claim and leaves any pending one-time choice unchanged.
-`--skill` without `--claim` exits 64.
+`--skill` without `--claim` exits 64. `--skill-dir` without `--skill` or
+with a relative path also exits 64 before claiming.
 
 The skill passes the version from its loaded text on each claim. On
 `stale`, it reloads before the next step and keeps the same claim id. On
@@ -867,7 +872,7 @@ same folder while they read, merge and write it.
 The session is a tmux session named by the run id. It runs `launch.sh` in
 the run folder, mode 600, which holds the engine's command, because tmux
 refuses a command longer than about 16 KiB. Its first message is the
-line `Brief from Claude, the lead, for Ember run <id>.`, the run's git rule
+line `Brief from the lead for Ember run <id>.`, the run's git rule
 and the brief, separated by blank lines, pasted once the engine is ready.
 The git rule of an editing run allows git commands that only read and says
 Ember commits the edits at the end of each turn. The git rule of a
@@ -1021,7 +1026,7 @@ line only.
 did not send, before it commits, saves a snapshot or changes the turn's
 state; when it does, or when its history cannot be checked, the command
 exits 75 with `emb run: the session of <run> holds messages Ember did not
-send (<what the driver found>); Claude asks the owner before going on` and
+send (<what the driver found>); the lead asks the owner before going on` and
 `next: ask the owner about the messages in the session of <run>; with their
 go-ahead, repeat the command with --force`. `--force` skips only this
 check, and records the messages then in the session as accepted, so they do
@@ -1289,10 +1294,14 @@ or a failed containment check counts as not contained.
 The verify and merge line is:
 
 ```text
-next: python3 <installed skill>/scripts/verify_branch.py --repo <main or repo> --base <base_branch> --branch <branch> --worktree <worktree> [--expect-files <count>], then emb merge <branch> --into <base_branch> --verdict keep --note '<verdict>' --subject '<subject>'
+next: python3 <skill source>/scripts/verify_branch.py --repo <main or repo> --base <base_branch> --branch <branch> --worktree <worktree> [--expect-files <count>], then emb merge <branch> --into <base_branch> --verdict keep --note '<verdict>' --subject '<subject>'
 ```
 
-Paths and branch names are shell-quoted. `--expect-files` is included only
+Ember uses the first verifier it finds in the source checkout's `skill/`
+folder, `/usr/share/ember/skill`, the default skill link or the native
+OpenCode skill link, in that order. If none has it, Ember prints the path
+under the default skill link. Paths and branch names are shell-quoted.
+`--expect-files` is included only
 on turn 1 when the run has a base commit and git can count the changed
 paths between that base and its last commit. Missing branch names use
 `<branch>` and `<session branch>` placeholders. The lead fills in `--note`
@@ -1426,12 +1435,12 @@ have no report line. Report lines are not translated or configurable.
 | Exit and case | Report line |
 |---|---|
 | 69, no turn started | `report: no worker started; do not retry the start or start another engine before the owner answers` |
-| 73, `capacity` | `report: capacity; retries exhausted; offer only a retry with the same model and effort once capacity returns; offer no other model, engine, Claude subagent or Claude's own work` |
-| 73, `outage` | `report: outage; offer only a retry with the same model and effort once it clears; offer no other model, engine, Claude subagent or Claude's own work` |
+| 73, `capacity` | `report: capacity; retries exhausted; offer only a retry with the same model and effort once capacity returns; offer no other model, engine, subagent or work by the lead` |
+| 73, `outage` | `report: outage; offer only a retry with the same model and effort once it clears; offer no other model, engine, subagent or work by the lead` |
 | 73, `usage_limit` | `report: usage_limit; a retry on the same worker needs no question; another worker or model needs the owner's answer; OpenCode may be offered` |
 | 73, a fallback entry applies | `report: fallback; the owner's fallback list names the worker of the next: line; run that line without a question; tell the owner which model failed, with which error, and which model runs now` |
-| 73, an engine that ended | `report: outage; the engine ended; offer only a new run with the same model and effort once it clears; offer no other model, engine, Claude subagent or Claude's own work` |
-| 73 or 74, `uncertain` | `report: retry delivery is uncertain; do not send again before inspecting the session; then offer only a retry with the same model and effort; offer no other model, engine, Claude subagent or Claude's own work` |
+| 73, an engine that ended | `report: outage; the engine ended; offer only a new run with the same model and effort once it clears; offer no other model, engine, subagent or work by the lead` |
+| 73 or 74, `uncertain` | `report: retry delivery is uncertain; do not send again before inspecting the session; then offer only a retry with the same model and effort; offer no other model, engine, subagent or work by the lead` |
 | 74, default, `retry` or `complete`, editing run | `report: interrupted; partial edits may be committed on <branch>` |
 | 76 | `report: branch or HEAD moved; nothing committed; recover only when the branch and HEAD are as recorded, otherwise leave the work to the owner` |
 | 77, default (commit refused) | `report: the commit hook refused; the work is uncommitted in <worktree>` |
@@ -1600,6 +1609,10 @@ Codex receives `-c features.fast_mode=false` for Standard and
 `-c service_tier="fast"` for Fast. A run record without `speed` supplies
 neither option.
 
+Codex rollout discovery matches the run id in the first line of a user
+message. It accepts both `Brief from the lead for Ember run <id>.` and
+the earlier `Brief from Claude, the lead, for Ember run <id>.`.
+
 OpenCode requests zero data retention through OpenRouter's provider options
 only for `openrouter/` models. Other integrations receive no OpenRouter
 options. The driver's payment-error note names the serving integration:
@@ -1609,8 +1622,9 @@ integration metadata, with the integration id as fallback.
 Both OpenCode drivers allow file reads, including `*.env` and `*.env.*`.
 OpenCode 1 sets `read: allow`; OpenCode 2 sets ordered `read` allow rules
 for `*`, `*.env` and `*.env.*` after OpenCode's defaults, with the last
-matching rule winning. An OpenCode worker asks the owner nothing in its
-window. Reading is limited by the sandbox, the read paths and
+matching rule winning. Both drivers deny the `ember` lead skill to their
+worker agent. An OpenCode worker asks the owner nothing in its window.
+Reading is limited by the sandbox, the read paths and
 `external_directory`.
 
 The OpenCode column describes OpenCode 1. When `opencode --version` reports
@@ -2184,7 +2198,7 @@ or when the run cannot be closed, the run's exit 73 is the check's exit.
 A flow runs a JSON plan of tasks in waves, in a runner's own session. Each
 task has a writer run and read-only review runs with fix rounds. Accepted
 tasks merge into `ember/flow/<id>`; the flow record's check runs after each wave's
-merges. Tasks that need a decision produce lead stops. Claude answers the
+merges. Tasks that need a decision produce lead stops. The lead answers the
 stops, reviews the flow branch and merges it with `emb merge`.
 
 ### Options
@@ -2818,7 +2832,7 @@ merge, where a conflict stops the later task as `conflict`.
 ### Lead stops
 
 A failed writer or review, an unresolved review, a lead finding or a merge
-conflict stops the task. Other tasks may continue. Claude reports each stop
+conflict stops the task. Other tasks may continue. The lead reports each stop
 to the owner with its findings and every available choice.
 
 | Task state | Accepted answers |
@@ -3851,9 +3865,10 @@ artifacts remain available.
 
 ## `emb ground`
 
-Prints, in one call, what Claude reads before choosing a worker: the machine,
-the Claude Code surface, Claude Code's `worktree.baseRef` setting and the
-state of one folder. It changes nothing.
+Prints the machine and the state of one folder before the lead chooses a
+worker. It changes nothing. `surface` and `worktree_base` are metadata for
+Claude Code's native modes; neither identifies the lead's model or gates
+Ember CLI runs.
 
 | Option | Does |
 |---|---|
@@ -4491,9 +4506,11 @@ not valid:
 
 ### Skill link
 
-The `ember-skill` component uses the same source candidates and link path as
-`emb skill status`, including `CLAUDE_CONFIG_DIR`. Its installed source kind
-is `skill`; its newest source kind is `none`.
+The `ember-skill` component uses the source candidates and link paths of
+`emb skill status`. Either managed link pointing to the source is
+`installed`. If neither does, the component reports the default link's
+state and repair command. Its installed source kind is `skill`; its newest
+source kind is `none`.
 
 | Link state | Status | Command or note |
 |---|---|---|
@@ -4684,16 +4701,21 @@ link state and any move-path or reinstall note.
 ## `emb skill`
 
 ```
-emb skill install [--force] [--json]
-emb skill uninstall [--json]
-emb skill status [--json]
+emb skill install [--harness {claude,opencode}] [--force] [--json]
+emb skill uninstall [--harness {claude,opencode}] [--json]
+emb skill status [--harness {claude,opencode}] [--json]
 ```
 
-Installs, removes or shows the `ember` skill for Claude Code. The skill is a
-symbolic link:
+Installs, removes or shows a symbolic link to the `ember` lead skill.
+The harness loads this skill independently of the lead's model.
 
-- The link is `$CLAUDE_CONFIG_DIR/skills/ember` when `CLAUDE_CONFIG_DIR` is
-  set and not empty, otherwise `~/.claude/skills/ember`.
+- The default link (`--harness claude`) is `$CLAUDE_CONFIG_DIR/skills/ember`
+  when `CLAUDE_CONFIG_DIR` is set and not empty, otherwise
+  `~/.claude/skills/ember`. OpenCode V2 also discovers `~/.claude/skills/ember`,
+  including when Claude Code is absent.
+- `--harness opencode` uses `$XDG_CONFIG_HOME/opencode/skills/ember`,
+  defaulting to `~/.config/opencode/skills/ember` when `XDG_CONFIG_HOME`
+  is unset, empty or relative. It manages only the native OpenCode link.
 - The source is the first of the source checkout's `skill/` folder (two
   folders above the `ember` package), used when `emb` runs from a checkout,
   and `/usr/share/ember/skill`. A folder is a source when its `SKILL.md` has
@@ -4708,6 +4730,7 @@ a file at the link path.
 | `--force` | With `install`: replace a link to another folder |
 | `uninstall` | Remove the link |
 | `status` | Print the link, its state, its target and the source |
+| `--harness` | Select the link for this action |
 | `--json` | Print JSON |
 
 `state` is one of:
@@ -4747,12 +4770,13 @@ link's resolved destination read before removal for an uninstall, and null
 for `not installed`.
 
 The package does not create the link; the owner runs `emb skill install`
-once.
+or `emb skill install --harness opencode` once.
 
 `SKILL.md` carries `Skill version: <x.y.z>`, updated by Release Please.
 An upgrade changes the link's target content; a session retains its loaded
 copy until it reloads. `emb choices --claim --skill <x.y.z>` compares that
-loaded version with the installed version on each claim.
+loaded version with the default link's installed version on each claim.
+Pass `--skill-dir` with the installation actually loaded when it is elsewhere.
 
 ### Exit codes
 
@@ -4765,7 +4789,7 @@ then prints one `next:` or `owner:` line.
 | 64 | Usage error | |
 | 66 | `install` found no skill source | `owner: reinstall Ember; the skill is missing from <paths tried>` |
 | 73 | The link cannot be created or removed | `owner: check <folder>: <error>` |
-| 75 | Refused: a link to another folder without `--force`, a folder or file at the link path, or, for `uninstall`, a link to a folder that is not an Ember skill | `next: emb skill install --force` for another link; otherwise `owner: move or remove <path>, then emb skill install` |
+| 75 | Refused: a link to another folder without `--force`, a folder or file at the link path, or, for `uninstall`, a link to a folder that is not an Ember skill | `next: emb skill install --force` for another link; otherwise `owner: move or remove <path>, then emb skill install`. The command includes `--harness opencode` for the native OpenCode link. |
 
 ## `emb app`
 
@@ -4903,7 +4927,7 @@ vertically.
 
 Overview's row counts
 top-level live items: standalone live runs plus every flow and panel in
-Live, including stopped flows waiting for Claude and gone runners or panel
+Live, including stopped flows waiting for the lead and gone runners or panel
 processes. Workers nested under a Live parent add nothing. A live worker
 whose parent is not in Live counts as a top-level run, including a running
 writer under a cancelled flow in Finished, as in the tray. The accessible
@@ -5205,7 +5229,7 @@ and show hours and minutes from an hour on, for example `1 h 30 min`.
 |---|---|---|
 | Starting | A run or flow's `starting` | Grey |
 | Running | `running`, a flow's `checking` | Blue |
-| Waiting for Claude | A run's `waiting`, a flow's `stopped`, or a starting, running or waiting run whose parent state is `lead` or `resume` | Amber |
+| Waiting for the lead | A run's `waiting`, a flow's `stopped`, or a starting, running or waiting run whose parent state is `lead` or `resume` | Amber |
 | Orphaned | A run whose parent state is `orphaned` in `emb run --status` | Amber |
 | At capacity, At usage limit, Waiting for provider | A running run whose sent turn has a saved provider wait of kind `capacity`, `usage_limit` or `outage` | Amber |
 | Done | A run's `closed`, a flow or panel's `done` | Green |
@@ -5234,7 +5258,7 @@ expanded body shows these parts in order.
    | Flow | Branch, Wave and Passes, plus recorded reasons and runner state when applicable. Task and latest review details appear on their readable worker runs. The flow grid shows earlier rounds of a reused reviewer and details whose worker records are unavailable. |
    | Panel | Question, member rows with worker, status, duration and any reason or changed paths, and Left out rows for omitted members. |
 
-   Wait can show `Waiting for Claude's answer to flow <id>` or a message
+   Wait can show `Waiting for the lead's answer to flow <id>` or a message
    about the flow resuming or the panel recovering.
 
 2. **Action bar.** A live run has Open terminal, which opens a terminal on
@@ -5344,7 +5368,9 @@ shortlisted models, under the engine's name, with its models as
 alone). The engine names are headers and cannot be chosen. The closed
 picker names the engine: `Codex · gpt-6-astra · high`. While a picker
 holds a Claude model, a row under it picks how it runs, CLI or Subagent
-(`single.writer_as`, `single.reviewer_as`).
+(`single.writer_as`, `single.reviewer_as`). Subagent and Claude Workflow
+require a Claude Code lead with the respective native tool. A lead without
+the tool asks before substituting another mode.
 
 A saved value that the picker no longer offers stays chosen and shows as
 `<engine>:<model> (not on the shortlist)` or `<engine>:<model> (<Engine> is
@@ -5362,12 +5388,14 @@ gpt-6-astra · high`, as Flow writer and Flow reviewer do. Run the gap check
 (`gapcheck.when`) is a picker of Off, Always, 2+ tasks to 10+ tasks and Ask
 each time; in its open list each option has a hint line with its effect,
 such as "Plans of 1 to 4 tasks start without one." under 5+ tasks; and
-Gaps Claude asks you about (`gapcheck.ask`): High only, High and medium,
+Gaps to ask you about (`gapcheck.ask`): High only, High and medium,
 All.
 
 Work of several tasks holds Multi-task work (`multi.runs_as`): Ask each time
-(`ask`), Flow (`flow`) or Claude Workflow (`workflow`). Flows shows unless
-it is Claude Workflow, and Claude Workflows unless it is Flow.
+(`ask`), Flow (`flow`) or Claude Workflow (`workflow`). With Ask each time,
+the lead offers a Claude Workflow only when its tool is available and the
+owner has already opted in. Flows shows unless Multi-task work is Claude
+Workflow, and Claude Workflows unless it is Flow.
 
 Flows holds Flow writer and Flow reviewer (`flow.writer`, `flow.reviewer`),
 pickers that start with Same as Writer and Same as Reviewer; Max review
@@ -5398,7 +5426,7 @@ every entry but the first a Move up control. A picker adds one shortlisted
 model of a switched-on engine that the list does not hold; it is disabled
 at eight entries. Remove and Move up save the list while it holds entries
 whose model left its shortlist. An empty list shows "No fallback models. A provider error
-then stops the run for Claude." The card's description is the tooltip of an
+then stops the run for the lead." The card's description is the tooltip of an
 info icon after its title.
 
 The Panel card's description is the tooltip of an info icon after its
@@ -5412,8 +5440,8 @@ explaining how to change it. An invalid value also shows a removal warning.
 Each member has a Remove button. Add member lists shortlisted models of
 engines that are on, grouped by engine, excluding saved members. Choosing
 one appends it and returns the picker to Add member. With no members the
-card says "No members. Claude asks for members, or uses the ones it is given,
-each time." At eight members Add member is hidden and the card says
+card says "No members. The lead asks for members, or uses the ones named
+in the request." At eight members Add member is hidden and the card says
 "A panel has at most eight members."
 
 A member missing from its shortlist hides Add member, even when its
@@ -5583,7 +5611,7 @@ exec /usr/lib/ember/bin/python -I -m ember.cli "$@"
 `-I` keeps the caller's `PYTHONPATH` and user site folder out of Ember's
 interpreter. The package installs no autostart entry; the app writes the
 user's own (see Files under Desktop app). The package does not link the
-skill into Claude Code; `emb skill install` does.
+skill into a lead harness; `emb skill install` does.
 
 ## Exit codes
 

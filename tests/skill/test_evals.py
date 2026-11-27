@@ -327,8 +327,8 @@ def worktree_path(work: Case, worktree_id: str) -> Path:
 
 
 def skill_script(work: Case) -> str:
-    """The quoted `verify_branch.py` path the real command prints."""
-    return shlex.quote(str(skill.link_path(work.env) / "scripts" / "verify_branch.py"))
+    """The quoted `verify_branch.py` path in the stub's shipped skill."""
+    return shlex.quote(str(work.eval / "skill/scripts/verify_branch.py"))
 
 
 def case(name: str, tmp_path: Path, env: dict[str, str]) -> Case:
@@ -1233,7 +1233,9 @@ def real_step(work: Case, run_id: str, session: str = "live") -> tuple[str, str 
             check=False,
         )
 
-    return steps.derive(record.Run(**values), session, False, run_git)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(skill, "source_candidates", lambda: (work.eval / "skill",))
+        return steps.derive(record.Run(**values), session, False, run_git)
 
 
 def stderr_next(result: subprocess.CompletedProcess[str]) -> str | None:
@@ -1556,7 +1558,7 @@ def test_send_refused_then_forced(tmp_path: Path, env: dict[str, str]) -> None:
     assert refused.returncode == 75
     assert refused.stderr.splitlines() == [
         f"emb run: the session of {run_id} holds messages Ember did not send "
-        "(1 user message in the rollout); Claude asks the owner before going on",
+        "(1 user message in the rollout); the lead asks the owner before going on",
         f"next: ask the owner about the messages in the session of {run_id}; with "
         "their go-ahead, repeat the command with --force",
     ]

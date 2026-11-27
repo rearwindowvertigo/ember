@@ -55,13 +55,16 @@ ENGINE_ORDER = ("codex", "opencode", "claude")
 ENGINE_LABELS = {engine: engine_name(engine) for engine in ENGINE_ORDER}
 """Each engine's shown name."""
 
-SUBTITLE = "Which workers Claude uses. Ask each time means Claude asks you."
+SUBTITLE = "Which workers the lead uses. Ask each time means the lead asks you."
 
 MULTI = (("ask", "Ask each time"), ("flow", "Flow"), ("workflow", "Claude Workflow"))
-MULTI_HELP = "How Claude runs two or more tasks that each need a worker."
+MULTI_HELP = (
+    "How the lead runs two or more tasks that each need a worker. "
+    "A Claude Workflow needs the Workflow tool in Claude Code."
+)
 RUN_AS_HELP = (
     "How a Claude model runs. CLI is a Claude Code worker started with emb run. "
-    "Subagent is a subagent inside Claude's own session."
+    "Subagent requires a Claude Code lead with a subagent tool."
 )
 ROUNDS = tuple((value, value) for value in choices.REVIEW_ROUNDS)
 ROUNDS_HELP = (
@@ -71,13 +74,13 @@ ROUNDS_HELP = (
 WHOLE_HELP = (
     "One review of all the flow's changes together. After every task of a "
     "flow merges, the Flow reviewer reads the whole flow's changes once, with "
-    "the review bar, before Claude merges the flow."
+    "the review bar, before the lead merges the flow."
 )
-PANEL_HELP = "The models a panel asks when Claude is given no members."
+PANEL_HELP = "The models a panel asks when the request names no members."
 PANEL_LIMIT = 8
 ADD_MEMBER = "Add member"
 NO_MEMBERS = (
-    "No members. Claude asks for members, or uses the ones it is given, each time."
+    "No members. The lead asks for members, or uses the ones named in the request."
 )
 FULL = "A panel has at most eight members."
 ALL_ADDED = "Every shortlisted model is a member. Shortlist more in Engines to add one."
@@ -111,14 +114,14 @@ DERIVED = (
         "flow.writer",
         "Flow writer",
         "Writes every task of a flow. Same as Writer uses the single-task "
-        "Writer. A flow Claude starts with named workers uses those.",
+        "Writer. A flow started with named workers uses those.",
         "Same as Writer",
     ),
     (
         "flow.reviewer",
         "Flow reviewer",
         "Reviews every flow task and, with Review the whole flow on, the whole "
-        "flow once before Claude merges it. Same as Reviewer uses the "
+        "flow once before the lead merges it. Same as Reviewer uses the "
         "single-task Reviewer.",
         "Same as Reviewer",
     ),
@@ -135,17 +138,18 @@ WHEN = tuple(
     for value in choices.GAPCHECK_WHEN
 )
 WHEN_TIP = (
-    "When Claude has a plan checked for gaps before a flow or Claude Workflow "
+    "When the lead has a plan checked for gaps before a flow or Claude Workflow "
     "starts. A plan the setting skips starts without a check and without a "
-    "question; Claude's report says so."
+    "question; the lead reports that it skipped the check."
 )
 ASKS = (("high", "High only"), ("medium", "High and medium"), ("all", "All"))
+ASKS_LABEL = "Gaps to ask you about"
 ASKS_TIP = (
-    "Which gaps Claude brings to you. High only: medium and low gaps take "
+    "Which gaps the lead brings to you. High only: medium and low gaps take "
     "their default. High and medium: low gaps take their default. All: high "
     "gaps one by one, medium and low together in one question. A gap that is "
     "not asked takes the default the gap check proposes, written into the "
-    "plan, and Claude lists it in its report."
+    "plan, and the lead lists it in its report."
 )
 PARALLEL = tuple((value, value) for value in choices.FLOW_PARALLEL)
 STALL = tuple((value, f"{value} min") for value in choices.FLOW_STALL)
@@ -163,7 +167,7 @@ SEGMENTS = (
         "flow.stall",
         "Stall after",
         "How long a flow worker's screen may stay still before Ember stops "
-        "waiting on it and asks Claude.",
+        "waiting on it and asks the lead.",
         STALL,
     ),
     (
@@ -176,7 +180,7 @@ SEGMENTS = (
     (
         "workflow.late",
         "When an agent runs late",
-        "What Claude does when a Claude Workflow agent runs past its deadline, "
+        "What the lead does when a Claude Workflow agent runs past its deadline, "
         "its expected time plus half again, or 10 minutes: ask you, wait one "
         "more deadline, or stop the agent.",
         LATE,
@@ -221,7 +225,7 @@ FALLBACK_HELP = (
     "the next model of another engine. A review never takes the model that "
     "wrote the work."
 )
-NO_FALLBACK = "No fallback models. A provider error then stops the run for Claude."
+NO_FALLBACK = "No fallback models. A provider error then stops the run for the lead."
 
 
 def when_hint(value: str) -> str:
@@ -231,7 +235,7 @@ def when_hint(value: str) -> str:
     if value == "always":
         return "Before every flow and Claude Workflow."
     if value == "ask":
-        return "Claude asks you before each flow or Claude Workflow."
+        return "The lead asks you before each flow or Claude Workflow."
     least = int(value)
     rest = "1 task" if least == 2 else f"1 to {least - 1} tasks"
     return f"Plans of {rest} start without one."
@@ -523,11 +527,11 @@ class MenuScreen(QWidget):
         rows["gapcheck.when"] = self.when_row
         planning.addWidget(self.when_row)
         self.asks = widgets.Segmented(ASKS)
-        self.asks.setAccessibleName("Gaps Claude asks you about")
+        self.asks.setAccessibleName(ASKS_LABEL)
         self.asks.changed.connect(
             lambda value: self._segment_picked("gapcheck.ask", value)
         )
-        self.asks_row = TooltipRow("Gaps Claude asks you about", ASKS_TIP, self.asks)
+        self.asks_row = TooltipRow(ASKS_LABEL, ASKS_TIP, self.asks)
         rows["gapcheck.ask"] = self.asks_row
         planning.addWidget(self.asks_row)
         layout.addWidget(planning_card)

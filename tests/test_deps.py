@@ -1552,7 +1552,7 @@ def test_skill_cached_read(
     state: str,
 ) -> None:
     current = skill.Status(tmp_path / "link", state, None, tmp_path / "source", None)
-    monkeypatch.setattr(skill, "status", lambda *_args: current)
+    monkeypatch.setattr(skill, "status", lambda *_args, **_kwargs: current)
     first = deps.read(env, components=(skill_spec,), newest="never", now=NOW)
 
     def no_read(*args: object) -> skill.Status:
@@ -1563,6 +1563,17 @@ def test_skill_cached_read(
         env, components=(skill_spec,), installed=False, newest="always", now=NOW + HOUR
     )
     assert cached == first
+
+
+def test_opencode_native_skill_is_current(
+    env: dict[str, str], skill_spec: deps.Spec
+) -> None:
+    skill.install(env, skill.source_candidates(), harness="opencode")
+    assert not skill.link_path(env).exists()
+    report = deps.read(env, components=(skill_spec,), newest="never", now=NOW)
+    assert _one(report).status == deps.CURRENT
+    assert _one(report).link_state == skill.INSTALLED
+    assert report.counts() == 0
 
 
 def test_none_newest_excluded_from_reads_and_summaries(

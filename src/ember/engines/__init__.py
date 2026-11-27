@@ -176,8 +176,8 @@ class Driver(ABC):
 
         Args:
             run: The run, with status `starting`.
-            first_message: The brief under the line that names Claude as its
-                author, ready to paste.
+            first_message: The brief under the line that identifies its run,
+                ready to paste.
 
         Returns:
             The command, its extra variables, its working folder and the

@@ -68,7 +68,8 @@ a kept branch, a branch with no run record and a flow branch give none.
 `cleanup --claim <id>` prints `next: emb choices --finish <id>` once on
 standard error unless a kept result holds that claim, `--dry-run` is set,
 or the claim is recorded as `gone` in the stub's state.
-The `verify_branch.py` path comes from `ember.skill.link_path(os.environ)`.
+The `verify_branch.py` path comes from `ember.skill.verification_script()`;
+the setup puts a copy of the script next to the stub's source.
 A run records `base_branch`, the branch checked out in its `--dir` checkout
 at start (null when detached). An exit-0 `choices --finish` records its
 claim as `gone` in `state.json`'s `claims`. An exit-0 choices read or claim
@@ -934,7 +935,7 @@ def verify_line(run: dict[str, Any]) -> str:
     )
     branch = shlex.quote(run["branch"]) if run.get("branch") else "<branch>"
     directory = run.get("main") or run["repo"]
-    script = skill.link_path(os.environ) / "scripts" / "verify_branch.py"
+    script = skill.verification_script()
     line = (
         f"next: python3 {shlex.quote(str(script))} --repo {shlex.quote(directory)} "
         f"--base {base_branch} --branch {branch} "

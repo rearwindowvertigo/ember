@@ -61,6 +61,8 @@ source_root="$kit/../../../src/ember"
 cp -R "$source_root" "$eval_dir/bin/"
 # The isolated kit runs without installed ember-app distribution metadata.
 : > "$eval_dir/bin/ember/__init__.py"
+mkdir -p "$eval_dir/skill/scripts"
+cp "$kit/../../scripts/verify_branch.py" "$eval_dir/skill/scripts/"
 
 # A route the case gives any reply for takes none of the default's parts.
 case_routes=" "

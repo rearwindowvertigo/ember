@@ -784,7 +784,7 @@ def test_editing_run_commits_its_turn(
         run_id, Path(brief).read_text(), read_only=False
     )
     assert pasted.startswith(
-        f"Brief from Claude, the lead, for Ember run {run_id}.\n\n"
+        f"Brief from the lead for Ember run {run_id}.\n\n"
         "You may run git commands that only read"
     )
     assert driver.commands[0][1] == pasted
@@ -2773,7 +2773,7 @@ def test_send_refuses_a_session_holding_foreign_messages_before_committing(
     err = capsys.readouterr().err.splitlines()
     assert err[0] == (
         f"emb run: the session of {run_id} holds messages Ember did not send "
-        f"({FOREIGN}); Claude asks the owner before going on"
+        f"({FOREIGN}); the lead asks the owner before going on"
     )
     assert err[1] == (
         f"next: ask the owner about the messages in the session of {run_id}; "
@@ -3223,11 +3223,11 @@ def test_subject_helpers() -> None:
     failed = engines.TurnOutcome(engines.FAILED, signed_out=True)
     assert core.incomplete_reason(failed) == "sign-in failure"
     assert core.first_message("r", "brief", read_only=False) == (
-        "Brief from Claude, the lead, for Ember run r.\n\n"
+        "Brief from the lead for Ember run r.\n\n"
         f"{core.GIT_RULE} {core.GIT_RULE_PRECEDENCE}\n\nbrief"
     )
     assert core.first_message("r", "brief", read_only=True) == (
-        "Brief from Claude, the lead, for Ember run r.\n\n"
+        "Brief from the lead for Ember run r.\n\n"
         f"{core.READ_ONLY_GIT_RULE} {core.GIT_RULE_PRECEDENCE}\n\nbrief"
     )
     assert "Ember commits your edits" in core.GIT_RULE
