@@ -479,6 +479,7 @@ def test_artificial_analysis_projects_supported_efforts_for_one_release(
     )
     assert codex_evidence["effort"] == "max" and codex_evidence["speed"] == "fast"
     assert not codex_evidence["matches"]
+    assert not codex_evidence["matches_by_effort"]
     assert "Fast" in codex_evidence["related"][TB41]["reason"]
     assert codex_evidence["model_reference"]["efforts"] == {
         "low": rows[1],
@@ -493,3 +494,56 @@ def test_artificial_analysis_projects_supported_efforts_for_one_release(
     deepseek_ref = report["workers"][deepseek_worker]["model_reference"]
     assert deepseek_ref["effort_catalog_available"]
     assert deepseek_ref["efforts"] == {"none": flash, "low": None, "max": None}
+
+
+def test_shortlisted_alternative_effort_has_evidence_without_pool_approval(
+    env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    choices.set_settings({"shortlist.codex": ["gpt-6.2-sol@max"]}, env=env)
+    model = models.Model("gpt-6.2-sol", "Sol", ("low", "max"))
+    status.save_cache_file(
+        models.cache_path("codex", env),
+        {"fetched_at": 0, "models": [model.to_json()]},
+        env,
+    )
+    low = Observation(
+        model="GPT-6.2 Sol",
+        harness="Codex",
+        effort="low",
+        metrics={"resolution": 60, "attempt_usd": 0.25},
+    )
+    maximum: Observation = {**low, "effort": "max", "metrics": {"resolution": 80}}
+    index = Observation(
+        model="GPT-6.2 Sol",
+        model_creator="OpenAI",
+        harness=None,
+        effort="low",
+        metrics={"intelligence_index": 55, "task_usd": 0.2},
+    )
+    for key in SOURCES:
+        _source(monkeypatch, key)
+    _source(monkeypatch, TB41, low, maximum, {**low, "effort": "ultra"})
+    _source(monkeypatch, TB21, low, {**low, "metrics": {"resolution": 62}})
+    benchmarks.configure_artificial_analysis("fixture-key", env)
+    monkeypatch.setattr(
+        benchmarks, "read_artificial_analysis", lambda key: ("5.0", [index])
+    )
+
+    refreshed = benchmarks.refresh(env)
+    assert refreshed["status"] == "partial"
+    assert refreshed["workers"] == {}
+    recommendation = refreshed["other_shortlisted_workers"][WORKER]
+    assert recommendation["effort"] == "max"
+    assert recommendation["supported_efforts"] == ("low", "max")
+    assert recommendation["matches"] == {TB41: maximum}
+    assert recommendation["matches_by_effort"] == {
+        "low": {TB41: low},
+        "max": {TB41: maximum},
+    }
+    assert recommendation["model_reference"]["efforts"] == {"low": index, "max": None}
+
+    choices.set_settings({"routing.pool": {WORKER: {"scores": {}}}}, env=env)
+    saved = benchmarks.cached(choices.read(env=env)["answers"], env)
+    assert saved["other_shortlisted_workers"] == {}
+    assert saved["workers"][WORKER] == recommendation

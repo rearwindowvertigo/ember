@@ -56,10 +56,10 @@ the data. Read the command's reply; report what updated, which setups have
 no match or no cost, and any sources that failed, including whether Ember
 kept their previous results. If `model_reference` is present, report Index
 score and cost coverage across its listed efforts and identify missing
-efforts or metrics. Keep this coverage separate from harness matches. If it
-reports `empty_pool`, point the owner to Team's Routing pool. If the reply
-has an `error` object, report it. Do not look up substitute numbers, edit
-Team settings, or retry automatically.
+efforts or metrics. Keep this coverage separate from harness matches. If
+it reports `empty_pool`, point the owner to Engines to shortlist models.
+If the reply has an `error` object, report it. Do not look up substitute
+numbers, edit Team settings, or retry automatically.
 
 ## One run
 
@@ -202,29 +202,25 @@ explicitly: `emb gapcheck --engine <e> --model <m> --effort <x>`,
 
 When the request did not pick a worker and the row is `ask` (Ask each
 time) or `auto` (Let the lead choose), read
-`references/worker-selection.md`. In `ask`, recommend a model for this
-job and wait. In `auto`, announce and start a suitable eligible pool
-model without asking again.
-Pass `--engine` and `--model` and the resolved `--effort` when there is
-one. If `auto` has no suitable pool model, ask and wait.
+`references/worker-selection.md`. Choose the model and a supported effort
+for the job. In `ask`, recommend a shortlisted pair and wait for the
+owner's choice. In `auto`, choose a shortlisted model in the Routing
+pool and start it at the selected effort. If no approved pair suits the
+job, ask and wait. Pass `--engine`, `--model`, and the selected `--effort`
+when there is one.
 
-#### Announce an automatic single worker
-
-Once you choose a single worker in `auto`, send the announcement as a
-user-visible chat message **before your next tool call**. Name the model,
-effort and why it fits. If benchmark cost helped you choose, name the
-benchmark and unit in that message. For example:
+For a single worker chosen in `auto`, send one sentence as soon as you
+pick it, before writing its brief. Give its model, effort and task-specific
+reason. If benchmark cost helped you choose, name the benchmark and unit.
+For example:
 
 > I'll use Codex GPT‑6.2 Sol at max effort for this bounded edit; focused tests cover the date boundary, and it cost $1.72 per pass on Terminal-Bench 4.1.
-
-Once the message is visible in the conversation, write the brief without
-waiting for a reply. A note in reasoning, a tool description or a preview
-line is not the announcement.
 
 For `emb run`, after writing the brief, run `--dry-run` with the start's
 exact options. A refusal starts no worker. Before starting a fixed or
 owner-chosen worker, post the preview's worker line to the owner. For an
 automatic worker, check that the preview agrees with your announcement.
+The shell output does not announce a choice to the owner.
 
 When you need a worker choice, use the harness's question tool if
 available. Include the row's `state` and `reason` and, when `auto` cannot

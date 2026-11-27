@@ -1,4 +1,4 @@
-"""Refresh and read the benchmark evidence for the owner's routing pool."""
+"""Refresh and read the benchmark evidence for shortlisted workers."""
 
 import contextlib
 import fcntl
@@ -31,7 +31,10 @@ from ember.engines import models, status
 
 MAX_CHECK_AGE = 30 * 24 * 60 * 60
 FORMAT_VERSION = 1
-EMPTY_POOL = "Add models to the routing pool in Ember’s Team screen first."
+EMPTY_POOL = (
+    "Shortlist models in Engines to view benchmarks. Approve automatic workers "
+    "in the Routing pool on Ember’s Team screen."
+)
 
 _HARNESSES = {
     "codex": frozenset({"codex", "codex cli"}),
@@ -102,19 +105,22 @@ class WorkerEvidence(TypedDict):
     effort: str | None
     speed: str | None
     shortlisted: bool
+    supported_efforts: tuple[str, ...] | None
     matches: dict[str, Observation]
+    matches_by_effort: dict[str, dict[str, Observation]]
     related: dict[str, Related]
     missing: dict[str, list[str]]
     model_reference: NotRequired[ModelReference]
 
 
 class Report(TypedDict):
-    """Evidence for the current pool and the result of reading the sources."""
+    """Saved evidence for the routing pool and other shortlisted workers."""
 
     status: str
     summary: str
     sources: dict[str, SourceStatus]
     workers: dict[str, WorkerEvidence]
+    other_shortlisted_workers: dict[str, WorkerEvidence]
 
 
 def cache_path(env: Mapping[str, str] | None = None) -> Path:
@@ -267,12 +273,8 @@ def read_cache(env: Mapping[str, str] | None = None) -> Cache:
     return snapshots
 
 
-def reference_efforts(
-    cache: Cache, env: Mapping[str, str] | None = None
-) -> EffortCatalog:
-    """Read the saved effort lists used to display optional model references."""
-    if ARTIFICIAL_ANALYSIS not in cache:
-        return {}
+def effort_catalog(env: Mapping[str, str] | None = None) -> EffortCatalog:
+    """Read the saved effort lists for matching benchmark evidence locally."""
     return {engine: models.saved_efforts(engine, env) for engine in status.ENGINES}
 
 
@@ -345,6 +347,7 @@ def _worker(
     answers: Mapping[str, Mapping[str, Any]],
     worker: dict[str, Any],
     snapshots: Mapping[str, _Snapshot],
+    saved_efforts: tuple[str, ...] | None,
 ) -> WorkerEvidence:
     engine, model = worker["engine"], worker["model"]
     shortlist = choices.shortlist_models(
@@ -356,7 +359,9 @@ def _worker(
         effort=effort,
         speed=speed,
         shortlisted=model in shortlist,
+        supported_efforts=saved_efforts,
         matches={},
+        matches_by_effort={},
         related={},
         missing={key: list(source.metrics) for key, source in SOURCES.items()},
     )
@@ -368,11 +373,19 @@ def _worker(
         candidates = _related_rows(snapshot["rows"], engine, model)
         if not candidates:
             continue
-        exact = [
-            row
-            for row, _ in candidates
-            if _match_reason(row, engine, model, effort, speed) is None
-        ]
+        exact_by_effort: dict[str, list[Observation]] = {}
+        for row, _ in candidates:
+            tested = row["effort"]
+            if tested is not None and (
+                _match_reason(row, engine, model, tested, speed) is None
+            ):
+                exact_by_effort.setdefault(tested.casefold(), []).append(row)
+        for supported in saved_efforts or ():
+            matches = exact_by_effort.get(supported.casefold(), [])
+            if len(matches) == 1:
+                by_series = evidence["matches_by_effort"].setdefault(supported, {})
+                by_series[key] = matches[0]
+        exact = [] if effort is None else exact_by_effort.get(effort.casefold(), [])
         if len(exact) == 1:
             row = exact[0]
             evidence["matches"][key] = row
@@ -494,8 +507,22 @@ def _report(
         key: _source_status(source, snapshots.get(key, _empty()), now, actions.get(key))
         for key, source in SOURCES.items()
     }
-    rows = choices.routing_rows(answers)
-    workers = {worker["value"]: _worker(answers, worker, snapshots) for worker in rows}
+    pool = {row["value"]: row for row in choices.routing_rows(answers)}
+    other_shortlisted = {
+        f"{engine}:{model}": {"engine": engine, "model": model}
+        for engine in status.ENGINES
+        for model in choices.shortlist_models(
+            engine, answers[f"shortlist.{engine}"]["value"]
+        )
+        if f"{engine}:{model}" not in pool
+    }
+    rows = pool | other_shortlisted
+    evidence = {
+        key: _worker(
+            answers, row, snapshots, efforts.get(row["engine"], {}).get(row["model"])
+        )
+        for key, row in rows.items()
+    }
     reference = snapshots.get(ARTIFICIAL_ANALYSIS)
     if reference is not None:
         edition = reference.get("edition")
@@ -509,20 +536,25 @@ def _report(
             pricing_basis="Publisher's weighted API inference cost per Index task",
             **_check_status(reference, now, actions.get(ARTIFICIAL_ANALYSIS)),
         )
-        for row in rows:
-            worker = workers[row["value"]]
+        for key, row in rows.items():
+            worker = evidence[key]
             if worker["shortlisted"]:
                 worker["model_reference"] = _model_reference(
                     row,
                     worker["effort"],
-                    efforts.get(row["engine"], {}).get(row["model"]),
+                    worker["supported_efforts"],
                     series,
                     reference["rows"],
                 )
-    if not workers:
+    if not rows:
         return Report(
-            status="empty_pool", summary=EMPTY_POOL, sources=sources, workers={}
+            status="empty_pool",
+            summary=EMPTY_POOL,
+            sources=sources,
+            workers={},
+            other_shortlisted_workers={},
         )
+    workers = {key: evidence[key] for key in pool}
     errors = sum(source["error"] is not None for source in sources.values())
     checks = sum(source["checked_at"] is not None for source in sources.values())
     if errors == len(sources):
@@ -538,11 +570,13 @@ def _report(
     summary = (
         f"{covered}/{len(workers)} pool workers have a matching result; "
         f"{costs}/{len(workers)} have a matching benchmark cost."
+        if workers
+        else "No workers in the Routing pool."
     )
     if reference is not None:
         variants = [
             observation
-            for worker in workers.values()
+            for worker in evidence.values()
             if "model_reference" in worker
             for observation in worker["model_reference"]["efforts"].values()
         ]
@@ -557,7 +591,13 @@ def _report(
             f" Artificial Analysis: {scores}/{len(variants)} listed efforts "
             f"have an Index score; {priced}/{len(variants)} have a cost."
         )
-    return Report(status=outcome, summary=summary, sources=sources, workers=workers)
+    return Report(
+        status=outcome,
+        summary=summary,
+        sources=sources,
+        workers=workers,
+        other_shortlisted_workers={key: evidence[key] for key in other_shortlisted},
+    )
 
 
 def cached(
@@ -566,9 +606,9 @@ def cached(
     *,
     now: float | None = None,
 ) -> Report:
-    """Match the saved benchmarks to the current pool, without network access."""
+    """Match saved benchmarks to the shortlists and pool without network access."""
     cache = read_cache(env)
-    return report(answers, cache, efforts=reference_efforts(cache, env), now=now)
+    return report(answers, cache, efforts=effort_catalog(env), now=now)
 
 
 def report(
@@ -578,7 +618,7 @@ def report(
     efforts: EffortCatalog | None = None,
     now: float | None = None,
 ) -> Report:
-    """Project an already loaded cache onto the current routing pool."""
+    """Project an already loaded cache onto the shortlists and routing pool."""
     checked_at = time.time() if now is None else now
     return _report(answers, cache, checked_at, {}, efforts or {})
 
@@ -663,7 +703,9 @@ def refresh(env: Mapping[str, str] | None = None) -> Report:
     if reply["source_error"]:
         raise choices.InvalidChoiceError("; ".join(reply["errors"]))
     answers = reply["answers"]
-    if not answers[choices.ROUTING_POOL]["value"]:
+    if not answers[choices.ROUTING_POOL]["value"] and not any(
+        answers[f"shortlist.{engine}"]["value"] for engine in status.ENGINES
+    ):
         return cached(answers, env)
     with _refresh_lock(env):
         snapshots, actions = _refresh(cache_path(env), env)
@@ -675,7 +717,7 @@ def refresh(env: Mapping[str, str] | None = None) -> Report:
             snapshots,
             time.time(),
             actions,
-            reference_efforts(snapshots, env),
+            effort_catalog(env),
         )
 
 

@@ -499,7 +499,11 @@ def test_team_accepts_a_masked_key_and_shows_the_effort_matrix(
 
     monkeypatch.setattr(benchmarks, "read_artificial_analysis", reference)
     choices.set_settings(
-        {**SHORTLISTS, "routing.pool": {"claude:opus": {"scores": {}}}}, env=env
+        {
+            "shortlist.claude": ["opus@medium", "sonnet@low"],
+            "routing.pool": {"claude:opus": {"scores": {}}},
+        },
+        env=env,
     )
     _context, screen = _screen(env, qtbot)
     assert screen.aa_matrix.isHidden()
@@ -531,13 +535,16 @@ def test_team_accepts_a_masked_key_and_shows_the_effort_matrix(
             assert item is not None
             return item.text()
 
-        assert table.rowCount() == 5
+        assert table.rowCount() == 10
         assert cell(0, 2) == "low"
         assert cell(0, 3) == cell(0, 4) == ""
         assert cell(1, 1) == "Claude Opus 5.5 · Default Fallback"
         assert cell(1, 2) == "medium (preferred)"
         assert cell(1, 3) == "55"
         assert cell(1, 4) == "1.2500"
+        assert cell(5, 0) == "claude:sonnet"
+        assert cell(5, 2) == "low (preferred)"
+        assert cell(5, 3) == cell(5, 4) == ""
         return QDialog.DialogCode.Rejected
 
     with monkeypatch.context() as patch:

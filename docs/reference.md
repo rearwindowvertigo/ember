@@ -307,10 +307,11 @@ runs an engine; with no cache, or a cache that is not valid, no row is
 
 ## `emb benchmarks`
 
-`emb benchmarks refresh [--json]` downloads results for the Team routing
-pool. Ask the lead to fill or refresh Ember benchmark data to run the
-same command without a worker run. The eight default sources need no
-account. With an empty pool the command points to Team and makes no requests.
+`emb benchmarks refresh [--json]` downloads results for shortlisted models.
+Ask the lead to fill or refresh Ember benchmark data to run the same
+command without a worker run. The eight default sources need no account.
+When both the shortlists and the Routing pool are empty, refresh points
+the owner to Engines and makes no requests.
 `emb benchmarks status [--json]` reads saved evidence without a download.
 
 | Series key | Result fields |
@@ -344,17 +345,22 @@ passing trials and are absent when no pass count or no passes are reported.
 These are benchmark costs. The refresh measures neither live subscription
 allowance nor the bill for an Ember job.
 
-The JSON reply has `status`, `summary`, `sources` by series key, and
-`workers` by `<engine>:<model>`. Each worker holds `effort`, `speed`,
-`shortlisted`, and `matches`, `related` and `missing`, each keyed by
-series. Matches contain the tested model, harness, effort and `metrics`.
+The JSON reply has `status`, `summary`, `sources` by series key, `workers`
+for the Routing pool and `other_shortlisted_workers` for models outside
+it. Both worker dictionaries use keys of the form `<engine>:<model>`.
+Each worker holds the shortlist `effort`, `speed`, `shortlisted`, and
+`matches`, `related` and `missing` for the shortlist setup, keyed by series.
+Matches contain the tested model, harness, effort and `metrics`.
 Related entries show a published configuration and why it does not match.
 For example, a Codex `max` result is related to the same model at `high`,
 and a moving Claude alias only gets related evidence. A public row without a
 verified harness or effort cannot fill an exact field. `missing` lists
-unfilled metrics. An absent number is unknown; zero is a result.
+unfilled metrics. `supported_efforts` lists advertised efforts from the
+local model catalogue, or is null when there is no saved catalogue row.
+`matches_by_effort` maps each supported effort that has an exact result to
+its series matches. An absent number is unknown; zero is a result.
 
-With Artificial Analysis enabled, each shortlisted pool model has a
+With Artificial Analysis enabled, each shortlisted model has a
 `model_reference` with a series key, a tested release name when known, and
 `efforts` keyed by the model's supported efforts from the local model
 catalogue. `effort_catalog_available` is false when only the saved preferred
@@ -5499,17 +5505,16 @@ becomes unavailable remains in the list with a reason.
 
 Artificial Analysis is optional. Add API key opens a masked field for the
 owner's free API key. View effort matrix shows the Index score and USD per
-task by model release and advertised effort, with missing measurements
-blank and the shortlisted effort marked Preferred. The matrix includes
-efforts independently of launch approval.
+task for shortlisted models by release and advertised effort. Missing
+measurements are blank. The saved Engines effort is marked Preferred.
 
-With Let the lead choose, the lead announces and starts a suitable pool
-model at its shortlisted effort or an effort the owner has separately
-approved. Codex Fast is approved separately on Engines. Among suitable
-workers the lead prefers a lower comparable benchmark cost. If no
-approved setup fits, it asks the owner and waits. With Ask each time, the
-lead recommends a worker and waits for the owner's choice. Fixed and
-explicit selections keep their precedence.
+Let the lead choose can start a suitable shortlisted Routing pool model
+at any effort the model supports. Among suitable pairs, the lead prefers
+a lower comparable benchmark cost. If no approved pair fits, it asks and
+waits. Ask each time can recommend any shortlisted model and supported
+effort, and waits for the owner's choice. Fixed Team selections use their
+shortlisted effort; an explicit choice for the job takes precedence.
+Codex Fast is approved separately on Engines. A panel uses its member list.
 
 Planning holds Gap check reviewer (`gapcheck.reviewer`), a picker of Same
 as Reviewer (`same`) and the same models as Reviewer; closed on Same as

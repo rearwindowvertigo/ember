@@ -248,9 +248,9 @@ FALLBACK_HELP = (
 )
 NO_FALLBACK = "No fallback models. A provider error then stops the run for the lead."
 ROUTING_HELP = (
-    "With Let the lead choose, any suitable model in this pool can start "
-    "automatically. The lead uses benchmark results and your notes to "
-    "recommend workers in Ask each time too."
+    "Let the lead choose can start a suitable shortlisted model in this pool "
+    "at any supported effort. Ask each time can recommend any shortlisted "
+    "model and effort, then waits for your answer."
 )
 NO_ROUTING_MODELS = "The lead asks you when the pool has no suitable model."
 ADD_ROUTING_MODEL = "Add model"
@@ -453,8 +453,8 @@ class _RoutingDialog(QDialog):
         if entry is None:
             layout.addWidget(
                 label(
-                    "Adding this model allows the lead to start it automatically "
-                    "with Let the lead choose.",
+                    "With Let the lead choose, this model can start automatically "
+                    "at any supported effort.",
                     "secondary",
                 )
             )
@@ -884,7 +884,12 @@ class MenuScreen(QWidget):
 
     def _read_benchmarks(self) -> tuple[benchmarks.Cache, benchmarks.EffortCatalog]:
         cache = benchmarks.read_cache(self.context.env)
-        return cache, benchmarks.reference_efforts(cache, self.context.env)
+        efforts = (
+            benchmarks.effort_catalog(self.context.env)
+            if ARTIFICIAL_ANALYSIS in cache
+            else {}
+        )
+        return cache, efforts
 
     def _benchmarks_loaded(
         self, saved: tuple[benchmarks.Cache, benchmarks.EffortCatalog] | None
@@ -957,9 +962,10 @@ class MenuScreen(QWidget):
         report = self._benchmark_report
         if report is None:
             return
+        shortlist = report["workers"] | report["other_shortlisted_workers"]
         references = [
             (name, worker["effort"], reference)
-            for name, worker in report["workers"].items()
+            for name, worker in shortlist.items()
             if (reference := worker.get("model_reference")) is not None
         ]
         if not references:
@@ -980,7 +986,8 @@ class MenuScreen(QWidget):
         layout.addWidget(
             label(
                 "Model-level references. Unavailable results are blank. "
-                "The preferred effort comes from the shortlist.",
+                "Fixed Team choices use the preferred effort. Automatic choices "
+                "use models in the Routing pool.",
                 "secondary",
             )
         )
@@ -989,7 +996,7 @@ class MenuScreen(QWidget):
                 label("Some effort lists are missing. Refresh model lists in Engines.")
             )
         headings = (
-            "Pool model",
+            "Shortlisted model",
             "Tested release",
             "Effort",
             "Index score",
@@ -1096,8 +1103,9 @@ class MenuScreen(QWidget):
         self.aa_remove.setVisible(analysis is not None)
         self.aa_remove.setEnabled(not self._saving_aa_key)
         self.aa_matrix.setVisible(analysis is not None)
+        shortlisted = report["workers"] | report["other_shortlisted_workers"]
         self.aa_matrix.setEnabled(
-            any("model_reference" in worker for worker in report["workers"].values())
+            any("model_reference" in worker for worker in shortlisted.values())
             and not self._saving_aa_key
         )
         analysis_status = ""
@@ -1110,7 +1118,7 @@ class MenuScreen(QWidget):
                 analysis_status = "API key saved. Ask the lead to refresh benchmarks."
         self.aa_status.setText(analysis_status)
         self.aa_status.setVisible(bool(analysis_status))
-        self.benchmark_summary.setVisible(bool(entries))
+        self.benchmark_summary.setVisible(bool(shortlisted))
         self.benchmark_summary.setToolTip("\n".join(benchmarks.lines(report)))
         checked = [
             stamp

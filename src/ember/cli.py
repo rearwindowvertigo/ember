@@ -160,7 +160,7 @@ def _add_benchmarks(parser: argparse.ArgumentParser) -> None:
     )
     for action, help_text in (
         ("refresh", "download and save public and opted-in benchmark results"),
-        ("status", "show saved benchmark evidence for the routing pool, offline"),
+        ("status", "show saved benchmark evidence for shortlisted workers, offline"),
     ):
         subparser = actions.add_parser(action, help=help_text, description=help_text)
         subparser.add_argument("--json", action="store_true", help="print JSON")
