@@ -496,6 +496,8 @@ def test_automatic_start_checks_the_posted_worker_and_brief(
     tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     env["CLAUDECODE"] = "1"
+    session_id = "session"
+    env["CLAUDE_CODE_SESSION_ID"] = session_id
     choices.set_settings(
         {
             "shortlist.codex": ["gpt-6.1-sol@high", "gpt-6.1-sol-mini@high"],
@@ -530,7 +532,7 @@ def test_automatic_start_checks_the_posted_worker_and_brief(
             "hook_event_name": "PostToolUse",
             "tool_name": "Bash",
             "transcript_path": str(transcript),
-            "session_id": "session",
+            "session_id": session_id,
             "tool_use_id": "preview",
             "tool_response": {"stdout": output},
         },
@@ -541,7 +543,7 @@ def test_automatic_start_checks_the_posted_worker_and_brief(
         json.dumps(
             {
                 "type": "attachment",
-                "sessionId": "session",
+                "sessionId": session_id,
                 "attachment": {
                     "type": "hook_system_message",
                     "hookEvent": "PostToolUse",
@@ -552,6 +554,17 @@ def test_automatic_start_checks_the_posted_worker_and_brief(
         )
         + "\n"
     )
+    no_session = env.copy()
+    del no_session["CLAUDE_CODE_SESSION_ID"]
+    for start_env in (
+        dict(no_session, CLAUDE_CODE_SESSION_ID="other-session"),
+        no_session,
+        dict(no_session, CLAUDE_CODE_SESSION_ID=""),
+    ):
+        assert _start(_core(start_env, driver), repo, brief, **options) == exits.REFUSED
+        assert "no published announcement" in capsys.readouterr().err
+        assert not driver.commands
+        assert not paths.runs_dir(start_env).exists()
     assert _start(
         run, repo, _brief(tmp_path, "Another task\n", "other.md"), **options
     ) == (exits.REFUSED)
