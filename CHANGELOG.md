@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.36.0](https://github.com/rearwindowvertigo/ember/compare/v0.35.0...v0.36.0) (2026-11-27)
+
+
+### Added
+
+* add optional Artificial Analysis benchmark references ([8235f54](https://github.com/rearwindowvertigo/ember/commit/8235f543b0a88156282c6958f9b95a172e5d3c3e))
+* let flexible Team policies choose supported efforts ([2b56ad0](https://github.com/rearwindowvertigo/ember/commit/2b56ad006d5c25f7241d0c38991989ca22babb01))
+
 ## [0.35.0](https://github.com/rearwindowvertigo/ember/compare/v0.34.1...v0.35.0) (2026-11-27)
 
 
