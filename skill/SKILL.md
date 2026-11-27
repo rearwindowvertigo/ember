@@ -208,18 +208,23 @@ model without asking again.
 Pass `--engine` and `--model` and the resolved `--effort` when there is
 one. If `auto` has no suitable pool model, ask and wait.
 
-For a single worker chosen in `auto`, send one sentence as soon as you
-pick it, before writing its brief. Give its model, effort and task-specific
-reason. If benchmark cost helped you choose, name the benchmark and unit.
-For example:
+#### Announce an automatic single worker
+
+Once you choose a single worker in `auto`, send the announcement as a
+user-visible chat message **before your next tool call**. Name the model,
+effort and why it fits. If benchmark cost helped you choose, name the
+benchmark and unit in that message. For example:
 
 > I'll use Codex GPT‑6.2 Sol at max effort for this bounded edit; focused tests cover the date boundary, and it cost $1.72 per pass on Terminal-Bench 4.1.
+
+Once the message is visible in the conversation, write the brief without
+waiting for a reply. A note in reasoning, a tool description or a preview
+line is not the announcement.
 
 For `emb run`, after writing the brief, run `--dry-run` with the start's
 exact options. A refusal starts no worker. Before starting a fixed or
 owner-chosen worker, post the preview's worker line to the owner. For an
 automatic worker, check that the preview agrees with your announcement.
-The shell output does not announce a choice to the owner.
 
 When you need a worker choice, use the harness's question tool if
 available. Include the row's `state` and `reason` and, when `auto` cannot

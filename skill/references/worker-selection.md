@@ -83,16 +83,15 @@ subscription quota or a bill for the current task. Ignore any legacy
   models can be offered. Explain the task-specific reason and wait for an
   answer.
 - **Let the lead choose (`auto`):** Consider only eligible pool members for
-  the automatic choice. Post one line naming the model, effort and why it
-  fits before calling the tool that starts it. If benchmark cost helped
-  you choose, name the benchmark and unit. If no approved setup fits, say
-  why, ask for a worker or effort, and wait. An eligible model outside
-  the pool needs an explicit choice for this job. Never change the pool
-  or settings yourself.
+  the automatic choice. Send the owner the model, effort and reason in
+  chat before starting it. If benchmark cost helped you choose, name the
+  benchmark and unit. If no approved setup fits, say why, ask for a worker
+  or effort, and wait. An eligible model outside the pool needs an explicit
+  choice for this job. Never change the pool or settings yourself.
 
 Pass the result explicitly to the command that starts that role, with the
 approved effort when set. If an OpenCode shortlist entry has no effort and
-the owner has not specified one, omit the effort option. Announce a single
-automatic worker when you pick it, before preparing its brief. For a flow,
-use the dry run's worker lines for the announcement. Name the gap check
-reviewer before running it.
+the owner has not specified one, omit the effort option. For a single
+automatic worker, send the announcement before the next tool call as
+SKILL.md describes. For a flow, use the dry run's worker lines for the
+announcement. Name the gap check reviewer before running it.
