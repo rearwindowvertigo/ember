@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.36.2](https://github.com/rearwindowvertigo/ember/compare/v0.36.1...v0.36.2) (2026-11-27)
+
+
+### Fixed
+
+* bind Claude worker notices to the active conversation ([24bb484](https://github.com/rearwindowvertigo/ember/commit/24bb48414d7da171155879a3afddec207c03fab5))
+* preserve flow selection and validate preparation retries ([a19fde2](https://github.com/rearwindowvertigo/ember/commit/a19fde2816821630c771d6801d44a86321cd68fd))
+* revalidate automatic retries, fallbacks, and efforts ([478a1ca](https://github.com/rearwindowvertigo/ember/commit/478a1ca48ea75fff866b185c4e815740bb780176))
+* **skill:** announce owner-chosen workers without CLI flags ([92a14a1](https://github.com/rearwindowvertigo/ember/commit/92a14a1ed966f43a9439843d3f2bb7267a9a20aa))
+
 ## [0.36.1](https://github.com/rearwindowvertigo/ember/compare/v0.36.0...v0.36.1) (2026-11-27)
 
 
