@@ -70,10 +70,18 @@ preview and announce with the saved brief and options named in the retry
 command before starting again. If Ember cannot verify publication, report
 the refusal. Do not substitute shell output.
 
-For a fixed or owner-chosen worker, copy the ordinary preview's complete
-worker line verbatim into chat before the start tool call. Use
-`--owner-choice` on both calls when a model comes directly from the owner's
-request or answer.
+When a fixed Team row supplies the worker, copy the ordinary preview's
+complete worker line verbatim into chat before the start tool call.
+
+When a model comes directly from the owner's request or answer, pass
+`--owner-choice` on the preview and the start. Run the preview by itself
+in the foreground with the start's exact options. After it succeeds, post
+a plain-language message in chat before the start tool call. Name the
+resolved engine, exact model, effort and any speed shown in the preview.
+If Team has a configured pair for the job and the resolved engine, model
+or effort differs, say that the owner chose this worker instead. The
+choice source is optional otherwise. Omit CLI flags and option-source
+annotations from the chat message.
 
 ## What a start checks
 
