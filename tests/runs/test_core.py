@@ -22,7 +22,7 @@ from ember.engines import Driver, LaunchSpec, models, opencode2, status
 from ember.engines.codex import CodexDriver, codex_home
 from ember.engines.opencode import OpenCodeDriver
 from ember.engines.opencode2 import DeliveryUncertainError, OpenCode2Driver
-from ember.runs import core, exits, record, steps
+from ember.runs import announcements, core, exits, record, steps
 from ember.runs.core import Core, RunError, StartOptions
 from engines.test_opencode2 import STUB_SERVER  # pyrefly: ignore[missing-import]
 
@@ -490,6 +490,85 @@ def test_dry_run_resolves_team_without_creating_launch_artifacts(
     }
     assert git(repo, "branch", "--list", env=env) == branches
     assert git(repo, "worktree", "list", "--porcelain", env=env) == worktrees
+
+
+def test_automatic_start_checks_the_posted_worker_and_brief(
+    tmp_path: Path, env: dict[str, str], repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    env["CLAUDECODE"] = "1"
+    choices.set_settings(
+        {
+            "shortlist.codex": ["gpt-6.1-sol@high", "gpt-6.1-sol-mini@high"],
+            "single.writer": "auto",
+            "routing.pool": {"codex:gpt-6.1-sol": {"scores": {}}},
+        },
+        env=env,
+    )
+    claim = "route-claim"
+    choices.claim(claim, env=env)
+    options = {
+        "engine": "codex",
+        "model": "gpt-6.1-sol",
+        "effort": "low",
+        "claim": claim,
+    }
+    brief = _brief(tmp_path, "Task\n")
+    driver = _driver(env, "codex")
+    run = _core(env, driver)
+    assert _start(run, repo, brief, **options) == exits.REFUSED
+    assert "no published announcement" in capsys.readouterr().err
+    assert not driver.commands
+    assert not paths.runs_dir(env).exists()
+    assert (
+        _start(run, repo, brief, dry_run=True, announce="Exact tests", **options) == 0
+    )
+    output = capsys.readouterr().out
+    transcript = tmp_path / "lead.jsonl"
+    transcript.touch()
+    text = announcements.claude_notice(
+        {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "transcript_path": str(transcript),
+            "session_id": "session",
+            "tool_use_id": "preview",
+            "tool_response": {"stdout": output},
+        },
+        env,
+    )
+    assert text is not None
+    transcript.write_text(
+        json.dumps(
+            {
+                "type": "attachment",
+                "sessionId": "session",
+                "attachment": {
+                    "type": "hook_system_message",
+                    "hookEvent": "PostToolUse",
+                    "toolUseID": "preview",
+                    "content": text,
+                },
+            }
+        )
+        + "\n"
+    )
+    assert _start(
+        run, repo, _brief(tmp_path, "Another task\n", "other.md"), **options
+    ) == (exits.REFUSED)
+    assert _start(run, repo, brief, **(options | {"effort": "high"})) == exits.REFUSED
+    outside = options | {"model": "gpt-6.1-sol-mini"}
+    assert _start(run, repo, brief, **outside) == exits.REFUSED
+    assert "not an eligible Routing pool model" in capsys.readouterr().err
+    assert not driver.commands
+    choices.set_settings({"single.writer": "ask"}, env=env)
+    assert _start(run, repo, brief, **options) == exits.REFUSED
+    assert "no longer lets the lead choose" in capsys.readouterr().err
+    choices.set_settings({"single.writer": "auto"}, env=env)
+    assert _start(run, repo, brief, **options) == 0
+    assert _start(run, repo, brief, **options) == exits.REFUSED
+    assert len(driver.commands) == 1
+    assert _start(run, repo, brief, owner_choice=True, **outside) == 0
+    assert len(driver.commands) == 2
 
 
 @pytest.mark.parametrize("connected", [False, True])

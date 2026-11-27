@@ -591,6 +591,9 @@ warnings described below.
 |---|---|
 | `--engine ENGINE --dir DIR --task-file FILE` | Start a run of `codex`, `opencode` or `claude` on the git checkout holding `DIR`, with `FILE` as the brief |
 | `--dry-run` | With a start: check inputs and print the resolved worker without starting a run |
+| `--announce REASON` | With `--dry-run`, `--claim` and `--model`: publish an automatic worker's model, effort and task-specific reason in the lead's conversation |
+| `--benchmark-cost SERIES:METRIC` | With `--announce`: cite a saved USD cost for the selected worker and effort |
+| `--owner-choice` | With `--claim` and `--model`: use the model the owner directly chose for this job, including when the Team row is automatic |
 | `--model MODEL` | With a start: the model |
 | `--effort EFFORT` | With a start: the effort |
 | `--read-only` | With a start: review a writable detached worktree at the source checkout's `HEAD`, with no branch or Ember commits |
@@ -725,6 +728,27 @@ With `--json`, the dry run prints one object instead:
 An unset effort is `null` in JSON. The announce line places the Codex speed
 after the effort. For other engines, the JSON `speed` is `null`. A dry run
 reads the settings when it runs. A later start resolves them again.
+
+For a claimed single worker selected through **Let the lead choose**, the
+model must be shortlisted, in the Routing pool and free of provider holds.
+Preview the exact start with `--dry-run --announce '<task-specific reason>'`.
+When cost helped choose, `--benchmark-cost <series>:<metric>` looks up the
+selected effort in saved results. The notice names the benchmark, edition
+and unit (`task_usd`, `pass_usd` or `attempt_usd`). A missing or stale cost
+refuses that preview. A successful preview with `--announce` adds an
+`ember announcement:` line, or an `announcement` field with `--json`.
+
+Claude Code publishes the notice through the Ember skill's `PostToolUse`
+hook. OpenCode V2 uses its CLI to post to the current session on the
+shared server. Set `EMBER_OPENCODE_SERVER` to the current server URL if
+running the OpenCode lead on a separate server. The preview and the start
+are separate tool calls. The start verifies publication in the conversation
+and consumes the notice before creating a run record, worktree or session.
+The claim, resolved worker and speed, brief and checkout commit must match.
+Publication needs no owner reply. A missing or mismatched notice refuses a
+start with exit 75. Every new automatic start, including a retry, needs its
+own notice. A provider fallback selected by the owner's fallback list uses
+the provider-error workflow.
 
 An editing run gets the branch `ember/<engine>/<id>`, cut from the named
 checkout's `HEAD`, in a worktree at `worktrees/<id>` in Ember's data folder,
@@ -1522,7 +1546,7 @@ evidence that no provider error occurred.
 | 72 | Session or window unavailable, or the run was closed | `next: emb run --status <run>`, or a new start |
 | 73 | Capacity retries exhausted or disabled, usage limit or outage, including an engine that ended because it could not reach its provider | `next: emb run --send <run> ...` naming the kind; uncertain resend delivery asks the lead to inspect the session before sending again; for an engine that ended, `next: emb run --close <run>, then` a new start |
 | 74 | Interrupted | `next: emb run --recover <run>`; a cancelled capacity resend collects the saved turn; uncertain delivery asks the lead to inspect the session before sending again; an interrupted send uses `next: emb run --send <run> ...` |
-| 75 | Close refused while a turn runs or is collected but not committed, a busy session, another command on the run, or a session holding messages Ember did not send | `next: emb run --recover <run>` or `--status`; for messages Ember did not send, `next: ask the owner ...` |
+| 75 | Automatic start lacks a matching published notice or eligible pool model; close refused while a turn runs or is collected but not committed; busy session; another command on the run; or a session holding messages Ember did not send | Publish an automatic notice or choose an eligible pair; `next: emb run --recover <run>` or `--status`; for messages Ember did not send, `next: ask the owner ...` |
 | 76 | Branch or `HEAD` moved; nothing committed | `next: git -C <worktree> log --oneline -3` |
 | 77 | `git commit was refused`, or `git add failed` | `next: emb run --send <run> --message-file <file>` sends hook output with the correction for a refused commit; a failed `git add` points to `next: emb run --recover <run>` |
 | 79 | Worktree preparation failed before a worker session started | Diagnostic names the log; `next:` gives a new start with the original options and saved brief |

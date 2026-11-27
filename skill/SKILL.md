@@ -11,6 +11,14 @@ description: >-
   exit or a `report:`, `next:` or `owner:` line. Use it even when the owner
   only says hand this off, have Codex or GPT do it, farm this out, use a
   workflow, or names a model, and for /ember.
+hooks:
+  PostToolUse:
+    - matcher: Bash
+      hooks:
+        - type: command
+          if: 'Bash(emb run *--announce*)'
+          command: emb
+          args: [run, --announcement-hook]
 ---
 
 # Ember
@@ -209,18 +217,21 @@ pool and start it at the selected effort. If no approved pair suits the
 job, ask and wait. Pass `--engine`, `--model`, and the selected `--effort`
 when there is one.
 
-For a single worker chosen in `auto`, send one sentence as soon as you
-pick it, before writing its brief. Give its model, effort and task-specific
-reason. If benchmark cost helped you choose, name the benchmark and unit.
-For example:
+After writing the brief for `emb run`, run `--dry-run` with the start's
+exact options. For an automatic single worker, add `--announce '<one
+task-specific reason>'`. If benchmark cost helped you choose, also add
+`--benchmark-cost <series>:<metric>` from the saved evidence. Ember posts
+the model, effort, reason and any cited cost in the lead's conversation.
+Run that preview by itself, in the foreground. Check the worker it
+resolved, then run the same start without `--dry-run`, `--announce` or
+`--benchmark-cost`, and without waiting for an owner reply. If Ember cannot
+verify the notice, it starts no worker. Report the failure to the owner.
 
-> I'll use Codex GPT‑6.2 Sol at max effort for this bounded edit; focused tests cover the date boundary, and it cost $1.72 per pass on Terminal-Bench 4.1.
-
-For `emb run`, after writing the brief, run `--dry-run` with the start's
-exact options. A refusal starts no worker. Before starting a fixed or
-owner-chosen worker, post the preview's worker line to the owner. For an
-automatic worker, check that the preview agrees with your announcement.
-The shell output does not announce a choice to the owner.
+For a fixed or owner-chosen worker, copy the complete ordinary dry-run
+worker line verbatim into chat before the start tool call. Keep the Team
+row, model, effort, any speed and source exactly as printed. Pass
+`--owner-choice` on the preview and start when a model comes directly from
+the owner's request or answer.
 
 When you need a worker choice, use the harness's question tool if
 available. Include the row's `state` and `reason` and, when `auto` cannot
@@ -329,7 +340,7 @@ Pass `--claim <id>` on starts and gap checks that accept it.
 
 | Purpose | Command |
 |---|---|
-| Preview and announce | Add `--dry-run` to the start's exact options; announce the worker and check it against the preview before starting |
+| Preview and announce | Add `--dry-run` to the start's exact options; for an automatic single worker add `--announce '<reason>'` and any `--benchmark-cost <series>:<metric>` |
 | Start | `emb run --engine <engine> --dir <repo> --task-file <brief> --claim <id>` (add `--trailer` when supplied or required) |
 | Read-only | Add `--read-only` |
 | Show the owner | Add `--window` at start, or `emb run --attach <run>` later |

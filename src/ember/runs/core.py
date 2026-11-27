@@ -49,7 +49,7 @@ from ember import (
 )
 from ember.engines import Driver, LaunchSpec, TurnOutcome, models, status
 from ember.engines.opencode2 import DeliveryUncertainError
-from ember.runs import exits, record, steps, worktrees
+from ember.runs import announcements, exits, record, steps, worktrees
 from ember.runs.record import Run
 
 POLL_SECONDS = 1.0
@@ -282,6 +282,15 @@ class StartOptions:
 
     parent: dict[str, Any] | None = None
     """The starting command from `record.parent()`; `None` for `emb run` itself."""
+
+    announce: str | None = None
+    """During a preview, tell the lead's conversation why this worker fits."""
+
+    benchmark_cost: str | None = None
+    """The saved benchmark series and cost metric used for the choice."""
+
+    owner_choice: bool = False
+    """The owner directly chose this model for the job."""
 
 
 @dataclass(frozen=True)
@@ -1096,7 +1105,38 @@ class Core:
             ) from error
         settings = self._settings(options.claim)
         driver, worker = self._select(options, settings)
-        redirected = self._held_replacement(options, settings, worker)
+        name = "single.reviewer" if options.read_only else "single.writer"
+        menu = settings["menu"]
+        claimed_selection = (
+            options.parent is None
+            and options.claim is not None
+            and not options.owner_choice
+            and options.fallback_from is None
+        )
+        automatic = (
+            claimed_selection
+            and menu is not None
+            and menu[name]["state"] == choices.AUTO
+        )
+        if options.announce is not None and not automatic:
+            raise RunError(
+                exits.USAGE, "--announce needs Let the lead choose for this job"
+            )
+        if automatic:
+            self._check_routing_worker(worker, settings["answers"])
+        elif (
+            claimed_selection
+            and options.claim is not None
+            and options.model is not None
+            and not options.dry_run
+            and announcements.pending(options.claim, self.env)
+        ):
+            raise RunError(
+                exits.REFUSED, f"{name} no longer lets the lead choose", "routing"
+            )
+        redirected = (
+            None if automatic else self._held_replacement(options, settings, worker)
+        )
         if redirected is not None:
             options = redirected
             engine = options.engine
@@ -1146,8 +1186,39 @@ class Core:
                 else f"{top} does not have the saved commit {options.base}",
                 dir=top,
             )
+        marker = None
+        if automatic and (options.announce is not None or not options.dry_run):
+            assert options.claim is not None
+            decision = announcements.fingerprint(worker, top, base, brief)
+            try:
+                if options.announce is not None:
+                    marker = announcements.prepare(
+                        options.claim,
+                        decision,
+                        worker,
+                        options.announce,
+                        options.benchmark_cost,
+                        settings["answers"],
+                        self.env,
+                    )
+                else:
+                    announcements.require_posted(options.claim, decision, self.env)
+            except (
+                announcements.AnnouncementError,
+                OSError,
+                paths.RuntimeDirError,
+            ) as error:
+                raise RunError(exits.REFUSED, str(error), "announcement") from error
         if options.dry_run:
-            self._say(json.dumps(asdict(worker)) if options.as_json else worker.line())
+            if options.as_json:
+                output = asdict(worker)
+                if marker is not None:
+                    output["announcement"] = marker
+                self._say(json.dumps(output))
+            else:
+                self._say(worker.line())
+                if marker is not None:
+                    self._say(marker)
             return exits.OK
         run_id = record.new_id(engine)
         worktree = str(self._worktree_path(run_id, checkouts, common))
@@ -1302,6 +1373,35 @@ class Core:
                 )
                 raise failure from error
             return self._turn(run, driver, started, window)
+
+    def _check_routing_worker(
+        self, worker: WorkerSelection, answers: Mapping[str, Mapping[str, Any]]
+    ) -> None:
+        pair = f"{worker.engine}:{worker.model}"
+        if not any(
+            row["value"] == pair and row["state"] == "set"
+            for row in choices.routing_rows(answers)
+        ):
+            raise RunError(
+                exits.REFUSED,
+                f"{pair} is not an eligible Routing pool model",
+                "routing",
+            )
+        if holds.find(worker.engine, worker.model, self.env) is not None:
+            raise RunError(
+                exits.REFUSED, f"{pair} has an active provider hold", "routing"
+            )
+        advertised = models.saved_efforts(worker.engine, self.env).get(worker.model)
+        if (
+            worker.effort is not None
+            and advertised is not None
+            and worker.effort not in advertised
+        ):
+            raise RunError(
+                exits.REFUSED,
+                f"{pair} does not advertise {worker.effort} effort",
+                "routing",
+            )
 
     def _held_replacement(
         self,
@@ -1631,6 +1731,7 @@ class Core:
         for flag, enabled in (
             ("--read-only", options.read_only),
             ("--window", options.window),
+            ("--owner-choice", options.owner_choice),
         ):
             if enabled:
                 argv.append(flag)
