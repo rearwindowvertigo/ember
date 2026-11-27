@@ -747,8 +747,6 @@ class Core:
         self,
         options: StartOptions,
         settings: Mapping[str, Any],
-        *,
-        automatic: bool = False,
     ) -> tuple[Driver, WorkerSelection]:
         """Return the driver and resolved worker, including option sources."""
         engine = options.engine
@@ -815,19 +813,8 @@ class Core:
             effort = row["effort"]
             if effort is not None:
                 effort_source = name
-        with (
-            models.without_cache_writes(saved_only=automatic)
-            if automatic or options.dry_run
-            else contextlib.nullcontext()
-        ):
-            if effort is None:
-                effort = driver.default_effort(model)
-            if automatic:
-                self._check_routing_worker(engine, model, effort, answers)
-            if effort is not None and not driver.valid_effort(effort):
-                raise RunError(
-                    exits.USAGE, f"{engine} does not take the effort {effort!r}"
-                )
+        if effort is None:
+            effort = driver.default_effort(model)
         return driver, WorkerSelection(
             engine=engine,
             model=model,
@@ -837,6 +824,15 @@ class Core:
             effort_source=effort_source,
             row="Single tasks Reviewer" if options.read_only else "Single tasks Writer",
         )
+
+    @staticmethod
+    def _check_worker_effort(driver: Driver, worker: WorkerSelection) -> None:
+        """Check that the driver accepts the resolved effort."""
+        effort = worker.effort
+        if effort is not None and not driver.valid_effort(effort):
+            raise RunError(
+                exits.USAGE, f"{worker.engine} does not take the effort {effort!r}"
+            )
 
     # Checkout and worktree
 
@@ -1075,15 +1071,15 @@ class Core:
         self.last_run_id = None
         fallback = self._start_source(options.fallback_from, "--fallback-from")
         named_retry = self._start_source(options.retry_of, "--retry-of")
-        engine = options.engine
-        for name in (options.dir, *options.read):
+        source = named_retry or fallback
+        task_paths = (options.task_file,) if source is None else ()
+        for name in (options.dir, *task_paths, *options.read):
             if not os.path.exists(name):
                 raise RunError(exits.NO_INPUT, f"{name} does not exist")
         try:
             task_file = Path(options.task_file).resolve()
             brief = task_file.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as error:
-            source = named_retry or fallback
             if source is not None:
                 raise RunError(
                     exits.REFUSED,
@@ -1136,21 +1132,23 @@ class Core:
             raise RunError(
                 exits.USAGE, "--announce needs Let the lead choose for this job"
             )
-        if automatic:
-            driver, worker = self._select(options, settings, automatic=True)
-        elif fallback is not None:
-            driver, worker = self._select(options, {**settings, "menu": None})
-        else:
-            driver, worker = self._select(options, settings)
-        redirected = (
-            None
-            if automatic or fallback is not None
-            else self._held_replacement(options, settings, worker)
-        )
-        if redirected is not None:
-            options = redirected
-            engine = options.engine
-            driver, worker = self._select(options, settings)
+        select_settings = settings if fallback is None else {**settings, "menu": None}
+        with (
+            models.without_cache_writes(saved_only=automatic)
+            if automatic or options.dry_run
+            else contextlib.nullcontext()
+        ):
+            driver, worker = self._select(options, select_settings)
+            if automatic:
+                self._check_routing_worker(worker, settings["answers"])
+            self._check_worker_effort(driver, worker)
+            if not automatic and fallback is None:
+                redirected = self._held_replacement(options, settings, worker)
+                if redirected is not None:
+                    options = redirected
+                    driver, worker = self._select(options, settings)
+                    self._check_worker_effort(driver, worker)
+        engine = options.engine
         self._check_codex_trust(engine, common)
         if options.base is not None and not options.read_only:
             raise RunError(exits.USAGE, "a saved base requires a read-only run")
@@ -1542,12 +1540,27 @@ class Core:
                 "routing",
             )
         use_row = options.model is None and options.effort is None
+        model = retry.model if options.model is None else options.model
         matches_row = (
             retry.selection_origin != record.SELECTION_AUTO
-            and options.model in (None, row["model"])
+            and model == row["model"]
             and options.effort in (None, row["effort"])
         )
-        if options.engine == row["engine"] and (use_row or matches_row):
+        saved = retry.start_argv
+        # The worker options in _start_argv follow the task-file path.
+        saved_effort_override = (
+            retry.selection_origin == record.SELECTION_DIRECT
+            and (retry.engine, retry.model) == (row["engine"], row["model"])
+            and options.model is None
+            and options.effort is not None
+            and options.effort == retry.effort
+            and "--task-file" in saved
+            and saved[saved.index("--task-file") + 2 :][:2]
+            == ("--effort", retry.effort)
+        )
+        if options.engine == row["engine"] and (
+            use_row or matches_row or saved_effort_override
+        ):
             return
         current = replace(options, engine=row["engine"], model=None, effort=None)
         preview = shlex.join((*self._start_argv(retry, current), "--dry-run"))
@@ -1560,11 +1573,10 @@ class Core:
 
     def _check_routing_worker(
         self,
-        engine: str,
-        model: str,
-        effort: str | None,
+        worker: WorkerSelection,
         answers: Mapping[str, Mapping[str, Any]],
     ) -> None:
+        engine, model, effort = worker.engine, worker.model, worker.effort
         pair = f"{engine}:{model}"
         if not any(
             row["value"] == pair and row["state"] == "set"
@@ -1579,7 +1591,7 @@ class Core:
             raise RunError(
                 exits.REFUSED, f"{pair} has an active provider hold", "routing"
             )
-        if effort is None and engine != "codex":
+        if effort is None and engine == "claude":
             return
         advertised = models.saved_efforts(engine, self.env).get(model)
         if advertised is None:

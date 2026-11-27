@@ -619,8 +619,17 @@ def test_automatic_start_checks_the_posted_worker_and_brief(
 
 
 @pytest.mark.parametrize(
-    "catalogue",
-    ["missing", "other-integration", "unsupported", "supported", "no-effort"],
+    ("catalogue", "effort", "refusal"),
+    [
+        ("missing", "high", "no saved effort catalogue entry"),
+        ("missing", None, "no saved effort catalogue entry"),
+        ("other-integration", "high", "no saved effort catalogue entry"),
+        ("other-integration", None, "no saved effort catalogue entry"),
+        ("efforts", "low", "does not advertise low effort"),
+        ("efforts", None, "choose an effort"),
+        ("efforts", "high", None),
+        ("no-effort", None, None),
+    ],
 )
 def test_automatic_opencode_effort_uses_exact_saved_catalogue(
     tmp_path: Path,
@@ -629,6 +638,8 @@ def test_automatic_opencode_effort_uses_exact_saved_catalogue(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     catalogue: str,
+    effort: str | None,
+    refusal: str | None,
 ) -> None:
     env.update(CLAUDECODE="1", CLAUDE_CODE_SESSION_ID="session")
     model = "openrouter/openai/example"
@@ -656,36 +667,35 @@ def test_automatic_opencode_effort_uses_exact_saved_catalogue(
     monkeypatch.setattr(models, "fetch_json", unexpected)
     monkeypatch.setattr(models, "_run_models", unexpected)
     monkeypatch.setattr(status, "save_cache_file", unexpected)
-    effort = "low" if catalogue == "unsupported" else "high"
     argv = [
         "run", "--engine", "opencode", "--model", model, "--claim", claim,
         "--dir", str(repo), "--task-file", _brief(tmp_path, "Task\n"),
     ]  # fmt: skip
-    if catalogue != "no-effort":
+    if effort is not None:
         argv.extend(("--effort", effort))
     preview = [*argv, "--dry-run", "--announce", "The task only needs a small edit"]
-    if catalogue in ("supported", "no-effort"):
+    if refusal is None:
         assert main(preview, env=env) == exits.OK
         _publish_claude_notice(tmp_path, env, capsys.readouterr().out)
-        if catalogue == "supported":
-            cache = models.cache_path("opencode", env)
-            saved = cache.read_bytes()
-            cache.unlink()
-            assert main(argv, env=env) == exits.REFUSED
-            assert "emb engines --models opencode" in capsys.readouterr().err
-            assert not worker.commands
-            cache.write_bytes(saved)
+        cache = models.cache_path("opencode", env)
+        saved = cache.read_bytes()
+        cache.unlink()
+        assert main(argv, env=env) == exits.REFUSED
+        assert "emb engines --models opencode" in capsys.readouterr().err
+        assert not worker.commands
+        cache.write_bytes(saved)
         assert main(argv, env=env) == exits.OK
         started, _ = worker.commands[0]
         assert started.model == model
-        assert started.effort == (None if catalogue == "no-effort" else effort)
+        assert started.effort == effort
         return
 
     for args in (preview, argv):
         assert main(args, env=env) == exits.REFUSED
         out, err = capsys.readouterr()
         assert not out
-        assert model in err and "emb engines --models opencode" in err
+        assert model in err and refusal in err
+        assert "emb engines --models opencode" in err
         assert not announcements.pending(claim, env)
         assert not worker.commands and not record.list_runs(env)[0]
 
@@ -1974,7 +1984,9 @@ def test_missing_files_are_66(
     capsys: pytest.CaptureFixture[str],
     dry_run: bool,
 ) -> None:
-    assert _start(_core(env), repo, str(tmp_path / "none.md"), dry_run=dry_run) == 66
+    missing = tmp_path / "none.md"
+    assert _start(_core(env), repo, str(missing), dry_run=dry_run) == 66
+    assert f"{missing} does not exist" in capsys.readouterr().err
     brief = _brief(tmp_path, "Task\n")
     assert (
         _start(_core(env), repo, brief, read=(str(tmp_path / "gone"),), dry_run=dry_run)
@@ -5286,6 +5298,67 @@ def test_automatic_preparation_retry_reapplies_current_team_policy(
         assert claude.commands[0][0].model == "opus"
 
 
+@pytest.mark.parametrize("read_only", [False, True])
+def test_fixed_preparation_retry_keeps_its_saved_effort_override(
+    tmp_path: Path,
+    env: dict[str, str],
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    read_only: bool,
+) -> None:
+    role = "single.reviewer" if read_only else "single.writer"
+    choices.set_settings(
+        {
+            role: "claude:opus",
+            "shortlist.claude": ["opus@high", "sonnet@low"],
+            "worktree.prepare": {str(repo): "exit 1"},
+        },
+        env=env,
+    )
+    choices.claim("prep-claim", env=env)
+    worker = _driver(env)
+    _use_cli_drivers(monkeypatch, worker)
+    assert _start(
+        _core(env, worker), repo, _brief(tmp_path, "Task\n"),
+        claim="prep-claim", read_only=read_only, effort="low",
+    ) == exits.PREPARATION_FAILED  # fmt: skip
+    out, err = capsys.readouterr()
+    failed = record.load(_run_id(out), env)
+    retry = _next_start(err)
+    assert failed.turn == 0 and failed.selection_origin == record.SELECTION_DIRECT
+    assert failed.model == "opus" and failed.effort == "low"
+    assert "--model" not in retry
+    assert retry[retry.index("--effort") + 1] == "low"
+    assert retry[retry.index("--retry-of") + 1] == failed.id
+
+    choices.set_settings({"worktree.prepare": {str(repo): "true"}}, env=env)
+    assert main(_with_arg(retry, "--effort", "medium"), env=env) == exits.REFUSED
+    assert "now uses the fixed Team worker" in capsys.readouterr().err
+    for unverified in (
+        replace(failed, selection_origin=None),
+        replace(failed, start_argv=()),
+    ):
+        record.save(unverified)
+        assert main(retry, env=env) == exits.REFUSED
+        assert "now uses the fixed Team worker" in capsys.readouterr().err
+    record.save(failed)
+    for selection, message in (
+        ("claude:sonnet", "now uses the fixed Team worker"),
+        ("ask", "now asks the owner to choose"),
+    ):
+        choices.set_settings({role: selection}, env=env)
+        assert main(retry, env=env) == exits.REFUSED
+        assert message in capsys.readouterr().err
+    assert not worker.commands
+
+    choices.set_settings({role: "claude:opus"}, env=env)
+    assert main(retry, env=env) == exits.OK
+    ((started, _),) = worker.commands
+    assert started.read_only == read_only
+    assert (started.engine, started.model, started.effort) == ("claude", "opus", "low")
+
+
 def test_owner_choice_retry_keeps_its_explicit_worker_under_ask(
     tmp_path: Path,
     env: dict[str, str],
@@ -5337,6 +5410,11 @@ def test_named_preparation_retry_requires_matching_failed_record(
     choices.set_settings({"worktree.prepare": {}}, env=env)
     assert main(["run", "--status", failed.id, "--retry-of", failed.id], env=env) == 64
     assert "--retry-of cannot be used with --status" in capsys.readouterr().err
+    missing = str(tmp_path / "missing.md")
+    assert main(_with_arg(retry, "--task-file", missing), env=env) == exits.REFUSED
+    err = capsys.readouterr().err
+    assert f"cannot read {missing}" in err
+    assert f"next: emb run --status {failed.id}" in err
     linked = tmp_path / "linked"
     git(repo, "worktree", "add", "-q", "--detach", str(linked), env=env)
     for invalid in (
@@ -6821,6 +6899,11 @@ def test_fallback_admission_binds_source_brief_checkout_and_continuation(
     choices.claim("other-claim", env=env)
     source = failed.folder / record.BRIEF_NAME
     copy = _brief(tmp_path, source.read_text(), "copy.md")
+    missing = str(tmp_path / "missing.md")
+    assert main(_with_arg(fallback, "--task-file", missing), env=env) == exits.REFUSED
+    err = capsys.readouterr().err
+    assert f"cannot read {missing}" in err
+    assert f"next: emb run --status {failed.id}" in err
     linked = tmp_path / "linked"
     git(repo, "worktree", "add", "-q", "--detach", str(linked), env=env)
     for invalid in (
