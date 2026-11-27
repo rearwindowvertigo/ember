@@ -106,7 +106,7 @@ script, which holds the command, instead.
 HOOK_OUTPUT_LINES = 200
 HOOK_OUTPUT_BYTES = 64 * 1024
 
-BRIEF_LINE = "Brief from Claude, the lead, for Ember run {id}."
+BRIEF_LINE = "Brief from the lead for Ember run {id}."
 """The first line of the first message, above the brief."""
 
 GIT_RULE = (
@@ -404,7 +404,7 @@ def first_message(run_id: str, brief: str, *, read_only: bool) -> str:
         read_only: Whether the run is read-only.
 
     Returns:
-        The line naming Claude as the brief's author, the run's git rule and
+        The line identifying the run, the run's git rule and
         the brief, separated by blank lines.
     """
     rule = READ_ONLY_GIT_RULE if read_only else GIT_RULE
@@ -782,7 +782,7 @@ class Core:
             if engine == "claude" and row["run_as"] == "subagent":
                 raise RunError(
                     exits.USAGE,
-                    f"menu row {name} runs as a subagent inside Claude, "
+                    f"menu row {name} runs as a subagent inside Claude Code, "
                     "not through emb run",
                     "subagent",
                 )
@@ -988,7 +988,7 @@ class Core:
             raise RunError(
                 exits.REFUSED,
                 f"the session of {run.id} holds messages Ember did not send "
-                f"({found}); Claude asks the owner before going on",
+                f"({found}); the lead asks the owner before going on",
                 "foreign",
                 run=run.id,
             )

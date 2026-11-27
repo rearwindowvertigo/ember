@@ -343,7 +343,7 @@ def _verify(run: Run, git: Callable[..., subprocess.CompletedProcess[str]]) -> s
     )
     branch = shlex.quote(run.branch) if run.branch else "<branch>"
     directory = run.main or run.repo
-    script = skill.link_path(run.env) / "scripts" / "verify_branch.py"
+    script = skill.verification_script(run.env)
     line = (
         f"next: python3 {shlex.quote(str(script))} --repo {shlex.quote(directory)} "
         f"--base {base_branch} --branch {branch} "

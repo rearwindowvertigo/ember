@@ -425,6 +425,7 @@ def test_config(tmp_path: Path) -> None:
     assert permissions[:1] == [
         {"action": "question", "resource": "*", "effect": "deny"}
     ]
+    assert {"action": "skill", "resource": "ember", "effect": "deny"} in permissions
     assert [p["resource"] for p in permissions if p["action"] == "shell"] == list(
         opencode.GIT_DENIED
     )

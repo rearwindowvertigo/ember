@@ -1,4 +1,15 @@
-# Claude agents
+# Native modes in Claude Code
+
+Use this reference when Claude Code hosts the lead and has the native tool
+the task needs. A Claude model in another harness does not provide these
+tools. Use Bash's background command support for the `emb` commands
+listed in SKILL.md step 6, and AskUserQuestion when that tool is available.
+
+When the owner invokes `/ember <task>` in Claude Code, use its arguments
+as the task. That explicit invocation opts into a Claude Workflow for
+several tasks. An explicit request or saved `multi.runs_as=workflow` also
+supplies opt-in. Loading the skill does not. If the selected native mode
+is unavailable, follow SKILL.md (Role) and ask before switching.
 
 ## Subagents
 
@@ -21,14 +32,17 @@ Subagents have no AskUserQuestion and no Workflow tool. They receive
 Plan), but not the owner's output style or memory. Put in the prompt only
 the repository rules the task needs.
 
-For editing, use `isolation: "worktree"`, tell the agent to commit with
-the supplied trailer, and have it return branch, worktree and tip. Its
-worktree is `.claude/worktrees/agent-<agentId>` on the branch
-`worktree-agent-<agentId>`, based on `worktree.baseRef` (`head` or
-`fresh`; see the skill's editing boundary). Do not isolate a read-only
-agent. Read-only output belongs in the final message, with a length cap
-set in the prompt; other results go to a session-scratchpad file whose
-path the agent returns.
+For editing, use `isolation: "worktree"`, tell the agent to commit with any
+supplied attribution trailer, and have it return branch, worktree and tip.
+Its worktree is `.claude/worktrees/agent-<agentId>` on the branch
+`worktree-agent-<agentId>`. Read `worktree_base` from `emb ground --json`:
+`head` is the checkout's current `HEAD`; `fresh` is the remote default
+branch. Say when the base is `fresh`. When that base leaves out session
+commits the worker needs, offer an Ember CLI run at the right commit and
+ask before substituting it. The same base rules apply to Workflow agents.
+Do not isolate a read-only agent. Read-only output belongs in the final
+message, with a length cap set in the prompt; other results go to a
+session-scratchpad file whose path the agent returns.
 
 Correct a running or finished agent with SendMessage addressed by its
 agentId. Respawn Explore or Plan, which have no agentId, and respawn when
@@ -43,7 +57,7 @@ The runtime allows 20 concurrent subagents and three levels of nesting.
 
 ## Claude Workflow
 
-A Workflow needs the opt-in SKILL.md (Role) describes. It is one run and one
+A Workflow needs the opt-in above. It is one run and one
 claim, whatever its agent count.
 
 Do not set a model or effort on `agent()`: agents use this session's.

@@ -83,6 +83,23 @@ def test_checkout_skill_is_beside_src() -> None:
     assert skill.source_candidates()[1] == skill.SYSTEM_SKILL
 
 
+def test_verification_falls_back_to_managed_links_without_a_shipped_script(
+    env: dict[str, str], source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(skill, "source_candidates", lambda: (tmp_path / "missing",))
+    script = Path("scripts/verify_branch.py")
+    default = skill.link_path(env)
+    assert skill.verification_script(env) == default / script
+
+    (source / script).parent.mkdir()
+    (source / script).touch()
+    native = skill.install(env, [source], harness="opencode").link
+    assert skill.verification_script(env) == native / script
+
+    skill.install(env, [source])
+    assert skill.verification_script(env) == default / script
+
+
 @pytest.mark.parametrize("version", ["0.0.0", "0.12.0", "1.2.3", "12.34.567"])
 def test_valid_skill_versions(version: str) -> None:
     assert skill.is_valid_version(version)
@@ -133,6 +150,21 @@ def test_installed_version_uses_config_dir_and_not_checkout(
     link.parent.mkdir(parents=True)
     link.symlink_to(source)
     assert skill.installed_version(env) == "98.76.54"
+
+
+def test_installed_version_checks_only_the_loaded_directory(
+    env: dict[str, str], source: Path, tmp_path: Path
+) -> None:
+    (source / "SKILL.md").write_text("---\nname: ember\n---\nSkill version: 1.0.0\n")
+    skill.install(env, [source])
+    project_skill = make_skill(tmp_path / ".opencode" / "skills" / "ember")
+    document = project_skill / "SKILL.md"
+    document.write_text(document.read_text() + "\nSkill version: 2.0.0\n")
+
+    assert skill.installed_version(env, directory=project_skill) == "2.0.0"
+    document.unlink()
+    assert skill.installed_version(env, directory=project_skill) is None
+    assert skill.installed_version(env) == "1.0.0"
 
 
 @pytest.mark.parametrize(

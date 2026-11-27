@@ -1,6 +1,6 @@
 # Ember use survey
 
-An optional development tool. A Claude session that has used Ember, in any
+An optional development tool. A lead session that has used Ember, in any
 repository, fills in `survey.md` when the owner asks for it and files the
 result as one issue in this repository with the `survey` label. That issue
 is the entry: it records friction points, efficiencies and how the session

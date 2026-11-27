@@ -1,7 +1,7 @@
 """The exit codes of `emb run` and the next step printed with each.
 
 Each non-zero exit prints its message on standard error, then one line that
-starts `next: ` (a command Claude runs) or `owner: ` (something only the
+starts `next: ` (an action for the lead) or `owner: ` (something only the
 owner does). A line names its placeholders in braces; a placeholder with no
 value prints as `<name>`.
 
@@ -48,7 +48,8 @@ LINES: dict[int, str | Mapping[str, str]] = {
         "menu": "owner: set {row} with emb choices --set; "
         "or the lead passes --engine and --model",
         "engine_off": "owner: switch {engine} on: emb choices --set engine.{engine}=on",
-        "subagent": "next: run this task as a Claude subagent inside Claude Code",
+        "subagent": "next: use a subagent in Claude Code if available; "
+        "otherwise ask the owner before choosing a CLI worker",
         "claim": "next: emb choices --claim --id <id>, then pass that id to --claim",
         "no_run": "next: emb run --status",
     },
@@ -206,16 +207,16 @@ def report(code: int, variant: str | None = None, **context: object) -> str | No
         text = (
             "retry delivery is uncertain; do not send again before inspecting the "
             "session; then offer only a retry with the same model and effort; offer "
-            "no other model, engine, Claude subagent or Claude's own work"
+            "no other model, engine, subagent or work by the lead"
         )
     elif code == PROVIDER_ERROR:
         text = {
             "capacity": "capacity; retries exhausted; offer only a retry with the "
             "same model and effort once capacity returns; offer no other model, "
-            "engine, Claude subagent or Claude's own work",
+            "engine, subagent or work by the lead",
             "outage": "outage; offer only a retry with the same model and effort "
-            "once it clears; offer no other model, engine, Claude subagent or "
-            "Claude's own work",
+            "once it clears; offer no other model, engine, subagent or work "
+            "by the lead",
             "usage_limit": "usage_limit; a retry on the same worker needs no "
             "question; another worker or model needs the owner's answer; "
             "OpenCode may be offered",
@@ -227,7 +228,7 @@ def report(code: int, variant: str | None = None, **context: object) -> str | No
                 ("starting", "ended"),
                 "outage; the engine ended; offer only a new run with the same "
                 "model and effort once it clears; offer no other model, engine, "
-                "Claude subagent or Claude's own work",
+                "subagent or work by the lead",
             ),
         }.get(variant or "outage")
     elif (

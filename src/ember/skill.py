@@ -1,10 +1,9 @@
-"""Installing the `ember` skill for Claude Code as a symbolic link.
+"""Install the `ember` skill as a symbolic link for a lead harness.
 
-The link is `$CLAUDE_CONFIG_DIR/skills/ember` when `CLAUDE_CONFIG_DIR` is set
-and not empty, otherwise `~/.claude/skills/ember`. Its target is the skill
-source: the source checkout's `skill/` folder when Ember runs from a checkout,
-otherwise the packaged `/usr/share/ember/skill`. A folder holds an Ember skill
-when its `SKILL.md` has `name: ember` in its front matter.
+Claude Code uses `$CLAUDE_CONFIG_DIR/skills/ember` when set and not empty,
+otherwise `~/.claude/skills/ember`, which OpenCode also discovers. OpenCode
+has a native link in its XDG configuration folder. Both link to the source
+checkout's `skill/` folder or the packaged `/usr/share/ember/skill`.
 
 Ember never removes a folder or a file at the link path; it creates, replaces
 and removes only symbolic links.
@@ -33,8 +32,11 @@ SYSTEM_SKILL = Path("/usr/share/ember/skill")
 CONFIG_DIR_VARIABLE = "CLAUDE_CONFIG_DIR"
 """The variable naming Claude Code's configuration folder."""
 
+HARNESSES = ("claude", "opencode")
+"""The supported install targets for `emb skill`."""
+
 PARENT_MODE = 0o755
-"""The mode of each parent folder Ember creates, as Claude Code's own."""
+"""The mode of each parent folder Ember creates."""
 
 _VERSION = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 _VERSION_LINE = re.compile(
@@ -159,18 +161,21 @@ def _text(path: Path | None) -> str | None:
     return None if path is None else str(path)
 
 
-def link_path(env: Mapping[str, str] | None = None) -> Path:
+def link_path(env: Mapping[str, str] | None = None, *, harness: str = "claude") -> Path:
     """Return where the skill's link goes.
 
     Args:
         env: The environment; `None` reads `os.environ`.
+        harness: `claude` for the default link or `opencode` for its native link.
 
     Returns:
-        `skills/ember` in `CLAUDE_CONFIG_DIR` when that is set and not empty,
-        otherwise `~/.claude/skills/ember`.
+        `skills/ember` in the selected harness's configuration folder.
     """
-    config = (os.environ if env is None else env).get(CONFIG_DIR_VARIABLE, "")
-    base = Path(config) if config else paths.home_dir(env) / ".claude"
+    if harness == "opencode":
+        base = paths.config_dir(env).with_name("opencode")
+    else:
+        config = (os.environ if env is None else env).get(CONFIG_DIR_VARIABLE, "")
+        base = Path(config) if config else paths.home_dir(env) / ".claude"
     return base / "skills" / SKILL_NAME
 
 
@@ -189,22 +194,28 @@ def is_valid_version(version: str) -> bool:
     return re.fullmatch(_VERSION, version) is not None
 
 
-def installed_version(env: Mapping[str, str] | None = None) -> str | None:
-    """Read the version from the installed skill link's target.
+def installed_version(
+    env: Mapping[str, str] | None = None, *, directory: Path | None = None
+) -> str | None:
+    """Read the version of the skill at the given installation.
 
     Args:
         env: The environment; `None` reads `os.environ`.
+        directory: The lead's loaded skill folder, or `None` to check the
+            default managed link.
 
     Returns:
-        The version, or `None` when the link, Ember skill or single version
-        line is missing, unreadable or malformed. No source fallback is used.
+        The version, or `None` when the selected link, Ember skill or version
+        line is missing, unreadable or malformed. No other source is checked.
     """
-    link = link_path(env)
+    folder = link_path(env) if directory is None else directory
     try:
-        if not link.is_symlink() or not is_ember_skill(link):
+        if directory is None and not folder.is_symlink():
             return None
-        text = (link / "SKILL.md").read_text(encoding="utf-8")
+        text = (folder / "SKILL.md").read_text(encoding="utf-8")
     except OSError, UnicodeDecodeError:
+        return None
+    if not _names_ember(text):
         return None
     lines = [line for line in text.splitlines() if line.startswith("Skill version:")]
     if len(lines) != 1:
@@ -222,6 +233,27 @@ def source_candidates() -> tuple[Path, ...]:
     return (checkout_skill(), SYSTEM_SKILL)
 
 
+def verification_script(env: Mapping[str, str] | None = None) -> Path:
+    """Return the shipped verifier or one from an installed skill.
+
+    Args:
+        env: The environment used to locate the managed skill links.
+
+    Returns:
+        The first existing script in the checkout, package, default skill
+        link or native OpenCode link. If none exists, the default link's
+        expected script path.
+    """
+    script = Path("scripts/verify_branch.py")
+    default = link_path(env)
+    candidates = (*source_candidates(), default, link_path(env, harness="opencode"))
+    for folder in candidates:
+        verifier = folder / script
+        if verifier.is_file():
+            return verifier
+    return default / script
+
+
 def is_ember_skill(folder: Path) -> bool:
     """Return whether a folder holds the Ember skill.
 
@@ -236,6 +268,10 @@ def is_ember_skill(folder: Path) -> bool:
         text = (folder / "SKILL.md").read_text(encoding="utf-8")
     except OSError, UnicodeDecodeError:
         return False
+    return _names_ember(text)
+
+
+def _names_ember(text: str) -> bool:
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return False
@@ -268,17 +304,23 @@ def _missing_reason(candidates: Sequence[Path]) -> str:
     return f"the skill is missing from {tried}"
 
 
-def status(env: Mapping[str, str] | None, candidates: Sequence[Path]) -> Status:
+def status(
+    env: Mapping[str, str] | None,
+    candidates: Sequence[Path],
+    *,
+    harness: str = "claude",
+) -> Status:
     """Read the state of the link path and find the skill source.
 
     Args:
         env: The environment; `None` reads `os.environ`.
         candidates: The folders to search for the source, in order.
+        harness: Which harness's link to check.
 
     Returns:
         The status.
     """
-    link = link_path(env)
+    link = link_path(env, harness=harness)
     source = find_source(candidates)
     reason = None if source is not None else _missing_reason(candidates)
     target: Path | None = None
@@ -299,12 +341,20 @@ def status(env: Mapping[str, str] | None, candidates: Sequence[Path]) -> Status:
     return Status(link, state, target, source, reason)
 
 
-def _not_a_link(current: Status) -> SkillError:
+def _install_command(harness: str) -> str:
+    return (
+        "emb skill install --harness opencode"
+        if harness == "opencode"
+        else "emb skill install"
+    )
+
+
+def _not_a_link(current: Status, harness: str) -> SkillError:
     kind = "a folder" if current.state == FOLDER else "a file"
     return SkillError(
         EX_TEMPFAIL,
         f"{current.link} is {kind}, not a link; Ember does not remove it",
-        f"owner: move or remove {current.link}, then emb skill install",
+        f"owner: move or remove {current.link}, then {_install_command(harness)}",
     )
 
 
@@ -325,8 +375,9 @@ def install(
     candidates: Sequence[Path],
     *,
     force: bool = False,
+    harness: str = "claude",
 ) -> Result:
-    """Link the skill into Claude Code's skills folder.
+    """Link the skill into the selected harness's skills folder.
 
     A missing or broken link is created or replaced. A link to another
     folder is replaced only with `force`. A folder or file is never touched.
@@ -335,6 +386,7 @@ def install(
         env: The environment; `None` reads `os.environ`.
         candidates: The folders to search for the source, in order.
         force: Replace a link to another folder.
+        harness: Which harness's link to install.
 
     Returns:
         What was done.
@@ -343,7 +395,7 @@ def install(
         SkillError: No source is found (66), the link cannot be created
             (73), or something else is at the link path (75).
     """
-    current = status(env, candidates)
+    current = status(env, candidates, harness=harness)
     source = current.source
     if source is None:
         raise SkillError(
@@ -355,12 +407,12 @@ def install(
     if current.state == INSTALLED:
         return Result(link, ALREADY_INSTALLED, source)
     if current.state in (FOLDER, FILE):
-        raise _not_a_link(current)
+        raise _not_a_link(current, harness)
     if current.state == OTHER_LINK and not force:
         raise SkillError(
             EX_TEMPFAIL,
             f"{link} links to {current.target}, not to {source}",
-            "next: emb skill install --force",
+            f"next: {_install_command(harness)} --force",
         )
     folder = link.parent
     temporary = folder / f".{SKILL_NAME}.{secrets.token_hex(4)}.tmp"
@@ -382,7 +434,12 @@ def install(
     return Result(link, INSTALLED, source)
 
 
-def uninstall(env: Mapping[str, str] | None, candidates: Sequence[Path]) -> Result:
+def uninstall(
+    env: Mapping[str, str] | None,
+    candidates: Sequence[Path],
+    *,
+    harness: str = "claude",
+) -> Result:
     """Remove the skill's link.
 
     A link is removed when it is installed, broken, or points to a folder
@@ -391,6 +448,7 @@ def uninstall(env: Mapping[str, str] | None, candidates: Sequence[Path]) -> Resu
     Args:
         env: The environment; `None` reads `os.environ`.
         candidates: The folders to search for the source, in order.
+        harness: Which harness's link to remove.
 
     Returns:
         What was done.
@@ -399,18 +457,18 @@ def uninstall(env: Mapping[str, str] | None, candidates: Sequence[Path]) -> Resu
         SkillError: The link cannot be removed (73), or something other than
             an Ember skill link is at the link path (75).
     """
-    current = status(env, candidates)
+    current = status(env, candidates, harness=harness)
     link = current.link
     if current.state == MISSING:
         return Result(link, NOT_INSTALLED, None)
     if current.state in (FOLDER, FILE):
-        raise _not_a_link(current)
+        raise _not_a_link(current, harness)
     target = current.target
     if current.state == OTHER_LINK and (target is None or not is_ember_skill(target)):
         raise SkillError(
             EX_TEMPFAIL,
             f"{link} links to {target}, which is not an Ember skill",
-            f"owner: move or remove {link}, then emb skill install",
+            f"owner: move or remove {link}, then {_install_command(harness)}",
         )
     try:
         link.unlink()

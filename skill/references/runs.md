@@ -27,7 +27,8 @@ trailer with an apostrophe, join single-quoted pieces with `'\''`.
   `emb engines --models opencode --json`, such as `anthropic/claude-sonnet-4`
   or `openrouter/deepseek/deepseek-v4.1-flash-1017`. Ember uses it unchanged.
 - A `claude` row whose run-as is `subagent` is refused with 64: use a
-  Claude subagent instead. With `--model`, that row is not read.
+  Claude Code subagent if available. Otherwise ask before substituting a
+  CLI worker. With `--model`, that row does not select the model or run-as.
 - `--effort` wins. Otherwise the effort is the row's when the row names the
   same engine and model, else the driver's default, which may be none.
 - With a `set` row and no model or effort named by the owner, pass neither
@@ -77,8 +78,8 @@ command per repository in Settings, Worktree preparation, Add repository,
 or at a terminal with `emb choices --set 'worktree.prepare=<JSON object>'`.
 The object maps absolute main-checkout paths to commands. Preserve the
 current mapping when giving the owner a command; the value replaces the
-whole mapping. Claude never sets it. No entry means no preparation; an
-empty command also means no preparation and no proposal from Claude.
+whole mapping. Only the owner sets it. No entry means no preparation; an
+empty command also means no preparation and no proposal from the lead.
 SKILL.md step 1 covers when to propose a command.
 
 Ember matches worktrees by their common git folder, so an Ember or Claude
@@ -185,7 +186,7 @@ files and tests still reflect the original checkout. Close the reviewer
 after the final verdict.
 
 `--send` refuses with 75 when the session holds messages Ember did not
-send, with `Claude asks the owner` in the message. Ask the owner about
+send, with `the lead asks the owner` in the message. Ask the owner about
 those messages with one direct question, such as whether to send anyway.
 `--force` records the messages as accepted.
 

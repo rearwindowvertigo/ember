@@ -670,10 +670,13 @@ def _same_folder(left: object, right: str) -> bool:
 def _names_run(lines: list[str], run_id: str) -> bool:
     """Return whether a user message in rollout lines starts with the run's line.
 
-    The line is the first line of the run's first message,
-    `Brief from Claude, the lead, for Ember run <id>.`
+    Match either heading so a rollout started before the heading changed can
+    still be found.
     """
-    header = BRIEF_LINE.format(id=run_id)
+    headings = {
+        BRIEF_LINE.format(id=run_id),
+        f"Brief from Claude, the lead, for Ember run {run_id}.",
+    }
     for line in lines:
         try:
             payload = json.loads(line).get("payload", {})
@@ -689,7 +692,7 @@ def _names_run(lines: list[str], run_id: str) -> bool:
             if not isinstance(text, str):
                 continue
             first = next((row.strip() for row in text.splitlines() if row.strip()), "")
-            if first == header:
+            if first in headings:
                 return True
     return False
 

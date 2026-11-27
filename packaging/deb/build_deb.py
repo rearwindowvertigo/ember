@@ -139,12 +139,12 @@ TOOLS = ("uv", "dpkg-deb", "objdump")
 """The commands the build runs, besides the interpreter."""
 
 DESCRIPTION = """\
-Lets Claude lead AI coding workers on one Linux machine
- Claude splits the work, Codex, OpenCode or Claude workers do it in isolated
- git worktrees, and Claude reviews and merges the result. The owner watches
- and configures it in the desktop app. The emb command holds the run, merge,
- cleanup and dependency commands, and the package carries the ember skill for
- Claude Code.
+Coordinates AI coding workers on one Linux machine
+ Codex, OpenCode and Claude Code workers run in isolated git worktrees. The
+ lead agent assigns the work, reviews the results and merges approved changes.
+ The desktop app shows live work and settings. The emb command manages runs,
+ merges, cleanup and dependencies. The package includes the ember skill for
+ leads in Claude Code and OpenCode V2.
 """
 
 

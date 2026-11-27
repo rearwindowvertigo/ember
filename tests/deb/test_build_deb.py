@@ -112,7 +112,7 @@ def test_control_has_every_field() -> None:
     assert fields["Homepage"] == "https://github.com/rearwindowvertigo/ember"
     assert fields["Recommends"] == "bubblewrap, xdg-terminal-exec"
     assert fields["Description"] == (
-        "Lets Claude lead AI coding workers on one Linux machine"
+        "Coordinates AI coding workers on one Linux machine"
     )
     depends = fields["Depends"].split(", ")
     assert depends[:3] == ["python3.14", "git", "tmux"]
@@ -139,7 +139,7 @@ def test_desktop_entry_keys() -> None:
     assert entries == {
         "Type": "Application",
         "Name": "Ember",
-        "Comment": "Lets Claude lead AI coding workers on this machine",
+        "Comment": "Coordinates AI coding workers on this machine",
         "Exec": "emb app",
         "Icon": "io.github.rearwindowvertigo.Ember",
         "Terminal": "false",

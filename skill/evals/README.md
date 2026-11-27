@@ -174,9 +174,10 @@ non-zero `.code`:
   it as `next` in JSON; a kept branch, a flow branch and a branch with no run
   record give none. `cleanup --claim <id>` prints
   `next: emb choices --finish <id>` once on standard error unless a kept result
-  holds that claim or `--dry-run` is set. The `verify_branch.py` path comes from
-  `ember.skill.link_path(os.environ)`; a run records `base_branch`, the branch
-  checked out in its `--dir` checkout at start, or null when detached. An
+  holds that claim or `--dry-run` is set. The `verify_branch.py` path uses
+  `ember.skill.verification_script()`, which finds the copy shipped by the
+  fixture setup. A run records `base_branch`, the branch checked out in its
+  `--dir` checkout at start, or null when detached. An
   exit-0 `choices --finish` records its claim as `gone`, and a run whose claim
   is `gone` derives no finish line. Canned replies print only what their `.err`
   holds; no template variable carries a `next:` line.
@@ -436,6 +437,28 @@ Out dirs go outside every git checkout, so that the session loads no
 ```
 bash skill/evals/_runner/run_case.sh skill/evals/<case> skill "${XDG_CACHE_HOME:-$HOME/.cache}/ember-evals/<case>"
 ```
+
+## OpenCode V2 smoke checks
+
+The same case scaffolds can be used in an isolated OpenCode V2 session with
+a non-Claude model. Use separate XDG folders for Ember and a `PATH` without
+`claude`. Install the checkout's skill with `emb skill install --harness
+opencode` in the test configuration before putting the stub `emb` on `PATH`.
+Run each case's `place-files.sh` in an empty folder, source its
+`.ember-eval/env.sh`, and open the case's prompt in OpenCode with `@ember`.
+
+- `claim-and-menu-writer`: check the native `--skill-dir` on the claim,
+  then the dry run, worker start, verification, merge and claim finish.
+- `owner-away-named-workers`: check that the gap check runs before the flow
+  starts and that the checked default is recorded.
+- `panel-named-members-compared`: check that the lead reads the summary
+  and reports the failed member along with the answers.
+- To exercise an unavailable mode, change `multi.runs_as` to `workflow` in
+  the case's canned choices answers and menu, then ask for two worker tasks.
+  The lead asks for approval of a substitute before starting an Ember flow,
+  gap check or worker.
+
+The case's `.ember-eval/calls.log` records the commands and exit codes.
 
 ## Grading
 

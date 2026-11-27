@@ -1,6 +1,6 @@
 # Ember use survey: instructions for the session filling it in
 
-You are a Claude session that used Ember in some repository, and the owner
+You are a lead agent that used Ember in some repository, and the owner
 asked you to take the Ember use survey. These instructions and the survey
 template are the only files you read from the Ember repository
 (`rearwindowvertigo/ember`). Do not clone it, browse it or read any other

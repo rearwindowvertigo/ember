@@ -258,7 +258,8 @@ def test_verify_arguments(
     monkeypatch.setattr(branches, "is_contained", contained)
     _, line = steps.derive(run, core.LIVE, False, diff)
     assert line is not None
-    assert str(skill.link_path(run.env) / "scripts/verify_branch.py") in line
+    script = skill.checkout_skill() / "scripts/verify_branch.py"
+    assert script.is_file() and str(script) in line
     assert not skill.link_path(run.env).exists()
     assert f"--base {base_branch or '<session branch>'}" in line
     assert f"--into {base_branch or '<session branch>'}" in line

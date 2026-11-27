@@ -50,8 +50,8 @@ states the run's git rule above the brief. Never tell an `emb run` worker
 to commit. For a Claude agent, keep the block that applies.>
 
 Editing Claude subagent or Workflow agent:
-Commit on your own branch in this worktree, with this exact trailer:
-<Attribution trailer supplied by the harness>
+Commit on your own branch in this worktree.
+<When supplied by the harness or required by the repository, give the exact attribution trailer.>
 Do not push, merge, rebase, cherry-pick, force-push, stash, delete
 branches, or touch main or a branch you did not create.
 

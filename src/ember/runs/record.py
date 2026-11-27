@@ -95,7 +95,7 @@ class Run:
     """Whether the run edits nothing."""
 
     repo: str
-    """The top of the checkout Claude named."""
+    """The top of the checkout the lead named."""
 
     worktree: str
     """The worker's worktree; older read-only records name the source checkout."""

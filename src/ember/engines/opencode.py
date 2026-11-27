@@ -167,6 +167,7 @@ def run_config(model: str, read_only: bool, read: Sequence[str] = ()) -> str:
         "bash": bash,
         "external_directory": external_directory(read_only, read),
         "question": "deny",
+        "skill": {"ember": "deny"},
     }
     config = {
         "provider": {

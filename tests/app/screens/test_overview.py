@@ -250,7 +250,7 @@ def test_rows_and_badges(
     first, second = screen.live_rows.values()
     assert (first.badge.text(), first.badge.tone()) == ("Starting", "neutral")
     assert (second.badge.text(), second.badge.tone()) == (
-        "Waiting for Claude",
+        "Waiting for the lead",
         "warning",
     )
     assert first.title_label.text() == "Add the thing"
@@ -735,7 +735,7 @@ def test_flow_details_and_nested_runs(
     assert screen.live_card.isVisible()
     assert screen.finished_empty.isVisible()
     row = screen.live_rows[FLOW]
-    assert row.badge.text() == "Waiting for Claude"
+    assert row.badge.text() == "Waiting for the lead"
     assert row.title_label.text() == "Task 0 and 1 more"
     assert row.repo_label.text() == "main-project"
     assert row.progress_label.text() == "1/2 merged"
@@ -1275,7 +1275,7 @@ def test_record_rows_survive_other_changes_and_refresh_workers(
     other["status"] = "stopped"
     flow_record.save(other, env)
     qtbot.waitUntil(
-        lambda: screen.live_rows[other["id"]].badge.text() == "Waiting for Claude"
+        lambda: screen.live_rows[other["id"]].badge.text() == "Waiting for the lead"
     )
     assert screen.live_rows[FLOW] is row and row.expanded
     assert panel_row.expanded is destination_expanded
@@ -1583,7 +1583,7 @@ def test_cancelled_parent_moves_live_workers_to_live_with_their_controls(
         assert detail_rows(row)["Reason"] == "Owner stopped it"
         assert not row.child_rows
         child = screen.live_rows[LIVE_A]
-        assert child.badge.text() == "Waiting for Claude"
+        assert child.badge.text() == "Waiting for the lead"
         assert child.open_button.isVisible()
         child.expand_button.click()
         assert detail_rows(child)["Parent"] == f"Flow · project · {FLOW}"
@@ -1773,7 +1773,7 @@ def test_unreadable_line_combines_counts_inside_live(
     [
         ("starting", "Starting", "neutral"),
         ("checking", "Running", "info"),
-        ("stopped", "Waiting for Claude", "warning"),
+        ("stopped", "Waiting for the lead", "warning"),
         ("done", "Done", "success"),
         ("cancelled", "Incomplete", "incomplete"),
         ("failed", "Failed", "danger"),
@@ -3185,18 +3185,18 @@ def test_flow_wait_badge(
     flow_row.expand_button.click()
     row = flow_row.child_rows[LIVE_A]
     row.expand_button.click()
-    assert (row.badge.text(), row.badge.tone()) == ("Waiting for Claude", "warning")
+    assert (row.badge.text(), row.badge.tone()) == ("Waiting for the lead", "warning")
     chip_column = row.badge.parentWidget()
     assert chip_column is not None
     qtbot.waitUntil(lambda: chip_column.width() == overview._chip_width())
     assert row.badge.sizeHint().width() <= row.badge.width() <= chip_column.width()
-    assert detail_rows(row)["Wait"] == f"Waiting for Claude's answer to flow {FLOW}"
+    assert detail_rows(row)["Wait"] == f"Waiting for the lead's answer to flow {FLOW}"
     flow["status"] = "failed"
     flow_record.save(flow, env)
     context.flows.reload()
     qtbot.waitUntil(lambda: LIVE_A in screen.live_rows)
     row.expand_button.click()
-    assert (row.badge.text(), row.badge.tone()) == ("Waiting for Claude", "warning")
+    assert (row.badge.text(), row.badge.tone()) == ("Waiting for the lead", "warning")
     assert detail_rows(row)["Wait"].startswith(f"Waiting for flow {FLOW} to resume")
     flow["status"] = "done"
     flow_record.save(flow, env)

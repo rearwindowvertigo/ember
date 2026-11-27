@@ -1,8 +1,8 @@
 ---
 name: ember
 description: >-
-  How Claude, as lead and final reviewer, hands coding work to workers
-  through Ember and lands the results. Load it before starting any worker:
+  Lead AI coding workers through Ember and review and land their work.
+  Load it before starting any worker:
   `emb run` on Codex, OpenCode or Claude, a Claude subagent or Workflow.
   Load it to run a flow, ask a few models, run a panel, or do a gap check;
   to review, merge or clean up a worker branch (`ember/<engine>/<id>`,
@@ -18,24 +18,29 @@ Skill version: 0.34.1 <!-- x-release-please-version -->
 
 ## Role
 
-Claude is the lead and final reviewer; spare Claude's work first. Read the
-owner's request, split the work and settle design choices yourself. A
-worker may read what informs those decisions, or draft, but you decide or
-bring the open choice to the owner. Treat worker reports as unverified
-until you or a second worker checks them.
+You are the lead and final reviewer. Read the owner's request, split the
+work and settle design choices yourself. A worker may investigate or draft;
+you decide or bring the open choice to the owner. Verify worker reports
+yourself or with an independent reviewer.
 
-After the conversation is compacted, read this file again from the
-installed skill before the next step: the copy kept in the conversation
-can end before the last step.
+Use the tools of your current harness. Claude Code and OpenCode V2 can both
+drive the `emb` commands, regardless of the lead model. Claude Code's
+native subagents and Workflows require their own tools. Read
+`references/claude-agents.md` if invoked with `/ember` in Claude Code or
+before choosing either native mode.
+If the owner requests or a saved choice selects a native mode you cannot
+run, explain why, offer an Ember CLI worker or flow as appropriate, and
+wait for approval before starting the substitute, including any gap check.
+A different harness's subagent tool does not fulfill a Claude Code subagent
+choice.
+
+After compaction, reload this skill before the next step, using the skill
+tool or the installed `SKILL.md`. Compaction can omit later steps.
 
 The choice of worker is the owner's. You recommend one; the owner's
 request, a claimed one-time choice, a standing setting or the owner's live
 answer picks it. Every rule in this skill still binds how the picked worker
 runs.
-
-The task after `/ember` is `$ARGUMENTS`. That explicit invocation opts into
-a Claude Workflow; loading this skill yourself does not. The owner's own
-words or saved `multi.runs_as=workflow` also supply opt-in for multi-task work.
 
 Bundled paths (`references/`, `assets/`, `scripts/`) are relative to this
 skill folder.
@@ -44,10 +49,10 @@ skill folder.
 
 ### 1. Read the ground
 
-Before recommending a worker, run `emb ground --json` once. Read
-`machine`, `surface` (`desktop` true is the Claude desktop app),
-`worktree_base`, and under `directory`: `git`, `top`, `branch`, `dirty`,
-`remote`, `files` (whether `CLAUDE.md` and `AGENTS.md` exist) and `prepare`.
+Before recommending a worker, run `emb ground --json` once. Read `machine`
+and under `directory`: `git`, `top`, `branch`, `dirty`, `remote`, `files`
+(whether `CLAUDE.md` and `AGENTS.md` exist) and `prepare`. `surface` and
+`worktree_base` are Claude Code metadata for its native modes.
 `directory.prepare` gives `state`, `command` and the resolved main checkout
 as `repository`. A null with its `<field>_reason` is data; do not substitute
 assumptions. Exit 66 means the folder does not exist: run it with `--dir`
@@ -64,7 +69,7 @@ choose the main checkout and enter the command. Second, give an exact
 `emb choices --set 'worktree.prepare=<JSON object>'` command for the owner's
 terminal, built from the current `worktree.prepare` mapping in the choices
 reply (`emb choices --json`) plus the new repository entry. Say that it
-replaces the whole mapping. Claude never sets it. When the state is `set`
+replaces the whole mapping. Only the owner sets it. When the state is `set`
 or `none`, or nothing needs installing, say nothing about preparation.
 `references/runs.md` describes
 when Ember runs the command and how a failed preparation is retried.
@@ -75,6 +80,11 @@ Before the first picker, mint a unique id matching
 `[a-z0-9][a-z0-9-]{5,63}`, keep it in the run's notes, then call
 `emb choices --claim --id <id> --skill <version> --brief`, using the
 `Skill version:` from this loaded text on every claim, including retries.
+When the skill was loaded outside the default link, add
+`--skill-dir <absolute skill directory>` for the installation the harness
+loaded, such as OpenCode's native link. Use the base directory the skill
+tool reports. `emb skill status --json` and `emb skill status --harness
+opencode --json` show the managed links if you need to locate them.
 Do this for every run, whether or not you expect to use any answer,
 including read-only work and choosing no worker.
 Only a claim reply authorizes a one-time answer. `--brief` keeps the claim,
@@ -85,11 +95,13 @@ step needs another setting. A picker answer's `layer` says whether its
 value is a request, a one-time choice, a setting or the default: name it
 that way to the owner.
 
-Read `skill` separately from `claim.status`. On `current`, continue. On
-`stale`, reload the ember skill before the next step, then follow the
-reloaded instructions with the same claim id. On `unknown`, keep the
-claim, report the installed-skill problem and the `owner:` line to the
-owner, and start no worker until a valid installed skill is loaded.
+Run the claim on its own and check `skill` separately from `claim.status`
+before the next `emb` command or worker choice. On `current`, continue.
+On `stale`, first reload Ember with the harness's skill tool or reread the
+installed `SKILL.md`, then follow the reloaded instructions with the same
+claim id. On `unknown`, keep the claim, report the installed-skill problem
+and the `owner:` line to the owner, and start no worker until a valid
+installed skill is loaded.
 
 One task, including its worker and its cleanup, is one run. A Claude
 Workflow, flow or panel is one run for all its workers. Separately started
@@ -107,8 +119,8 @@ question about one-time choices.
 
 A `gone` or `unknown` claim stops `emb run` work: the run refuses it. Keep
 and finish that id, tell the owner no worker started and why, and mint no
-other id for the same task. A Claude subagent or no worker may still go
-ahead after a live question.
+other id for the same task. After a live question, you can proceed yourself
+or use a Claude Code subagent when available.
 
 A subagent that loads this skill claims nothing and reads no settings:
 it chooses by the worker table and names its choice in its report.
@@ -116,8 +128,8 @@ it chooses by the worker table and names its choice in its report.
 ### 3. Choose the worker
 
 Run `emb engines --json` for each engine's `state`. Use only engines that
-are on (`engine.<name>` in the answers), `connected`, and that this
-surface can run. Do not choose, withhold or swap workers by cost or usage;
+are on (`engine.<name>` in the answers), `connected`, and that the current
+session can run. Do not choose, withhold or swap workers by cost or usage;
 Ember reads no usage figures. A provider refusal is a run error, not a
 usage reading.
 
@@ -127,38 +139,41 @@ usage reading.
 | Codex, `emb run --engine codex` | Coding, drafting, tests and research; the default. |
 | OpenCode, `emb run --engine opencode` | A model suited to the task from any integration connected in OpenCode; when the owner names it, or as the `report:` line allows after a usage limit. |
 | Claude CLI, `emb run --engine claude` | A requested Claude CLI run. |
-| Claude subagent | Work needing Claude's tools, the browser, connectors, its own workers, or a folder that is not a git checkout. |
-| Claude Workflow | Claude-side fan-out of two or more tasks, with opt-in. |
+| Claude Code subagent | In Claude Code, work needing tools the CLI workers lack, or read-only work outside a git checkout. |
+| Claude Workflow | In Claude Code with the Workflow tool and the owner's opt-in, two or more tasks. |
 | Flow, `emb flow` | Two or more coding tasks with a writer and a reviewer each, run by Ember in waves. |
 | Panel, `emb panel` | One question that independent answers from several models improve. |
 
 #### Several tasks
 
 For two or more tasks needing workers, read `menu["multi.runs_as"].value`:
-`flow` runs a flow; `workflow` runs a Claude Workflow and supplies opt-in.
-`ask` asks the owner, offering a flow or separate single runs, and a Claude
-Workflow only with opt-in. The owner's words win over the row.
+`flow` runs a flow; `workflow` supplies opt-in for a Claude Workflow when
+available. Otherwise ask before substituting, as in Role. `ask` asks the
+owner, offering a flow or separate single runs. Offer a Claude Workflow
+only when its tool is available and the owner has already opted in
+as described in `references/claude-agents.md`. The owner's words win
+over the row.
 Read `references/flows.md` before a flow and `references/panels.md` before a
 panel.
 
-For research or search, recommend Codex with `--read-only`, and a Claude
-subagent as the alternative when it needs the browser or connectors.
+For research or search, recommend Codex with `--read-only` when it has the
+tools the work needs.
 
 A small edit (a few lines in one or two files already open) defaults to no
 worker even when `single.writer` is `set`; say so in one line. The run still
-claims, and finishes at once. Work a CLI
-engine cannot do (connectors, the browser, Claude's tools) fails that
-engine's gate: recommend a Claude subagent with the reason, whatever the
-row says. Editing workers need a git checkout; work in a folder that is not
-one goes to a read-only subagent, or you do it. Otherwise a `set` row, a
-claimed choice or the owner's request binds, and departing from it needs
-the owner's consent.
+claims, and finishes at once. Work that needs a tool a CLI worker lacks
+(such as a connector) cannot go to that worker. Recommend a Claude Code
+subagent if you can start one with the needed tool; otherwise explain the
+limit and offer to do the work in the lead session if you have the tool.
+Editing workers need a git checkout. A `set` row, a claimed choice or the
+owner's request binds; ask before departing from it.
 
 Use `single.writer` for edits and `single.reviewer` for read-only work.
 For a `claude` row, `run_as` picks `cli` (`emb run --engine claude`) or
-`subagent`. Take engine, model and effort from a `set` row: `emb run` with
-`--engine` alone resolves the row's model and effort. For `emb run`,
-once the brief is written, run `emb run --dry-run` with the start's exact
+`subagent` inside Claude Code. Check that native tools are available before
+acting on a `subagent` choice. Take engine, model and effort from a `set`
+row: `emb run` with `--engine` alone resolves the row's model and effort.
+Once the brief is written, run `emb run --dry-run` with the start's exact
 options, including its claim, model, effort and read-only options when
 given. On success, copy its standard-output line as the visible announce
 line right before the start, for example:
@@ -176,15 +191,16 @@ explicitly: `emb gapcheck --engine <e> --model <m> --effort <x>`,
 `emb flow --writer <e>:<m>@<x> --reviewer <e>:<m>@<x>`, or repeatable
 `emb panel --member <e>:<m>[@<x>]`. Never set a row to make a command work.
 
-When a row is not `set` and no worker was named, ask with AskUserQuestion.
+When a row is not `set` and no worker was named, ask using the harness's
+question tool if available.
 Include its `state` and `reason`. Build options from
 `emb engines --models <engine> --json` and
 the enabled shortlists. Put worker, model and effort in each label; give
 the recommendation in one or two plain sentences and one or two real
-alternatives. Put the task and every decision fact inside the question:
-text before the picker is hidden. Without the picker tool (print mode),
-ask the same question in plain text, as one direct question ending in a
-question mark, and stop until the owner answers.
+alternatives. Put the task and every decision fact inside the question so
+the owner can answer from the picker alone. Without a question tool, ask
+in plain text, as one direct question ending in a question mark, and stop
+until the owner answers.
 
 Word the worker question as "Owner questions" below says.
 
@@ -200,12 +216,8 @@ the `HEAD` of the checkout named by `--dir`, as `references/runs.md`
 describes. Each `emb run --read-only` and panel member gets its own detached
 worktree, with no branch. Tell reviewers to read their own working folder,
 using relative paths.
-An editing subagent or Workflow agent uses
-`isolation: "worktree"`; Claude Code bases it on `worktree.baseRef`:
-`head` is the current `HEAD`, `fresh` the remote default branch. Say so
-when it is `fresh`. A worker's base must hold what its task needs: when
-the base is `fresh` and the task needs session commits or an earlier
-merged branch, use `emb run` instead, or ask the owner.
+For native Claude Code editing agents, check the worktree and base rules
+in `references/claude-agents.md`.
 
 Uncommitted edits do not reach any worker; ask the owner to commit first
 when the task needs them. For separately started workers, hold a dependent
@@ -221,9 +233,10 @@ branches or touches `main` or a branch it did not create. Do not commit or
 stash on the owner's branch for a worker: worker commits reach it through
 merge.
 
-Pass the harness attribution trailer to every `emb run` start with
-`--trailer`; give editing Claude agents the same trailer in their git
-line. The commit subject of an `emb run` turn is the brief's first
+Pass the attribution trailer supplied by the harness or required by the
+repository to `emb run` with `--trailer`, and to editing Claude Code agents
+in their git line. Omit it when none is supplied or required.
+The commit subject of an `emb run` turn is the brief's first
 non-empty line, cut at 72 characters. Write that line as the worker's
 objective; the lead writes the landed subject at merge.
 
@@ -274,15 +287,19 @@ Read `references/runs.md` before the session's first `emb run`, and
 again with `references/sandbox-and-exits.md` on every non-zero exit. Read
 `references/claude-agents.md` before a subagent or Workflow spawn.
 
-Run every `emb run` start, `--send` and `--recover`, and every
-`emb flow --start` and `--watch`, `emb gapcheck` and `emb panel`, as a
-background Bash command, unpiped, and take the exit code: a pipe hides it.
-Pass the claim with `--claim <id>`.
+Run each `emb run` start, `--send` and `--recover`, `emb flow --start` and
+`--watch`, `emb gapcheck` and `emb panel` in the background. In Claude Code,
+set Bash's `run_in_background: true`. In other harnesses, use the shell
+tool's background option if it has one. Collect the result on completion.
+If background commands are unavailable, wait in the shell tool with a
+suitable timeout.
+Keep the command unpiped so you get its own exit code and standard error.
+Pass `--claim <id>` on starts and gap checks that accept it.
 
 | Purpose | Command |
 |---|---|
 | Preview and announce | Add `--dry-run` to the start's exact options; copy its line before starting |
-| Start | `emb run --engine <engine> --dir <repo> --task-file <brief> --trailer '<trailer>' --claim <id>` |
+| Start | `emb run --engine <engine> --dir <repo> --task-file <brief> --claim <id>` (add `--trailer` when supplied or required) |
 | Read-only | Add `--read-only` |
 | Show the owner | Add `--window` at start, or `emb run --attach <run>` later |
 | Correct | `emb run --send <run> --message-file <file>`; write the correction yourself |
@@ -334,9 +351,10 @@ and an older outcome's missing `provider_kind` and `attempts`, as unknown;
 (Turn results) describes unfinished and older results.
 
 When your check of a worker finds a `must` (step 7), correct it first with
-`--send` or SendMessage, unless an `owner:` line still waits for the owner's answer; offer another worker after a correction fails. When the
-owner named the workers or said they will not answer worker questions,
-do not offer one: give the verdict and say what is missing. Do not discard
+`--send` for an Ember run or the native correction tool, unless an `owner:`
+line still waits for the owner's answer. Offer another worker after a
+correction fails. When the owner named the workers or said they will not
+answer worker questions, give the verdict and say what is missing. Do not discard
 stalled partial edits without the owner's approval.
 
 ### 7. Verify and review
@@ -347,11 +365,11 @@ clean or commit nothing there, including files your own checks create;
 run Python checks with `PYTHONDONTWRITEBYTECODE=1`. Cleanup decides from
 what the worktree holds. After every editing worker, verify its branch. For
 an `emb run` branch, run the `verify_branch.py` command in the `next:` line
-Ember printed after the turn. For a branch with no run record (a flow
-or `worktree-agent-*` branch), run:
+Ember printed after the turn. For a branch with no run record (a flow or
+`worktree-agent-*` branch), use the script's absolute path in the loaded skill:
 
 ```bash
-python3 scripts/verify_branch.py --repo <repo> --base <session branch> --branch <branch> --worktree <worktree>
+python3 <skill directory>/scripts/verify_branch.py --repo <repo> --base <session branch> --branch <branch> --worktree <worktree>
 ```
 
 The script prints the tip, the three-dot numstat, the file count and the
@@ -441,15 +459,15 @@ Give the verdict line as `--note`, such as `--note 'Keep, with a docstring
 fix'`. `emb merge` prints it as `Verdict: <note>` before the merge and keeps
 it as an `Ember-Verdict` trailer on the landed commit.
 Repeat the same verdict in the step 8 report. Run `emb merge` as its own
-Bash call, with no other command chained before or after it; do the same
+shell call, with no other command chained before or after it; do the same
 after a correction. Merge only Keep or Keep-with-fix work into the session
 branch. For an `emb run` branch, run the `emb merge` line in the `next:`
 line printed after the turn, writing `--note` and `--subject` yourself.
 Write `--subject` in the repository's commit convention: the one
 `AGENTS.md` or `CONTRIBUTING` states; when neither states one, the form of
 the session branch's recent commit subjects, including any prefix or tag
-they share. Claude Code lists those subjects under the recent commits in
-your starting context. Run `git log --oneline -10 <session branch>` only
+they share. Use the subjects from your starting context if present.
+Run `git log --oneline -10 <session branch>` only
 when that list is absent, is for another repository or branch, or shows no
 single form. Describe the reviewed result across all turns.
 Mark a breaking Conventional Commit with `!`. For a branch with no run
@@ -494,7 +512,7 @@ prints no `next:` line, report each kept line and run
 | 76 | The target or worker branch moved while building a squash or completed-flow merge, or the checked-out target changed before that flow merge. Review both tips before repeating the merge. |
 | 77 | The target's commit hook, commit identity or signing configuration refused the squash or completed-flow merge. Follow `next:`; nothing moved. |
 
-A subagent or Workflow branch (`worktree-agent-*`) gets a merge commit.
+A Claude Code subagent or Workflow branch (`worktree-agent-*`) gets a merge commit.
 `emb merge` keeps it as `not an Ember run branch`; remove its worktree with
 `git worktree remove <path>` (never `--force` without approval), then follow
 the `next: git branch -d <branch>` line.
@@ -602,7 +620,7 @@ finding gets at most one closing sentence, or is left out.
 | `references/claims.md` | A claim or read reply other than a clean `claimed` or `none`, a lost reply, an `emb choices` exit, or an owner question about one-time choices. |
 | `references/runs.md` | Before the session's first `emb run`; on every non-zero `emb run` exit; before closing a run; when handing the owner a test build from any worker branch, including a flow branch. |
 | `references/sandbox-and-exits.md` | On every non-zero `emb run` exit; on a denied path or an `owner:` line about a path; before giving a worker anything outside its worktree. |
-| `references/claude-agents.md` | Before a Claude subagent or Claude Workflow spawn. |
+| `references/claude-agents.md` | For `/ember` in Claude Code, or before using its native subagents or Workflows. |
 | `references/gap-check.md` | Before a flow or a multi-task Claude Workflow starts. |
 | `references/flows.md` | Before `emb flow`; at every flow report. |
 | `references/panels.md` | Before `emb panel`; inspecting member progress or reading its summary. |

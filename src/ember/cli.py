@@ -28,6 +28,7 @@ import re
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any, NoReturn, TextIO, cast
 
 from ember import __version__, branches, choices, db, deps, ground, holds, skill
@@ -71,6 +72,12 @@ def _add_choices(parser: argparse.ArgumentParser) -> None:
         "--skill",
         metavar="X.Y.Z",
         help="compare the loaded skill version with the installed skill, with --claim",
+    )
+    parser.add_argument(
+        "--skill-dir",
+        metavar="DIR",
+        type=Path,
+        help="check the skill in this absolute directory instead of the default link",
     )
     parser.add_argument(
         "--brief",
@@ -537,7 +544,7 @@ def _add_skill(parser: argparse.ArgumentParser) -> None:
     )
     install = actions.add_parser(
         "install",
-        help="link the skill into Claude Code's skills folder",
+        help="link the skill into a lead harness's skills folder",
         description=(
             "Create the link to the skill source. A broken link is replaced; "
             "a link to another folder only with --force; a folder or file is "
@@ -547,7 +554,6 @@ def _add_skill(parser: argparse.ArgumentParser) -> None:
     install.add_argument(
         "--force", action="store_true", help="replace a link to another folder"
     )
-    install.add_argument("--json", action="store_true", help="print JSON")
     uninstall = actions.add_parser(
         "uninstall",
         help="remove the skill's link",
@@ -556,13 +562,19 @@ def _add_skill(parser: argparse.ArgumentParser) -> None:
             "A folder or file is never touched."
         ),
     )
-    uninstall.add_argument("--json", action="store_true", help="print JSON")
     show = actions.add_parser(
         "status",
         help="print the link, its state, its target and the skill source",
         description="Print the link, its state, its target and the skill source.",
     )
-    show.add_argument("--json", action="store_true", help="print JSON")
+    for action in (install, uninstall, show):
+        action.add_argument(
+            "--harness",
+            choices=skill.HARNESSES,
+            default="claude",
+            help="which link to use; defaults to the Claude Code compatible link",
+        )
+        action.add_argument("--json", action="store_true", help="print JSON")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -573,7 +585,7 @@ def build_parser() -> argparse.ArgumentParser:
     """
     parser = ArgumentParser(
         prog="emb",
-        description="Let Claude lead AI coding workers on this machine.",
+        description="Coordinate AI coding workers on this machine.",
     )
     parser.add_argument("--version", action="version", version=f"emb {__version__}")
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
@@ -643,9 +655,9 @@ def build_parser() -> argparse.ArgumentParser:
             "ground",
             help="print what to read before choosing a worker",
             description=(
-                "Print the machine, the Claude Code surface, Claude Code's "
-                "worktree.baseRef setting and the folder's checkout, branch, "
-                "dirty state, remote and instruction files."
+                "Print the machine and the folder's checkout, branch, dirty "
+                "state, remote, instruction files and worktree preparation. "
+                "Includes surface and worktree.baseRef metadata for Claude Code."
             ),
         )
     )
@@ -709,13 +721,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_skill(
         subparsers.add_parser(
             "skill",
-            help="install or remove the ember skill for Claude Code",
+            help="install, remove or show the ember skill",
             description=(
-                "Install, remove or show the ember skill for Claude Code. The "
-                "skill is a link at $CLAUDE_CONFIG_DIR/skills/ember, or "
-                "~/.claude/skills/ember when CLAUDE_CONFIG_DIR is unset or empty, to "
-                "the skill source: the source checkout's skill/ folder when "
-                "emb runs from a checkout, else /usr/share/ember/skill. Each "
+                "The default link is $CLAUDE_CONFIG_DIR/skills/ember or "
+                "~/.claude/skills/ember, which OpenCode V2 also discovers. "
+                "With --harness opencode on the action, the link is "
+                "$XDG_CONFIG_HOME/opencode/skills/ember (~/.config by default). "
+                "Both link to the source checkout's skill/ folder or "
+                "/usr/share/ember/skill. Each "
                 "non-zero exit prints a next: or owner: line."
             ),
         )
@@ -758,6 +771,8 @@ def _choices_action(args: argparse.Namespace) -> str:
         raise UsageError("--claim needs --id")
     if args.skill is not None and action != "--claim":
         raise UsageError("--skill needs --claim")
+    if args.skill_dir is not None and args.skill is None:
+        raise UsageError("--skill-dir needs --skill")
     if args.request and action not in ("read", "--claim"):
         raise UsageError(f"--request cannot be used with {action}")
     if args.brief and action not in ("read", "--claim"):
@@ -793,6 +808,7 @@ def _run_choices(args: argparse.Namespace, env: Mapping[str, str] | None) -> int
             args.id,
             _pairs(args.request, "--request"),
             skill_version=args.skill,
+            skill_dir=args.skill_dir,
             env=env,
         ),
         "--finish": lambda: choices.finish(args.finish, env=env),
@@ -1134,7 +1150,7 @@ def _run_deps(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
 def _run_skill(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
     candidates = skill.source_candidates()
     if args.skill_action == "status":
-        current = skill.status(env, candidates)
+        current = skill.status(env, candidates, harness=args.harness)
         if args.json:
             print(json.dumps(current.to_json(), indent=2))
         else:
@@ -1143,9 +1159,11 @@ def _run_skill(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
         return EX_OK
     try:
         if args.skill_action == "install":
-            result = skill.install(env, candidates, force=args.force)
+            result = skill.install(
+                env, candidates, force=args.force, harness=args.harness
+            )
         else:
-            result = skill.uninstall(env, candidates)
+            result = skill.uninstall(env, candidates, harness=args.harness)
     except skill.SkillError as error:
         print(f"emb skill: {error}", file=sys.stderr)
         print(error.line, file=sys.stderr)

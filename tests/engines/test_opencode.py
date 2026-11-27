@@ -294,6 +294,7 @@ def test_command_runs_the_view_with_its_server(
     agent = config["agent"]["ember-worker"]["permission"]
     assert (agent["edit"], agent["write"], agent["patch"]) == ("allow",) * 3
     assert agent["bash"]["git commit*"] == "deny"
+    assert agent["skill"] == {"ember": "deny"}
     assert config["agent"]["title"] == {"disable": True}
     assert not Path(run.worktree).exists()
 

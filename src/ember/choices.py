@@ -453,7 +453,7 @@ WORKFLOW_AGENTS = ("4", "8", "16")
 """The values of `workflow.agents`: Claude Workflow agents at once."""
 
 WORKFLOW_LATE = ("ask", "wait", "stop")
-"""The values of `workflow.late`: what Claude does when an agent runs late."""
+"""The values of `workflow.late`: what the lead does when an agent runs late."""
 
 
 def _keys() -> dict[str, Key]:
@@ -1229,6 +1229,7 @@ def claim(
     request: Mapping[str, object] | None = None,
     *,
     skill_version: str | None = None,
+    skill_dir: Path | None = None,
     expect_generation: int | None = None,
     env: Mapping[str, str] | None = None,
     now: float | None = None,
@@ -1246,6 +1247,7 @@ def claim(
         id: The run's claim id.
         request: Request-layer values, validated before anything is read.
         skill_version: The loaded skill's version; `None` skips the comparison.
+        skill_dir: The absolute loaded skill directory; `None` uses the default link.
         expect_generation: The generation the caller last read, or `None`.
         env: The environment; `None` reads `os.environ`.
         now: The time; `None` for the current time.
@@ -1256,7 +1258,7 @@ def claim(
         `current`, `stale` or `unknown` for an unreadable installed version.
 
     Raises:
-        InvalidChoiceError: The id, a request value or skill version is not valid.
+        InvalidChoiceError: The id, a request value or skill argument is not valid.
         DatabaseError: The database cannot be written, is busy, has another
             schema, or is at another generation than `expect_generation`.
     """
@@ -1266,6 +1268,11 @@ def claim(
         raise InvalidChoiceError(
             f"--skill needs a version in x.y.z form, not {skill_version!r}"
         )
+    if skill_dir is not None:
+        if skill_version is None:
+            raise InvalidChoiceError("--skill-dir needs --skill")
+        if not skill_dir.is_absolute():
+            raise InvalidChoiceError("--skill-dir must be an absolute directory path")
     at = _now(now)
 
     refused: list[bool] = []
@@ -1297,7 +1304,7 @@ def claim(
 
     result = _write(env, at, expect_generation, change, reply)
     if skill_version is not None:
-        installed = skill.installed_version(env)
+        installed = skill.installed_version(env, directory=skill_dir)
         result.update(
             skill="unknown"
             if installed is None

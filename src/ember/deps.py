@@ -784,7 +784,12 @@ def _read_installed(
 ) -> _Installed:
     source = spec.installed
     if source.kind == "skill":
-        current = skill.status(env, skill.source_candidates())
+        candidates = skill.source_candidates()
+        current = skill.status(env, candidates)
+        if current.source is not None and current.state != skill.INSTALLED:
+            native = skill.status(env, candidates, harness="opencode")
+            if native.state == skill.INSTALLED:
+                current = native
         note = None
         if current.source is None:
             note = "Reinstall Ember."

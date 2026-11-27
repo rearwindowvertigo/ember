@@ -90,14 +90,13 @@ REPORTS = [  # noqa: E501
         "capacity",
         "capacity; retries exhausted; offer only a retry with the same model "
         "and effort once capacity returns; offer no other model, engine, "
-        "Claude subagent or Claude's own work",
+        "subagent or work by the lead",
     ),
     (
         73,
         "outage",
         "outage; offer only a retry with the same model and effort once it "
-        "clears; offer no other model, engine, Claude subagent or Claude's "
-        "own work",
+        "clears; offer no other model, engine, subagent or work by the lead",
     ),
     (
         73,
@@ -110,14 +109,14 @@ REPORTS = [  # noqa: E501
         "uncertain",
         "retry delivery is uncertain; do not send again before inspecting the session; "
         "then offer only a retry with the same model and effort; offer no other "
-        "model, engine, Claude subagent or Claude's own work",
+        "model, engine, subagent or work by the lead",
     ),
     (
         74,
         "uncertain",
         "retry delivery is uncertain; do not send again before inspecting the session; "
         "then offer only a retry with the same model and effort; offer no other "
-        "model, engine, Claude subagent or Claude's own work",
+        "model, engine, subagent or work by the lead",
     ),
     (74, None, "interrupted; partial edits may be committed on worker"),
     (74, "retry", "interrupted; partial edits may be committed on worker"),
@@ -191,5 +190,5 @@ def test_an_outage_that_ended_the_engine_points_to_a_new_run(variant: str) -> No
     assert exits.report(73, variant, run="codex-1") == (
         "report: outage; the engine ended; offer only a new run with the same "
         "model and effort once it clears; offer no other model, engine, "
-        "Claude subagent or Claude's own work"
+        "subagent or work by the lead"
     )

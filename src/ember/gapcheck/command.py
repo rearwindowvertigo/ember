@@ -212,10 +212,12 @@ def _engine(args: argparse.Namespace, settings: Mapping[str, Any], command: str)
         raise CommandError(
             64,
             f"{name} runs claude:{row['model']} as a subagent",
-            f"next: {command} --brief{' --confirmed' if args.confirmed else ''}, "
+            f"next: in Claude Code with a subagent tool, {command} "
+            f"--brief{' --confirmed' if args.confirmed else ''}, "
             "then give the brief to a read-only Claude "
             f"subagent on {row['model']} and read its answer with "
-            f"{command} --reply <file> --brief-file <saved brief>",
+            f"{command} --reply <file> --brief-file <saved brief>; otherwise "
+            "ask the owner before choosing a CLI reviewer",
         )
     if args.engine is not None and args.engine != row["engine"]:
         return args.engine
