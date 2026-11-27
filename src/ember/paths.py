@@ -14,6 +14,7 @@ import hashlib
 import os
 import pwd
 import re
+import secrets
 import shutil
 import stat
 import tempfile
@@ -709,6 +710,21 @@ def open_private_file(path: Path, flags: int = os.O_RDWR) -> int:
         os.close(fd)
         raise
     return fd
+
+
+def replace_private_file(path: Path, content: bytes, *, root: Path) -> None:
+    """Publish a mode 600 file with one rename inside a private folder."""
+    ensure_private_dir(path.parent, root=root)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}")
+    fd = open_private_file(temporary, os.O_WRONLY | os.O_EXCL)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 @contextlib.contextmanager

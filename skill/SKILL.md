@@ -54,9 +54,12 @@ use the command directly from the lead session, with no run or claim. The
 request authorizes the refresh. Ember downloads, validates, matches and saves
 the data. Read the command's reply; report what updated, which setups have
 no match or no cost, and any sources that failed, including whether Ember
-kept their previous results. If it reports `empty_pool`, point the owner
-to Team's Routing pool. If the reply has an `error` object, report it. Do not
-look up substitute numbers, edit Team settings, or retry automatically.
+kept their previous results. If `model_reference` is present, report Index
+score and cost coverage across its listed efforts and identify missing
+efforts or metrics. Keep this coverage separate from harness matches. If
+it reports `empty_pool`, point the owner to Engines to shortlist models.
+If the reply has an `error` object, report it. Do not look up substitute
+numbers, edit Team settings, or retry automatically.
 
 ## One run
 
@@ -199,11 +202,12 @@ explicitly: `emb gapcheck --engine <e> --model <m> --effort <x>`,
 
 When the request did not pick a worker and the row is `ask` (Ask each
 time) or `auto` (Let the lead choose), read
-`references/worker-selection.md`. In `ask`, recommend a model for this
-job and wait. In `auto`, announce and start a suitable eligible pool
-model without asking again.
-Pass `--engine` and `--model` and the resolved `--effort` when there is
-one. If `auto` has no suitable pool model, ask and wait.
+`references/worker-selection.md`. Choose the model and a supported effort
+for the job. In `ask`, recommend a shortlisted pair and wait for the
+owner's choice. In `auto`, choose a shortlisted model in the Routing
+pool and start it at the selected effort. If no approved pair suits the
+job, ask and wait. Pass `--engine`, `--model`, and the selected `--effort`
+when there is one.
 
 For a single worker chosen in `auto`, send one sentence as soon as you
 pick it, before writing its brief. Give its model, effort and task-specific

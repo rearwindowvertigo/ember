@@ -515,6 +515,29 @@ def _claude_list(now: float) -> ModelList:
     return ModelList(models=models, source=CLI, fetched_at=now, reason=None)
 
 
+def saved_efforts(
+    engine: str, env: Mapping[str, str] | None = None
+) -> dict[str, tuple[str, ...]]:
+    """Read advertised efforts without calling an engine or refreshing its cache."""
+    if engine == "claude":
+        return dict.fromkeys(CLAUDE_MODELS, CLAUDE_EFFORTS)
+    try:
+        payload = status.load_cache_file(cache_path(engine, env))
+        held = _read_cache(payload)
+    except OverflowError, RecursionError:
+        return {}
+    if held is None:
+        return {}
+    if engine != "opencode":
+        return {model.id: model.efforts for model in held[1]}
+    assert isinstance(payload, dict)
+    if "format_version" not in payload:
+        return {choices.full_opencode_id(model.id): model.efforts for model in held[1]}
+    if payload["format_version"] != CACHE_VERSION:
+        return {}
+    return {model.id: model.efforts for model in held[1]}
+
+
 def list_models(
     engine: str,
     env: Mapping[str, str] | None = None,

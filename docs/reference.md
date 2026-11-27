@@ -307,10 +307,11 @@ runs an engine; with no cache, or a cache that is not valid, no row is
 
 ## `emb benchmarks`
 
-`emb benchmarks refresh [--json]` downloads public results for the Team
-routing pool. Ask the lead to fill or refresh Ember benchmark data to
-run the same command. No account, spreadsheet or worker run is needed.
-With an empty pool the command points to Team and makes no requests.
+`emb benchmarks refresh [--json]` downloads results for shortlisted models.
+Ask the lead to fill or refresh Ember benchmark data to run the same
+command without a worker run. The eight default sources need no account.
+When both the shortlists and the Routing pool are empty, refresh points
+the owner to Engines and makes no requests.
 `emb benchmarks status [--json]` reads saved evidence without a download.
 
 | Series key | Result fields |
@@ -324,6 +325,18 @@ With an empty pool the command points to Team and makes no requests.
 | `ironbee-frontier-r123` | [IronBee code review](https://github.com/ironbee-ai/code-review-benchmarks/tree/main/reports/frontier-r123) F1, 10 PRs |
 | `ionwarp-onerow4-code-2026-10-06-r1` | [IonWarp code review](https://github.com/Winding-Labs/ai-code-review-benchmark) F1 for model configurations, 50 PRs |
 
+Team's Artificial Analysis opt-in adds the publisher's
+[Intelligence Index](https://artificialanalysis.ai/evaluations/artificial-analysis-intelligence-index)
+score and weighted USD per Index task from the
+[free v2 Language Models API](https://artificialanalysis.ai/data-api/docs/reference).
+The series key is `artificial-analysis-intelligence-index-<edition>`, using
+the major and minor version available in the API. Before a download
+succeeds its status has no edition suffix. Each refresh uses the owner's
+API key for this source. The key and its results are stored locally at
+mode 600 in `$XDG_CONFIG_HOME/ember/artificial-analysis/`
+(`~/.config/ember/artificial-analysis/` by default). Removing the key
+removes its saved results and disables the source.
+
 A result belongs to one series key and metric. Different editions, suites
 and PR samples have separate fields. Ember does not fill a missing field
 from another series. Dollars per attempt are the publisher's total inference
@@ -332,15 +345,30 @@ passing trials and are absent when no pass count or no passes are reported.
 These are benchmark costs. The refresh measures neither live subscription
 allowance nor the bill for an Ember job.
 
-The JSON reply has `status`, `summary`, `sources` by series key, and
-`workers` by `<engine>:<model>`. Each worker holds `effort`, `speed`,
-`shortlisted`, and `matches`, `related` and `missing`, each keyed by
-series. Matches contain the tested model, harness, effort and `metrics`.
+The JSON reply has `status`, `summary`, `sources` by series key, `workers`
+for the Routing pool and `other_shortlisted_workers` for models outside
+it. Both worker dictionaries use keys of the form `<engine>:<model>`.
+Each worker holds the shortlist `effort`, `speed`, `shortlisted`, and
+`matches`, `related` and `missing` for the shortlist setup, keyed by series.
+Matches contain the tested model, harness, effort and `metrics`.
 Related entries show a published configuration and why it does not match.
 For example, a Codex `max` result is related to the same model at `high`,
 and a moving Claude alias only gets related evidence. A public row without a
 verified harness or effort cannot fill an exact field. `missing` lists
-unfilled metrics. An absent number is unknown; zero is a result.
+unfilled metrics. `supported_efforts` lists advertised efforts from the
+local model catalogue, or is null when there is no saved catalogue row.
+`matches_by_effort` maps each supported effort that has an exact result to
+its series matches. An absent number is unknown; zero is a result.
+
+With Artificial Analysis enabled, each shortlisted model has a
+`model_reference` with a series key, a tested release name when known, and
+`efforts` keyed by the model's supported efforts from the local model
+catalogue. `effort_catalog_available` is false when only the saved preferred
+effort can be shown. An effort without an unambiguous reference has a null
+row. An effort with a measurement includes its published metrics, with
+`intelligence_index` for the score and `task_usd` for cost. Moving Claude
+aliases show the latest tested release under that name. Model references
+are separate from `matches`, `related`, and the owner's ratings and notes.
 
 Each source reports its publisher, edition, URL, pricing basis where applicable,
 revision and last successful check (`checked_at` in seconds since the Unix
@@ -348,11 +376,11 @@ epoch). Each field in `metrics` has its own `title` and `suite`.
 Refresh marks a series `updated`, `unchanged`, `retained` or
 `unavailable`. Changing the report order alone does not change its revision.
 Ember replaces a complete validated series and retains the previous one
-when a source fails. Refresh refuses to replace an unreadable local cache.
-A source without a successful check for 30 days shows
-as due for refresh; its measurements do not expire. Worker selection reads
-the saved data locally from `$XDG_CACHE_HOME/ember/benchmarks.json`
-(`~/.cache/ember/benchmarks.json` by default).
+when a source fails. Refresh refuses to replace an unreadable public cache.
+A successful check becomes due for refresh after 30 days; its measurements
+do not expire. Worker selection reads the saved data locally. The public
+cache is `$XDG_CACHE_HOME/ember/benchmarks.json` (`~/.cache/ember/benchmarks.json`
+by default).
 
 | Code | Meaning |
 |---|---|
@@ -5475,12 +5503,18 @@ setups labelled Related. The last successful check and refresh status come
 from `emb benchmarks`. Remove deletes the pool entry. A saved model that
 becomes unavailable remains in the list with a reason.
 
-With Let the lead choose, the lead announces and starts a suitable pool
-model. Among suitable workers it prefers a lower benchmark cost where the
-same measure is available from the same test. If none is eligible and
-suitable, the lead asks the owner. With Ask each time, the lead recommends
-a worker and waits for the owner's choice. Fixed and explicit selections
-keep their precedence.
+Artificial Analysis is optional. Add API key opens a masked field for the
+owner's free API key. View effort matrix shows the Index score and USD per
+task for shortlisted models by release and advertised effort. Missing
+measurements are blank. The saved Engines effort is marked Preferred.
+
+Let the lead choose can start a suitable shortlisted Routing pool model
+at any effort the model supports. Among suitable pairs, the lead prefers
+a lower comparable benchmark cost. If no approved pair fits, it asks and
+waits. Ask each time can recommend any shortlisted model and supported
+effort, and waits for the owner's choice. Fixed Team selections use their
+shortlisted effort; an explicit choice for the job takes precedence.
+Codex Fast is approved separately on Engines. A panel uses its member list.
 
 Planning holds Gap check reviewer (`gapcheck.reviewer`), a picker of Same
 as Reviewer (`same`) and the same models as Reviewer; closed on Same as

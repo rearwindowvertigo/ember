@@ -11,13 +11,19 @@ is the same. Panel members follow `references/panels.md`.
 ## Match the work
 
 Read `answers["routing.pool"].value` and run `emb benchmarks status --json`
-once before choosing. It reads saved data locally. The pool is the owner's
-authorization to use an Ember CLI worker. Benchmarks and owner ratings
-are evidence for that choice. Check eligibility first: the model is on the
-current shortlist, is available at its shortlisted effort, and can do the
-job through a connected, enabled engine. Use the model catalogue when you
-need to confirm availability or effort. Active model or engine holds
-exclude a candidate from automatic selection.
+once before choosing. It reads saved data locally. For automatic launches
+the owner approves models through the Routing pool. Check that each
+candidate is still shortlisted and can do the job through a connected,
+enabled engine. Active model or engine holds exclude a candidate from
+automatic selection.
+
+In `ask` and `auto`, compare model-and-effort pairs. Confirm the model
+advertises the chosen effort with `emb engines --models <engine> --json`
+when the current catalogue is needed. The Engines shortlist effort is
+the default for fixed Team choices. In the two flexible modes, select any
+supported effort for an eligible model. If an OpenCode model offers no
+effort setting, leave the effort unset. Use the owner's Codex speed
+setting (`fast.codex`); Fast needs separate approval in Engines.
 
 Use the task, plan or diff you already have:
 
@@ -36,47 +42,58 @@ Use the task, plan or diff you already have:
   role separately against its most demanding work, including the whole-flow
   review when enabled. A task in the flow does not start a new selection.
 
-In `workers["<engine>:<model>"]`, check that `effort` and `speed` match
-the planned start. `matches` and `related` are keyed by benchmark series,
-and `sources` identifies each publisher, edition, suite and metric. Compare a numeric value
-only with the same metric under the same series key and comparable trial
-coverage. Terminal-Bench 2.1 and 4.1 are separate tests, as are IronBee's
-50-PR and 10-PR sets. Never combine sources into a capability score or
-fill one benchmark's missing value from another. Zero is a result.
+Use `workers["<engine>:<model>"]` for pool models. When making a
+recommendation in `ask`, also use `other_shortlisted_workers`. Read
+`matches_by_effort[effort]` for task-specific harness evidence at the
+chosen effort. The `matches` field is for the saved shortlist effort.
+Check `speed` before using either. `sources` identifies each publisher,
+edition, suite and metric. Compare a numeric value only with the same
+metric under the same series key and comparable trial coverage.
+Terminal-Bench 2.1 and 4.1 are separate tests, as are IronBee's 50-PR and
+10-PR sets. Never combine sources into a capability score or fill one
+benchmark's missing value from another. Zero is a result.
+
+When present, use `model_reference.efforts[effort]` for an eligible
+worker's tested release and effort. The source is the Artificial Analysis
+Intelligence Index. A moving Claude alias shows a named test release.
+The reference supplies a general baseline; give relevant task-specific
+and harness evidence more weight when available. An Index result does
+not measure the worker's harness, provider route or Codex speed.
 
 Use `related` as background about the tested setup, without treating its
-scores or costs as values for the configured worker. Use owner `scores`
-and `notes` or relevant prior work as separate evidence when a benchmark
-is missing or the status read fails. Do not turn a benchmark score into a
-probability of success on this job. Missing evidence alone does not rule
-out a model.
+scores or costs as values for the configured worker. Keep owner `scores`,
+`notes` and relevant prior work separate from benchmark results. Do not
+turn a benchmark score into a probability of success on this job. Missing
+evidence alone does not rule out a model.
 
 Among workers likely to meet the quality bar, prefer the lowest comparable
 benchmark cost. Compare dollars per pass (`pass_usd`) when available for
 the workers within the same benchmark series. If only dollars per
 attempt (`attempt_usd`) are comparable within one series, consider likely
-retry or rework as part of judging suitability. When costs are unreported,
-known to be out of date, or from different series or setups, choose on
-suitability without assuming which worker costs less. Benchmark dollars
-describe published inference spend; they do not predict subscription quota
-or a bill for the current task. Ignore any legacy `usage` value. Follow
-Ember's usual provider retry and fallback rules.
+retry or rework as part of judging suitability. For the Index baseline,
+compare `task_usd` across comparable model references within one edition.
+It is weighted USD per Index task, with no pass or retry adjustment.
+When costs are unreported, out of date, or from incomparable series or
+setups, choose on suitability without assuming which worker costs less.
+Benchmark dollars describe published inference spend; they do not predict
+subscription quota or a bill for the current task. Ignore any legacy
+`usage` value. Follow Ember's usual provider retry and fallback rules.
 
 ## Apply the policy
 
-- **Ask each time (`ask`):** Recommend the best fit and give the owner a
-  meaningful alternative when one is available. Other eligible shortlisted
-  models can be offered. Explain the task-specific reason and wait for an
-  answer.
-- **Let the lead choose (`auto`):** Consider only eligible pool members for
-  the automatic choice. Post one line naming the model, effort and why it
-  fits before calling the tool that starts it. If benchmark cost helped
-  you choose, name the benchmark and unit. If none fits, say why and ask
-  for a worker. An eligible model outside the pool needs an explicit choice
-  for this job. Never change the pool or settings yourself.
+- **Ask each time (`ask`):** Recommend a shortlisted model and supported
+  effort. Give a meaningful alternative when available; it can be another
+  effort of the same model. Explain the task-specific reason and wait for
+  the owner's choice.
+- **Let the lead choose (`auto`):** Pick a suitable supported effort for
+  an eligible Routing pool model. If no approved model and effort fits,
+  ask the owner and wait. A model outside the pool needs the owner's
+  explicit choice for this job. Never change the pool or settings yourself.
 
-Pass the result explicitly to the command that starts that role, with the
-shortlist effort when set. If an OpenCode shortlist entry has no effort,
-omit the effort option. Announce a single automatic worker when you pick
-it, before preparing its brief. For a flow, use the dry run's worker
-lines for the announcement. Name the gap check reviewer before running it.
+Pass the selected model and effort explicitly to the command that starts
+the role. If there is no selected effort, omit the effort option.
+
+Announce an automatic single worker in chat when you choose it, before
+preparing its brief. If Index cost helped choose, name Artificial Analysis
+and USD per Index task. For a flow, use the dry run's worker lines for the
+announcement. Name the gap check reviewer before running it.

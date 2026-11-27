@@ -2,7 +2,7 @@
 
 Writer and Reviewer each offer Ask each time, Let the lead choose and the
 shortlisted models of every engine that is on, under the engine's name. The
-routing pool holds approved models, owner notes and public benchmark evidence. While
+routing pool holds approved models, owner notes and benchmark evidence. While
 a row holds a Claude model, a row under it picks how that model runs: as a
 CLI or as a subagent. A saved value that the picker no longer offers stays
 chosen, with a warning saying why. A saved model whose engine was not
@@ -28,13 +28,17 @@ from typing import TYPE_CHECKING, Any
 from PySide6.QtCore import QFileSystemWatcher, QLocale, Qt
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QDialog,
     QFormLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -42,6 +46,7 @@ from PySide6.QtWidgets import (
 from ember import benchmarks, choices, db
 from ember.app import icons, theme, widgets
 from ember.app.screens.common import (
+    FittingRow,
     ToneLine,
     TooltipRow,
     align_controls,
@@ -53,7 +58,14 @@ from ember.app.screens.common import (
     scrolled,
     titled_card,
 )
-from ember.benchmark_sources import Observation
+from ember.benchmark_sources import (
+    AA_KEY_URL,
+    AA_TERMS_URL,
+    AA_URL,
+    ARTIFICIAL_ANALYSIS,
+    Observation,
+)
+from ember.engines import models as engine_models
 
 if TYPE_CHECKING:
     from ember.app.context import AppContext
@@ -236,9 +248,9 @@ FALLBACK_HELP = (
 )
 NO_FALLBACK = "No fallback models. A provider error then stops the run for the lead."
 ROUTING_HELP = (
-    "With Let the lead choose, any suitable model in this pool can start "
-    "automatically. The lead uses benchmark results and your notes to "
-    "recommend workers in Ask each time too."
+    "Let the lead choose can start a suitable shortlisted model in this pool "
+    "at any supported effort. Ask each time can recommend any shortlisted "
+    "model and effort, then waits for your answer."
 )
 NO_ROUTING_MODELS = "The lead asks you when the pool has no suitable model."
 ADD_ROUTING_MODEL = "Add model"
@@ -441,8 +453,8 @@ class _RoutingDialog(QDialog):
         if entry is None:
             layout.addWidget(
                 label(
-                    "Adding this model allows the lead to start it automatically "
-                    "with Let the lead choose.",
+                    "With Let the lead choose, this model can start automatically "
+                    "at any supported effort.",
                     "secondary",
                 )
             )
@@ -515,6 +527,8 @@ def _benchmark_line(
     source: benchmarks.SourceStatus,
     observation: Observation,
     reason: str | None = None,
+    *,
+    model_reference: bool = False,
 ) -> QLabel:
     values = [
         f"{metric['title']} {observation['metrics'][key]:.4g}"
@@ -522,6 +536,13 @@ def _benchmark_line(
         if key in observation["metrics"]
     ]
     text = f"{source['title']} · {' · '.join(values)}"
+    if model_reference:
+        setup = (
+            observation["model"],
+            observation["effort"] or "unknown effort",
+            observation.get("configuration", ""),
+        )
+        text = f"Model reference · {text} ({' · '.join(filter(None, setup))})"
     if reason:
         setup = " · ".join(
             (
@@ -542,6 +563,8 @@ def _benchmark_line(
         detail.append(f"Last checked: {datetime.fromtimestamp(checked, UTC):%Y-%m-%d}")
     if source["pricing_basis"]:
         detail.append(source["pricing_basis"])
+    if model_reference:
+        detail.append("Model-level evidence for the tested release and effort.")
     if reason:
         detail.append(reason.capitalize())
     line.setToolTip("\n".join(detail))
@@ -647,6 +670,27 @@ class MenuScreen(QWidget):
 
         routing_card, routing = titled_card("Routing pool", ROUTING_HELP)
         self.routing_info = routing_card.findChild(widgets.InfoTip)
+        self.aa_key = widgets.button("Add API key", "secondary", size="sm")
+        self.aa_key.setAccessibleName("Set Artificial Analysis API key")
+        self.aa_key.clicked.connect(self._enter_aa_key)
+        self.aa_remove = widgets.button("Remove key", "secondary", size="sm")
+        self.aa_remove.setAccessibleName("Remove Artificial Analysis API key")
+        self.aa_remove.clicked.connect(lambda: self._save_aa_key(None))
+        self.aa_matrix = widgets.button("View effort matrix", "secondary", size="sm")
+        self.aa_matrix.clicked.connect(self._show_aa_matrix)
+        routing.addWidget(
+            FittingRow(
+                (
+                    label("Artificial Analysis (optional)", "secondary"),
+                    self.aa_key,
+                    self.aa_remove,
+                    self.aa_matrix,
+                )
+            )
+        )
+        self.aa_status = label("", "secondary")
+        self.aa_status.setTextFormat(Qt.TextFormat.PlainText)
+        routing.addWidget(self.aa_status)
         self.benchmark_summary = label("", "secondary")
         routing.addWidget(self.benchmark_summary)
         self.routing_layout = QVBoxLayout()
@@ -659,6 +703,9 @@ class MenuScreen(QWidget):
         routing.addWidget(self.add_routing, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addWidget(routing_card)
         self._benchmarks: benchmarks.Cache = {}
+        self._effort_catalog: benchmarks.EffortCatalog = {}
+        self._benchmark_report: benchmarks.Report | None = None
+        self._saving_aa_key = False
         self._benchmark_read_error = False
         self._reading_benchmarks = False
         self._read_benchmarks_again = False
@@ -810,35 +857,187 @@ class MenuScreen(QWidget):
         watcher = self._benchmark_watcher
         if changed in watcher.files():
             watcher.removePath(changed)
-        path = benchmarks.cache_path(self.context.env)
-        target = str(next(p for p in (path, *path.parents) if p.exists()))
-        watched = watcher.files() + watcher.directories()
-        if target not in watched:
-            watcher.addPath(target)
-        other = [item for item in watched if item != target]
-        if other:
-            watcher.removePaths(other)
+        env = self.context.env
+        paths = (
+            benchmarks.cache_path(env),
+            benchmarks.artificial_analysis_directory(env),
+            engine_models.cache_path("codex", env),
+            engine_models.cache_path("opencode", env),
+        )
+        targets = {
+            str(next(p for p in (path, *path.parents) if p.exists())) for path in paths
+        }
+        watched = set(watcher.files() + watcher.directories())
+        if needed := targets - watched:
+            watcher.addPaths(sorted(needed))
+        if obsolete := watched - targets:
+            watcher.removePaths(sorted(obsolete))
         if self._reading_benchmarks:
             self._read_benchmarks_again = True
             return
         self._reading_benchmarks = True
         self.context.tasks.run(
-            lambda: benchmarks.read_cache(self.context.env),
+            self._read_benchmarks,
             self._benchmarks_loaded,
             lambda _error: self._benchmarks_loaded(None),
         )
 
-    def _benchmarks_loaded(self, saved: benchmarks.Cache | None) -> None:
+    def _read_benchmarks(self) -> tuple[benchmarks.Cache, benchmarks.EffortCatalog]:
+        cache = benchmarks.read_cache(self.context.env)
+        efforts = (
+            benchmarks.effort_catalog(self.context.env)
+            if ARTIFICIAL_ANALYSIS in cache
+            else {}
+        )
+        return cache, efforts
+
+    def _benchmarks_loaded(
+        self, saved: tuple[benchmarks.Cache, benchmarks.EffortCatalog] | None
+    ) -> None:
         self._reading_benchmarks = False
         failed = saved is None
-        current = self._benchmarks if saved is None else saved
-        if self._benchmark_read_error != failed or self._benchmarks != current:
+        previous = (self._benchmarks, self._effort_catalog)
+        current = previous if saved is None else saved
+        if self._benchmark_read_error != failed or previous != current:
             self._benchmark_read_error = failed
-            self._benchmarks = current
+            self._benchmarks, self._effort_catalog = current
             self._redraw()
         if self._read_benchmarks_again:
             self._read_benchmarks_again = False
             self._reload_benchmarks()
+
+    def _enter_aa_key(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Artificial Analysis API key")
+        dialog.setMinimumWidth(440)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.addWidget(label("Use your own free API key for local benchmark data."))
+        links = label(
+            f'<a href="{AA_KEY_URL}">Get a free API key</a> · '
+            f'<a href="{AA_TERMS_URL}">Data Platform Terms</a>'
+        )
+        links.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        links.setOpenExternalLinks(True)
+        layout.addWidget(links)
+        key = QLineEdit()
+        key.setAccessibleName("Artificial Analysis API key")
+        key.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addWidget(key)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = widgets.button("Cancel", "secondary")
+        save = widgets.button("Save", "primary")
+        cancel.clicked.connect(dialog.reject)
+        save.clicked.connect(dialog.accept)
+        save.setEnabled(False)
+        key.textChanged.connect(lambda text: save.setEnabled(bool(text.strip())))
+        buttons.addWidget(cancel)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+        key.setFocus()
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        if accepted:
+            self._save_aa_key(key.text())
+        key.clear()
+        dialog.deleteLater()
+
+    def _save_aa_key(self, key: str | None) -> None:
+        self._saving_aa_key = True
+        self._redraw()
+        self.context.tasks.run(
+            lambda: benchmarks.configure_artificial_analysis(key, self.context.env),
+            lambda _result: self._aa_key_saved(),
+            self._aa_key_saved,
+        )
+
+    def _aa_key_saved(self, error: Exception | None = None) -> None:
+        self._saving_aa_key = False
+        if error is not None:
+            self.context.error.emit(f"Artificial Analysis: {error}")
+        self._redraw()
+        self._reload_benchmarks()
+
+    def _show_aa_matrix(self) -> None:
+        report = self._benchmark_report
+        if report is None:
+            return
+        shortlist = report["workers"] | report["other_shortlisted_workers"]
+        references = [
+            (name, worker["effort"], reference)
+            for name, worker in shortlist.items()
+            if (reference := worker.get("model_reference")) is not None
+        ]
+        if not references:
+            return
+        source = report["sources"][references[0][2]["source"]]
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Artificial Analysis effort matrix")
+        dialog.resize(830, 550)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(24, 24, 24, 24)
+        subtitle = label(
+            f'<a href="{AA_URL}">Artificial Analysis Intelligence Index</a>'
+            f" · Edition {source['edition']}"
+        )
+        subtitle.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        subtitle.setOpenExternalLinks(True)
+        layout.addWidget(subtitle)
+        layout.addWidget(
+            label(
+                "Model-level references. Unavailable results are blank. "
+                "Fixed Team choices use the preferred effort. Automatic choices "
+                "use models in the Routing pool.",
+                "secondary",
+            )
+        )
+        if any(not ref["effort_catalog_available"] for _, _, ref in references):
+            layout.addWidget(
+                label("Some effort lists are missing. Refresh model lists in Engines.")
+            )
+        headings = (
+            "Shortlisted model",
+            "Tested release",
+            "Effort",
+            "Index score",
+            "USD / task",
+        )
+        table = QTableWidget(0, len(headings))
+        table.setAccessibleName("Model references by release and effort")
+        table.setHorizontalHeaderLabels(headings)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.verticalHeader().hide()
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        for name, preferred, reference in references:
+            for effort, observation in (reference["efforts"] or {"": None}).items():
+                metrics = {} if observation is None else observation["metrics"]
+                score = metrics.get("intelligence_index")
+                cost = metrics.get("task_usd")
+                release = reference["model"] or ""
+                if observation and (configuration := observation.get("configuration")):
+                    release += f" · {configuration}"
+                cells = (
+                    name,
+                    release,
+                    f"{effort} (preferred)" if effort == preferred else effort,
+                    "" if score is None else f"{score:g}",
+                    "" if cost is None else f"{cost:.4f}",
+                )
+                index = table.rowCount()
+                table.insertRow(index)
+                for column, text in enumerate(cells):
+                    item = QTableWidgetItem(text)
+                    item.setToolTip(text)
+                    table.setItem(index, column, item)
+        layout.addWidget(table)
+        close = widgets.button("Close", "secondary")
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
+        dialog.exec()
+        dialog.deleteLater()
 
     # Drawing
 
@@ -894,8 +1093,32 @@ class MenuScreen(QWidget):
         """Show approved models and their separately sourced benchmark data."""
         clear_layout(self.routing_layout)
         self.routing_buttons.clear()
-        report = benchmarks.report(answers, self._benchmarks)
-        self.benchmark_summary.setVisible(bool(entries))
+        report = benchmarks.report(
+            answers, self._benchmarks, efforts=self._effort_catalog
+        )
+        self._benchmark_report = report
+        analysis = self._benchmarks.get(ARTIFICIAL_ANALYSIS)
+        self.aa_key.setText("Add API key" if analysis is None else "Replace API key")
+        self.aa_key.setEnabled(not self._saving_aa_key)
+        self.aa_remove.setVisible(analysis is not None)
+        self.aa_remove.setEnabled(not self._saving_aa_key)
+        self.aa_matrix.setVisible(analysis is not None)
+        shortlisted = report["workers"] | report["other_shortlisted_workers"]
+        self.aa_matrix.setEnabled(
+            any("model_reference" in worker for worker in shortlisted.values())
+            and not self._saving_aa_key
+        )
+        analysis_status = ""
+        if analysis is not None:
+            if error := analysis["error"]:
+                analysis_status = f"Artificial Analysis: {error}"
+                if analysis["rows"]:
+                    analysis_status += " Showing saved measurements."
+            elif analysis["checked_at"] is None:
+                analysis_status = "API key saved. Ask the lead to refresh benchmarks."
+        self.aa_status.setText(analysis_status)
+        self.aa_status.setVisible(bool(analysis_status))
+        self.benchmark_summary.setVisible(bool(shortlisted))
         self.benchmark_summary.setToolTip("\n".join(benchmarks.lines(report)))
         checked = [
             stamp
@@ -909,7 +1132,7 @@ class MenuScreen(QWidget):
             summary = f"Benchmarks last checked {last_check} UTC. {report['summary']}"
             if any(source["stale"] for source in report["sources"].values()):
                 summary += " Some sources are due for a refresh."
-            if report["status"] != "ok":
+            if any(source["error"] for source in report["sources"].values()):
                 summary += " Some sources could not be refreshed."
         elif report["status"] == "unavailable":
             summary = "Benchmark sources were unavailable. Ask the lead to refresh."
@@ -965,6 +1188,17 @@ class MenuScreen(QWidget):
                         related["reason"],
                     )
                 )
+            reference = evidence.get("model_reference")
+            if reference is not None:
+                observation = reference["efforts"].get(evidence["effort"] or "")
+                if observation is not None:
+                    self.routing_layout.addWidget(
+                        _benchmark_line(
+                            report["sources"][reference["source"]],
+                            observation,
+                            model_reference=True,
+                        )
+                    )
             if checked and evidence["shortlisted"]:
                 if not evidence["matches"]:
                     self.routing_layout.addWidget(
@@ -1169,6 +1403,7 @@ class MenuScreen(QWidget):
         order.append(self.open_engines)
         if self.routing_info is not None:
             order.append(self.routing_info)
+        order.extend((self.aa_key, self.aa_remove, self.aa_matrix))
         order.extend(self.routing_buttons)
         order.append(self.add_routing)
         order.extend(
