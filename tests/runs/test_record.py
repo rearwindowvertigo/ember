@@ -121,6 +121,8 @@ def test_missing_run(env: dict[str, str]) -> None:
         ({"model": None}, "invalid model"),
         ({"speed": "slow"}, "invalid speed"),
         ({"speed": True}, "invalid speed"),
+        ({"selection_origin": "other"}, "invalid selection_origin"),
+        ({"selection_origin": True}, "invalid selection_origin"),
         ({"engine": "opencode", "speed": "fast"}, "invalid speed"),
         ({"main": 3}, "invalid main"),
         ({"common": []}, "invalid common"),
@@ -150,6 +152,16 @@ def test_speed_round_trip(env: dict[str, str], speed: str | None) -> None:
     record.save(run)
     assert record.load(run.id, env).speed == speed
     assert ("speed" in run.to_json()) == (speed is not None)
+
+
+@pytest.mark.parametrize("origin", [None, *record.SELECTION_ORIGINS])
+def test_preparation_retry_selection_origin_round_trip(
+    env: dict[str, str], origin: str | None
+) -> None:
+    run = replace(_run(env), selection_origin=origin)
+    record.save(run)
+    assert record.load(run.id, env).selection_origin == origin
+    assert ("selection_origin" in run.to_json()) == (origin is not None)
 
 
 def test_record_missing_a_field(env: dict[str, str]) -> None:

@@ -110,6 +110,13 @@ LINES: dict[int, str | Mapping[str, str]] = {
         "in the lead's conversation before starting",
         "routing": "next: read Team's current choices; choose an eligible worker "
         "or ask the owner",
+        "effort": "next: check the model's supported efforts with "
+        "emb engines --models {engine} --refresh, then preview the worker again",
+        "start_source": "next: emb run --status {source}",
+        "start_source_missing": "next: emb run --status",
+        "retry_ask": "next: ask the owner to choose the worker, "
+        "then preview the retry with --owner-choice",
+        "retry_fixed": "next: {preview}",
         "busy": RECOVER + " (waits for the turn, then collects it)",
         "close": RECOVER + ", then emb run --close {run}; "
         "or emb run --close {run} --force",
