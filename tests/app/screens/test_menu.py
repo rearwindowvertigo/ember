@@ -1,18 +1,20 @@
 import threading
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from typing import Any
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QWidget
 from pytestqt.qtbot import QtBot
 
-from ember import choices, db
+from ember import benchmarks, choices, db
 from ember.app import widgets
 from ember.app.context import AppContext
 from ember.app.screens import menu
 from ember.app.screens.menu import MenuScreen
 from ember.app.widgets import Card, Picker
+from ember.benchmark_sources import SOURCES, Observation, SourceError
 from ember.engines import status
 
 
@@ -63,12 +65,15 @@ SHORTLISTS: dict[str, object] = {
 }
 
 
-def test_empty_shortlists_offer_ask_and_open_engines(
+def test_empty_shortlists_offer_policies_and_open_engines(
     env: dict[str, str], qtbot: QtBot
 ) -> None:
     context, screen = _screen(env, qtbot)
     for controls in screen.roles.values():
-        assert _items(controls.picker) == [("Ask each time", "ask", False)]
+        assert _items(controls.picker) == [
+            ("Ask each time", "ask", False),
+            ("Let the lead choose", "auto", False),
+        ]
         assert controls.picker.value() == "ask"
         assert not controls.warning.isVisibleTo(screen)
         assert not controls.run_as_row.isVisibleTo(screen)
@@ -87,6 +92,7 @@ def test_groups_list_shortlisted_models_of_engines_that_are_on(
     picker = screen.roles["writer"].picker
     assert _items(picker) == [
         ("Ask each time", "ask", False),
+        ("Let the lead choose", "auto", False),
         ("Codex", None, True),
         ("gpt-5 · high", "codex:gpt-5", False),
         ("OpenCode", None, True),
@@ -317,6 +323,7 @@ def test_cards_and_subtitle(env: dict[str, str], qtbot: QtBot) -> None:
     _context, screen = _screen(env, qtbot)
     assert [_texts(card)[0] for card in screen.findChildren(Card)] == [
         "Single tasks",
+        "Routing pool",
         "Planning",
         "Work of several tasks",
         "Flows",
@@ -338,6 +345,126 @@ def test_cards_and_subtitle(env: dict[str, str], qtbot: QtBot) -> None:
     )
     assert screen.multi.accessibleName() == "Multi-task work"
     assert screen.add_member.accessibleName() == "Add panel member"
+
+
+def test_owner_can_add_edit_and_remove_a_pooled_model(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    choices.set_settings({**SHORTLISTS, "engine.opencode": "off"}, env=env)
+    context, screen = _screen(env, qtbot)
+    _pick(context, screen.roles["reviewer"].picker, "auto", qtbot)
+    assert _stored(env, "single.reviewer") == "auto"
+    assert (
+        screen.derived["gapcheck.reviewer"].picker.closed_text()
+        == "Same as Reviewer · Let the lead choose"
+    )
+    assert screen.add_routing.findData("opencode:openrouter/qwen3-coder") == -1
+
+    def add(dialog: menu._RoutingDialog) -> int:
+        assert dialog.save_button.isEnabled()
+        dialog.scores["implementation"].setText("100.01")
+        assert not dialog.save_button.isEnabled()
+        dialog.scores["implementation"].setText("63.25")
+        dialog.scores["codebase"].setText("0")
+        dialog.scores["review"].setText("52.5")
+        dialog.notes.setPlainText("Example benchmark, high effort")
+        assert dialog.save_button.isEnabled()
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(menu._RoutingDialog, "exec", add)
+    _pick(context, screen.add_routing, "codex:gpt-5", qtbot)
+    assert _stored(env, "routing.pool") == {
+        "codex:gpt-5": {
+            "scores": {"implementation": 63.25, "codebase": 0, "review": 52.5},
+            "notes": "Example benchmark, high effort",
+        }
+    }
+    assert (
+        "Owner scores · Implementation 63.25 · Codebase understanding 0"
+        " · Code review 52.5" in _texts(screen)
+    )
+    assert "Example benchmark, high effort" in _texts(screen)
+    assert screen.add_routing.findData("codex:gpt-5") == -1
+
+    def edit(dialog: menu._RoutingDialog) -> int:
+        assert dialog.notes.toPlainText() == "Example benchmark, high effort"
+        assert dialog.scores["reasoning"].text() == ""
+        assert float(dialog.scores["codebase"].text()) == 0
+        dialog.scores["codebase"].clear()
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(menu._RoutingDialog, "exec", edit)
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        screen.routing_buttons[0].click()
+    assert _stored(env, "routing.pool")["codex:gpt-5"] == {
+        "scores": {"implementation": 63.25, "review": 52.5},
+        "notes": "Example benchmark, high effort",
+    }
+    choices.set_settings({"shortlist.codex": []}, env=env)
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        context.reload_settings()
+    assert any("not on the Codex shortlist" in text for text in _texts(screen))
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        screen.routing_buttons[1].click()
+    assert _stored(env, "routing.pool") == {}
+
+
+def test_routing_dialog_accepts_signed_zero_from_a_saved_score(qtbot: QtBot) -> None:
+    parent = QWidget()
+    qtbot.addWidget(parent)
+    entry: choices.RoutingEntry = {"scores": {"reasoning": -0.0}}
+    dialog = menu._RoutingDialog("codex:gpt-5", entry, parent)
+    assert dialog.save_button.isEnabled()
+    assert dialog.entry() == entry
+
+
+def test_routing_pool_shows_a_cli_refresh_and_labels_a_changed_effort(
+    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    choices.set_settings(
+        {
+            **SHORTLISTS,
+            "routing.pool": {"codex:gpt-5": {"scores": {}, "notes": "Owner evidence"}},
+        },
+        env=env,
+    )
+    context, screen = _screen(env, qtbot)
+    assert screen.benchmark_summary.text() == (
+        "Ask the lead to refresh Ember benchmark data."
+    )
+
+    def unavailable() -> list[Observation]:
+        raise SourceError("fixture unavailable")
+
+    for key, source in SOURCES.items():
+        monkeypatch.setitem(SOURCES, key, replace(source, read=unavailable))
+    key = "terminal-bench-4.1"
+    sample = Observation(
+        model="GPT-5",
+        harness="Codex",
+        effort="high",
+        metrics={"resolution": 63.25, "attempt_usd": 1.25, "pass_usd": 2},
+    )
+    monkeypatch.setitem(SOURCES, key, replace(SOURCES[key], read=lambda: [sample]))
+    benchmarks.refresh(env)
+    exact = "Terminal-Bench 4.1 · Resolved % 63.25 · USD / attempt 1.25 · USD / pass 2"
+    qtbot.waitUntil(lambda: exact in _texts(screen), timeout=5000)
+    assert "last checked" in screen.benchmark_summary.text()
+    assert "Some sources could not be refreshed." in screen.benchmark_summary.text()
+    assert "Owner evidence" in _texts(screen)
+
+    sample["metrics"]["resolution"] = 64.5
+    benchmarks.refresh(env)
+    updated = exact.replace("63.25", "64.5")
+    qtbot.waitUntil(lambda: updated in _texts(screen), timeout=5000)
+    assert exact not in _texts(screen)
+
+    choices.set_settings({"shortlist.codex": ["gpt-5@low"]}, env=env)
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        context.reload_settings()
+    assert updated not in _texts(screen)
+    assert f"Related · {updated} (GPT-5 · Codex · high)" in _texts(screen)
+    assert "No matching benchmark for this setup." in _texts(screen)
 
 
 @pytest.mark.parametrize("value", ["1", "3", "4"])

@@ -203,10 +203,15 @@ def _engine(args: argparse.Namespace, settings: Mapping[str, Any], command: str)
     row = menu["gapcheck.reviewer"]
     name = "single.reviewer" if row["same"] else "gapcheck.reviewer"
     if row["state"] != "set":
+        follow = (
+            "next: choose a model for the gap check and pass --engine and --model"
+            if row["state"] == choices.AUTO
+            else REVIEWER_LINE
+        )
         raise CommandError(
             64,
             f"{name} is {row['state']}: {row['reason']}",
-            REVIEWER_LINE,
+            follow,
         )
     if row["engine"] == "claude" and row["run_as"] == "subagent":
         raise CommandError(

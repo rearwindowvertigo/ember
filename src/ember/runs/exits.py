@@ -47,6 +47,7 @@ LINES: dict[int, str | Mapping[str, str]] = {
         "*": "next: emb run --help",
         "menu": "owner: set {row} with emb choices --set; "
         "or the lead passes --engine and --model",
+        "auto": "next: choose a model for {row} and pass --engine and --model",
         "engine_off": "owner: switch {engine} on: emb choices --set engine.{engine}=on",
         "subagent": "next: use a subagent in Claude Code if available; "
         "otherwise ask the owner before choosing a CLI worker",

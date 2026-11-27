@@ -23,7 +23,7 @@ standard error as `emb choices: <message>`; skill-version warnings use
 | `--claim --id ID` | Claim the pending one-time choice for `ID` | Read reply |
 | `--skill X.Y.Z` | With `--claim`: compare the loaded skill version with the installed skill | Adds `skill`, `loaded_skill_version` and `installed_skill_version` |
 | `--skill-dir DIR` | With `--skill`: check the skill in this absolute directory instead of the default skill link | |
-| `--brief` | With a read or `--claim`: keep only the `engine.<name>`, `shortlist.<name>`, `single.writer`, `single.reviewer`, `single.writer_as`, `single.reviewer_as`, `multi.runs_as` and `panel.members` keys in `answers` and the `single.writer`, `single.reviewer`, `multi.runs_as` and `panel.members` rows in `menu` (`null` stays `null`); every other field is unchanged | Shortened reply |
+| `--brief` | With a read or `--claim`: keep only the `engine.<name>`, `shortlist.<name>`, `routing.pool`, `single.writer`, `single.reviewer`, `single.writer_as`, `single.reviewer_as`, `multi.runs_as` and `panel.members` keys in `answers` and the `single.writer`, `single.reviewer`, `multi.runs_as` and `panel.members` rows in `menu` (`null` stays `null`); every other field is unchanged | Shortened reply |
 | `--finish ID` | Release the claim for `ID` | `{"claim": {"id", "status": "gone", "was"}, "generation", "errors"}` |
 | `--request KEY=VALUE` | With a read or `--claim`: a request-layer value; repeatable | |
 | `--set KEY=VALUE` | Save a standing setting; repeatable | `{"settings": {...}, "generation", "errors"}` |
@@ -53,7 +53,8 @@ empty list.
 | `shortlist.claude`, `shortlist.codex` | List of `<model>@<effort>`; model `[A-Za-z0-9][A-Za-z0-9._-]*`, effort `[a-z]+` | `[]` | standing |
 | `fast.codex` | List of distinct Codex model names that use Fast. New entries must be on `shortlist.codex` when saved. Existing entries may stay after leaving the shortlist. All other Codex models use Standard. | `[]` | standing |
 | `shortlist.opencode` | List of full `<integration>/<model>` ids, with optional `@<effort>`; integration `~?[A-Za-z0-9][A-Za-z0-9._-]*`, model one or more `/`-separated parts matching `~?[A-Za-z0-9][A-Za-z0-9._:-]*` | `[]` | standing |
-| `single.writer`, `single.reviewer` | `ask`, or `<engine>:<model>` with the model on that engine's shortlist when saved | `ask` | request, one-time, standing |
+| `routing.pool` | JSON object mapping `<engine>:<model>` to an owner `scores` object and optional text `notes`; new models must be shortlisted when saved | `{}` | standing |
+| `single.writer`, `single.reviewer` | `ask`, `auto`, or `<engine>:<model>` with the model on that engine's shortlist when saved | `ask` | request, one-time, standing |
 | `multi.runs_as` | `ask`, `flow`, `workflow` | `ask` | request, one-time, standing |
 | `flow.review_rounds` | `1`, `2`, `3`, `4` | `3` | request, one-time, standing |
 | `gapcheck.reviewer`, `flow.writer`, `flow.reviewer` | `same`, or `<engine>:<model>` with the model on that engine's shortlist when saved | `same` | request, one-time, standing |
@@ -105,6 +106,24 @@ folder, fails the lookup. This setting is not read from repository files.
 No entry and an empty command both run no preparation. `emb ground`
 distinguishes them as `unset` and `none`.
 
+The owner sets `routing.pool` in Team or at a terminal, for example:
+
+```bash
+emb choices --set 'routing.pool={"codex:gpt-6.2-astra":{"scores":{}}}'
+```
+
+This replaces the whole pool. Saved entries remain visible if their model
+leaves the shortlist. They stay ineligible until the model is shortlisted
+again. Each entry takes its effort from the current shortlist. The
+`auto` policies use the pool; adding to it alone does not change a worker
+row's policy.
+
+Owner scores take numbers from 0 to 100 for `implementation`, `codebase`,
+`review`, `terminal` and `reasoning`. Zero is a rating. An empty `scores`
+object enrolls a model without any ratings. Ember accepts a legacy `usage`
+value from 1 to 10; the lead ignores it. Owner ratings and notes are separate
+from public results, which `emb benchmarks` saves locally.
+
 OpenCode ids include the integration that serves the model, such as
 `anthropic/claude-sonnet-4` or
 `openrouter/deepseek/deepseek-v4.1-flash-1017`. Stored ids are used as stored,
@@ -129,8 +148,9 @@ both are equally close. The next choices write transaction stores that preset.
 `gapcheck.reviewer`, `flow.writer` and `flow.reviewer` follow their
 single-task row (`single.reviewer`, `single.writer`, `single.reviewer`)
 while `same`. `menu` reports each of them as a worker row with `same`
-true or false; a `same` row is its single-task row's. A Claude model in
-one of them runs as its single-task row's `_as` value says.
+true or false. A `same` row inherits the single-task row's model or policy.
+A fixed Claude model in one of them runs as its single-task row's `_as`
+value says.
 `gapcheck.when` decides whether a plan gets a gap check: `off` never,
 `always` every plan, a number from that many steps up, `ask` after the
 owner says so. `gapcheck.ask` is the lowest gap harm put to the owner:
@@ -150,7 +170,7 @@ Each key resolves to the first of:
 3. `setting`: the standing setting.
 4. `default`: the key's default.
 
-`ask` is a value like any other: an `ask` in a higher layer wins.
+`ask` and `auto` are values like any other: a policy in a higher layer wins.
 
 Each answer is `{"value": ..., "layer": "request" | "one-time" | "setting" |
 "default"}`.
@@ -251,7 +271,7 @@ it names no worker. `ask` has reason `asks at each run`; `flow` and
 
 `panel.members` has `value` (the list), `state` (`empty` or `set`) and
 `members`, one row per entry with `value`, `state`, `engine`, `model`,
-`effort` and `reason`, in the worker row states except `ask`; it has no
+`effort` and `reason`, in the worker row states except `ask` and `auto`; it has no
 `run_as`. A non-empty list stays `set` even when none of its member rows
 is `set`. Entries contain no `@effort`; the shortlist supplies the effort.
 Its allowed values are every shortlisted `<engine>:<model>` in engine
@@ -264,8 +284,9 @@ settings and claimed values still resolve through their layers. Explicit
 panel members can therefore use the saved engine and sandbox switches.
 An invalid value for another key still makes every answer use its default.
 
-Worker menu `state` is `set`, `ask`, `invalid`, `engine off`, `not connected` or
-`not shortlisted`, checked in that order. `not connected` means the engine is
+Worker menu `state` is `set`, `ask`, `auto`, `invalid`, `engine off`,
+`not connected` or `not shortlisted`. `ask` and `auto` name no model.
+`not connected` means the engine is
 on and its status in the cache of `emb engines` says it is not connected; its
 reason is `<engine> is not connected`. A read uses only that cache and never
 runs an engine; with no cache, or a cache that is not valid, no row is
@@ -283,6 +304,64 @@ runs an engine; with no cache, or a cache that is not valid, no row is
 | 75 | Stale generation, or the database stayed busy for 5 seconds |
 | 77 | An owner option without a terminal on standard input |
 | 78 | The settings database has an unsupported schema |
+
+## `emb benchmarks`
+
+`emb benchmarks refresh [--json]` downloads public results for the Team
+routing pool. Ask the lead to fill or refresh Ember benchmark data to
+run the same command. No account, spreadsheet or worker run is needed.
+With an empty pool the command points to Team and makes no requests.
+`emb benchmarks status [--json]` reads saved evidence without a download.
+
+| Series key | Result fields |
+|---|---|
+| `terminal-bench-4.1` | [Terminal-Bench 4.1](https://www.tbench.ai/?version=4.1) resolution rate, USD per attempt, USD per pass |
+| `terminal-bench-2.1` | [Terminal-Bench 2.1](https://www.tbench.ai/?version=2.1) resolution rate and USD per attempt; USD per pass requires a published pass count |
+| `livebench-2026-11-06` | [LiveBench 2.0](https://livebench.ai/data/20261106/table.csv) Coding and Reasoning scores |
+| `livebench-coding-cost-2026-11-06` | [LiveBench 2.0 Coding](https://livebench.ai/data/20261106/cost.csv) USD per attempt |
+| `swe-atlas-qna-1.1` | [SWE Atlas v1.1 Codebase QnA](https://labs.scale.com/leaderboard/swe-atlas?tab=qna) score |
+| `ironbee-full-r123` | [IronBee code review](https://github.com/ironbee-ai/code-review-benchmarks/tree/main/reports/full-r123) F1, 50 PRs |
+| `ironbee-frontier-r123` | [IronBee code review](https://github.com/ironbee-ai/code-review-benchmarks/tree/main/reports/frontier-r123) F1, 10 PRs |
+| `ionwarp-onerow4-code-2026-10-06-r1` | [IonWarp code review](https://github.com/Winding-Labs/ai-code-review-benchmark) F1 for model configurations, 50 PRs |
+
+A result belongs to one series key and metric. Different editions, suites
+and PR samples have separate fields. Ember does not fill a missing field
+from another series. Dollars per attempt are the publisher's total inference
+cost divided by trial count. Dollars per pass divide that same cost by
+passing trials and are absent when no pass count or no passes are reported.
+These are benchmark costs. The refresh measures neither live subscription
+allowance nor the bill for an Ember job.
+
+The JSON reply has `status`, `summary`, `sources` by series key, and
+`workers` by `<engine>:<model>`. Each worker holds `effort`, `speed`,
+`shortlisted`, and `matches`, `related` and `missing`, each keyed by
+series. Matches contain the tested model, harness, effort and `metrics`.
+Related entries show a published configuration and why it does not match.
+For example, a Codex `max` result is related to the same model at `high`,
+and a moving Claude alias only gets related evidence. A public row without a
+verified harness or effort cannot fill an exact field. `missing` lists
+unfilled metrics. An absent number is unknown; zero is a result.
+
+Each source reports its publisher, edition, URL, pricing basis where applicable,
+revision and last successful check (`checked_at` in seconds since the Unix
+epoch). Each field in `metrics` has its own `title` and `suite`.
+Refresh marks a series `updated`, `unchanged`, `retained` or
+`unavailable`. Changing the report order alone does not change its revision.
+Ember replaces a complete validated series and retains the previous one
+when a source fails. Refresh refuses to replace an unreadable local cache.
+A source without a successful check for 30 days shows
+as due for refresh; its measurements do not expire. Worker selection reads
+the saved data locally from `$XDG_CACHE_HOME/ember/benchmarks.json`
+(`~/.cache/ember/benchmarks.json` by default).
+
+| Code | Meaning |
+|---|---|
+| 0 | Status read, at least one source checked, or empty pool |
+| 64 | Invalid arguments or settings |
+| 69 | Every source failed during refresh; the report includes any retained data |
+| 74 | Local read or write failed |
+| 75 | Another refresh or settings database write is in progress |
+| 78 | Unsupported settings database schema |
 
 ## `emb engines`
 
@@ -556,7 +635,8 @@ Model and effort:
   `single.writer`, or `single.reviewer` for `--read-only`. The row must be
   `set` and name the same engine; a `claude` row whose run-as is `subagent` is
   refused (64). With `--model`, a `claude` row whose run-as is `subagent` is
-  not read at all.
+  not read at all. The lead passes an explicit model and any selected
+  effort for `auto` or `ask`; the CLI does not select a model by the task.
 - `--effort` wins. Otherwise the effort is the row's, when the row names the
   same engine and model, else the driver's default for the model, which may
   be none.
@@ -1807,7 +1887,8 @@ Without `--model`, the `gapcheck.reviewer` row must be `set` (while `same`,
 the `single.reviewer` row); its model and effort are the run's. When
 `--engine` is given it must match the row. A Claude row that runs as a subagent exits
 64 with the `--brief` and `--reply` route. With `--engine` and `--model`,
-the row may be `ask`. The run checks that the engine is on and connected
+the row may be `ask` or `auto`. The lead applies the policy to the plan
+before supplying these options. The run checks that the engine is on and connected
 and that its driver accepts the effort. A `gone` or `unknown` claim stops
 before the reviewer row is inspected.
 
@@ -2219,6 +2300,7 @@ emb flow --cancel FLOW [--reason TEXT] [--json]
 | `--plan FILE` | Read the JSON plan; required with `--dry-run` or `--start` |
 | `--dry-run` | Validate the plan and workers, then print waves and a gap check command |
 | `--previous FILE` | With `--dry-run` only: compare this earlier result's saved plan and pass the result to the printed gap check command when complete |
+| `--gapcheck-use-team` | With `--dry-run` only: keep the Team gap check reviewer policy when the flow reviewer is named |
 | `--start` | Create the flow branch, worktree and records, then start the runner |
 | `--check-base` | With `--start`: run the check in the prepared flow worktree before creating any task run; requires a plan check |
 | `--writer W`, `--reviewer W` | Name a worker as `<engine>:<model>[@<effort>]`; override the plan and menu |
@@ -2403,9 +2485,10 @@ colons and slashes. The result records `engine`, `model`, `effort` and
 
 Menu resolution requires a readable settings source and a row in state
 `set`. A Claude row set to run as a subagent is refused: a flow runs CLI
-workers. These refusals give code 64 with an `owner:` line naming the
-role's explicit option and Team screen. Explicit options and plan workers
-work when the rows are `ask`; they do not require a shortlist entry.
+workers. These refusals give code 64. For `auto`, the next line asks
+the lead to resolve that role and pass its option; other unresolved rows
+print an `owner:` line. Explicit options and plan workers take precedence
+over `ask` and `auto` and do not require a shortlist entry.
 
 The worker check requires its engine switch to be `on` (64), a connected
 engine (69), an available driver (69), and an accepted explicit effort
@@ -3148,9 +3231,12 @@ ids), `warnings`, `gapcheck` (the shell command, or null when skipped),
 `gapcheck_status` (`run`, `skipped` or `ask`), `gapcheck_reason` and
 `gapcheck_comparison` (null without `--previous`). The
 decision follows `gapcheck.when` and the plan's task count. The command
-names the flow's reviewer with `--engine`, `--model` and `--effort` when
-that reviewer came from `--reviewer` or the plan; otherwise it names none
-and `emb gapcheck` uses the `gapcheck.reviewer` row. With `ask` it carries
+names the flow's reviewer with `--engine`, `--model` and any `--effort`
+when that reviewer came from `--reviewer` or the plan. With
+`--gapcheck-use-team`, or when the flow reviewer comes from Team, the
+command has no worker options and the Gap check reviewer row applies.
+The lead uses `--gapcheck-use-team` when `--reviewer` supplies a model
+chosen under the flow's policy. With `ask` for the gap check it carries
 `--confirmed`. It always carries `--json`, and carries `--previous FILE`
 when the dry run receives a complete result. In text and JSON the command
 omits `--read` for the plan's own paths; `--plan` supplies them. Empty lists
@@ -5357,12 +5443,13 @@ waits for both record models.
 
 ### Team
 
-Team shows the standing worker menu in eight cards: Single tasks, Planning,
-Work of several tasks, Flows, Claude Workflows, Provider capacity, Fallback
-models and Panel.
+Team shows the standing worker menu: Single tasks, Routing pool, Planning,
+Work of several tasks, Flows, Claude Workflows, Provider capacity,
+Fallback models and Panel.
 Single tasks holds the Writer and Reviewer pickers
-(`single.writer`, `single.reviewer`). Each lists Ask each time (`ask`), then,
-for Codex, OpenCode and Claude in that order, each engine that is on and has
+(`single.writer`, `single.reviewer`). Each lists Ask each time (`ask`),
+Let the lead choose (`auto`) and, for Codex, OpenCode and Claude in that
+order, each engine that is on and has
 shortlisted models, under the engine's name, with its models as
 `<model> · <effort>` (OpenCode entries without an effort show the model
 alone). The engine names are headers and cannot be chosen. The closed
@@ -5378,13 +5465,29 @@ off)`, with a warning line giving that reason. A saved model whose engine was
 not connected at its last check shows a warning line too; the check is the
 app's last engine status read, or before the first read the status cache the
 settings snapshot reports. When no engine
-offers a model, the pickers hold Ask each time only and the screen shows
+offers a model, the pickers hold the two policies and the screen shows
 "Shortlist models in Engines to offer them here." with Open Engines.
+
+Routing pool lists the approved models. Add model offers shortlisted models
+of engines that are on. Add and Edit accept optional owner ratings and notes.
+Public benchmark results appear by source and edition, with other tested
+setups labelled Related. The last successful check and refresh status come
+from `emb benchmarks`. Remove deletes the pool entry. A saved model that
+becomes unavailable remains in the list with a reason.
+
+With Let the lead choose, the lead announces and starts a suitable pool
+model. Among suitable workers it prefers a lower benchmark cost where the
+same measure is available from the same test. If none is eligible and
+suitable, the lead asks the owner. With Ask each time, the lead recommends
+a worker and waits for the owner's choice. Fixed and explicit selections
+keep their precedence.
 
 Planning holds Gap check reviewer (`gapcheck.reviewer`), a picker of Same
 as Reviewer (`same`) and the same models as Reviewer; closed on Same as
 Reviewer it shows what that resolves to, such as `Same as Reviewer · Codex ·
-gpt-6-astra · high`, as Flow writer and Flow reviewer do. Run the gap check
+gpt-6-astra · high`, as Flow writer and Flow reviewer do. An inherited
+policy is evaluated for the gap check plan, separately from a code review.
+Run the gap check
 (`gapcheck.when`) is a picker of Off, Always, 2+ tasks to 10+ tasks and Ask
 each time; in its open list each option has a hint line with its effect,
 such as "Plans of 1 to 4 tasks start without one." under 5+ tasks; and
@@ -5398,7 +5501,9 @@ owner has already opted in. Flows shows unless Multi-task work is Claude
 Workflow, and Claude Workflows unless it is Flow.
 
 Flows holds Flow writer and Flow reviewer (`flow.writer`, `flow.reviewer`),
-pickers that start with Same as Writer and Same as Reviewer; Max review
+pickers that start with Same as Writer and Same as Reviewer. The lead
+resolves and announces one writer and one reviewer for the flow, using
+the plan to evaluate any inherited policy. Flows also holds Max review
 rounds (`flow.review_rounds`): 1, 2, 3 or 4, the most times a reviewer
 can check one flow task; Max tasks at once (`flow.parallel`): 1, 2, 4, 6,
 the most flow tasks that run at the same time; Stall

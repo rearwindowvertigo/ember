@@ -368,6 +368,18 @@ def test_quick_saves_wait_and_use_the_new_generation(
     assert context.settings()["generation"] > first
 
 
+def test_snapshot_derived_save_does_not_take_a_newer_queued_generation(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    context = _ready(env, qtbot)
+    generation = context.settings()["generation"]
+    with qtbot.waitSignal(context.stale, timeout=5000):
+        context.save_settings({"app.theme": "dark"})
+        context.save_settings({"worker.network": "on"}, expect_generation=generation)
+    assert context.setting("app.theme") == "dark"
+    assert context.setting("worker.network") == "off"
+
+
 def test_stale_save_drops_the_saves_behind_it(
     env: dict[str, str], qtbot: QtBot
 ) -> None:

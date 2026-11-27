@@ -158,6 +158,37 @@ def no_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
 
 
+def test_owner_sets_pool_and_policy_from_the_terminal(
+    env: dict[str, str], terminal: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pool = {
+        "opencode:openrouter/qwen:free": {
+            "scores": {
+                "terminal": 0,
+                "reasoning": 100,
+                "implementation": 63.25,
+                "review": 56.8,
+            },
+            "notes": "Example benchmarks, a, b",
+        }
+    }
+    code, written, err = _run(
+        [
+            "--set", "shortlist.opencode=openrouter/qwen:free@high",
+            "--set", f"routing.pool={json.dumps(pool)}",
+            "--set", "single.writer=auto",
+        ],
+        env,
+        capsys,
+    )  # fmt: skip
+    assert code == 0 and not err
+    assert written["settings"]["routing.pool"] == pool
+    code, claimed, err = _run(["--claim", "--id", "auto-123", "--brief"], env, capsys)
+    assert code == 0 and not err
+    assert claimed["menu"]["single.writer"]["state"] == "auto"
+    assert claimed["answers"]["routing.pool"]["value"] == pool
+
+
 def _run(
     argv: list[str], env: dict[str, str], capsys: pytest.CaptureFixture[str]
 ) -> tuple[int, Any, str]:

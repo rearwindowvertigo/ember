@@ -29,8 +29,7 @@ and for the flow plan's `read` paths; folders are not checked.
 
 ## Decide first
 
-Settle whether the plan gets a check before choosing a reviewer or asking
-any worker question:
+Settle whether the plan gets a check before choosing its gap check reviewer:
 
 - Flow: read `gapcheck_status` in the `emb flow --dry-run` JSON.
 - Claude Workflow: read `gapcheck.when` with `emb choices --json --id <id>`
@@ -72,16 +71,21 @@ preparation.
 
 Use the run's existing claim. `emb gapcheck` uses the owner's Gap check
 reviewer row (`gapcheck.reviewer`, which follows `single.reviewer` while
-`same`). When the owner named the reviewer, or that row is not `set`, pass
-`--engine <e> --model <m> --effort <x>` with the resolved effort when there
-is one. If no reviewer was named and
-the row cannot answer, ask the owner using the skill's worker question.
+`same`). Read the claimed choices without `--brief` for this row. When
+there is no named reviewer, use a fixed row as set or apply the inherited
+`ask` or `auto` to this plan as `references/worker-selection.md` describes.
+This is a separate choice from resolving a flow's writer or code reviewer.
+If an unusable fixed row needs replacing, ask the owner. For a named,
+approved or automatically chosen reviewer, pass `--engine <e> --model <m>`
+and `--effort <x>` when there is one.
 
 For a flow, run the exact `gapcheck` command from the dry run (also printed
 after `gap check:`; it already carries `--json` and `--confirmed` after an
-`ask`). The printed command does not repeat the plan's `read` paths as
-`--read` options, in text or JSON. Add `--claim <id>` when absent and the
-redirect above. For a Claude Workflow, run the command above.
+`ask`). When it has no worker flags, add any explicit worker options
+resolved for the gap check. The printed command does not repeat the
+plan's `read` paths as `--read` options, in text or JSON. Add `--claim <id>`
+when absent and the redirect above. For a Claude Workflow, run the command
+above with the chosen reviewer's options when needed.
 Should `emb gapcheck` itself report `status` `skipped` or `ask`, the
 settings changed since you read them: treat it as the decision above.
 
@@ -193,8 +197,9 @@ default for a `high` gap with `ask_owner: true` yourself. Write the answers
 into the failure model, context or task text before `--start` or the
 Workflow. Record every answer of the current result first and update the
 plan once with all of them. For a flow, run
-`emb flow --plan <file> --dry-run --previous <last result>` and follow its
-comparison lines (or `gapcheck_comparison` in JSON):
+`emb flow --plan <file> --dry-run --previous <last result>` with the same
+claim, worker and gap check options, and follow its comparison lines
+(or `gapcheck_comparison` in JSON):
 
 - `repeat needed` names each structural change: tasks added or removed,
   changed `files` or `after`, or changed waves. Run the plan's one repeat

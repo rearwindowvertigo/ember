@@ -375,11 +375,12 @@ def test_usage(env: dict[str, str], options: list[str]) -> None:
     ],
 )
 def test_previous_requires_dry_run(env: dict[str, str], options: list[str]) -> None:
-    code, out, err = invoke(env, *options, "--previous", "missing-result.json")
-    assert code == 64 and not out
-    assert "--previous needs --dry-run" in err
-    assert err.endswith("next: emb flow --help\n")
-    assert not paths.runs_dir(env).exists()
+    for flag in (["--previous", "missing-result.json"], ["--gapcheck-use-team"]):
+        code, out, err = invoke(env, *options, *flag)
+        assert code == 64 and not out
+        assert f"{flag[0]} needs --dry-run" in err
+        assert err.endswith("next: emb flow --help\n")
+        assert not paths.runs_dir(env).exists()
 
 
 @pytest.mark.parametrize(
@@ -431,6 +432,39 @@ def test_ask_rows(env: dict[str, str], plan_file: Path, explicit: bool) -> None:
     code, out, err = invoke(env, "--plan", str(plan_file), "--dry-run", *options)
     assert code == (0 if explicit else 64), err
     assert "(option)" in out if explicit else "owner: name the flow's writer" in err
+
+
+def test_auto_flow_pair_keeps_the_gap_reviewer_policy_separate(
+    env: dict[str, str], plan_file: Path
+) -> None:
+    choices.set_settings(
+        {"single.writer": "auto", "single.reviewer": "auto", "gapcheck.when": "ask"},
+        env=env,
+    )
+    data = json.loads(plan_file.read_text())
+    del data["writer"], data["reviewer"]
+    plan_file.write_text(json.dumps(data))
+    preview = ["--plan", str(plan_file), "--dry-run", "--json"]
+    code, out, err = invoke(env, *preview)
+    assert code == 64 and not out
+    assert "next: choose a model for the flow's writer and pass --writer" in err
+
+    pair = ["--writer", "codex:writer@low", "--reviewer", "codex:reviewer@high"]
+    code, out, err = invoke(env, *preview, *pair)
+    assert code == 0, err
+    default_gap = shlex.split(json.loads(out)["gapcheck"])
+    assert default_gap[default_gap.index("--model") + 1] == "reviewer"
+    assert "--confirmed" in default_gap
+
+    code, out, err = invoke(env, *preview, *pair, "--gapcheck-use-team")
+    assert code == 0, err
+    result = json.loads(out)
+    gap = shlex.split(result["gapcheck"])
+    assert "--confirmed" in gap and "--model" not in gap and "--engine" not in gap
+    assert (result["writer"]["model"], result["writer"]["effort"]) == ("writer", "low")
+    assert (result["reviewer"]["model"], result["reviewer"]["effort"]) == (
+        "reviewer", "high"
+    )  # fmt: skip
 
 
 @pytest.mark.parametrize("claim_state", ["gone", "unknown"])
