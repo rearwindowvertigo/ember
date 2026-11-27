@@ -246,6 +246,9 @@ def _add_run(parser: argparse.ArgumentParser) -> None:
         help="the run that a provider error ended and that this start replaces",
     )
     start.add_argument(
+        "--retry-of", metavar="RUN", help="retry this run's failed preparation"
+    )
+    start.add_argument(
         "--continue-run",
         metavar="RUN",
         help="start from the branch of this earlier editing run and tell the "
@@ -1043,6 +1046,7 @@ def _run_mode(args: argparse.Namespace) -> str:
         "--window": args.window,
         "--continue-run": args.continue_run is not None,
         "--fallback-from": args.fallback_from is not None,
+        "--retry-of": args.retry_of is not None,
         "--dry-run": args.dry_run,
         "--announce": args.announce is not None,
         "--benchmark-cost": args.benchmark_cost is not None,
@@ -1115,6 +1119,7 @@ def _run_run(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
                 announce=args.announce,
                 benchmark_cost=args.benchmark_cost,
                 owner_choice=args.owner_choice,
+                retry_of=args.retry_of,
             )
         ),
         "send": lambda: core.send(args.send, args.message_file, force=args.force),

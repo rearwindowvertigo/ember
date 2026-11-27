@@ -42,6 +42,18 @@ COMMITTED = "committed"
 TURN_STATES = (SENT, COLLECTED, COMMITTED)
 """The values of `turn_state`."""
 
+SELECTION_AUTO = "automatic"
+SELECTION_OWNER = "owner_choice"
+SELECTION_FALLBACK = "fallback"
+SELECTION_DIRECT = "direct"
+SELECTION_ORIGINS = (
+    SELECTION_AUTO,
+    SELECTION_OWNER,
+    SELECTION_FALLBACK,
+    SELECTION_DIRECT,
+)
+"""The ways a single-worker start chose its worker."""
+
 SANDBOXES = ("codex", "bubblewrap", "none")
 """The values of `sandbox`: who provides the run's sandbox."""
 
@@ -236,13 +248,16 @@ class Run:
     speed: str | None = None
     """The Codex tier at start, or None for other engines and older records."""
 
+    selection_origin: str | None = None
+    """How a single-worker start chose its worker, if recorded."""
+
     def to_json(self) -> dict[str, Any]:
         """Return the stored fields as a JSON-ready dict.
 
         Returns:
             The stored record with tuples as lists and the full OpenCode model
-            id marker. Empty preparation, start arguments, run links and speed
-            are omitted, as is an inactive checkout preservation flag.
+            id marker. Empty preparation, start arguments, run links, speed and
+            selection origin are omitted, as is an inactive preservation flag.
         """
         result: dict[str, Any] = {}
         for item in fields(self):
@@ -255,6 +270,7 @@ class Run:
                 "continues",
                 "fallback_from",
                 "speed",
+                "selection_origin",
                 "preserve_ignored",
             ):
                 continue
@@ -287,6 +303,7 @@ _TYPES: dict[str, tuple[tuple[type, ...], bool]] = {
     "parent": ((dict,), True),
     "preparation": ((dict,), True),
     "start_argv": ((list,), False),
+    "selection_origin": (_STR, True),
     "continues": (_STR, True),
     "fallback_from": (_STR, True),
     "sandbox": (_STR, False),
@@ -685,6 +702,7 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
         "continues": None,
         "fallback_from": None,
         "speed": None,
+        "selection_origin": None,
         **value,
     }
     values: dict[str, Any] = {}
@@ -720,6 +738,8 @@ def from_json(value: object, folder: Path, env: Mapping[str, str] | None = None)
         values["engine"] != "codex" or values["speed"] not in choices.SPEEDS
     ):
         raise RecordError(name, "run.json has an invalid speed")
+    if values["selection_origin"] not in (None, *SELECTION_ORIGINS):
+        raise RecordError(name, "run.json has an invalid selection_origin")
     if values["status"] not in STATUSES:
         raise RecordError(name, "run.json has an invalid status")
     if values["turn_state"] is not None and values["turn_state"] not in TURN_STATES:
@@ -1056,7 +1076,7 @@ def load(run_id: str, env: Mapping[str, str] | None = None) -> Run:
         text = (folder / RECORD_NAME).read_text(encoding="utf-8")
     except FileNotFoundError as error:
         raise RecordMissingError(run_id, "no such run") from error
-    except OSError as error:
+    except (OSError, UnicodeDecodeError) as error:
         raise RecordError(run_id, f"cannot read run.json: {error}") from error
     try:
         value = json.loads(text)
