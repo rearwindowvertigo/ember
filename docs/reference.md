@@ -54,6 +54,9 @@ empty list.
 | `fast.codex` | List of distinct Codex model names that use Fast. New entries must be on `shortlist.codex` when saved. Existing entries may stay after leaving the shortlist. All other Codex models use Standard. | `[]` | standing |
 | `shortlist.opencode` | List of full `<integration>/<model>` ids, with optional `@<effort>`; integration `~?[A-Za-z0-9][A-Za-z0-9._-]*`, model one or more `/`-separated parts matching `~?[A-Za-z0-9][A-Za-z0-9._:-]*` | `[]` | standing |
 | `routing.pool` | JSON object mapping `<engine>:<model>` to an owner `scores` object and optional text `notes`; new models must be shortlisted when saved | `{}` | standing |
+| `benchmarks.score_margin` | Integer strings `0` to `100`; points below the best comparable Intelligence Index score | `5` | standing |
+| `benchmarks.lead_apps` | `["all"]`, or a list of distinct app ids from `codex`, `opencode` and `claude`; `[]` selects no apps | `["all"]` | standing |
+| `benchmarks.one_per_model` | `on`, `off`; keep one qualifying effort per measured model release | `off` | standing |
 | `single.writer`, `single.reviewer` | `ask`, `auto`, or `<engine>:<model>` with the model on that engine's shortlist when saved | `ask` | request, one-time, standing |
 | `multi.runs_as` | `ask`, `flow`, `workflow` | `ask` | request, one-time, standing |
 | `flow.review_rounds` | `1`, `2`, `3`, `4` | `3` | request, one-time, standing |
@@ -308,11 +311,32 @@ runs an engine; with no cache, or a cache that is not valid, no row is
 ## `emb benchmarks`
 
 `emb benchmarks refresh [--json]` downloads results for shortlisted models.
-Ask the lead to fill or refresh Ember benchmark data to run the same
-command without a worker run. The eight default sources need no account.
-When both the shortlists and the Routing pool are empty, refresh points
-the owner to Engines and makes no requests.
+The eight public sources need no account. With no shortlist or Routing pool,
+refresh checks only Artificial Analysis if its API key is saved. Without
+the key it reports `empty_pool` and makes no requests. Ask the lead to
+refresh the benchmark data to run the same command without a worker run.
+
 `emb benchmarks status [--json]` reads saved evidence without a download.
+
+`emb benchmarks recommend [--json]` reads the saved Benchmarks settings,
+Intelligence Index results, and app catalogues. It performs no worker
+claim, dispatch, or network request. It uses only pairs that have both
+score and cost for the same measured release, effort, and Index edition
+and at least one matching route in the selected connected apps. Matching
+routes may include models outside the Routing pool. The report lists every
+matching app route once for each measured pair. For a Claude family alias,
+it gives the tested release and the app's selector separately.
+
+The highest comparable score in that scope sets the cutoff. A pair exactly
+at the cutoff qualifies; a margin of zero allows only ties for best. A pair
+is on the Pareto frontier if no other pair scores at least as high for no
+more cost, with a strict advantage on either measure. Recommendations are
+the three cheapest qualifying pairs on the frontier, or fewer when fewer
+qualify. With **One result per model** on, the cheapest qualifying frontier
+effort for each measured release is kept before taking three. The report
+includes the saved settings, effective app scope, best score and cutoff,
+and each recommendation's score, gap, cost, effort and routes. It also
+reports the edition, last successful check and saved source status.
 
 | Series key | Result fields |
 |---|---|
@@ -325,7 +349,7 @@ the owner to Engines and makes no requests.
 | `ironbee-frontier-r123` | [IronBee code review](https://github.com/ironbee-ai/code-review-benchmarks/tree/main/reports/frontier-r123) F1, 10 PRs |
 | `ionwarp-onerow4-code-2026-10-06-r1` | [IonWarp code review](https://github.com/Winding-Labs/ai-code-review-benchmark) F1 for model configurations, 50 PRs |
 
-Team's Artificial Analysis opt-in adds the publisher's
+The Benchmarks page's Artificial Analysis opt-in adds the publisher's
 [Intelligence Index](https://artificialanalysis.ai/evaluations/artificial-analysis-intelligence-index)
 score and weighted USD per Index task from the
 [free v2 Language Models API](https://artificialanalysis.ai/data-api/docs/reference).
@@ -377,6 +401,8 @@ Refresh marks a series `updated`, `unchanged`, `retained` or
 `unavailable`. Changing the report order alone does not change its revision.
 Ember replaces a complete validated series and retains the previous one
 when a source fails. Refresh refuses to replace an unreadable public cache.
+An Index-only refresh reports `ok`, `retained` or `unavailable` according
+to that source. The eight public source entries are kept.
 A successful check becomes due for refresh after 30 days; its measurements
 do not expire. Worker selection reads the saved data locally. The public
 cache is `$XDG_CACHE_HOME/ember/benchmarks.json` (`~/.cache/ember/benchmarks.json`
@@ -384,7 +410,7 @@ by default).
 
 | Code | Meaning |
 |---|---|
-| 0 | Status read, at least one source checked, or empty pool |
+| 0 | Status or recommendations read, at least one source checked, or empty pool |
 | 64 | Invalid arguments or settings |
 | 69 | Every source failed during refresh; the report includes any retained data |
 | 74 | Local read or write failed |
@@ -5033,6 +5059,9 @@ During installation, `Updating Ember` shows `Installing Ember <version>.`
 PackageKit installs only trusted packages and can prompt for authorization
 through polkit. Ember runs no `sudo` for the update.
 
+When a focused update notice is replaced, focus follows its action or
+progress notice. Background changes to the notice preserve focus elsewhere.
+
 A failed check shows `Ember could not check for updates`. If PackageKit is
 unavailable, authorization is declined, or installation fails, the notice
 says `Ember could not install the update`. Ember stays open and either
@@ -5138,6 +5167,7 @@ durations as `18 min`, `1 h 5 min` or `2 h`.
 | Keys | Do |
 |---|---|
 | Ctrl+1 to Ctrl+5 | Open Overview, Team, Engines, Dependencies, Settings |
+| Ctrl+6 | Open Benchmarks |
 | Ctrl+W | Hide the window to the tray; quit when there is no tray |
 | Ctrl+Q | Quit |
 
@@ -5544,16 +5574,10 @@ offers a model, the pickers hold the two policies and the screen shows
 "Shortlist models in Engines to offer them here." with Open Engines.
 
 Routing pool lists the approved models. Add model offers shortlisted models
-of engines that are on. Add and Edit accept optional owner ratings and notes.
-Public benchmark results appear by source and edition, with other tested
-setups labelled Related. The last successful check and refresh status come
-from `emb benchmarks`. Remove deletes the pool entry. A saved model that
-becomes unavailable remains in the list with a reason.
-
-Artificial Analysis is optional. Add API key opens a masked field for the
-owner's free API key. View effort matrix shows the Index score and USD per
-task for shortlisted models by release and advertised effort. Missing
-measurements are blank. The saved Engines effort is marked Preferred.
+of engines that are on. Each row shows the engine, model, preferred effort
+and Edit and Remove actions. Edit holds the optional owner ratings and notes.
+A saved model that becomes unavailable stays in the list with a reason
+under its row. View benchmarks opens the Benchmarks page.
 
 Let the lead choose can start a suitable shortlisted Routing pool model
 at any effort the model supports. Among suitable pairs, the lead prefers
@@ -5759,6 +5783,32 @@ Remove deletes the entry. The card is disabled while a save is pending.
 An empty command explicitly means no preparation; no entry leaves the
 repository unset. Invalid or duplicate paths are refused with the reason.
 Preparation runs as described under `emb run`.
+
+### Benchmarks
+
+Benchmarks uses the same saved choices as `emb benchmarks recommend`.
+**Points below the best score** starts at 5 and accepts whole points.
+**Lead apps** starts at **All connected apps**, which follows changes in
+connected apps. An explicit subset stays saved until changed; disconnected
+apps in that subset contribute no routes. **One result per model** starts
+off. Each choice saves as it changes.
+
+The chart plots benchmark USD per Index task horizontally and Intelligence
+Index score vertically. It connects the Pareto frontier and shades the
+range at or above the cutoff. Numbers on recommended points match the
+table, which includes the measured pair, score, gap, cost and app routes.
+The best score stays visible even when its pair is outside the recommendations.
+
+The page also shows the benchmark sources, the last successful check, and
+whether a refresh is due or saved data was retained. Refresh explicitly
+checks the sources. Add API key opens a masked field for an Artificial
+Analysis free API key. View effort matrix shows the Index score and USD
+per task for shortlisted models by release and advertised effort; missing
+measurements are blank and the saved Engines effort is marked Preferred.
+
+Worker evidence shows **Exact matches** first and keeps **Related results**
+collapsed initially. It identifies the tested model, effort, and harness
+when known. The Artificial Analysis **Model reference** is shown separately.
 
 ### Files
 
