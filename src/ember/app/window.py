@@ -646,28 +646,51 @@ class MainWindow(QMainWindow):
 
     def show_update(self, notice: UpdateNotice | None) -> None:
         """Show the release offer or its result above the current screen."""
-        self._clear_update()
         if notice is None:
+            self._replace_update(None)
             return
         actions = []
         if notice.update is not None:
             actions.append(("Update", notice.update))
         if notice.dismissible:
-            actions.append(("Dismiss", self._clear_update))
+            actions.append(("Dismiss", lambda: self.show_update(None)))
         alert = widgets.Alert(notice.tone, notice.title, notice.text, actions=actions)
         alert.text_label.setTextFormat(Qt.TextFormat.PlainText)
         alert.text_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        self.update_notice = alert
-        self.notice_area.insertWidget(0, alert)
+        if not alert.buttons:
+            alert.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self._replace_update(alert)
 
-    def _clear_update(self) -> None:
-        if self.update_notice is not None:
-            self.update_notice.hide()
-            self.notice_area.removeWidget(self.update_notice)
-            self.update_notice.deleteLater()
-            self.update_notice = None
+    def _replace_update(self, alert: widgets.Alert | None) -> None:
+        previous = self.update_notice
+        self.update_notice = alert
+        if alert is not None:
+            self.notice_area.insertWidget(0, alert)
+            alert.show()
+        if previous is None:
+            return
+        focused = self.focusWidget()
+        if focused is not None and (
+            focused is previous or previous.isAncestorOf(focused)
+        ):
+            # Hiding a focused notice makes Qt move focus by Tab.
+            target = self._update_focus_target(alert)
+            if target is not None:
+                target.setFocus(Qt.FocusReason.OtherFocusReason)
+        previous.hide()
+        self.notice_area.removeWidget(previous)
+        previous.deleteLater()
+
+    def _update_focus_target(self, alert: widgets.Alert | None) -> QWidget | None:
+        if alert is not None:
+            return alert.buttons[0] if alert.buttons else alert
+        if self.update_button is not None and self.update_button.isVisibleTo(self):
+            return self.update_button
+        if self.update_box is not None and self.update_box.isVisibleTo(self):
+            return self.update_box.restart_button
+        return self.stack.currentWidget()
 
     def show_restart(self, version: str, restart: Callable[[], None]) -> None:
         """Offer a restart into the installed version until Ember restarts.

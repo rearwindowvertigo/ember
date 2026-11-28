@@ -6,11 +6,12 @@ from unittest.mock import Mock, call
 
 import pytest
 from PySide6.QtCore import QCoreApplication, QPoint, QProcessEnvironment, Qt
+from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QWidget
 from pytestqt.qtbot import QtBot
 
 from ember import deps
-from ember.app import flows, icons, state, theme
+from ember.app import flows, icons, state, theme, widgets
 from ember.app import window as window_module
 from ember.app.context import STALE_TITLE, AppContext
 from ember.app.screens import KEYS, SCREENS
@@ -673,12 +674,145 @@ def test_update_notice_shows_both_versions_and_its_action(
     assert window.notice is not None
 
 
+@pytest.mark.parametrize("width", [959, 960])
+@pytest.mark.parametrize("keyboard", [False, True], ids=["mouse", "keyboard"])
+def test_update_activation_keeps_focus_in_notice(
+    env: dict[str, str], qtbot: QtBot, qapp: QApplication, width: int, keyboard: bool
+) -> None:
+    widgets.install_tooltips(qapp)
+    window, _context, _quit = _window(env, qtbot)
+    window.resize(width, 600)
+    window.show()
+    with qtbot.waitActive(window):
+        window.activateWindow()
+
+    def prepare() -> None:
+        window.show_update(
+            UpdateNotice(
+                "Preparing Ember update", "Refreshing packages.", dismissible=False
+            )
+        )
+
+    window.show_update(UpdateNotice("Ember update available", "", update=prepare))
+    offer = window.update_notice
+    assert offer is not None
+    update, dismiss = offer.buttons
+    qtbot.waitUntil(update.isVisible)
+    if keyboard:
+        dismiss.setFocus()
+        qtbot.keyClick(dismiss, Qt.Key.Key_Backtab)
+    else:
+        qtbot.mousePress(update, Qt.MouseButton.LeftButton)
+    assert update.hasFocus()
+
+    focus_changes = QSignalSpy(qapp.focusChanged)
+    if keyboard:
+        qtbot.keyClick(update, Qt.Key.Key_Space)
+    else:
+        qtbot.mouseRelease(update, Qt.MouseButton.LeftButton)
+
+    preparing = window.update_notice
+    assert preparing is not None and preparing.hasFocus()
+    assert preparing.accessibleName() == "Preparing Ember update"
+    assert focus_changes.count() == 1
+    popup = widgets.tip_popup()
+    assert not popup.isVisible()
+
+    hide = window.hide_sidebar_button
+    qtbot.keyClick(preparing, Qt.Key.Key_Tab)
+    assert hide.hasFocus()
+    assert popup.isVisible() and popup.owner is hide and popup.mode == "keyboard"
+    qtbot.keyClick(hide, Qt.Key.Key_Tab)
+    assert window.nav["overview"].hasFocus()
+    qtbot.mouseMove(hide, hide.rect().center())
+    assert popup.isVisible() and popup.owner is hide and popup.mode == "hover"
+
+
+@pytest.mark.parametrize("candidate_changed", [False, True], ids=["failed", "changed"])
+def test_update_progress_hands_focus_to_the_result(
+    env: dict[str, str], qtbot: QtBot, candidate_changed: bool
+) -> None:
+    window, _context, _quit = _window(env, qtbot)
+    window.show()
+    with qtbot.waitActive(window):
+        window.activateWindow()
+    window.show_update(UpdateNotice("Preparing Ember update", "", dismissible=False))
+    preparing = window.update_notice
+    assert preparing is not None
+    preparing.setFocus()
+
+    if candidate_changed:
+        result = UpdateNotice("The available Ember version changed", "", update=Mock())
+    else:
+        window.show_update(UpdateNotice("Updating Ember", "", dismissible=False))
+        installing = window.update_notice
+        assert installing is not None and installing.hasFocus()
+        result = UpdateNotice("Ember could not install the update", "", tone="danger")
+    window.show_update(result)
+    alert = window.update_notice
+    assert alert is not None and alert.buttons[0].hasFocus()
+    dismiss = alert.buttons[-1]
+    if candidate_changed:
+        qtbot.keyClick(alert.buttons[0], Qt.Key.Key_Tab)
+    assert dismiss.hasFocus()
+    qtbot.keyClick(dismiss, Qt.Key.Key_Space)
+    assert window.update_notice is None
+    screen = window.stack.currentWidget()
+    assert screen is not None and screen.hasFocus()
+
+
+@pytest.mark.parametrize("width", [959, 960])
+def test_clearing_focused_update_notice_focuses_visible_restart(
+    env: dict[str, str], qtbot: QtBot, width: int
+) -> None:
+    window, _context, _quit = _window(env, qtbot)
+    window.resize(width, 600)
+    window.show()
+    with qtbot.waitActive(window):
+        window.activateWindow()
+    window.show_update(UpdateNotice("Updating Ember", "", dismissible=False))
+    installing = window.update_notice
+    assert installing is not None
+    installing.setFocus()
+    window.show_restart("2.0.0", Mock())
+    assert window.update_box is not None and window.update_button is not None
+    restart = window.update_button if width < 960 else window.update_box.restart_button
+    assert restart.isVisible()
+
+    window.show_update(None)
+
+    assert window.update_notice is None
+    assert restart.hasFocus()
+
+
+def test_background_update_notices_preserve_unrelated_focus(
+    env: dict[str, str], qtbot: QtBot
+) -> None:
+    window, _context, _quit = _window(env, qtbot)
+    window.show()
+    with qtbot.waitActive(window):
+        window.activateWindow()
+    window.show_notice("info", "Settings changed")
+    assert window.notice is not None
+    dismiss = window.notice.buttons[0]
+    qtbot.waitUntil(dismiss.isVisible)
+    dismiss.setFocus()
+
+    for notice in (
+        UpdateNotice("Ember update available", "", update=Mock()),
+        UpdateNotice("Preparing Ember update", "", dismissible=False),
+        UpdateNotice("Ember could not install the update", "", tone="danger"),
+        None,
+    ):
+        window.show_update(notice)
+        QCoreApplication.processEvents()
+        assert dismiss.hasFocus()
+
+
 @pytest.mark.parametrize("width", [640, 959, 960, 1100])
 def test_hide_and_show_from_sidebar_and_each_screen(
     env: dict[str, str], qtbot: QtBot, width: int
 ) -> None:
-    from ember.app import widgets
-
     window, _context, _quit = _window(env, qtbot)
     window.resize(width, 600)
     window.show()
