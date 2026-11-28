@@ -1,6 +1,5 @@
 import threading
 from collections.abc import Callable, Mapping
-from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -9,19 +8,16 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QLabel,
-    QLineEdit,
-    QTableWidget,
     QWidget,
 )
 from pytestqt.qtbot import QtBot
 
-from ember import benchmarks, choices, db
+from ember import choices, db
 from ember.app import widgets
 from ember.app.context import AppContext
 from ember.app.screens import menu
 from ember.app.screens.menu import MenuScreen
 from ember.app.widgets import Card, Picker
-from ember.benchmark_sources import SOURCES, Observation, SourceError
 from ember.engines import status
 
 
@@ -386,17 +382,17 @@ def test_owner_can_add_edit_and_remove_a_pooled_model(
             "notes": "Example benchmark, high effort",
         }
     }
-    assert (
-        "Owner scores · Implementation 63.25 · Codebase understanding 0"
-        " · Code review 52.5" in _texts(screen)
-    )
-    assert "Example benchmark, high effort" in _texts(screen)
+    assert "Codex · gpt-5 · Preferred effort high" in _texts(screen)
+    assert "Example benchmark, high effort" not in _texts(screen)
+    assert all("Owner scores" not in text for text in _texts(screen))
     assert screen.add_routing.findData("codex:gpt-5") == -1
 
     def edit(dialog: menu._RoutingDialog) -> int:
         assert dialog.notes.toPlainText() == "Example benchmark, high effort"
         assert dialog.scores["reasoning"].text() == ""
+        assert float(dialog.scores["implementation"].text()) == 63.25
         assert float(dialog.scores["codebase"].text()) == 0
+        assert float(dialog.scores["review"].text()) == 52.5
         dialog.scores["codebase"].clear()
         return QDialog.DialogCode.Accepted
 
@@ -423,136 +419,6 @@ def test_routing_dialog_accepts_signed_zero_from_a_saved_score(qtbot: QtBot) -> 
     dialog = menu._RoutingDialog("codex:gpt-5", entry, parent)
     assert dialog.save_button.isEnabled()
     assert dialog.entry() == entry
-
-
-def test_routing_pool_shows_a_cli_refresh_and_labels_a_changed_effort(
-    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    choices.set_settings(
-        {
-            **SHORTLISTS,
-            "routing.pool": {"codex:gpt-5": {"scores": {}, "notes": "Owner evidence"}},
-        },
-        env=env,
-    )
-    context, screen = _screen(env, qtbot)
-    assert screen.benchmark_summary.text() == (
-        "Ask the lead to refresh Ember benchmark data."
-    )
-
-    def unavailable() -> list[Observation]:
-        raise SourceError("fixture unavailable")
-
-    for key, source in SOURCES.items():
-        monkeypatch.setitem(SOURCES, key, replace(source, read=unavailable))
-    key = "terminal-bench-4.1"
-    sample = Observation(
-        model="GPT-5",
-        harness="Codex",
-        effort="high",
-        metrics={"resolution": 63.25, "attempt_usd": 1.25, "pass_usd": 2},
-    )
-    monkeypatch.setitem(SOURCES, key, replace(SOURCES[key], read=lambda: [sample]))
-    benchmarks.refresh(env)
-    exact = "Terminal-Bench 4.1 · Resolved % 63.25 · USD / attempt 1.25 · USD / pass 2"
-    qtbot.waitUntil(lambda: exact in _texts(screen), timeout=5000)
-    assert "last checked" in screen.benchmark_summary.text()
-    assert "Some sources could not be refreshed." in screen.benchmark_summary.text()
-    assert "Owner evidence" in _texts(screen)
-
-    sample["metrics"]["resolution"] = 64.5
-    benchmarks.refresh(env)
-    updated = exact.replace("63.25", "64.5")
-    qtbot.waitUntil(lambda: updated in _texts(screen), timeout=5000)
-    assert exact not in _texts(screen)
-
-    choices.set_settings({"shortlist.codex": ["gpt-5@low"]}, env=env)
-    with qtbot.waitSignal(context.settings_changed, timeout=5000):
-        context.reload_settings()
-    assert updated not in _texts(screen)
-    assert f"Related · {updated} (GPT-5 · Codex · high)" in _texts(screen)
-    assert "No matching benchmark for this setup." in _texts(screen)
-
-
-def test_team_accepts_a_masked_key_and_shows_the_effort_matrix(
-    env: dict[str, str], qtbot: QtBot, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def unavailable() -> list[Observation]:
-        raise SourceError("fixture unavailable")
-
-    for key, source in SOURCES.items():
-        monkeypatch.setitem(SOURCES, key, replace(source, read=unavailable))
-    calls: list[str] = []
-
-    def reference(key: str) -> tuple[str, list[Observation]]:
-        calls.append(key)
-        return "5.0", [
-            Observation(
-                model="Claude Opus 5.5",
-                model_creator="Anthropic",
-                harness=None,
-                effort="medium",
-                configuration="Default Fallback",
-                metrics={"intelligence_index": 55, "task_usd": 1.25},
-            )
-        ]
-
-    monkeypatch.setattr(benchmarks, "read_artificial_analysis", reference)
-    choices.set_settings(
-        {
-            "shortlist.claude": ["opus@medium", "sonnet@low"],
-            "routing.pool": {"claude:opus": {"scores": {}}},
-        },
-        env=env,
-    )
-    _context, screen = _screen(env, qtbot)
-    assert screen.aa_matrix.isHidden()
-
-    def enter(dialog: QDialog) -> int:
-        field = dialog.findChild(QLineEdit)
-        assert field is not None and field.echoMode() == QLineEdit.EchoMode.Password
-        assert field.text() == ""
-        field.setText("fixture-key")
-        return QDialog.DialogCode.Accepted
-
-    with monkeypatch.context() as patch:
-        patch.setattr(QDialog, "exec", enter)
-        screen.aa_key.click()
-    qtbot.waitUntil(lambda: screen.aa_status.text().startswith("API key saved."))
-    assert not calls
-
-    benchmarks.refresh(env)
-    qtbot.waitUntil(lambda: not screen.aa_status.text())
-    assert calls == ["fixture-key"]
-    assert screen.aa_matrix.isEnabled()
-
-    def matrix(dialog: QDialog) -> int:
-        table = dialog.findChild(QTableWidget)
-        assert table is not None
-
-        def cell(row: int, column: int) -> str:
-            item = table.item(row, column)
-            assert item is not None
-            return item.text()
-
-        assert table.rowCount() == 10
-        assert cell(0, 2) == "low"
-        assert cell(0, 3) == cell(0, 4) == ""
-        assert cell(1, 1) == "Claude Opus 5.5 · Default Fallback"
-        assert cell(1, 2) == "medium (preferred)"
-        assert cell(1, 3) == "55"
-        assert cell(1, 4) == "1.2500"
-        assert cell(5, 0) == "claude:sonnet"
-        assert cell(5, 2) == "low (preferred)"
-        assert cell(5, 3) == cell(5, 4) == ""
-        return QDialog.DialogCode.Rejected
-
-    with monkeypatch.context() as patch:
-        patch.setattr(QDialog, "exec", matrix)
-        screen.aa_matrix.click()
-    screen.aa_remove.click()
-    qtbot.waitUntil(screen.aa_matrix.isHidden)
-    assert calls == ["fixture-key"]
 
 
 @pytest.mark.parametrize("value", ["1", "3", "4"])

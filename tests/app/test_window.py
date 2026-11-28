@@ -61,13 +61,21 @@ def _component(status: str, index: int) -> deps.Component:
 
 
 def test_screens_list_in_sidebar_order() -> None:
-    assert KEYS == ("overview", "menu", "engines", "dependencies", "settings")
+    assert KEYS == (
+        "overview",
+        "menu",
+        "engines",
+        "dependencies",
+        "settings",
+        "benchmarks",
+    )
     assert [title for _k, title, _i, _c in SCREENS] == [
         "Overview",
         "Team",
         "Engines",
         "Dependencies",
         "Settings",
+        "Benchmarks",
     ]
 
 
@@ -148,7 +156,7 @@ def test_shortcuts_switch_screens_and_ctrl_w_hides(
     assert not window.isVisible()
     assert not context.visible()
     assert quit_app.calls == 0
-    assert state.load(env).screen == "settings"
+    assert state.load(env).screen == KEYS[-1]
     window.show()
     qtbot.keyClick(
         window.windowHandle(), Qt.Key.Key_Q, Qt.KeyboardModifier.ControlModifier
