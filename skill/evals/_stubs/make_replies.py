@@ -17,9 +17,10 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from unittest.mock import Mock, patch
 
-from ember import choices, engines, paths, sandbox, skill
+from ember import benchmarks, choices, engines, paths, sandbox, skill
+from ember.benchmark_sources import Observation, SourceError
 from ember.cli import main as cli_main
-from ember.engines import codex
+from ember.engines import codex, models, status
 from ember.flows import command as flows
 from ember.flows import plan as flow_plan
 from ember.gapcheck import command as gapcheck
@@ -939,6 +940,81 @@ def gapcheck_replies() -> dict[str, str]:
     return replies
 
 
+def benchmark_replies() -> dict[str, str]:
+    """Build a lead recommendation for an explicit app subset and zero margin."""
+    with TemporaryDirectory(prefix="ember-eval-benchmarks-") as temporary:
+        home = Path(temporary)
+        env = {
+            "HOME": temporary,
+            "XDG_CONFIG_HOME": str(home / "config"),
+            "XDG_CACHE_HOME": str(home / "cache"),
+            "PATH": "",
+        }
+        now = fixture_began()
+        connections = {
+            app: status.EngineStatus(
+                engine=app,
+                state=status.CONNECTED,
+                reason=None,
+                installed=True,
+                binary=f"/fixture/{app}",
+                version="2.0.0",
+                signed_in=True,
+                connected=True,
+                requirements=(),
+                checked_at=now,
+            ).to_json()
+            for app in status.ENGINES
+        }
+        status.save_cache_file(status.cache_path(env), {"engines": connections}, env)
+        route = models.Model(
+            "openrouter/anthropic/claude-fable-5.2",
+            "Claude Fable 5.2",
+            ("high",),
+            provider="openrouter",
+            provider_name="OpenRouter",
+        )
+        openrouter = models.Integration("openrouter", "OpenRouter")
+        catalogue = models.ModelList((route,), models.CACHE, now, None, (openrouter,))
+        status.save_cache_file(
+            models.cache_path("opencode", env),
+            {**catalogue.to_json(), "format_version": models.CACHE_VERSION},
+            env,
+        )
+        choices.set_settings(
+            {
+                "benchmarks.score_margin": "0",
+                "benchmarks.lead_apps": ["opencode", "claude"],
+                "benchmarks.one_per_model": "on",
+            },
+            env=env,
+        )
+        row: Observation = {
+            "model": "Claude Fable 5.2",
+            "model_creator": "Anthropic",
+            "harness": None,
+            "effort": "high",
+            "metrics": {"intelligence_index": 61.9, "task_usd": 9.08},
+        }
+        benchmarks.configure_artificial_analysis("fixture-key", env)
+        with (
+            patch.object(benchmarks, "read", side_effect=SourceError("no feed")),
+            patch.object(
+                benchmarks, "read_artificial_analysis", return_value=("5.0", [row])
+            ),
+        ):
+            benchmarks.refresh(env)
+        out = StringIO()
+        with redirect_stdout(out):
+            result = cli_main(["benchmarks", "recommend", "--json"], env=env)
+        if result != 0:
+            raise RuntimeError("saved benchmark recommendation failed")
+    return {
+        "lead-benchmark-recommendations/files/.ember-eval/replies/"
+        "benchmarks-recommend.json": out.getvalue()
+    }
+
+
 def generated_replies() -> dict[str, str]:
     """Return every generated reply and state file by its eval-relative path."""
     choices = choices_replies()
@@ -951,6 +1027,7 @@ def generated_replies() -> dict[str, str]:
         **denied_path_replies(),
         **panel_replies(),
         **gapcheck_replies(),
+        **benchmark_replies(),
         **choices,
         **run_dry_run_replies(json.loads(choices["_stubs/replies/choices-read.out"])),
     }

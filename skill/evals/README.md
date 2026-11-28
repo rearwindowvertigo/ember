@@ -1,6 +1,6 @@
 # Ember skill evals
 
-Twenty-four cases check the `ember` skill's rules in a real Claude session against
+Twenty-five cases check the `ember` skill's rules in a real Claude session against
 a stub `emb` command. Each case has `prompt.md`, `case.yaml`, `graders/`
 and `place-files.sh`; some also have `files/` or `owner-replies.md`. Every grader has
 `focus: trace` and names commands, their order and flags, and what is asked
@@ -11,6 +11,7 @@ order of the run's Bash calls (Grading). The cases run outside
 
 | Case | Situation the stubs set up | Graders |
 |---|---|---|
+| `lead-benchmark-recommendations` | Saved Claude Code and OpenCode scope, zero margin, one result per model on; one measured model-and-effort pair available in both apps | One offline recommendation read; no claim, refresh, settings change or dispatch; applied settings before the measured pair, score, gap, USD per task, source and exact app routes |
 | `claim-and-menu-writer` | Claim `none`; `single.writer` is `codex:gpt-6.1-sol` at `high`, `set`; the run's commit is a correct, complete `--since` that changes only the two files the request names | Claim with the loaded skill version before any picker; `skill: current` continues; dry run with the start's exact options and its line copied before the start; `emb run --engine codex` in the background with `--claim` and `--trailer`; `verify_branch.py` on the run's branch and worktree; an own check and a verdict; `emb merge … --verdict keep --note --subject`; `emb choices --finish` after the merge; no correction for a detail the request does not state without a harm case |
 | `small-change-no-worker` | Same menu; the prompt starts with `/ember`; a one-word typo in `README.md` | Claim before the edit; Claude edits; no worker; one line saying so; finish at once |
 | `connector-work-goes-to-subagent` | Same menu; `/ember`; the owner asks which worker before anything starts; the work needs the Linear connector | Claim first; no `emb run`; the connector given as the reason; a Claude subagent recommended |
@@ -105,7 +106,7 @@ A call's route comes from its subcommand and flags: `choices-claim`,
 `gapcheck-answer`, `gapcheck-brief`, `gapcheck-reply`, `gapcheck`,
 `flow-dry-run`, `flow-start`,
 `flow-watch`, `flow-status`, `flow-lead`, `flow-resume`, `panel-dry-run`,
-`panel-status`, `panel-recover`, `panel-start`, `deps`, `skill` and `help`
+`panel-status`, `panel-recover`, `panel-start`, `benchmarks-recommend`, `deps`, `skill` and `help`
 (any `--help`). The nth call on a route takes
 `replies/<route>.<n>.*` when that exists, else `replies/<route>.*`. The
 parts are `.out` (standard output), `.json` (standard output with

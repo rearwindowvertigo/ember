@@ -285,6 +285,8 @@ def route(args: list[str]) -> str:
         return "choices-read-id" if has(rest, "--id") else "choices-read"
     if command == "engines":
         return "engines-models" if has(rest, "--models") else "engines"
+    if command == "benchmarks" and rest:
+        return f"benchmarks-{rest[0]}"
     if command == "run":
         for mode in RUN_MODES:
             if has(rest, f"--{mode}"):
