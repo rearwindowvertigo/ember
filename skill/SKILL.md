@@ -23,7 +23,7 @@ hooks:
 
 # Ember
 
-Skill version: 0.36.2 <!-- x-release-please-version -->
+Skill version: 0.37.0 <!-- x-release-please-version -->
 
 ## Role
 
