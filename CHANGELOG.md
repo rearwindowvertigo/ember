@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.37.0](https://github.com/rearwindowvertigo/ember/compare/v0.36.2...v0.37.0) (2026-11-28)
+
+
+### Added
+
+* **app:** add a Benchmarks page and simplify the Routing pool ([8e76648](https://github.com/rearwindowvertigo/ember/commit/8e766484c220a414f7101e35a931389967cb6662))
+* **benchmarks:** rank lead model and effort pairs by value ([808b1f6](https://github.com/rearwindowvertigo/ember/commit/808b1f65f64a776079fcb427c75aba56c24009d1))
+
+
+### Fixed
+
+* **app:** keep focus with the Ember update notice ([b08db57](https://github.com/rearwindowvertigo/ember/commit/b08db578775c48f7d19531c1aaa7438e80fc8d0a))
+* **benchmarks:** use shared app switches and clarify evidence ([1e1e63d](https://github.com/rearwindowvertigo/ember/commit/1e1e63d346963426261211f0418a6d1a9072322c))
+
 ## [0.36.2](https://github.com/rearwindowvertigo/ember/compare/v0.36.1...v0.36.2) (2026-11-27)
 
 
