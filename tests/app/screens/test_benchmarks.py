@@ -232,7 +232,9 @@ def test_cache_creation_dynamic_all_and_unavailable_explicit_choices(
         screen.lead_apps["opencode"].click()
 
     _connections(env, "opencode", "claude")
-    qtbot.waitUntil(lambda: screen.lead_apps["codex"].text() == "Codex (unavailable)")
+    qtbot.waitUntil(
+        lambda: screen.lead_apps["codex"].accessibleName() == "Codex (unavailable)"
+    )
     assert screen.lead_apps["codex"].isChecked()
     assert not screen.lead_apps["claude"].isChecked()
     with qtbot.waitSignal(screen.context.settings_changed):
@@ -334,7 +336,7 @@ def test_benchmarks_show_external_refresh_and_collapse_related_results(
     for key, source in SOURCES.items():
         monkeypatch.setitem(SOURCES, key, replace(source, read=_unavailable))
     screen = _screen(env, qtbot)
-    assert "No matching benchmark for this setup." in _texts(screen)
+    assert "No matching benchmark for this setup." not in _texts(screen)
     assert screen.related.isHidden()
 
     key = "terminal-bench-4.1"
@@ -371,6 +373,11 @@ def test_benchmarks_show_external_refresh_and_collapse_related_results(
     screen.related.click()
     assert updated in _texts(screen)
     assert "Different effort." in _texts(screen)
+
+    benchmarks.cache_path(env).write_text("invalid cache")
+    qtbot.waitUntil(lambda: screen.related.isHidden())
+    assert "Could not read saved source statuses." in _texts(screen)
+    assert updated not in _texts(screen)
 
 
 def test_masked_key_cancellation_and_effort_matrix(
@@ -620,6 +627,13 @@ def test_benchmarks_navigation_and_keyboard_order(
     for target in steps:
         qtbot.keyClick(window, Qt.Key.Key_Tab)
         assert qapp.focusWidget() is target
+        assert widgets.focus_visible(target)
+    scope = screen.lead_apps["all"]
+    with qtbot.waitSignal(context.settings_changed, timeout=5000):
+        qtbot.mouseClick(scope, Qt.MouseButton.LeftButton)
+    assert qapp.focusWidget() is scope
+    assert not widgets.focus_visible(scope)
+    _wait_for_report(screen, qtbot)
 
     window.nav["menu"].click()
     window.nav["benchmarks"].click()

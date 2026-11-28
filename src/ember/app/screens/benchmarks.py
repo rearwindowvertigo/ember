@@ -7,7 +7,6 @@ from PySide6.QtCore import QFileSystemWatcher, QPointF, QRectF, Qt
 from PySide6.QtGui import QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
     QDialog,
     QGridLayout,
     QHBoxLayout,
@@ -415,16 +414,24 @@ class BenchmarksScreen(QWidget):
         self.margin.activated.connect(self._pick_margin)
 
         self._app_checklist = QWidget()
-        apps_layout = QVBoxLayout(self._app_checklist)
+        apps_layout = QGridLayout(self._app_checklist)
         apps_layout.setContentsMargins(0, 0, 0, 0)
-        apps_layout.setSpacing(theme.SPACE[0])
-        self.lead_apps = {"all": QCheckBox("All connected apps")}
-        self.lead_apps.update(
-            {app: QCheckBox(engine_name(app)) for app in status.ENGINES}
-        )
-        for app, box in self.lead_apps.items():
-            box.clicked.connect(lambda checked, app=app: self._pick_app(app, checked))
-            apps_layout.addWidget(box)
+        apps_layout.setSpacing(theme.SPACE[1])
+        apps_layout.setColumnStretch(0, 1)
+        self.lead_apps: dict[str, widgets.Switch] = {}
+        self._app_labels: dict[str, QLabel] = {}
+        for row, app in enumerate(("all", *status.ENGINES)):
+            name = "All connected apps" if app == "all" else engine_name(app)
+            switch = widgets.Switch()
+            switch.setAccessibleName(name)
+            switch.clicked.connect(
+                lambda checked, app=app: self._pick_app(app, checked)
+            )
+            caption = _plain_label(name)
+            self.lead_apps[app] = switch
+            self._app_labels[app] = caption
+            apps_layout.addWidget(caption, row, 0)
+            apps_layout.addWidget(switch, row, 1, Qt.AlignmentFlag.AlignRight)
 
         self.one_per_model = widgets.Switch()
         self.one_per_model.setAccessibleName("One result per model")
@@ -560,15 +567,20 @@ class BenchmarksScreen(QWidget):
         all_apps = selected == ["all"]
         self.lead_apps["all"].setChecked(all_apps)
         for app in status.ENGINES:
-            box = self.lead_apps[app]
+            switch = self.lead_apps[app]
+            caption = self._app_labels[app]
             available = app in self._connected
             included = app in selected
             name = engine_name(app)
-            box.setText(name if available else f"{name} (unavailable)")
-            box.setChecked(available if all_apps else included)
-            if not available and not included and box.hasFocus():
+            text = name if available else f"{name} (unavailable)"
+            caption.setText(text)
+            switch.setAccessibleName(text)
+            switch.setChecked(available if all_apps else included)
+            visible = available or included
+            if not visible and switch.hasFocus():
                 self.lead_apps["all"].setFocus(Qt.FocusReason.OtherFocusReason)
-            box.setVisible(available or included)
+            caption.setVisible(visible)
+            switch.setVisible(visible)
 
     def _pick_margin(self, _index: int) -> None:
         if (value := self.margin.value()) is not None:
@@ -687,9 +699,8 @@ class BenchmarksScreen(QWidget):
         else:
             self.benchmark_summary.setText(workers["summary"])
             self.public_status.hide()
-            if workers != self._worker_report:
-                self._worker_report = workers
-                self._draw_workers(workers)
+        if workers != self._worker_report:
+            self._draw_workers(workers)
         self._draw_lead_controls()
         self._draw_rank()
 
@@ -746,18 +757,26 @@ class BenchmarksScreen(QWidget):
         self.aa_matrix.setVisible(source is not None)
         self._update_actions()
 
-    def _draw_workers(self, report: benchmarks.Report) -> None:
+    def _draw_workers(self, report: benchmarks.Report | None) -> None:
+        self._worker_report = report
         clear_layout(self.public_sources_body)
+        clear_layout(self._worker_details)
+        clear_layout(self._related_layout)
+        if report is None:
+            self.related.hide()
+            self.related.setChecked(False)
+            self._update_actions()
+            return
+        checked = False
         for key, source in report["sources"].items():
             if key in SOURCES:
+                checked = checked or source["checked_at"] is not None
                 self.public_sources_body.addWidget(
                     _plain_label(
                         benchmarks.source_line(source, show_edition=True),
                         "secondary",
                     )
                 )
-        clear_layout(self._worker_details)
-        clear_layout(self._related_layout)
         shortlist = report["workers"] | report["other_shortlisted_workers"]
         if shortlist:
             self._worker_details.addWidget(_section_title("Exact matches"))
@@ -768,9 +787,12 @@ class BenchmarksScreen(QWidget):
                     _plain_label("This model is off its worker shortlist.", "secondary")
                 )
             elif not worker["matches"]:
-                self._worker_details.addWidget(
-                    _plain_label("No matching benchmark for this setup.", "secondary")
-                )
+                if checked:
+                    self._worker_details.addWidget(
+                        _plain_label(
+                            "No matching benchmark for this setup.", "secondary"
+                        )
+                    )
             else:
                 for key, observation in worker["matches"].items():
                     source = report["sources"][key]

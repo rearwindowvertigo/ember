@@ -69,13 +69,15 @@ per model** (`one_per_model`) is on. Give `best_score` and `minimum_score`
 when available.
 
 Report up to three pairs from `recommendations` in the returned order. For
-each, give the measured `model` and `effort`, `score` in Index points,
-`task_usd` as benchmark API inference cost in USD per Index task, and every
-route's `app`, exact `model_id` and `effort` from `routes`. Label routes
-with `is_alias` set to true as Claude family selectors.
+each, give the measured `model`, `effort` and `configuration` when present,
+the Index `score` and points below the best (`gap`), and `task_usd` as
+benchmark API inference cost in USD per Index task. List every route's
+`app`, exact `model_id` and `effort` from `routes`. Label routes with
+`is_alias` set to true as Claude family selectors.
 
 Give the Index edition and last successful check (`source.edition` and
-`source.checked_at`) when known. Report retained data (`source.result` is
+`source.checked_at`) when known. Convert `checked_at` from Unix seconds to
+a UTC date. Report retained data (`source.result` is
 `retained`), refresh due (`source.stale` is true), any `source.error`, and
 apps in `missing_model_caches`. Explain empty results with `status` and
 `summary`. Report CLI errors and leave missing values unknown.

@@ -1,6 +1,7 @@
 """Rank lead model and effort pairs from the saved Intelligence Index."""
 
 from collections.abc import Iterable, Mapping
+from decimal import Decimal
 from fractions import Fraction
 from typing import Literal, TypedDict
 
@@ -362,9 +363,11 @@ def lines(report: RecommendationReport) -> list[str]:
         effort = (
             f"{point['effort']}, {configuration}" if configuration else point["effort"]
         )
+        cost = Decimal(str(point["task_usd"]))
+        shown_cost = format(cost, "f").removesuffix(".0") if cost else "0"
         result.append(
             f"{index}. {point['model']} ({effort}) · {point['score']} Index points "
-            f"({point['gap']} below best) · ${point['task_usd']} per Index task"
+            f"({point['gap']} below best) · ${shown_cost} per Index task"
         )
         for route in point["routes"]:
             app = _APP_NAMES[route["app"]]
