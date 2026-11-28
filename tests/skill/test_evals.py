@@ -25,6 +25,7 @@ STUBS = EVALS / "_stubs"
 RUNNER = EVALS / "_runner" / "run_case.sh"
 
 CASES = (
+    "lead-benchmark-recommendations",
     "claim-and-menu-writer",
     "small-change-no-worker",
     "connector-work-goes-to-subagent",
@@ -96,6 +97,8 @@ HELP_COMMANDS = (
     "",
     "choices",
     "engines",
+    "benchmarks",
+    "benchmarks recommend",
     "run",
     "gapcheck",
     "flow",

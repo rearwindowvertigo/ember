@@ -1,8 +1,8 @@
 # Offscreen screens
 
-Run `make screens` after `uv sync`. Qt renders the populated Overview, Team,
-Engines, Dependencies and Settings screens with the app's style sheet, in light
-and dark themes, at 640 × 480 and 1100 × 720. The run produces 20 PNG images.
+Run `make screens` after `uv sync`. Qt renders Overview, Team, Engines,
+Dependencies, Settings and Benchmarks with the app's style sheet, in light
+and dark themes, at 640 × 480 and 1100 × 720. The run produces 24 PNG images.
 It needs no display or network access.
 
 Install `fonts-dejavu-core`. The command uses the test fontconfig aliases:
@@ -40,6 +40,6 @@ runs in CI through pytest; `check.yml` does not run `make screens` separately.
 
 Offscreen images cannot show the desktop's compositor, fractional scale or
 desktop fonts. A test build on the desktop checks those. The renderer covers
-each sidebar screen in its populated state, at the top of its scroll area;
-it does not render dialogs, open menus, empty, loading or error states, or
-exercise controls. These images are not pixel comparison tests.
+each sidebar screen with fixture data, at the top of its scroll area.
+It does not render dialogs or open menus, or exercise controls. These
+images are not pixel comparison tests.

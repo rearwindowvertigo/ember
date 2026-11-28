@@ -88,6 +88,16 @@ def test_choices_help_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
     assert "--skill-dir DIR" in help_text
 
 
+def test_benchmarks_recommend_help(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        main(["benchmarks", "recommend", "--help"])
+    assert exit_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "usage: emb benchmarks recommend" in help_text
+    assert "saved benchmark data" in help_text
+    assert "--json" in help_text
+
+
 @pytest.mark.parametrize(
     "argv",
     [

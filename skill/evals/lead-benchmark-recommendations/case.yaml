@@ -1,0 +1,9 @@
+schema_version: "1.1"
+name: lead-benchmark-recommendations
+expected_outcome: |
+  The lead reads `emb benchmarks recommend --json` once, without a claim,
+  refresh, settings change, worker, or follow-up question. It states the
+  saved app subset, zero-point margin, and one-result-per-model setting
+  before the single measured recommendation and its app routes.
+context:
+  scaffold_script: place-files.sh

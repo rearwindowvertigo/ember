@@ -1,4 +1,4 @@
-"""Refresh and read the benchmark evidence for shortlisted workers."""
+"""Refresh and read saved benchmark evidence."""
 
 import contextlib
 import fcntl
@@ -8,7 +8,7 @@ import os
 import re
 import stat
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, NotRequired, TypedDict
@@ -297,6 +297,25 @@ def _model_key(text: str) -> str:
     return re.sub(r"[ ._-]+", "-", text.casefold())
 
 
+type ModelIdentity = tuple[str, str]
+
+
+def model_identity(model: str, creator: str) -> ModelIdentity:
+    """Normalize the creator and full release name for model-level matching."""
+    return _model_key(creator), _model_key(model)
+
+
+def model_release_dates(rows: Iterable[Observation]) -> set[str]:
+    """Collect the published dates for a set of model observations."""
+    return {date for row in rows if (date := row.get("model_release_date"))}
+
+
+def claude_alias_version(model: str, alias: str) -> tuple[int, ...] | None:
+    """Find the version of a named release in the Claude alias's family."""
+    match = re.fullmatch(rf"claude-{alias}-(\d+(?:-\d+)*)", _model_key(model))
+    return None if match is None else tuple(int(part) for part in match[1].split("-"))
+
+
 def _related_rows(
     rows: list[Observation], engine: str, model: str
 ) -> list[tuple[Observation, tuple[int, ...]]]:
@@ -311,11 +330,10 @@ def _related_rows(
         ]
     if engine != "claude" or model not in _CLAUDE_ALIASES:
         return [(row, ()) for row in rows if _model_key(row["model"]) == key]
-    pattern = re.compile(rf"claude-{model}-(\d+(?:-\d+)*)\Z")
     result = []
     for row in rows:
-        if match := pattern.fullmatch(_model_key(row["model"])):
-            result.append((row, tuple(int(part) for part in match[1].split("-"))))
+        if (version := claude_alias_version(row["model"], model)) is not None:
+            result.append((row, version))
     return result
 
 
@@ -436,11 +454,9 @@ def _model_reference(
     release = [item for item, version in candidates if version == latest]
     # Use a single named release for all efforts, including for moving aliases.
     releases = {
-        (_model_key(item["model"]), _model_key(item.get("model_creator", "")))
-        for item in release
+        model_identity(item["model"], item.get("model_creator", "")) for item in release
     }
-    dates = {date for item in release if (date := item.get("model_release_date"))}
-    if len(releases) != 1 or len(dates) > 1:
+    if len(releases) != 1 or len(model_release_dates(release)) > 1:
         release = []
     efforts = saved_efforts
     if efforts is None:
@@ -487,6 +503,31 @@ def _source_status(
     )
 
 
+def _reference_status(
+    reference: _Snapshot, now: float, action: str | None = None
+) -> SourceStatus:
+    return SourceStatus(
+        title=AA_TITLE,
+        edition=reference.get("edition", "unknown"),
+        url=AA_URL,
+        publisher="Artificial Analysis",
+        metrics=AA_METRICS,
+        pricing_basis="Publisher's weighted API inference cost per Index task",
+        **_check_status(reference, now, action),
+    )
+
+
+def read_index(
+    env: Mapping[str, str] | None = None, *, now: float | None = None
+) -> tuple[SourceStatus | None, list[Observation]]:
+    """Read the opted-in Index status and observations from the local snapshot."""
+    _, reference = _read_reference(env)
+    if reference is None:
+        return None, []
+    at = time.time() if now is None else now
+    return _reference_status(reference, at), reference["rows"]
+
+
 def has_cost(worker: WorkerEvidence) -> bool:
     """Return whether a matching benchmark reports a cost for this worker."""
     return any(
@@ -527,14 +568,8 @@ def _report(
     if reference is not None:
         edition = reference.get("edition")
         series = f"{ARTIFICIAL_ANALYSIS}-{edition}" if edition else ARTIFICIAL_ANALYSIS
-        sources[series] = SourceStatus(
-            title=AA_TITLE,
-            edition=edition or "unknown",
-            url=AA_URL,
-            publisher="Artificial Analysis",
-            metrics=AA_METRICS,
-            pricing_basis="Publisher's weighted API inference cost per Index task",
-            **_check_status(reference, now, actions.get(ARTIFICIAL_ANALYSIS)),
+        sources[series] = _reference_status(
+            reference, now, actions.get(ARTIFICIAL_ANALYSIS)
         )
         for key, row in rows.items():
             worker = evidence[key]
@@ -693,8 +728,38 @@ def _refresh(path: Path, env: Mapping[str, str] | None) -> tuple[Cache, dict[str
     return snapshots, actions
 
 
+def _refresh_index_only(
+    answers: Mapping[str, Mapping[str, Any]], env: Mapping[str, str] | None
+) -> Report:
+    _, reference = _read_reference(env)
+    if reference is None:
+        return report(answers, _read_public_cache(env))
+    with _refresh_lock(env):
+        snapshots = _read_public_cache(env)
+        key, reference = _read_reference(env)
+        if reference is None:
+            return report(answers, snapshots)
+        action = "unavailable"
+        if key is not None:
+            reference, action = _refresh_reference(env, key, reference)
+        snapshots[ARTIFICIAL_ANALYSIS] = reference
+        result = _report(
+            answers, snapshots, time.time(), {ARTIFICIAL_ANALYSIS: action}, {}
+        )
+    if action == "retained":
+        result["status"] = "retained"
+        result["summary"] = f"Kept the saved {AA_TITLE} after refresh failed."
+    elif action == "unavailable":
+        result["status"] = "unavailable"
+        result["summary"] = f"Could not refresh the {AA_TITLE}."
+    else:
+        result["status"] = "ok"
+        result["summary"] = f"The {AA_TITLE} is available for lead recommendations."
+    return result
+
+
 def refresh(env: Mapping[str, str] | None = None) -> Report:
-    """Refresh public and opted-in results and report coverage of the current pool.
+    """Refresh the opted-in Index and public sources used for worker evidence.
 
     A refresh is serialized with other refreshes and publishes whole series.
     It reads standing choices but does not claim or write any settings.
@@ -706,7 +771,7 @@ def refresh(env: Mapping[str, str] | None = None) -> Report:
     if not answers[choices.ROUTING_POOL]["value"] and not any(
         answers[f"shortlist.{engine}"]["value"] for engine in status.ENGINES
     ):
-        return cached(answers, env)
+        return _refresh_index_only(answers, env)
     with _refresh_lock(env):
         snapshots, actions = _refresh(cache_path(env), env)
         reply = choices.read(env=env)
@@ -721,22 +786,24 @@ def refresh(env: Mapping[str, str] | None = None) -> Report:
         )
 
 
+def source_line(source: SourceStatus, *, show_edition: bool = False) -> str:
+    """Format the result and date of a saved source check."""
+    title = source["title"]
+    if show_edition and source["edition"] != "unknown":
+        title += f" {source['edition']}"
+    checked = source["checked_at"]
+    date = (
+        ""
+        if checked is None
+        else time.strftime(" (last checked %Y-%m-%d UTC)", time.gmtime(checked))
+    )
+    reminder = " · refresh due" if source["stale"] else ""
+    error = "" if not source["error"] else f" — {source['error']}"
+    return f"{title}: {source['result'].replace('_', ' ')}{date}{reminder}{error}"
+
+
 def lines(report: Report) -> list[str]:
     """Return plain text refresh and source status lines for the terminal."""
     if report["status"] == "empty_pool":
         return [report["summary"]]
-    result = [report["summary"]]
-    for source in report["sources"].values():
-        checked = source["checked_at"]
-        date = (
-            ""
-            if checked is None
-            else time.strftime(" (last checked %Y-%m-%d UTC)", time.gmtime(checked))
-        )
-        reminder = " · refresh due" if source["stale"] else ""
-        error = "" if not source["error"] else f" — {source['error']}"
-        result.append(
-            f"{source['title']}: {source['result'].replace('_', ' ')}"
-            f"{date}{reminder}{error}"
-        )
-    return result
+    return [report["summary"], *(source_line(s) for s in report["sources"].values())]

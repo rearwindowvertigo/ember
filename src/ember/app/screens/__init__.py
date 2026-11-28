@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from PySide6.QtWidgets import QWidget
 
+from ember.app.screens.benchmarks import BenchmarksScreen
 from ember.app.screens.dependencies import DependenciesScreen
 from ember.app.screens.engines import EnginesScreen
 from ember.app.screens.menu import MenuScreen
@@ -36,6 +37,7 @@ SCREENS: tuple[tuple[str, str, str, ScreenClass], ...] = (
     ("engines", "Engines", "cpu", EnginesScreen),
     ("dependencies", "Dependencies", "package", DependenciesScreen),
     ("settings", "Settings", "settings", SettingsScreen),
+    ("benchmarks", "Benchmarks", "chart-no-axes-combined", BenchmarksScreen),
 )
 """`(key, title, icon name, class)` for each screen, in sidebar order."""
 

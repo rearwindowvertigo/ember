@@ -18,7 +18,7 @@ mkdir -p "$out"
 cd "$top"
 if [ "$mode" = all ] || [ "$mode" = help ]; then
     mkdir -p "$out/_stubs/replies"
-    for command in "" choices engines run gapcheck flow panel ground merge cleanup deps app skill "skill install" "skill uninstall" "skill status"; do
+    for command in "" choices engines benchmarks "benchmarks recommend" run gapcheck flow panel ground merge cleanup deps app skill "skill install" "skill uninstall" "skill status"; do
         echo "==> emb${command:+ $command} --help <=="
         if ! COLUMNS=80 NO_COLOR=1 FORCE_COLOR=0 uv run --frozen emb $command --help; then
             echo "generate.sh: help generator (emb $command --help) failed" >&2
