@@ -4,13 +4,13 @@ description: >-
   Lead AI coding workers through Ember and review and land their work.
   Load it before starting any worker:
   `emb run` on Codex, OpenCode or Claude, a Claude subagent or Workflow.
-  Load it to run a flow, ask a few models, run a panel, or do a gap check;
-  to fill or refresh Team's benchmark data;
-  to review, merge or clean up a worker branch (`ember/<engine>/<id>`,
-  `ember/flow/<id>`, `worktree-agent-*`); or to handle an `emb`
-  exit or a `report:`, `next:` or `owner:` line. Use it even when the owner
-  only says hand this off, have Codex or GPT do it, farm this out, use a
-  workflow, or names a model, and for /ember.
+  Load it for lead model recommendations or to fill or refresh Ember's
+  benchmark data. Load it to run a flow, ask a few models,
+  run a panel, do a gap check, review, merge or clean up a worker branch
+  (`ember/<engine>/<id>`, `ember/flow/<id>`, `worktree-agent-*`), or handle
+  an `emb` exit or a `report:`, `next:` or `owner:` line. Use it even when
+  the owner only says hand this off, have Codex or GPT do it, farm this
+  out, use a workflow, or names a model, and for /ember.
 hooks:
   PostToolUse:
     - matcher: Bash
@@ -54,20 +54,52 @@ runs.
 Bundled paths (`references/`, `assets/`, `scripts/`) are relative to this
 skill folder.
 
-## Fill or refresh Team benchmarks
+## Recommend lead models
+
+When the owner asks which model and effort to use for the next lead, run
+`emb benchmarks recommend --json`. Use this read-only command without
+changing settings, refreshing data, probing providers, claiming a run or
+starting a worker.
+
+Report the applied Benchmarks settings first. Give **Lead apps** from
+`selected_apps` (`["all"]` means All connected apps, `[]` means no apps
+selected) and the apps searched from `effective_apps`. Give **Points below
+the best score** (`score_margin`) in Index points and say whether **One result
+per model** (`one_per_model`) is on. Give `best_score` and `minimum_score`
+when available.
+
+Report up to three pairs from `recommendations` in the returned order. For
+each, give the measured `model` and `effort`, `score` in Index points,
+`task_usd` as benchmark API inference cost in USD per Index task, and every
+route's `app`, exact `model_id` and `effort` from `routes`. Label routes
+with `is_alias` set to true as Claude family selectors.
+
+Give the Index edition and last successful check (`source.edition` and
+`source.checked_at`) when known. Report retained data (`source.result` is
+`retained`), refresh due (`source.stale` is true), any `source.error`, and
+apps in `missing_model_caches`. Explain empty results with `status` and
+`summary`. Report CLI errors and leave missing values unknown.
+
+## Fill or refresh benchmarks
 
 When the owner asks to fill or refresh Ember's benchmark data, run
-`emb benchmarks refresh --json` once. This is a Team maintenance action:
-use the command directly from the lead session, with no run or claim. The
-request authorizes the refresh. Ember downloads, validates, matches and saves
-the data. Read the command's reply; report what updated, which setups have
-no match or no cost, and any sources that failed, including whether Ember
-kept their previous results. If `model_reference` is present, report Index
-score and cost coverage across its listed efforts and identify missing
-efforts or metrics. Keep this coverage separate from harness matches. If
-it reports `empty_pool`, point the owner to Engines to shortlist models.
-If the reply has an `error` object, report it. Do not look up substitute
-numbers, edit Team settings, or retry automatically.
+`emb benchmarks refresh --json` once from the lead session, with no run or
+claim. The request authorizes the refresh. Benchmarks holds the Refresh
+action, source status and the opt-in Artificial Analysis API key. With
+shortlisted or Routing pool models, Ember refreshes the eight public sources
+and the Index if opted in. With an opted-in key and no shortlisted or pool
+models, Ember refreshes only the Index and keeps saved public evidence. In
+that case, `sources` includes the Index and all eight public source statuses.
+The reply's `status` is `ok` on success, `retained` on failure with saved
+Index data, or `unavailable` on failure without it. Both failures exit 69.
+
+Read `status`, `summary` and `sources`. Report what updated, which setups have
+no match or no cost, and which sources failed and whether Ember kept their
+previous results. If `model_reference` is present, report Index score and
+cost coverage across its listed efforts and identify missing efforts or
+metrics. Keep this coverage separate from harness matches. If `status` is
+`empty_pool`, point the owner to Engines to shortlist models. Report any CLI
+error. Do not look up substitute numbers, edit settings or retry automatically.
 
 ## One run
 

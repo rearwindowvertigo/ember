@@ -23,6 +23,7 @@ ICON_NAMES = (
     "cpu",
     "package",
     "settings",
+    "chart-no-axes-combined",
     "terminal",
     "copy",
     "refresh-cw",

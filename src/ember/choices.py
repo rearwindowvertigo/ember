@@ -47,6 +47,10 @@ MENU_KEYS = ("single.writer", "single.reviewer")
 AUTO = "auto"
 """The value of a single-task worker row that lets the lead choose."""
 ROUTING_POOL = "routing.pool"
+BENCHMARK_SCORE_MARGIN = "benchmarks.score_margin"
+BENCHMARK_LEAD_APPS = "benchmarks.lead_apps"
+BENCHMARK_ONE_PER_MODEL = "benchmarks.one_per_model"
+BENCHMARK_SCORE_MARGINS = tuple(str(points) for points in range(101))
 ROUTING_CAPABILITIES = {
     "implementation": "Implementation",
     "codebase": "Codebase understanding",
@@ -239,6 +243,16 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise InvalidChoiceError(f"{value!r} is not a list of strings")
     return value
+
+
+def _benchmark_lead_apps(value: object) -> None:
+    apps = _string_list(value)
+    if "all" in apps and apps != ["all"]:
+        _fail("all must be the only selection")
+    if any(app not in ("all", *ENGINES) for app in apps):
+        _fail(f"choose all or apps from {', '.join(ENGINES)}")
+    if len(apps) != len(set(apps)):
+        _fail("each app can only be selected once")
 
 
 def shortlist_models(engine: str, entries: Iterable[str]) -> dict[str, str | None]:
@@ -705,6 +719,20 @@ def _keys() -> dict[str, Key]:
     keys.append(_key("app.autostart", _ON_OFF, "on"))
     keys.append(_key("updates.check", _ON_OFF, "on"))
     keys.append(_key("app.theme", ("system", "light", "dark"), "system"))
+    keys.extend(
+        (
+            _key(BENCHMARK_SCORE_MARGIN, BENCHMARK_SCORE_MARGINS, "5"),
+            Key(
+                BENCHMARK_LEAD_APPS,
+                _STANDING,
+                _benchmark_lead_apps,
+                _constant(["all"]),
+                is_list=True,
+                pattern=f"all or a comma-separated subset of {', '.join(ENGINES)}",
+            ),
+            _key(BENCHMARK_ONE_PER_MODEL, _ON_OFF, "off"),
+        )
+    )
     return {key.name: key for key in keys}
 
 
