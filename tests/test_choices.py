@@ -77,6 +77,12 @@ VALID = [
     ("updates.check", "on"),
     ("updates.check", "off"),
     ("app.theme", "dark"),
+    ("benchmarks.score_margin", "0"),
+    ("benchmarks.score_margin", "100"),
+    ("benchmarks.lead_apps", ["all"]),
+    ("benchmarks.lead_apps", ["codex", "claude"]),
+    ("benchmarks.lead_apps", []),
+    ("benchmarks.one_per_model", "on"),
 ]
 
 INVALID = [
@@ -119,6 +125,15 @@ INVALID = [
     ("app.autostart", "maybe"),
     ("updates.check", True),
     ("app.theme", "blue"),
+    ("benchmarks.score_margin", "-1"),
+    ("benchmarks.score_margin", "101"),
+    ("benchmarks.score_margin", "5.0"),
+    ("benchmarks.score_margin", 5),
+    ("benchmarks.lead_apps", "all"),
+    ("benchmarks.lead_apps", ["codex", "all"]),
+    ("benchmarks.lead_apps", ["codex", "codex"]),
+    ("benchmarks.lead_apps", ["claude", "other"]),
+    ("benchmarks.one_per_model", True),
 ]
 
 
@@ -192,6 +207,9 @@ def test_defaults(env: dict[str, str]) -> None:
         "app.autostart": "on",
         "updates.check": "on",
         "app.theme": "system",
+        "benchmarks.score_margin": "5",
+        "benchmarks.lead_apps": ["all"],
+        "benchmarks.one_per_model": "off",
     }
 
 
@@ -399,7 +417,16 @@ def test_ask_in_an_upper_layer_wins(env: dict[str, str]) -> None:
 
 
 @pytest.mark.parametrize(
-    "key", ["worker.network", "shortlist.codex", "terminal", "routing.pool"]
+    "key",
+    [
+        "worker.network",
+        "shortlist.codex",
+        "terminal",
+        "routing.pool",
+        "benchmarks.score_margin",
+        "benchmarks.lead_apps",
+        "benchmarks.one_per_model",
+    ],
 )
 def test_request_or_once_for_standing_only_key_is_refused(
     env: dict[str, str], key: str
@@ -1034,6 +1061,11 @@ def test_check_id_refuses_non_strings() -> None:
 def test_parse_value() -> None:
     assert choices.parse_value("shortlist.codex", "") == []
     assert choices.parse_value("shortlist.codex", "a@b,c@d") == ["a@b", "c@d"]
+    assert choices.parse_value("benchmarks.lead_apps", "codex,claude") == [
+        "codex",
+        "claude",
+    ]
+    assert choices.parse_value("benchmarks.lead_apps", "") == []
     assert choices.parse_value("terminal", "kitty -e") == "kitty -e"
     with pytest.raises(choices.InvalidChoiceError):
         choices.parse_value("nope", "x")

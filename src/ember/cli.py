@@ -17,7 +17,7 @@ after Quit Ember or when the running app takes over, 64 for a usage error and
 `emb panel` uses the codes in `ember.panels.command`.
 `emb prune` exits 0 on success, 1 on a failure and 64 for invalid arguments.
 `emb benchmarks` exits 0 after a read or a refresh with any available source,
-64 for invalid settings or arguments, 69 when every source failed a refresh,
+64 for invalid settings or arguments, 69 when every requested source failed a refresh,
 and uses the settings database codes for local read, write and busy errors.
 
 With `--json`, a command that exits non-zero having printed nothing on
@@ -36,6 +36,7 @@ from typing import Any, NoReturn, TextIO, cast
 
 from ember import (
     __version__,
+    benchmark_recommendations,
     benchmarks,
     branches,
     choices,
@@ -161,6 +162,7 @@ def _add_benchmarks(parser: argparse.ArgumentParser) -> None:
     for action, help_text in (
         ("refresh", "download and save public and opted-in benchmark results"),
         ("status", "show saved benchmark evidence for shortlisted workers, offline"),
+        ("recommend", "rank lead models and efforts from saved benchmark data"),
     ):
         subparser = actions.add_parser(action, help=help_text, description=help_text)
         subparser.add_argument("--json", action="store_true", help="print JSON")
@@ -668,7 +670,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_benchmarks(
         subparsers.add_parser(
             "benchmarks",
-            help="refresh or read benchmark evidence for the routing pool",
+            help="refresh benchmarks, show worker evidence, or rank lead models",
         )
     )
     _add_run(
@@ -1238,6 +1240,13 @@ def _run_deps(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
 def _run_benchmarks(args: argparse.Namespace, env: Mapping[str, str] | None) -> int:
     refreshing = args.benchmark_action == "refresh"
     try:
+        if args.benchmark_action == "recommend":
+            recommendation = benchmark_recommendations.read(env)
+            if args.json:
+                print(json.dumps(recommendation, indent=2))
+            else:
+                print("\n".join(benchmark_recommendations.lines(recommendation)))
+            return EX_OK
         if refreshing:
             reply = benchmarks.refresh(env)
         else:
@@ -1259,7 +1268,7 @@ def _run_benchmarks(args: argparse.Namespace, env: Mapping[str, str] | None) -> 
     else:
         for line in benchmarks.lines(reply):
             print(line)
-    if refreshing and reply["status"] == "unavailable":
+    if refreshing and reply["status"] in ("unavailable", "retained"):
         return EX_UNAVAILABLE
     return EX_OK
 

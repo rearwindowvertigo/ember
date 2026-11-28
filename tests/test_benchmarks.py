@@ -496,6 +496,94 @@ def test_artificial_analysis_projects_supported_efforts_for_one_release(
     assert deepseek_ref["efforts"] == {"none": flash, "low": None, "max": None}
 
 
+def test_index_only_refresh_preserves_public_evidence(
+    env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    choices.set_settings({"shortlist.codex": ["gpt-6.2-sol@max"]}, env=env)
+    for key in SOURCES:
+        _source(monkeypatch, key)
+    public = Observation(
+        model="GPT-6.2 Sol", harness="Codex", effort="max", metrics={"resolution": 60}
+    )
+    _source(monkeypatch, TB41, public)
+    code, first = _run("refresh", env, capsys)
+    assert code == 0
+    public_cache = benchmarks.cache_path(env)
+    original = public_cache.read_bytes()
+    choices.clear_settings(["shortlist.codex"], env=env)
+
+    def unexpected() -> list[Observation]:
+        pytest.fail("an Index-only refresh contacted a public source")
+
+    for key, source in SOURCES.items():
+        monkeypatch.setitem(SOURCES, key, replace(source, read=unexpected))
+    observation = Observation(
+        model="GPT-6.2 Sol",
+        model_creator="OpenAI",
+        harness=None,
+        effort="max",
+        metrics={"intelligence_index": 57, "task_usd": 1.2345},
+    )
+    keys = []
+
+    def download(key: str) -> tuple[str, list[Observation]]:
+        keys.append(key)
+        return "5.0", [observation]
+
+    benchmarks.configure_artificial_analysis("fixture-key", env)
+    monkeypatch.setattr(benchmarks, "read_artificial_analysis", download)
+    code, refreshed = _run("refresh", env, capsys)
+    assert code == 0 and refreshed["status"] == "ok"
+    assert keys == ["fixture-key"]
+    series = f"{ARTIFICIAL_ANALYSIS}-5.0"
+    assert set(refreshed["sources"]) == {*SOURCES, series}
+    source = refreshed["sources"][series]
+    assert source["result"] == "updated"
+    assert refreshed["sources"][TB41]["result"] == "cached"
+    assert refreshed["sources"][TB41]["revision"] == first["sources"][TB41]["revision"]
+    assert refreshed["workers"] == refreshed["other_shortlisted_workers"] == {}
+
+    def failed(key: str) -> tuple[str, list[Observation]]:
+        raise SourceError("fixture Index failure")
+
+    monkeypatch.setattr(benchmarks, "read_artificial_analysis", failed)
+    code, retained = _run("refresh", env, capsys)
+    assert code == 69 and retained["status"] == "retained"
+    assert retained["sources"][series]["result"] == "retained"
+    assert retained["sources"][series]["checked_at"] == source["checked_at"]
+    assert benchmarks.read_cache(env)[ARTIFICIAL_ANALYSIS]["rows"] == [observation]
+    assert public_cache.read_bytes() == original
+
+
+def test_index_only_failure_without_previous_data(
+    env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def failed(key: str) -> tuple[str, list[Observation]]:
+        raise SourceError("fixture Index failure")
+
+    def unexpected() -> list[Observation]:
+        pytest.fail("an Index-only refresh contacted a public source")
+
+    for key, source in SOURCES.items():
+        monkeypatch.setitem(SOURCES, key, replace(source, read=unexpected))
+    benchmarks.configure_artificial_analysis("fixture-key", env)
+    monkeypatch.setattr(benchmarks, "read_artificial_analysis", failed)
+    code, unavailable = _run("refresh", env, capsys)
+    assert code == 69 and unavailable["status"] == "unavailable"
+    assert set(unavailable["sources"]) == {*SOURCES, ARTIFICIAL_ANALYSIS}
+    assert unavailable["sources"][ARTIFICIAL_ANALYSIS]["checked_at"] is None
+    assert not benchmarks.cache_path(env).exists()
+    assert main(["benchmarks", "refresh"], env=env) == 69
+    captured = capsys.readouterr()
+    assert "Artificial Analysis Intelligence Index: unavailable" in captured.out
+    assert "fixture Index failure" in captured.out
+    assert captured.err == ""
+
+
 def test_shortlisted_alternative_effort_has_evidence_without_pool_approval(
     env: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
